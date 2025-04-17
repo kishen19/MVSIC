@@ -7,19 +7,24 @@ import time
 
 import kmeans
 from seeding import random_seeding
-from utils import chamfer_distance, split_batches, shared_array_init
+from utils import split_batches
+from data_types import PointCloud
 
 
 # Assign Clusters
 def process_batch_assign(batch_indices, X, centers):
     results = []
     for i in batch_indices:
-        dists = [chamfer_distance(X[i], c) for c in centers]
+        dists = [X[i].distance(centers[c]) for c in range(centers.size())]
         results.append(np.argmin(dists))
     return results
 
 def assign_clusters(X, centers, n_jobs=-1):
-    n = len(X)
+    """
+    X: PointCloud object
+    centers: PointCloud object
+    """
+    n = X.size()
     cpu_count = mp.cpu_count() if n_jobs == -1 else n_jobs
     batch_size = max(250, n // (2 * cpu_count))
     batches = split_batches(n, batch_size)
@@ -34,11 +39,15 @@ def assign_clusters(X, centers, n_jobs=-1):
 def process_batch_cost(batch_indices, X, centers, cluster_ids):
     cost = 0.0
     for i in batch_indices:
-        cost += chamfer_distance(X[i], centers[cluster_ids[i]])
+        cost += X[i].distance(centers[cluster_ids[i]])
     return cost
 
 def cost(X, centers, cluster_ids, n_jobs=-1):
-    n = len(X)
+    """
+    X: PointCloud object
+    centers: PointCloud object
+    """
+    n = X.size()
     cpu_count = mp.cpu_count() if n_jobs == -1 else n_jobs
     batch_size = max(250, n // cpu_count)
     batches = split_batches(n, batch_size)
@@ -49,8 +58,15 @@ def cost(X, centers, cluster_ids, n_jobs=-1):
     return sum(results)
 
 # Multi-Vector K-Means
-def mvkmeans(X, k, max_iter=5, n_jobs=-1):
-    s, d = X[0].shape
+def mvkmeans(X, k, s=-1, max_iter=5, n_jobs=-1):
+    """
+    X: PointCloud object
+    k: Number of clusters
+    s: Max number of points within a center-cloud
+    """
+    d = X.dims()
+    if s == -1:
+        s = np.ceil(np.mean([X.num_embeddings(i) for i in range(X.size())]))
 
     # Timing Utils
     init_time = 0.0
@@ -61,7 +77,7 @@ def mvkmeans(X, k, max_iter=5, n_jobs=-1):
     # Initialization
     print("Seeding...", end=" ", flush=True)
     t0 = time.perf_counter()
-    centers = random_seeding(X, k)
+    centers = PointCloud(random_seeding(X, k))
     t1 = time.perf_counter()
     print(f"Done in {t1 - t0:.2f}s", flush=True)
     init_time = t1 - t0
@@ -96,9 +112,10 @@ def mvkmeans(X, k, max_iter=5, n_jobs=-1):
                 print(f"Cluster {i} is empty. Reseeding...")
                 new_centers.append(random_seeding(X, 1)[0])
                 continue
-            data = X[indices].reshape(len(indices) * s, d)
+            data = np.concatenate([X.coords(j) for j in indices]).reshape(-1, d)
             new_centers.append(kmeans.faiss_kmeans(data, s))
-        centers = np.array(new_centers)
+        centers.delete()
+        centers = PointCloud(np.array(new_centers))
         t1 = time.perf_counter()
         centroid_times.append(t1 - t0)
 
@@ -123,13 +140,27 @@ def mvkmeans(X, k, max_iter=5, n_jobs=-1):
     print(f"Average centroid update time: {np.mean(centroid_times):.2f}s")
     print(f"Average cost computation time: {np.mean(cost_times):.2f}s")
 
+    return centers
+
 
 # ---------- Demo ----------
 if __name__ == "__main__":
     np.random.seed(42)
-    X = np.random.rand(100000, 10, 3).astype(np.float32)
-    shm, shared_X = shared_array_init(X)
-    print("Sample input shape:", shared_X.shape)
-    mvkmeans(shared_X, k=500, max_iter=5, n_jobs=-1)
-    shm.close()
-    shm.unlink()
+
+    # Dummy Example
+    # X0 = np.random.rand(100000, 10, 3).astype(np.float32)
+    # X = PointCloud(X0)
+    # print("Sample input shape:", X.size())
+    # print("Sample input dims:", X.dims())
+    # print("Sample input coords:", X.coords(0))
+    # print("Sample input coords shape:", X.coords(0).shape)
+    # mvkmeans(X, k=5, s=10, max_iter=5, n_jobs=8)
+    # X.delete()
+
+    X = PointCloud("/ssd2/laxman/multivector/arguana/data.pointcloud",np.float32)
+    print("Sample input shape:", X.size())
+    print("Sample input dims:", X.dims())
+    print("Sample input coords:", X.coords(0))
+    print("Sample input coords shape:", X.coords(0).shape)
+    mvkmeans(X, k=5, max_iter=5, n_jobs=8)
+    X.delete()
