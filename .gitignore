@@ -1,5 +1,5 @@
 # Virtual Env
-mvc/
+.mvc/
 
 # Byte-compiled files
 *.pyc
@@ -15,3 +15,6 @@ __pycache__/
 
 # Logs
 *.log
+
+# Bazel files
+bazel-*

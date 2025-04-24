@@ -1,0 +1,52 @@
+# Executables with no extension
+*
+!*.*
+!*/
+!Makefile
+!BUILD
+!WORKSPACE
+
+# Input/Output/debug files
+data/
+.vscode/
+*.bak
+*.tsv
+*.sh
+*.txt
+*.py
+perf*
+MODULE.bazel
+MODULE.bazel.lock
+
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app

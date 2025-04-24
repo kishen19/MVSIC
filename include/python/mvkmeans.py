@@ -140,7 +140,7 @@ def mvkmeans(X, k, s=-1, max_iter=5, n_jobs=-1):
     print(f"Average centroid update time: {np.mean(centroid_times):.2f}s")
     print(f"Average cost computation time: {np.mean(cost_times):.2f}s")
 
-    return centers
+    return centers, cluster_ids
 
 
 # ---------- Demo ----------
