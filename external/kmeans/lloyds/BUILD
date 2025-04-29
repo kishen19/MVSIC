@@ -38,9 +38,9 @@ cc_library(
     ],
 )
 
-cc_binary(
+cc_library(
     name = "kmeans",
-    srcs = ["kmeans.cpp"],
+    hdrs = ["kmeans.h"],
     deps = [
       ":pairwise",
       ":anns",
@@ -55,9 +55,17 @@ cc_binary(
       "@parlaylib//parlay:io",
       "@parlaylib//parlay:sequence",
       "@parlayann//algorithms/utils:point_range",
+      "@parlayann//algorithms/utils:types",
+    ],
+)
+
+cc_binary(
+    name = "kmeans_runner",
+    srcs = ["kmeans.cpp"],
+    deps = [
+      ":kmeans",
       "@parlayann//algorithms/utils:euclidian_point",
       "@parlayann//algorithms/utils:mips_point",
       "@parlayann//algorithms/bench:parse_command_line",
-      "@parlayann//algorithms/utils:types",
     ],
 )

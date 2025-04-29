@@ -7,20 +7,7 @@
 #include "algorithms/bench/parse_command_line.h"
 #include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/mips_point.h"
-#include "algorithms/utils/point_range.h"
-#include "algorithms/utils/types.h"
-#include "anns.h"
-#include "multi-swap.h"
-#include "pairwise.h"
-#include "parlay/io.h"
-#include "parlay/sequence.h"
-#include "seeding/kmeansparallel.h"
-#include "seeding/kmeansplusplus.h"
-#include "seeding/ksetcover.h"
-#include "seeding/prefixdoubling.h"
-#include "seeding/uniformlyrandom.h"
-#include "seeding/wards.h"
-#include "utils/evals.h"
+#include "kmeans.h"
 
 // #define PERROUND
 
@@ -78,40 +65,6 @@ parlay::sequence<uint32_t> ReadGT(const char* filename) {
   }
   ifs.close();
   return values;
-}
-
-template <typename T, typename Range>
-T SumOfSquaredCost(const Range& points,
-                   const parlay::sequence<uint32_t>& center_ids) {
-  auto min_distances = parlay::delayed_seq<T>(points.size(), [&](size_t i) {
-    auto new_distances = parlay::delayed_seq<T>(
-        center_ids.size(),
-        [&](size_t j) { return points[i].distance(points[center_ids[j]]); });
-    T smallest_new_distance = reduce(new_distances, parlay::minm<T>());
-    return smallest_new_distance;
-  });
-  return parlay::reduce(min_distances);
-}
-
-template <typename T, typename Range>
-T SumOfSquaredCost(const Range& points, const Range& centers) {
-  auto min_distances = parlay::delayed_seq<T>(points.size(), [&](size_t i) {
-    auto new_distances = parlay::delayed_seq<T>(centers.size(), [&](size_t j) {
-      return points[i].distance(centers[j]);
-    });
-    T smallest_new_distance = reduce(new_distances, parlay::minm<T>());
-    return smallest_new_distance;
-  });
-  return parlay::reduce(min_distances);
-}
-
-template <typename T, typename Range>
-T SumOfSquaredCost(const Range& points, const Range& centers,
-                   const parlay::sequence<uint32_t>& clusters) {
-  auto distances = parlay::delayed_seq<T>(points.size(), [&](size_t i) {
-    return points[i].distance(centers[clusters[i]]);
-  });
-  return parlay::reduce(distances);
 }
 
 template <class DistTy, class PointTy>

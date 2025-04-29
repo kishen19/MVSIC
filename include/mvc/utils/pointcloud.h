@@ -1,8 +1,10 @@
-// #include "chamferpoint.h"
+#pragma once
+
+#include "chamferpoint.h"
 
 // Reads in a multi-embedding, stored in CSR. The format assumes the num_points
 // many offsets are the last num_points many size_t's in the read data.
-template <typename T>
+template <typename T, typename Range>
 struct PointCloud {
   long dimension() { return dims; }
 
@@ -18,16 +20,14 @@ struct PointCloud {
     }
 
     size_t file_size = 0;
-    {
-      std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
-      if (!file.is_open()) {
-        std::cerr << "Error opening file!" << std::endl;
-        exit(-1);
-      }
-      file_size = file.tellg();
-      std::cout << "File size: " << file_size << " bytes" << std::endl;
+    if (!file.is_open()) {
+      std::cerr << "Error opening file!" << std::endl;
+      exit(-1);
     }
+    file_size = file.tellg();
+    std::cout << "File size: " << file_size << " bytes" << std::endl;
 
     std::ifstream reader(filename);
     assert(reader.is_open());
@@ -84,7 +84,7 @@ struct PointCloud {
         aligned_dims(dim_round_up(dims, sizeof(T))),
         n(data.size()) {
     offsets = parlay::sequence<size_t>::from_function(n + 1, [&](size_t i) {
-      return i == 0 ? 0 : data[i-1].size() * dims;
+      return (i == 0) ? 0 : (data[i-1].size() * dims);
     });
     parlay::scan_inclusive_inplace(offsets);
     size_t total_coords = offsets[n];
@@ -119,8 +119,15 @@ struct PointCloud {
       values + offsets[p_i] + num_coords);
   }
 
+  auto Coords2(long i) {
+    auto p_i = perm[i];
+    size_t num_coords = offsets[p_i + 1] - offsets[p_i];
+    // std::cout << "num_coords = " << num_coords << std::endl;
+    return values + offsets[p_i];
+  }
+
   template <typename Seq>
-  auto GetCluster(const Seq& cluster_ids) {
+  Range GetCluster(const Seq& cluster_ids) {
     size_t k = cluster_ids.size();
     auto num_emb = parlay::delayed_seq<size_t>(k, [&](size_t i) {
       return num_embeddings(cluster_ids[i]);
@@ -137,9 +144,10 @@ struct PointCloud {
         }
       });
     });
+    return Range(data, dims);
   }
 
-  ChamferPoint<T> operator[](long i) { return ChamferPoint<T>(i, Coords(i), dims); }
+  ChamferPoint<T> operator[](long i) { return ChamferPoint<T>(i, Coords2(i), num_embeddings(i), dims); }
 
   ~PointCloud() {
     std::cout << "Freeing... " << values << " initialized = " << initialized
@@ -152,6 +160,7 @@ struct PointCloud {
     }
   }
 
+private:
   T* values = nullptr;
   bool initialized = false;  // false by default
   parlay::sequence<size_t> offsets;
