@@ -166,8 +166,8 @@ void run(commandLine& P) {
     } else if (seed_algo == "ParallelPlusPlus") {
       center_ids = ParallelPlusPlus<DistTy>(points, k);
       centers = copyPoints<PointTy>(points, center_ids);
-    } else if (seed_algo == "Wards") {
-      centers = Wards<DistTy, PointTy>(points, k, BP, epsw, deltaw, samw, wghw);
+    // } else if (seed_algo == "Wards") {
+    //   centers = Wards<DistTy, PointTy>(points, k, BP, epsw, deltaw, samw, wghw);
     } else if (seed_algo == "KSetCover") {
       center_ids = KSetCover<DistTy, PointTy>(points, k, BP);
       centers = copyPoints<PointTy>(points, center_ids);

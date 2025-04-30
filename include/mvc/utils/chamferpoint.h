@@ -11,7 +11,8 @@ struct ChamferPoint {
   auto operator[](long i) const {return parlay::make_slice(values + i*d, values + i*d + d);}
 
   float distance(const ChamferPoint& x) const {
-    return 1 - (chamfer_sim(*this, x, d)); // + chamfer_sim(x, *this, dim));
+    // return 1 - (chamfer_sim(*this, x, d)); // + chamfer_sim(x, *this, dim));
+    return chamfer_dis(*this, x, d);
   }
 
   void prefetch() {}
@@ -71,6 +72,25 @@ struct ChamferPoint {
       sim += max_sim;
     }
     return sim / (a.size());
+  }
+
+  static float chamfer_dis(const ChamferPoint& a, const ChamferPoint& b,
+    unsigned int dim) {
+    auto our_coords = a.Coords();
+    auto their_coords = b.Coords();
+    auto a_dists = parlay::sequence<T>::from_function(a.size(), [&](size_t i) {
+      auto dists_b = parlay::sequence<T>::from_function(b.size(), [&](size_t j) {
+        float curr_dis = 0;
+        for (unsigned int k = 0; k < dim; ++k) {
+          curr_dis += (our_coords[i * dim + k] - their_coords[j * dim + k]) *
+                      (our_coords[i * dim + k] - their_coords[j * dim + k]);
+        }
+        return curr_dis;
+      });
+      return parlay::reduce(dists_b, parlay::minm<T>());
+    });
+    auto dis = parlay::reduce(a_dists);
+    return dis / a.size();
   }
 
 private:

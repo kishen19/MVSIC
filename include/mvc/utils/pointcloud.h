@@ -6,7 +6,7 @@
 // many offsets are the last num_points many size_t's in the read data.
 template <typename T, typename Range>
 struct PointCloud {
-  long dimension() { return dims; }
+  long dimension() const { return dims; }
 
   PointCloud() : initialized(false) {}
 
@@ -51,29 +51,35 @@ struct PointCloud {
       exit(-1);
     }
 
-    char* ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t));
+    // char* ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t));
     // Skip to the last N entries and read the last N size_t values
-    // reader.seekg(-static_cast<int64_t>(n) * sizeof(uint32_t), std::ios::end);
+    reader.seekg(-static_cast<int64_t>(n) * sizeof(uint32_t), std::ios::end);
     perm = parlay::sequence<uint32_t>(n);
-    std::memcpy(perm.begin(), ptr, n * sizeof(uint32_t));
+    // std::memcpy(perm.begin(), ptr, n * sizeof(uint32_t));
+    reader.read((char*)perm.begin(), n * sizeof(uint32_t));
 
     // Skip to the offsets
     reader.seekg(-1LL * (static_cast<int64_t>(n) * sizeof(uint32_t) +
                          static_cast<int64_t>(n + 1) * sizeof(size_t)),
                  std::ios::end);
-    ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t)) -
-          (static_cast<int64_t>(n + 1) * sizeof(size_t));
+    // ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t)) -
+          // (static_cast<int64_t>(n + 1) * sizeof(size_t));
     offsets = parlay::sequence<size_t>(n + 1);
-    std::memcpy(offsets.begin(), ptr, (n + 1) * sizeof(size_t));
+    // std::memcpy(offsets.begin(), ptr, (n + 1) * sizeof(size_t));
+    reader.read((char*)offsets.begin(), (n + 1) * sizeof(size_t));
 
     size_t coordinate_size =
         file_size - (2 * sizeof(uint32_t) + ((n) * sizeof(uint32_t)) +
                      ((n + 1) * sizeof(size_t)));
     std::cout << "Coordinate size = " << coordinate_size << std::endl;
-    values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
-    auto del_seq = parlay::delayed_seq<size_t>(
-        coordinate_size, [&](size_t i) { return ((uint8_t*)(values))[i]; });
-    std::cout << parlay::reduce(del_seq) << std::endl;
+    values = static_cast<T*>(malloc(coordinate_size));
+    reader.seekg(static_cast<int64_t>(2) * sizeof(uint32_t), std::ios::beg);
+    reader.read((char*)values, coordinate_size);
+
+    // values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
+    // auto del_seq = parlay::delayed_seq<size_t>(
+    //     coordinate_size, [&](size_t i) { return ((uint8_t*)(values))[i]; });
+    // std::cout << parlay::reduce(del_seq) << std::endl;
     reader.close();
   }
 
@@ -102,16 +108,16 @@ struct PointCloud {
     });
   }
 
-  size_t size() { return n; }
+  size_t size() const { return n; }
 
   // Return the number of embeddings for point i in the multi-embedding.
-  size_t num_embeddings(size_t i) {
+  size_t num_embeddings(size_t i) const {
     auto p_i = perm[i];
     size_t num_coords = offsets[p_i + 1] - offsets[p_i];
     return num_coords / dims;
   }
 
-  auto Coords(long i) {
+  auto Coords(long i) const {
     auto p_i = perm[i];
     size_t num_coords = offsets[p_i + 1] - offsets[p_i];
     // std::cout << "num_coords = " << num_coords << std::endl;
@@ -119,7 +125,7 @@ struct PointCloud {
       values + offsets[p_i] + num_coords);
   }
 
-  auto Coords2(long i) {
+  auto Coords2(long i) const {
     auto p_i = perm[i];
     size_t num_coords = offsets[p_i + 1] - offsets[p_i];
     // std::cout << "num_coords = " << num_coords << std::endl;
@@ -127,40 +133,66 @@ struct PointCloud {
   }
 
   template <typename Seq>
-  Range GetCluster(const Seq& cluster_ids) {
+  Range GetCluster(const Seq& cluster_ids) const{
     size_t k = cluster_ids.size();
     auto num_emb = parlay::delayed_seq<size_t>(k, [&](size_t i) {
       return num_embeddings(cluster_ids[i]);
     });
     auto [offsets, total_embs] = parlay::scan(num_emb);
-    auto data = parlay::sequence<parlay::sequence<T>>::uninitialized(total_embs);
+    auto data = parlay::sequence<parlay::sequence<T>>(total_embs);
     parlay::parallel_for(0, k, [&](size_t i) {
       auto ind = cluster_ids[i];
       auto offset = offsets[i];
       auto coords = Coords(ind);
-      parlay::parallel_for(0, coords.size(), [&](size_t j) { 
+      parlay::parallel_for(0, coords.size()/dims, [&](size_t j) {
+        data[offset + j] = parlay::sequence<T>::uninitialized(dims);
         for (unsigned int t = 0; t < dims; ++t) {
-          data[offset + j].push_back(coords[j * dims + t]);
+          data[offset + j][t] = coords[j * dims + t];
         }
       });
     });
     return Range(data, dims);
   }
 
-  ChamferPoint<T> operator[](long i) { return ChamferPoint<T>(i, Coords2(i), num_embeddings(i), dims); }
+  ChamferPoint<T> operator[](long i) const { return ChamferPoint<T>(i, Coords2(i), num_embeddings(i), dims); }
+
+  PointCloud& operator=(const PointCloud& other) {
+    if (this != &other) {
+      if (initialized && values != nullptr) {
+        free(values);
+        values = nullptr;
+      }
+      initialized = other.initialized;
+      if (initialized) {
+        n = other.n;
+        dims = other.dims;
+        aligned_dims = other.aligned_dims;
+        offsets = other.offsets;
+        perm = other.perm;
+        size_t total_coords = offsets[n];
+        values = static_cast<T*>(malloc(total_coords * sizeof(T)));
+        std::memcpy(values, other.values, total_coords * sizeof(T));
+      } else {
+        values = nullptr;
+      }
+    }
+    return *this;
+  }
 
   ~PointCloud() {
-    std::cout << "Freeing... " << values << " initialized = " << initialized
-              << std::endl;
+    // std::cout << "PointCloud destructor called." << std::endl;
+    // std::cout << "Number of elem: " << n << std::endl;
+    // std::cout << "Freeing... " << values << " initialized = " << initialized
+    //           << std::endl;
     if (initialized && values != nullptr) {
-      //      free(values);
-      //      values = nullptr;
-      //      std::cout << "Done freeing" << std::endl;
-      //      initialized = false;
+      free(values);
+      values = nullptr;
+      // std::cout << "Done freeing" << std::endl;
+      initialized = false;
     }
   }
 
-private:
+// private:
   T* values = nullptr;
   bool initialized = false;  // false by default
   parlay::sequence<size_t> offsets;

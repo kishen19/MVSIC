@@ -49,7 +49,7 @@ def chamfer_distance(A, B):
 				min_dist = dist
 		cost_B += min_dist
 
-	return (cost_A / sA) + (cost_B / sB)
+	return (cost_A / sA) #+ (cost_B / sB)
 
 # Batching Helper
 def split_batches(n, batch_size):

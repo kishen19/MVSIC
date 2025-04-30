@@ -50,7 +50,7 @@ cc_library(
       "//seeding:uniformlyrandom",
       "//seeding:kmeansparallel",
       "//seeding:ksetcover",
-      "//seeding:wards",
+      # "//seeding:wards",
       "//utils:evals",
       "@parlaylib//parlay:io",
       "@parlaylib//parlay:sequence",
