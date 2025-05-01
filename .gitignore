@@ -1,5 +1,6 @@
 # Virtual Env
-.mvc/
+/mvc/
+/.mvc/
 
 # Byte-compiled files
 *.pyc

@@ -1,19 +1,24 @@
 package(default_visibility = ["//visibility:public"])
 
-cc_binary(
+cc_library(
     name = "mvkmeans",
-    srcs = ["mvkmeans.cpp"],
+    hdrs = ["mvkmeans.h"],
     deps = [
-      "@parlaylib//parlay:parallel",
-      "@parlaylib//parlay:primitives",
       "@parlaylib//parlay:sequence",
       "@kmeans//lloyds:kmeans",
+      "//mvc/seeding:uniformlyrandom",
+    ],
+)
+
+cc_binary(
+    name = "mvkmeans_runner",
+    srcs = ["mvkmeans.cpp"],
+    deps = [
+      ":mvkmeans",
       "@parlayann//algorithms/utils:point_range",
       "@parlayann//algorithms/utils:euclidian_point",
       "@parlayann//algorithms/utils:mips_point",
       "@parlayann//algorithms/bench:parse_command_line",
-      "@parlayann//algorithms/utils:types",
       "//mvc/utils:pointcloud",
-      "//mvc/seeding:uniformlyrandom",
     ],
 )

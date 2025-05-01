@@ -3,27 +3,8 @@ import numpy as np
 
 from mvkmeans import mvkmeans
 
-class FaissIndex:
-	def __init__(self, dimension):
-		self.d = dimension
-		self.index = faiss.IndexFlatL2(dimension)
-
-	def add_data(self, data):
-		if not isinstance(data, np.ndarray) or data.ndim != 2 or data.shape[1] != self.d:
-			raise ValueError(f"Data must be a 2D numpy array with shape (n_samples, {self.d})")
-		self.index.add(data)
-
-	def search(self, query, k=5):
-		if not isinstance(query, np.ndarray) or query.ndim != 2 or query.shape[1] != self.d:
-			raise ValueError(f"Query must be a 2D numpy array with shape (n_queries, {self.d})")
-		distances, indices = self.index.search(query, k)
-		return distances, indices
-
 class MVIVF:
 	def __init__(self, data):
-		"""
-		data: PointCloud object
-		"""
 		
 	def build_index(self):
 		centers, cluster_ids = mvkmeans(self.data, k=self.n/500)

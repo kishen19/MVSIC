@@ -46,27 +46,22 @@ class PointCloud:
       self.n, self.d = header
       self.dtype = dtype
       n = self.n
-
       # Step 2: Get file size
       f.seek(0, 2)
       file_size = f.tell()
-
       # Step 3: Compute sizes of various sections
       size_header = 8
       size_perm = n * np.dtype(np.uint32).itemsize
       size_offsets = (n + 1) * np.dtype(np.uint64).itemsize
       size_coords = file_size - (size_header + size_offsets + size_perm)
-
       # Step 4: Read coordinate values
       f.seek(size_header)
       values = np.frombuffer(f.read(size_coords), dtype=dtype)
       self.shape = values.shape
       self.shm = shared_array_init(values)
-
       # Step 5: Read offset values
       self.offsets = np.frombuffer(f.read(size_offsets), dtype=np.uint64)
       # self.offsets_shm, self.offsets = shared_array_init(offsets, dtype=np.uint64)
-
       # Step 6: Read permutation of points
       self.perm = np.frombuffer(f.read(size_perm), dtype=np.uint32)
       # self.perm_shm, self.perm = shared_array_init(perm, dtype=np.uint32)
