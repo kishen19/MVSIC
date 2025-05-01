@@ -1,42 +1,36 @@
 #pragma once
 
-#include "chamferpoint.h"
-
 // Reads in a multi-embedding, stored in CSR. The format assumes the num_points
 // many offsets are the last num_points many size_t's in the read data.
-template <typename T, typename Range>
+template <typename ChPoint, typename Range>
 struct PointCloud {
-  long dimension() const { return dims; }
+  using T = typename ChPoint::distance_type;
+  using range_type = Range;
+  using point_type = ChPoint;
 
-  PointCloud() : initialized(false) {}
+  PointCloud() {}
 
-  PointCloud(const char* filename) {
-    initialized = true;
+  PointCloud(const char* filename) { // Doesn't support mmap at the moment.
     std::cout << "filename = " << filename << std::endl;
     if (filename == nullptr) {
       n = 0;
       dims = 0;
       return;
     }
-
     size_t file_size = 0;
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
-
     if (!file.is_open()) {
       std::cerr << "Error opening file!" << std::endl;
       exit(-1);
     }
     file_size = file.tellg();
     std::cout << "File size: " << file_size << " bytes" << std::endl;
-
     std::ifstream reader(filename);
     assert(reader.is_open());
-
-    auto [fileptr, length] = mmapStringFromFile(filename);
-
+    // [MMAP] auto [fileptr, length] = mmapStringFromFile(filename);
     // Read num points and dimension
-    uint32_t num_points;  // Number of points with multi-embeddings.
-    uint32_t d;           // Dimensionality per-embedding, e.g., 128.
+    uint32_t num_points;
+    uint32_t d;
     reader.read((char*)(&num_points), sizeof(uint32_t));
     n = num_points;
     reader.read((char*)(&d), sizeof(uint32_t));
@@ -50,24 +44,24 @@ struct PointCloud {
                 << std::endl;
       exit(-1);
     }
-
-    // char* ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t));
+    // [MMAP] char* ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t));
     // Skip to the last N entries and read the last N size_t values
     reader.seekg(-static_cast<int64_t>(n) * sizeof(uint32_t), std::ios::end);
     perm = parlay::sequence<uint32_t>(n);
-    // std::memcpy(perm.begin(), ptr, n * sizeof(uint32_t));
+    //[MMAP] std::memcpy(perm.begin(), ptr, n * sizeof(uint32_t));
     reader.read((char*)perm.begin(), n * sizeof(uint32_t));
-
+    ids = parlay::sequence<uint32_t>::from_function(n, [&](size_t i) {
+      return perm[i];
+    });
     // Skip to the offsets
     reader.seekg(-1LL * (static_cast<int64_t>(n) * sizeof(uint32_t) +
                          static_cast<int64_t>(n + 1) * sizeof(size_t)),
                  std::ios::end);
-    // ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t)) -
+    // [MMAP] ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t)) -
           // (static_cast<int64_t>(n + 1) * sizeof(size_t));
     offsets = parlay::sequence<size_t>(n + 1);
-    // std::memcpy(offsets.begin(), ptr, (n + 1) * sizeof(size_t));
+    // [MMAP] std::memcpy(offsets.begin(), ptr, (n + 1) * sizeof(size_t));
     reader.read((char*)offsets.begin(), (n + 1) * sizeof(size_t));
-
     size_t coordinate_size =
         file_size - (2 * sizeof(uint32_t) + ((n) * sizeof(uint32_t)) +
                      ((n + 1) * sizeof(size_t)));
@@ -75,20 +69,16 @@ struct PointCloud {
     values = static_cast<T*>(malloc(coordinate_size));
     reader.seekg(static_cast<int64_t>(2) * sizeof(uint32_t), std::ios::beg);
     reader.read((char*)values, coordinate_size);
-
-    // values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
-    // auto del_seq = parlay::delayed_seq<size_t>(
-    //     coordinate_size, [&](size_t i) { return ((uint8_t*)(values))[i]; });
-    // std::cout << parlay::reduce(del_seq) << std::endl;
+    // [MMAP] values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
     reader.close();
   }
 
   template <typename Seq>
-  PointCloud(const Seq& data, unsigned _d)
-      : initialized(true),
-        dims(_d),
+  PointCloud(const Seq& data, unsigned _d, parlay::sequence<uint32_t> _ids = {})
+      : dims(_d),
         aligned_dims(dim_round_up(dims, sizeof(T))),
         n(data.size()) {
+    if (_ids.size() > 0){ ids = _ids; }
     offsets = parlay::sequence<size_t>::from_function(n + 1, [&](size_t i) {
       return (i == 0) ? 0 : (data[i-1].size() * dims);
     });
@@ -109,9 +99,10 @@ struct PointCloud {
   }
 
   size_t size() const { return n; }
+  long dimension() const { return dims; }
 
-  // Return the number of embeddings for point i in the multi-embedding.
-  size_t num_embeddings(size_t i) const {
+  // Return the number of embeddings for point i.
+  size_t NumEmb(size_t i) const {
     auto p_i = perm[i];
     size_t num_coords = offsets[p_i + 1] - offsets[p_i];
     return num_coords / dims;
@@ -133,10 +124,10 @@ struct PointCloud {
   }
 
   template <typename Seq>
-  Range GetCluster(const Seq& cluster_ids) const{
+  Range GetRange(const Seq& cluster_ids) const{
     size_t k = cluster_ids.size();
     auto num_emb = parlay::delayed_seq<size_t>(k, [&](size_t i) {
-      return num_embeddings(cluster_ids[i]);
+      return NumEmb(cluster_ids[i]);
     });
     auto [offsets, total_embs] = parlay::scan(num_emb);
     auto data = parlay::sequence<parlay::sequence<T>>(total_embs);
@@ -154,49 +145,77 @@ struct PointCloud {
     return Range(data, dims);
   }
 
-  ChamferPoint<T> operator[](long i) const { return ChamferPoint<T>(i, Coords2(i), num_embeddings(i), dims); }
+  template <typename Seq>
+  PointCloud GetPointCloud(const Seq& cluster_ids) const{
+    size_t k = cluster_ids.size();
+    auto points = parlay::delayed_seq<ChPoint>(k, [&](size_t i) {
+      return (*this)[cluster_ids[i]];
+    });
+    auto ids_ = parlay::sequence<uint32_t>::from_function(k, [&](size_t i) {
+      return get_id(cluster_ids[i]);
+    });
+    return PointCloud<ChPoint, Range>(points, dims, ids_);
+  }
+
+  ChPoint operator[](long i) const { return ChPoint(i, Coords2(i), NumEmb(i), dims); }
 
   PointCloud& operator=(const PointCloud& other) {
     if (this != &other) {
-      if (initialized && values != nullptr) {
+      if (values != nullptr) {
         free(values);
         values = nullptr;
       }
-      initialized = other.initialized;
-      if (initialized) {
-        n = other.n;
-        dims = other.dims;
-        aligned_dims = other.aligned_dims;
-        offsets = other.offsets;
-        perm = other.perm;
-        size_t total_coords = offsets[n];
-        values = static_cast<T*>(malloc(total_coords * sizeof(T)));
-        std::memcpy(values, other.values, total_coords * sizeof(T));
-      } else {
-        values = nullptr;
-      }
+      n = other.n;
+      dims = other.dims;
+      aligned_dims = other.aligned_dims;
+      offsets = other.offsets;
+      perm = other.perm;
+      ids = other.ids;
+      size_t total_coords = offsets[n];
+      values = static_cast<T*>(malloc(total_coords * sizeof(T)));
+      std::memcpy(values, other.values, total_coords * sizeof(T));
     }
     return *this;
   }
 
+  // Copy constructor
+  PointCloud(PointCloud& other) {
+    n = other.n;
+    dims = other.dims;
+    aligned_dims = other.aligned_dims;
+    offsets = other.offsets;
+    perm = other.perm;
+    ids = other.ids;
+    size_t total_coords = offsets[n];
+    values = static_cast<T*>(malloc(total_coords * sizeof(T)));
+    std::memcpy(values, other.values, total_coords * sizeof(T));
+  }
+
   ~PointCloud() {
-    // std::cout << "PointCloud destructor called." << std::endl;
-    // std::cout << "Number of elem: " << n << std::endl;
-    // std::cout << "Freeing... " << values << " initialized = " << initialized
-    //           << std::endl;
-    if (initialized && values != nullptr) {
+    if (values != nullptr) {
+      // std::cout << "Freeing values of PointCloud with " << n 
+      //           << " points and " << dims << " dimensions." << std::endl;
       free(values);
       values = nullptr;
-      // std::cout << "Done freeing" << std::endl;
-      initialized = false;
     }
   }
 
-// private:
+  uint32_t get_id(uint32_t i) const {
+    if (ids.size() > 0) {
+      return ids[i];
+    } else {
+      return i;
+    }
+  }
+
+  auto get_ids() const {
+    return ids;
+  }
+
   T* values = nullptr;
-  bool initialized = false;  // false by default
   parlay::sequence<size_t> offsets;
   parlay::sequence<uint32_t> perm;
+  parlay::sequence<uint32_t> ids;
   unsigned int dims = 0;
   unsigned int aligned_dims = 0;
   size_t n = 0;

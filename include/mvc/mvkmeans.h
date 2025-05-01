@@ -4,10 +4,10 @@
 #include "lloyds/kmeans.h"
 #include "seeding/uniformlyrandom.h"
 
-template <typename DistTy, typename PointCloud>
-DistTy sum_of_squared_cost(const PointCloud& points, const PointCloud& centers,
+template <typename T, typename PointCloud>
+T sum_of_squared_cost(const PointCloud& points, const PointCloud& centers,
                    const parlay::sequence<uint32_t>& clusters) {
-  auto distances = parlay::delayed_seq<DistTy>(points.size(), [&](size_t i) {
+  auto distances = parlay::delayed_seq<T>(points.size(), [&](size_t i) {
     return points[i].distance(centers[clusters[i]]);
   });
   return parlay::reduce(distances);
@@ -27,27 +27,25 @@ parlay::sequence<uint32_t> compute_cluster_ids(const PointCloud &points,
   return updated_cluster_ids;
 }
 
-template <typename DistTy, typename Range, typename PointCloud>
+template <typename Range, typename PointCloud>
 auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
-    long iters = 5, std::string seeding="Random",
-    std::string kmeans_dist_algo = "ANNS", std::string kmeans_seeding = "PrefixDoubling",
-    long kmeans_iters = 20) {
+    long iters = 1, std::string seeding="Random",
+    std::string kmeans_dist_algo = "Pairwise", std::string kmeans_seeding = "PrefixDoubling",
+    long kmeans_iters = 1) {
+  using T = typename PointCloud::T;
   uint32_t n = points.size();
   uint32_t d = points.dimension();
   
   if (s == 0){
-    auto num_emb = parlay::delayed_seq<size_t>(points.size(), [&](size_t i) {
-      return points.num_embeddings(i);
-    });
-    s = parlay::reduce(num_emb)/n;
+    auto num_embeddings = parlay::delayed_seq<size_t>(points.size(), 
+        [&](size_t i) { return points.NumEmb(i); });
+    s = parlay::reduce(num_embeddings)/n;
   }
-
-  // Initialization 
+  // Step 1: Initialization 
   PointCloud centers;
   parlay::sequence<uint32_t> cluster_ids;
-
   if (seeding == "Random"){
-    centers = UniformlyRandomMV<DistTy>(points, k);
+    centers = UniformlyRandomMV(points, k);
   } else {
     std::cout << "Error: seeding algorithm not specified correctly"
               << std::endl;
@@ -55,33 +53,33 @@ auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
   }
   
   cluster_ids = compute_cluster_ids(points, centers);
-  DistTy seed_cost = sum_of_squared_cost<DistTy>(points, centers, cluster_ids);
+  T seed_cost = sum_of_squared_cost<T>(points, centers, cluster_ids);
   std::cout << "Seeding cost: " << seed_cost << std::endl;
 
-  // Lloyd's Step
-  DistTy cost;
-  for (long it=0; it<iters; it++){
-    // Compute new centers
-    auto id_pt = parlay::delayed_seq<std::pair<uint32_t, uint32_t>>(n, [&](size_t i) {
-      return std::make_pair(cluster_ids[i], i);
-    });
+  // Step 2: Lloyd's Iteration
+  T cost;
+  for (long it = 0; it < iters; it++){
+    // Step 2A: Compute new centers
+    auto id_pt = parlay::delayed_seq<std::pair<uint32_t, uint32_t>>(n, 
+        [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = parlay::group_by_index(id_pt, k);
     auto new_centers = parlay::sequence<Range>(k);
     parlay::parallel_for(0, k, [&](size_t i) {
-      if(grouped[i].size() > 0){
-        auto data = points.GetCluster(grouped[i]);
-        new_centers[i] = kmeans(data, s, kmeans_seeding, kmeans_dist_algo, kmeans_iters);
-      } else {
+      if (grouped[i].size() > 0){
+        auto data = points.GetRange(grouped[i]);
+        new_centers[i] = kmeans(data, s, kmeans_seeding, kmeans_dist_algo, 
+                                kmeans_iters);
+      } else { // Empty Cluster, sample from input
         static uint32_t seed = 42;
         uint32_t id = parlay::hash32(seed++) % n;
         new_centers[i] = Range(points[id], d);
       }
     });
     centers = PointCloud(new_centers, d);
-    // Reassign points
+    // Step 2B: Reassign points
     cluster_ids = compute_cluster_ids(points, centers);
-    cost = sum_of_squared_cost<DistTy>(points, centers, cluster_ids);
-    std::cout << "Lloyd's iteration " << it << ": cost = " << cost
-              << std::endl;
+    cost = sum_of_squared_cost<T>(points, centers, cluster_ids);
+    std::cout << "Lloyd's iteration " << it << ": cost = " << cost << std::endl;
   }
+  return std::make_pair(centers, cluster_ids);
 }

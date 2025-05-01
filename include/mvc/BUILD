@@ -20,5 +20,6 @@ cc_binary(
       "@parlayann//algorithms/utils:mips_point",
       "@parlayann//algorithms/bench:parse_command_line",
       "//mvc/utils:pointcloud",
+      "//mvc/utils:chamferpoint",
     ],
 )
