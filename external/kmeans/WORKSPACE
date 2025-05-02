@@ -28,6 +28,7 @@ http_archive(
 git_repository(
   name = "parlayann",
   branch = "bazel",
-  remote = "https://github.com/cmuparlay/parlayann.git",
+  remote = "https://github.com/kishen19/ParlayANN.git",
+  # remote = "https://github.com/cmuparlay/parlayann.git",
 #  commit = "a4ba8585235789b555ce0ae920e548946d714b9d"
 )

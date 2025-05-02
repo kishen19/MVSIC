@@ -9,26 +9,64 @@
 #include "index.h"
 
 template <typename ChPoint, typename Range>
-void bench(const char *inFile, size_t maxsize) {
+void bench(commandLine& P) {
   using T = typename ChPoint::distance_type;
   using PC = PointCloud<ChPoint, Range>;
+
+  auto inFile = P.getOptionValue("-i");
+  auto qFile = P.getOptionValue("-q");
+  long maxsize = P.getOptionLongValue("-maxsize", 100);
+  long nprobes = P.getOptionLongValue("-nprobes", 1);
+  long k = P.getOptionLongValue("-k", 10);
+  auto seeding = P.getOptionValue("-seed", "Random");
+  auto iters = P.getOptionLongValue("-iters", 5);
+  auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
+  auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
+  auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
+  // long num = P.getOptionLongValue("-num", 1000);
+
   auto points = PC(inFile);
-  auto index = mvivf::Index<T, PC>(points, maxsize);
-  std::cout << "Index built with " << points.size() << " points." << std::endl;
-  for(size_t i=0; i<10; i++) {
-    std::cout << "Running query " << i << std::endl;
-    auto query = points[i];
-    auto k = 10;
-    auto nprobes = 1;
-    auto results = index.Search(query, k, nprobes);
-    std::cout << "Query: " << i << ", Results: " << results.size() << std::endl;
-    for(size_t j=0; j<results.size(); j++) {
-      auto res = results[j];
-      std::cout << "(" << res.first << ", " << res.second << ") ";
+  auto queries = PC(qFile);
+  parlay::internal::timer it;
+  it.start();
+  auto index = mvivf::Index<T, PC>(points, maxsize, iters, seeding, 
+      kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+  it.stop();
+  std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
+  
+  parlay::internal::timer t;
+  double recall = 0.0;
+  double query_time = 0.0;
+  for(size_t i = 0; i < queries.size(); i++) {
+    // Run Brute-force search
+    auto bf_results = mvivf::get_knn(queries[i], points, k);
+    std::unordered_set<uint32_t> bf_set;
+    for (const auto& [id, dist] : bf_results) {
+      bf_set.insert(id);
     }
-    std::cout << std::endl;
+
+    // Run Index search
+    t.start();
+    auto results = index.Search(queries[i], k, nprobes);
+    t.stop();
+    query_time += t.total_time();
+    t.reset();
+
+    // Calculate recall
+    size_t correct = 0;
+    for (const auto& [id, dist] : results) {
+      if (bf_set.find(id) != bf_set.end()) {
+        correct++;
+      }
+    }
+    recall += static_cast<float>(correct)/k;
   }
-  std::cout << "Benchmark completed." << std::endl;
+  recall /= queries.size();
+  double QPS = queries.size() / query_time;
+  double avg_query_time = 1/QPS;
+  std::cout << "Average recall over " << queries.size() << " queries: " << recall << std::endl;
+  std::cout << "QPS: " << QPS << std::endl;
+  std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -48,8 +86,6 @@ int main(int argc, char* argv[]) {
     abort();
   }
 
-  auto inFile = P.getOptionValue("-i");
-  auto maxsize = P.getOptionLongValue("-maxsize", 100);
   // auto seeding = P.getOptionValue("-seed", "Random");
   // auto iters = P.getOptionLongValue("-iters", 5);
   // auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
@@ -58,39 +94,39 @@ int main(int argc, char* argv[]) {
 
   if (tp == "float") {
     if (df == "Euclidian"){
-      using ChPoint = ChamferPoint<float>;
+      using ChPoint = Chamfer_Euclidian_Point<float>;
       using Point = Euclidian_Point<float>;
       using Range = PointRange<float, Point>;
-      bench<ChPoint, Range>(inFile, maxsize);
+      bench<ChPoint, Range>(P);
     } else if (df == "Mips") {
-      using ChPoint = ChamferPoint<float>;
+      using ChPoint = Chamfer_Mips_Point<float>;
       using Point = Mips_Point<float>;
       using Range = PointRange<float, Point>;
-      bench<ChPoint, Range>(inFile, maxsize);
+      bench<ChPoint, Range>(P);
     }
   } else if (tp == "uint8") {
     if (df == "Euclidian"){
-      using ChPoint = ChamferPoint<uint8_t>;
+      using ChPoint = Chamfer_Euclidian_Point<uint8_t>;
       using Point = Euclidian_Point<uint8_t>;
       using Range = PointRange<uint8_t, Point>;
-      bench<ChPoint, Range>(inFile, maxsize);
+      bench<ChPoint, Range>(P);
     } else if (df == "Mips") {
-      using ChPoint = ChamferPoint<uint8_t>;
+      using ChPoint = Chamfer_Mips_Point<uint8_t>;
       using Point = Mips_Point<uint8_t>;
       using Range = PointRange<uint8_t, Point>;
-      bench<ChPoint, Range>(inFile, maxsize);
+      bench<ChPoint, Range>(P);
     }
   } else if (tp == "int8") {
     if (df == "Euclidian"){
-      using ChPoint = ChamferPoint<int8_t>;
+      using ChPoint = Chamfer_Euclidian_Point<int8_t>;
       using Point = Euclidian_Point<int8_t>;
       using Range = PointRange<int8_t, Point>;
-      bench<ChPoint, Range>(inFile, maxsize);
+      bench<ChPoint, Range>(P);
     } else if (df == "Mips") {
-      using ChPoint = ChamferPoint<int8_t>;
+      using ChPoint = Chamfer_Mips_Point<int8_t>;
       using Point = Mips_Point<int8_t>;
       using Range = PointRange<int8_t, Point>;
-      bench<ChPoint, Range>(inFile, maxsize);
+      bench<ChPoint, Range>(P);
     }
   }
   return 0;

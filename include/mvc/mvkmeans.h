@@ -29,9 +29,9 @@ parlay::sequence<uint32_t> compute_cluster_ids(const PointCloud &points,
 
 template <typename Range, typename PointCloud>
 auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
-    long iters = 1, std::string seeding="Random",
-    std::string kmeans_dist_algo = "Pairwise", std::string kmeans_seeding = "PrefixDoubling",
-    long kmeans_iters = 1) {
+    long iters = 5, std::string seeding="Random",
+    std::string kmeans_dist_algo = "ANNS", std::string kmeans_seeding = "PrefixDoubling",
+    long kmeans_iters = 10) {
   using T = typename PointCloud::T;
   uint32_t n = points.size();
   uint32_t d = points.dimension();
@@ -67,14 +67,25 @@ auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
     parlay::parallel_for(0, k, [&](size_t i) {
       if (grouped[i].size() > 0){
         auto data = points.GetRange(grouped[i]);
-        new_centers[i] = kmeans(data, s, kmeans_seeding, kmeans_dist_algo, 
-                                kmeans_iters);
+        if (s >= data.size()) {
+          new_centers[i] = data;
+        } else {
+          new_centers[i] = kmeans(data, std::min(s, data.size()), kmeans_seeding, 
+                                kmeans_dist_algo, kmeans_iters);
+        }
       } else { // Empty Cluster, sample from input
         static uint32_t seed = 42;
         uint32_t id = parlay::hash32(seed++) % n;
-        new_centers[i] = Range(points[id], d);
+        auto data = Range(points[id], d);
+        if (s >= data.size()) {
+          new_centers[i] = data;
+        } else {
+          new_centers[i] = kmeans(data, std::min(s, data.size()), kmeans_seeding, 
+                                kmeans_dist_algo, kmeans_iters);
+        }
       }
     });
+    std::cout << "Here" << std::endl;
     centers = PointCloud(new_centers, d);
     // Step 2B: Reassign points
     cluster_ids = compute_cluster_ids(points, centers);

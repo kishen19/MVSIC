@@ -9,7 +9,7 @@ template <typename ChPoint, typename PointCloud>
 auto get_knn(const ChPoint& q, const PointCloud& points, uint32_t k){
   using T = typename ChPoint::distance_type;
   auto dists = parlay::tabulate(points.size(), [&](size_t i) {
-    return std::pair(q.distance(points[i]), points.get_id(i));// Points should have ids
+    return std::pair(q.distance(points[i]), points.get_id(i)); // Points should have ids
   });
   auto sorted = parlay::sort(dists, [](const auto& a, const auto& b) {
     return a.first < b.first;

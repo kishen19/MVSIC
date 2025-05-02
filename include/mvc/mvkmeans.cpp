@@ -34,14 +34,14 @@ int main(int argc, char* argv[]) {
 
   if (tp == "float") {
     if (df == "Euclidian"){
-      using ChPoint = ChamferPoint<float>;
+      using ChPoint = Chamfer_Euclidian_Point<float>;
       using Point = Euclidian_Point<float>;
       using Range = PointRange<float, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
       mvkmeans<Range>(points, k, s, iters, seeding, 
           kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     } else if (df == "Mips") {
-      using ChPoint = ChamferPoint<float>;
+      using ChPoint = Chamfer_Mips_Point<float>;
       using Point = Mips_Point<float>;
       using Range = PointRange<float, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
@@ -50,14 +50,14 @@ int main(int argc, char* argv[]) {
     }
   } else if (tp == "uint8") {
     if (df == "Euclidian"){
-      using ChPoint = ChamferPoint<uint8_t>;
+      using ChPoint = Chamfer_Euclidian_Point<uint8_t>;
       using Point = Euclidian_Point<uint8_t>;
       using Range = PointRange<uint8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
       mvkmeans<Range>(points, k, s, iters, seeding, 
           kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     } else if (df == "Mips") {
-      using ChPoint = ChamferPoint<uint8_t>;
+      using ChPoint = Chamfer_Mips_Point<uint8_t>;
       using Point = Mips_Point<uint8_t>;
       using Range = PointRange<uint8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
@@ -66,14 +66,14 @@ int main(int argc, char* argv[]) {
     }
   } else if (tp == "int8") {
     if (df == "Euclidian"){
-      using ChPoint = ChamferPoint<int8_t>;
+      using ChPoint = Chamfer_Euclidian_Point<int8_t>;
       using Point = Euclidian_Point<int8_t>;
       using Range = PointRange<int8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
       mvkmeans<Range>(points, k, s, iters, seeding, 
           kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     } else if (df == "Mips") {
-      using ChPoint = ChamferPoint<int8_t>;
+      using ChPoint = Chamfer_Mips_Point<int8_t>;
       using Point = Mips_Point<int8_t>;
       using Range = PointRange<int8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
