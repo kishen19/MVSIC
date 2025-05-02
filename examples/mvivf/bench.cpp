@@ -18,6 +18,7 @@ void bench(commandLine& P) {
   long maxsize = P.getOptionLongValue("-maxsize", 100);
   long nprobes = P.getOptionLongValue("-nprobes", 1);
   long k = P.getOptionLongValue("-k", 10);
+  long s = P.getOptionLongValue("-s", 0);
   auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
   auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
@@ -29,7 +30,7 @@ void bench(commandLine& P) {
   auto queries = PC(qFile);
   parlay::internal::timer it;
   it.start();
-  auto index = mvivf::Index<T, PC>(points, maxsize, iters, seeding, 
+  auto index = mvivf::Index<T, PC>(points, maxsize, s, iters, seeding, 
       kmeans_dist_algo, kmeans_seeding, kmeans_iters);
   it.stop();
   std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;

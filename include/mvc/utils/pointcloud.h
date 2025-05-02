@@ -8,7 +8,7 @@ struct PointCloud {
   using range_type = Range;
   using point_type = ChPoint;
 
-  PointCloud() {}
+  PointCloud(): values(std::shared_ptr<T[]>(nullptr, std::free)) {}
 
   PointCloud(const char* filename) { // Doesn't support mmap at the moment.
     std::cout << "filename = " << filename << std::endl;
@@ -66,10 +66,11 @@ struct PointCloud {
         file_size - (2 * sizeof(uint32_t) + ((n) * sizeof(uint32_t)) +
                      ((n + 1) * sizeof(size_t)));
     std::cout << "Coordinate size = " << coordinate_size << std::endl;
-    values = static_cast<T*>(malloc(coordinate_size));
+    auto raw_values = static_cast<T*>(malloc(coordinate_size));
     reader.seekg(static_cast<int64_t>(2) * sizeof(uint32_t), std::ios::beg);
-    reader.read((char*)values, coordinate_size);
+    reader.read((char*)raw_values, coordinate_size);
     // [MMAP] values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
+    values = std::shared_ptr<T[]>(raw_values, std::free);
     reader.close();
   }
 
@@ -84,15 +85,16 @@ struct PointCloud {
     });
     parlay::scan_inclusive_inplace(offsets);
     size_t total_coords = offsets[n];
-    values = static_cast<T*>(malloc(total_coords * sizeof(T)));
+    auto raw_values = static_cast<T*>(malloc(total_coords * sizeof(T)));
     parlay::parallel_for(0, n, [&](size_t i) {
       size_t offset = offsets[i];
       parlay::parallel_for(0, data[i].size(), [&](size_t j) {
         for (unsigned int k = 0; k < dims; ++k) {
-          values[offset + j * dims + k] = data[i][j][k];
+          raw_values[offset + j * dims + k] = data[i][j][k];
         }
       });
     });
+    values = std::shared_ptr<T[]>(raw_values, std::free);
     perm = parlay::sequence<uint32_t>::from_function(n, [&](size_t i) {
       return static_cast<uint32_t>(i);
     });
@@ -112,15 +114,15 @@ struct PointCloud {
     auto p_i = perm[i];
     size_t num_coords = offsets[p_i + 1] - offsets[p_i];
     // std::cout << "num_coords = " << num_coords << std::endl;
-    return parlay::make_slice(values + offsets[p_i], 
-      values + offsets[p_i] + num_coords);
+    return parlay::make_slice(values.get() + offsets[p_i], 
+      values.get() + offsets[p_i] + num_coords);
   }
 
   auto Coords2(long i) const {
     auto p_i = perm[i];
     size_t num_coords = offsets[p_i + 1] - offsets[p_i];
     // std::cout << "num_coords = " << num_coords << std::endl;
-    return values + offsets[p_i];
+    return values.get() + offsets[p_i];
   }
 
   template <typename Seq>
@@ -161,43 +163,51 @@ struct PointCloud {
 
   PointCloud& operator=(const PointCloud& other) {
     if (this != &other) {
-      if (values != nullptr) {
-        free(values);
-        values = nullptr;
-      }
       n = other.n;
       dims = other.dims;
       aligned_dims = other.aligned_dims;
       offsets = other.offsets;
       perm = other.perm;
       ids = other.ids;
-      size_t total_coords = offsets[n];
-      values = static_cast<T*>(malloc(total_coords * sizeof(T)));
-      std::memcpy(values, other.values, total_coords * sizeof(T));
+      if (other.values) {
+        size_t total_coords = offsets[n];
+        size_t coordinate_size = total_coords * sizeof(T);
+        T* raw_copy = static_cast<T*>(malloc(coordinate_size));
+        std::memcpy(raw_copy, other.values.get(), coordinate_size);
+        values = std::shared_ptr<T[]>(raw_copy, std::free);
+      } else {
+        values.reset();
+      }
     }
     return *this;
   }
 
   // Copy constructor
-  PointCloud(PointCloud& other) {
+  PointCloud(const PointCloud& other) {
     n = other.n;
     dims = other.dims;
     aligned_dims = other.aligned_dims;
     offsets = other.offsets;
     perm = other.perm;
     ids = other.ids;
-    size_t total_coords = offsets[n];
-    values = static_cast<T*>(malloc(total_coords * sizeof(T)));
-    std::memcpy(values, other.values, total_coords * sizeof(T));
+    if (other.values) {
+      size_t total_coords = offsets[n];
+      size_t coordinate_size = total_coords * sizeof(T);
+      T* raw_copy = static_cast<T*>(malloc(coordinate_size));
+      std::memcpy(raw_copy, other.values.get(), coordinate_size);
+      values = std::shared_ptr<T[]>(raw_copy, std::free);
+    } else {
+      values.reset();
+    }
   }
 
   ~PointCloud() {
-    if (values != nullptr) {
-      // std::cout << "Freeing values of PointCloud with " << n 
-      //           << " points and " << dims << " dimensions." << std::endl;
-      free(values);
-      values = nullptr;
-    }
+    // if (values != nullptr) {
+    //   // std::cout << "Freeing values of PointCloud with " << n 
+    //   //           << " points and " << dims << " dimensions." << std::endl;
+    //   free(values);
+    //   values = nullptr;
+    // }
   }
 
   uint32_t get_id(uint32_t i) const {
@@ -212,7 +222,8 @@ struct PointCloud {
     return ids;
   }
 
-  T* values = nullptr;
+  // T* values = nullptr;
+  std::shared_ptr<T[]> values;
   parlay::sequence<size_t> offsets;
   parlay::sequence<uint32_t> perm;
   parlay::sequence<uint32_t> ids;

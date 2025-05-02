@@ -31,7 +31,7 @@ template <typename Range, typename PointCloud>
 auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
     long iters = 5, std::string seeding="Random",
     std::string kmeans_dist_algo = "ANNS", std::string kmeans_seeding = "PrefixDoubling",
-    long kmeans_iters = 10) {
+    long kmeans_iters = 20) {
   using T = typename PointCloud::T;
   uint32_t n = points.size();
   uint32_t d = points.dimension();
@@ -40,8 +40,11 @@ auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
     auto num_embeddings = parlay::delayed_seq<size_t>(points.size(), 
         [&](size_t i) { return points.NumEmb(i); });
     s = parlay::reduce(num_embeddings)/n;
+    std::cout << "Average number of embeddings per point: " << s << std::endl;
   }
   // Step 1: Initialization 
+  parlay::internal::timer st;
+  st.start();
   PointCloud centers;
   parlay::sequence<uint32_t> cluster_ids;
   if (seeding == "Random"){
@@ -51,13 +54,17 @@ auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
               << std::endl;
     abort();
   }
+  st.stop();
   
   cluster_ids = compute_cluster_ids(points, centers);
   T seed_cost = sum_of_squared_cost<T>(points, centers, cluster_ids);
   std::cout << "Seeding cost: " << seed_cost << std::endl;
+  std::cout << "Seeding time: " << st.total_time() << " seconds" << std::endl;
 
   // Step 2: Lloyd's Iteration
+  parlay::internal::timer it_timer;
   T cost;
+  it_timer.start();
   for (long it = 0; it < iters; it++){
     // Step 2A: Compute new centers
     auto id_pt = parlay::delayed_seq<std::pair<uint32_t, uint32_t>>(n, 
@@ -92,5 +99,7 @@ auto mvkmeans(const PointCloud& points, size_t k, size_t s = 0,
     cost = sum_of_squared_cost<T>(points, centers, cluster_ids);
     std::cout << "Lloyd's iteration " << it << ": cost = " << cost << std::endl;
   }
+  it_timer.stop();
+  std::cout << "Lloyd's iterations time: " << it_timer.total_time() << " seconds" << std::endl;
   return std::make_pair(centers, cluster_ids);
 }
