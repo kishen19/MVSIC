@@ -13,7 +13,7 @@
 #include "seeding/prefixdoubling.h"
 #include "seeding/uniformlyrandom.h"
 // #include "seeding/wards.h"
-#include "utils/evals.h"
+// #include "utils/evals.h"
 
 template <typename T, typename Range>
 T SumOfSquaredCost(const Range& points,

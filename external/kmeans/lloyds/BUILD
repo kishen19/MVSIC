@@ -51,7 +51,7 @@ cc_library(
       "//seeding:kmeansparallel",
       "//seeding:ksetcover",
       # "//seeding:wards",
-      "//utils:evals",
+      #"//utils:evals",
       "@parlaylib//parlay:io",
       "@parlaylib//parlay:sequence",
       "@parlayann//algorithms/utils:point_range",
