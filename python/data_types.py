@@ -9,6 +9,9 @@ class ChamferPoint:
 
   def distance(self, other):
     return chamfer_distance(self.coords, other.coords)
+  
+  def to_nparray(self):
+    return self.coords.reshape(-1, self.dim)
 
 class PointCloud:
   def __init__(self, *args):
@@ -80,6 +83,18 @@ class PointCloud:
     # self.offsets_shm, self.offsets = shared_array_init(offsets)
     self.perm = np.arange(self.n, dtype=np.uint32)
     # self.perm_shm, self.perm = shared_array_init(perm)
+
+  def save(self, filename):
+    with open(filename, "wb") as f:
+      # Write header (num_points, dim)
+      header = np.array([self.n, self.d], dtype=np.uint32)
+      f.write(header.tobytes())
+      # Write coordinate values
+      f.write(self.shm.buf)
+      # Write offsets
+      f.write(self.offsets.tobytes())
+      # Write permutation
+      f.write(self.perm.tobytes())
 
   def delete(self):
     shared_array_unlink(self.shm)
