@@ -26,16 +26,18 @@ struct Index {
   using ind_node = index_node<ChPoint, PointCloud>;
   ind_node* root;
 
-  Index(PointCloud& points, uint32_t maxsize = 0, long s = 0, long iters = 5, 
+  Index() : root(nullptr) {}
+
+  void Build(PointCloud& points, uint32_t maxsize = 0, long s = 0, long iters = 5, 
       std::string seeding = "Random", std::string kmeans_dist_algo = "ANNS", 
       std::string kmeans_seeding = "PrefixDoubling", long kmeans_iters = 10) {
     root = new ind_node();
-    Build(root, points, maxsize, s, iters, seeding, kmeans_dist_algo, 
+    BuildHelper(root, points, maxsize, s, iters, seeding, kmeans_dist_algo, 
       kmeans_seeding, kmeans_iters);
   }
 
   // Recursively builds the kmeans tree
-  void Build(ind_node* node, PointCloud& data, uint32_t maxsize, long s, long 
+  void BuildHelper(ind_node* node, PointCloud& data, uint32_t maxsize, long s, long 
       iters, std::string seeding, std::string kmeans_dist_algo, std::string 
       kmeans_seeding, long kmeans_iters = 10) {
     if (maxsize == 0) { 
@@ -66,7 +68,7 @@ struct Index {
     parlay::parallel_for(0, num_clusters, [&](size_t i) {
       auto child_data = PointCloud(data.filter(grouped[i]), data.get_dims());
       if (child_data.size() > maxsize) {
-        Build(children[i], child_data, maxsize, s, iters, seeding,
+        BuildHelper(children[i], child_data, maxsize, s, iters, seeding,
           kmeans_dist_algo, kmeans_seeding, kmeans_iters);
       }
       else {
@@ -159,13 +161,166 @@ struct Index {
     return final_results;
   }
 
+  size_t traverse_tree(ind_node* node, parlay::sequence<ind_node*>& ind_to_node,
+    std::unordered_map<ind_node*, uint32_t>& node_to_ind, parlay::sequence<size_t>& center_offsets,
+    parlay::sequence<size_t>& children_offsets, parlay::sequence<size_t>& point_offsets, size_t height) {
+    node_to_ind[node] = ind_to_node.size();
+    ind_to_node.push_back(node);
+    center_offsets.push_back((node->center.size())*(node->center.get_dims()));
+    children_offsets.push_back(node->children.size());
+    point_offsets.push_back(node->points.size());
+    size_t h = height+1;
+    for (auto child : node->children) {
+      h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, 
+        center_offsets, children_offsets, point_offsets, height+1));
+    }
+    return h;
+  }
+
   void Save(const std::string& filename) {
-    // n,dim
-    // (compute ids for each node)
-    // offsets for each node
-    // children of each node
-    // offsets for num points of leaf clusters in order of ids
-    // points stored in order of leaf ids
+    std::ofstream outfile(filename, std::ios::binary);
+    std::cout << "Saving index to " << filename << std::endl;
+    if (!outfile.is_open()) {
+      std::cerr << "Error opening file for writing: " << filename << std::endl;
+      return;
+    }
+    // Collect data
+    parlay::sequence<ind_node*> ind_to_node;
+    std::unordered_map<ind_node*, uint32_t> node_to_ind;
+    parlay::sequence<size_t> center_offsets;
+    parlay::sequence<size_t> children_offsets;
+    parlay::sequence<size_t> point_offsets;
+
+    auto height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, children_offsets, point_offsets, 0);
+    std::cout << "Height of tree: " << height << std::endl;
+    
+    auto total_center_sizes = parlay::scan_inplace(center_offsets);
+    center_offsets.push_back(total_center_sizes);
+    auto total_children_sizes = parlay::scan_inplace(children_offsets);
+    children_offsets.push_back(total_children_sizes);
+    auto total_point_sizes = parlay::scan_inplace(point_offsets);
+    point_offsets.push_back(total_point_sizes);
+    
+    // Write num
+    uint32_t num = ind_to_node.size();
+    outfile.write(reinterpret_cast<const char*>(&num), sizeof(uint32_t));
+    // Write center offsets
+    outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
+                  center_offsets.size() * sizeof(size_t));
+    // Write center values
+    for (size_t i = 0; i < num; ++i) {// TODO: make parallel
+      auto node = ind_to_node[i];
+      if (node->center.size() > 0) {
+        auto coords = node->center.coords();
+        outfile.write(reinterpret_cast<const char*>(coords.begin()),
+                      coords.size() * sizeof(T));
+      }
+    }
+    // Write children offsets
+    outfile.write(reinterpret_cast<const char*>(children_offsets.begin()),
+                  children_offsets.size() * sizeof(size_t));
+    // Write children values
+    for (size_t i = 0; i < num; ++i) {
+      auto node = ind_to_node[i];
+      auto children = node->children;
+      for (size_t j = 0; j < children.size(); ++j) { // TODO: make parallel
+        auto child = children[j];
+        uint32_t child_id = node_to_ind[child];
+        outfile.write(reinterpret_cast<const char*>(&child_id), sizeof(uint32_t));
+      }
+    }
+    // Write point offsets
+    outfile.write(reinterpret_cast<const char*>(point_offsets.begin()),
+                  point_offsets.size() * sizeof(size_t));
+    // Write point values
+    for (size_t i = 0; i < num; ++i) {
+      auto node = ind_to_node[i];
+      auto points = node->points;
+      for (size_t j = 0; j < points.size(); ++j) {
+        auto point_id = points.get_id(j);
+        outfile.write(reinterpret_cast<const char*>(&point_id), sizeof(uint32_t));
+      }
+    }
+    outfile.close();
+  }
+
+  void Load(const std::string& filename, PointCloud& data) {
+    std::ifstream infile(filename, std::ios::binary);
+    std::cout << "Loading index from " << filename << std::endl;
+    if (!infile.is_open()) {
+      std::cerr << "Error opening file for reading: " << filename << std::endl;
+      return;
+    }
+    // Read number of nodes
+    uint32_t num = 0;
+    infile.read(reinterpret_cast<char*>(&num), sizeof(uint32_t));
+    // Read center offsets
+    parlay::sequence<size_t> center_offsets(num + 1);
+    infile.read(reinterpret_cast<char*>(center_offsets.begin()),
+                center_offsets.size() * sizeof(size_t));
+    // Read center values
+    parlay::sequence<T> center_values(center_offsets[center_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(center_values.begin()),
+                center_values.size() * sizeof(T));
+    // Read children offsets
+    parlay::sequence<size_t> children_offsets(num + 1);
+    infile.read(reinterpret_cast<char*>(children_offsets.begin()),
+                children_offsets.size() * sizeof(size_t));
+    // Read children values
+    parlay::sequence<uint32_t> children_values(children_offsets[children_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(children_values.begin()),
+                children_values.size() * sizeof(uint32_t));
+    // Read point offsets
+    parlay::sequence<size_t> point_offsets(num + 1);
+    infile.read(reinterpret_cast<char*>(point_offsets.begin()),
+                point_offsets.size() * sizeof(size_t));
+    // Read point values
+    parlay::sequence<uint32_t> point_values(point_offsets[point_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(point_values.begin()),
+                point_values.size() * sizeof(uint32_t));
+
+    // Build the index 
+    unsigned int dim = data.get_dims();
+    auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(data.size());
+    parlay::parallel_for(0, data.size(), [&](size_t i) {
+      point_id_to_data_id[data.get_id(i)] = i;
+    });
+    auto center_sizes = parlay::sequence<size_t>::from_function(num, 
+      [&](size_t i) { return center_offsets[i + 1] - center_offsets[i]; });
+    auto children_sizes = parlay::sequence<size_t>::from_function(num, 
+      [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
+    auto point_sizes = parlay::sequence<size_t>::from_function(num, 
+      [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
+    auto ind_to_node = parlay::sequence<ind_node*>::from_function(num, 
+      [&](size_t i) { 
+      auto node = new ind_node();
+      if (center_sizes[i] > 0) {
+        node->set_center(ChPoint(center_values.begin() + center_offsets[i], 
+          center_sizes[i]/dim, dim)); 
+      }
+      node->children.resize(children_sizes[i]);
+      if (point_sizes[i] > 0){
+        auto point_group = parlay::sequence<uint32_t>::from_function(
+          point_sizes[i], [&](size_t j) {
+            auto point_id = point_values[point_offsets[i] + j];
+            return point_id_to_data_id[point_id]; 
+          });
+        node->set_points(PointCloud(data.filter(point_group), dim));
+      }
+      return node;
+    });
+    
+    // Set children pointers
+    parlay::parallel_for(0, num, [&](size_t i) {
+      auto node = ind_to_node[i];
+      auto& children = node->children;
+      parlay::parallel_for(0, children.size(), [&](size_t j) {
+        auto child_id = children_values[children_offsets[i] + j];
+        children[j] = ind_to_node[child_id];
+      });
+    });
+    root = ind_to_node[0];
+    infile.close();
   }
 };
 

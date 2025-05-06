@@ -21,6 +21,9 @@ struct Chamfer_Euclidian_Point {
     return chamfer_euclidian_distance(values, n, x.values, x.n, dims);
   }
   void prefetch() {}
+  auto coords() const{
+    return parlay::make_slice(values, values + n * dims);
+  }
 
   Chamfer_Euclidian_Point() {}
   Chamfer_Euclidian_Point(long id_, T* values_, size_t num_, unsigned int dims_)
@@ -79,6 +82,9 @@ struct Chamfer_Mips_Point {
     return chamfer_mips_distance(values, n, x.values, x.n, dims);
   }
   void prefetch() {}
+  auto coords() const{
+    return parlay::make_slice(values, values + n * dims);
+  }
 
   Chamfer_Mips_Point() {}
   Chamfer_Mips_Point(long id_, T* values_, size_t num_, unsigned int dims_)

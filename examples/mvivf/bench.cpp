@@ -13,8 +13,10 @@ void bench(commandLine& P) {
   using T = typename ChPoint::distance_type;
   using PC = PointCloud<ChPoint, Range>;
 
-  auto inFile = P.getOptionValue("-i");
-  auto qFile = P.getOptionValue("-q");
+  char* inFile = P.getOptionValue("-i");
+  char* qFile = P.getOptionValue("-q");
+  std::string outFile = P.getOptionValue("-o", "");
+  std::string indexFile = P.getOptionValue("-index", "");
   long maxsize = P.getOptionLongValue("-maxsize", 100);
   long nprobes = P.getOptionLongValue("-nprobes", 1);
   long k = P.getOptionLongValue("-k", 10);
@@ -28,17 +30,34 @@ void bench(commandLine& P) {
 
   auto points = PC(inFile);
   auto queries = PC(qFile);
-  parlay::internal::timer it;
-  it.start();
-  auto index = mvivf::Index<T, PC>(points, maxsize, s, iters, seeding, 
-      kmeans_dist_algo, kmeans_seeding, kmeans_iters);
-  it.stop();
-  std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
+  mvivf::Index<T, PC> index;
+  if (indexFile != ""){
+    std::cout << "Loading index from " << indexFile << std::endl;
+    index.Load(indexFile, points);
+    std::cout << "Index loaded" << std::endl;
+  } else {
+    std::cout << "Building index..." << std::endl;
+    parlay::internal::timer it;
+    it.start();
+    index.Build(points, maxsize, s, iters, seeding, 
+        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+    it.stop();
+    std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
+  }
+  if (outFile != ""){
+    std::cout << "Saving index to " << outFile << std::endl;
+    index.Save(P.getOptionValue("-o"));
+    std::cout << "Index saved." << std::endl;
+  }
   
   parlay::internal::timer t;
-  double recall = 0.0;
+  double recall_1_k = 0.0;
+  double recall_k_k = 0.0;
   double query_time = 0.0;
   for(size_t i = 0; i < queries.size(); i++) {
+    if (i % 100 == 0) {
+      std::cout << queries.size()-i << " queries left" << std::endl;
+    }
     // Run Brute-force search
     auto bf_results = mvivf::get_knn(queries[i], points, k);
     std::unordered_set<uint32_t> bf_set;
@@ -59,13 +78,19 @@ void bench(commandLine& P) {
       if (bf_set.find(id) != bf_set.end()) {
         correct++;
       }
+      if (id == bf_results[0].first) {
+        recall_1_k += 1.0;
+      }
     }
-    recall += static_cast<float>(correct)/k;
+    recall_k_k += static_cast<float>(correct)/k;
   }
-  recall /= queries.size();
+  recall_k_k /= queries.size();
+  recall_1_k /= queries.size();
   double QPS = queries.size() / query_time;
   double avg_query_time = 1/QPS;
-  std::cout << "Average recall over " << queries.size() << " queries: " << recall << std::endl;
+  std::cout << "Number of Queries: " << queries.size() << std::endl;
+  std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
+  std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
   std::cout << "QPS: " << QPS << std::endl;
   std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
 }

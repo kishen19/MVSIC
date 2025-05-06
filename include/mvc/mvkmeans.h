@@ -30,7 +30,7 @@ parlay::sequence<uint32_t> compute_cluster_ids(const PointCloud& points,
 template <typename Range, typename PointCloud>
 auto mvkmeans(const PointCloud& points, size_t k,
   size_t s = 0, long iters = 5, std::string seeding = "Random",
-  std::string kmeans_dist_algo = "ANNS", std::string kmeans_seeding = "PrefixDoubling",
+  std::string kmeans_dist_algo = "Pairwise", std::string kmeans_seeding = "PrefixDoubling",
   long kmeans_iters = 20) {
   using T = typename PointCloud::T;
   uint32_t n = points.size();
