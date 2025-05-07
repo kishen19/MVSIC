@@ -2,6 +2,14 @@
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "stats",
+    hdrs = ["stats.h"],
+    deps = [
+      "@parlaylib//parlay:parallel",
+    ],
+)
+
+cc_library(
     name = "utils",
     hdrs = ["utils.h"],
     deps = [
@@ -24,6 +32,7 @@ cc_binary(
     srcs = ["bench.cpp"],
     deps = [
       ":index",
+      ":stats",
       "@parlayann//algorithms/utils:point_range",
       "@parlayann//algorithms/utils:euclidian_point",
       "@parlayann//algorithms/utils:mips_point",

@@ -14,6 +14,7 @@ build --cxxopt=-fvisibility=hidden
 build --cxxopt=-fvisibility-inlines-hidden
 build --cxxopt=-fsized-deallocation  # https://github.com/pybind/pybind11/issues/1604 (for clang)
 build --cxxopt=-UNDEBUG
+build --cxxopt=-DFINTEGER=int # Required by Faiss
 build -c opt
 
 # C++ warning flags.

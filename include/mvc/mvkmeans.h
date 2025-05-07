@@ -3,6 +3,7 @@
 #include "parlay/sequence.h"
 #include "lloyds/kmeans.h"
 #include "seeding/uniformlyrandom.h"
+#include "faisskmeans.h"
 
 template <typename T, typename PointCloud>
 T sum_of_squared_cost(const PointCloud& points, const PointCloud& centers,
@@ -35,6 +36,7 @@ auto mvkmeans(const PointCloud& points, size_t k,
   using T = typename PointCloud::T;
   uint32_t n = points.size();
   uint32_t d = points.get_dims();
+  bool is_metric = points[0].is_metric();
 
   if (s == 0) {
     auto num_embeddings = parlay::delayed_seq<size_t>(points.size(),
@@ -73,26 +75,26 @@ auto mvkmeans(const PointCloud& points, size_t k,
     auto new_centers = parlay::sequence<Range>(k);
     parlay::parallel_for(0, k, [&](size_t i) {
       if (grouped[i].size() > 0) {
-        auto data_raw = points.filter_flattened(grouped[i]);
-        auto data = Range(data_raw, d);
-        // auto data = points.GetRange(data_raw);
+        auto data = points.filter_flattened(grouped[i]);
         if (s >= data.size()) {
-          new_centers[i] = data;
+          new_centers[i] = Range(data, d);
         } else {
-          new_centers[i] = kmeans(data, std::min(s, data.size()),
-            kmeans_seeding, kmeans_dist_algo, kmeans_iters);
+          new_centers[i] = Range(faiss_kmeans(data, d, s, is_metric), d);
+          // auto range_data = Range(data, d);
+          // new_centers[i] = kmeans(range_data, s, kmeans_seeding, kmeans_dist_algo, kmeans_iters);
         }
       } else { // Empty Cluster, sample from input
         std::cout << "Cluster " << i << ": empty" << std::endl;
         std::cout << "Sampling from input" << std::endl;
         static uint32_t seed = 42;
-        uint32_t id = parlay::hash32(seed++) % n;
-        auto data = Range(points[id], d);
+        parlay::sequence<uint32_t> id = {parlay::hash32(seed++) % n};
+        auto data = points.filter_flattened(id);
         if (s >= data.size()) {
-          new_centers[i] = data;
+          new_centers[i] = Range(data, d);
         } else {
-          new_centers[i] = kmeans(data, std::min(s, data.size()), kmeans_seeding,
-            kmeans_dist_algo, kmeans_iters);
+          new_centers[i] = Range(faiss_kmeans(data, d, s, is_metric), d);
+          // auto range_data = Range(data, d);
+          // new_centers[i] = kmeans(range_data, s, kmeans_seeding, kmeans_dist_algo, kmeans_iters);
         }
       }
       });

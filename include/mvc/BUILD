@@ -1,12 +1,22 @@
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+  name = "faisskmeans",
+  hdrs = ["faisskmeans.h"],
+  deps = [
+    "@parlaylib//parlay:primitives",
+    "@faiss//:faiss_core",
+  ],
+)
+
+cc_library(
     name = "mvkmeans",
     hdrs = ["mvkmeans.h"],
     deps = [
       "@parlaylib//parlay:sequence",
       "@kmeans//lloyds:kmeans",
       "//mvc/seeding:uniformlyrandom",
+      ":faisskmeans",
     ],
 )
 

@@ -19,3 +19,6 @@ __pycache__/
 
 # Bazel files
 bazel-*
+
+# VSCode files
+.vscode

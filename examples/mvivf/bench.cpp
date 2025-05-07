@@ -7,6 +7,7 @@
 #include "mvc/utils/chamferpoint.h"
 
 #include "index.h"
+#include "stats.h"
 
 template <typename ChPoint, typename Range>
 void bench(commandLine& P) {
@@ -15,6 +16,13 @@ void bench(commandLine& P) {
 
   char* inFile = P.getOptionValue("-i");
   char* qFile = P.getOptionValue("-q");
+  std::string QFile;
+  if (qFile != nullptr){
+    QFile = P.getOptionValue("-q");
+  } else {
+    QFile = "";
+  }
+  std::string gtFile = P.getOptionValue("-gt", "");
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
   long maxsize = P.getOptionLongValue("-maxsize", 100);
@@ -26,10 +34,8 @@ void bench(commandLine& P) {
   auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
   auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
   auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
-  // long num = P.getOptionLongValue("-num", 1000);
 
   auto points = PC(inFile);
-  auto queries = PC(qFile);
   mvivf::Index<T, PC> index;
   if (indexFile != ""){
     std::cout << "Loading index from " << indexFile << std::endl;
@@ -50,49 +56,53 @@ void bench(commandLine& P) {
     std::cout << "Index saved." << std::endl;
   }
   
-  parlay::internal::timer t;
-  double recall_1_k = 0.0;
-  double recall_k_k = 0.0;
-  double query_time = 0.0;
-  for(size_t i = 0; i < queries.size(); i++) {
-    if (i % 100 == 0) {
-      std::cout << queries.size()-i << " queries left" << std::endl;
-    }
-    // Run Brute-force search
-    auto bf_results = mvivf::get_knn(queries[i], points, k);
-    std::unordered_set<uint32_t> bf_set;
-    for (const auto& [id, dist] : bf_results) {
-      bf_set.insert(id);
-    }
-
-    // Run Index search
-    t.start();
-    auto results = index.Search(queries[i], k, nprobes);
-    t.stop();
-    query_time += t.total_time();
-    t.reset();
-
-    // Calculate recall
-    size_t correct = 0;
-    for (const auto& [id, dist] : results) {
-      if (bf_set.find(id) != bf_set.end()) {
-        correct++;
+  if (QFile != ""){
+    auto queries = PC(qFile);
+    // auto gt = ReadGT(gtFile, queries.size());
+    parlay::internal::timer t;
+    double recall_1_k = 0.0;
+    double recall_k_k = 0.0;
+    double query_time = 0.0;
+    for(size_t i = 0; i < queries.size(); i++) {
+      if (i % 100 == 0) {
+        std::cout << queries.size()-i << " queries left" << std::endl;
       }
-      if (id == bf_results[0].first) {
-        recall_1_k += 1.0;
+      // Run Brute-force search
+      auto bf_results = mvivf::get_knn(queries[i], points, k);
+      std::unordered_set<uint32_t> bf_set;
+      for (const auto& [id, dist] : bf_results) {
+        bf_set.insert(id);
       }
+
+      // Run Index search
+      t.start();
+      auto results = index.Search(queries[i], k, nprobes);
+      t.stop();
+      query_time += t.total_time();
+      t.reset();
+
+      // Calculate recall
+      size_t correct = 0;
+      for (const auto& [id, dist] : results) {
+        if (bf_set.find(id) != bf_set.end()) {
+          correct++;
+        }
+        if (id == bf_results[0].first) {
+          recall_1_k += 1.0;
+        }
+      }
+      recall_k_k += static_cast<float>(correct)/k;
     }
-    recall_k_k += static_cast<float>(correct)/k;
+    recall_1_k /= queries.size();
+    recall_k_k /= queries.size();
+    double QPS = queries.size() / query_time;
+    double avg_query_time = 1/QPS;
+    std::cout << "Number of Queries: " << queries.size() << std::endl;
+    std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
+    std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+    std::cout << "QPS: " << QPS << std::endl;
+    std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
   }
-  recall_k_k /= queries.size();
-  recall_1_k /= queries.size();
-  double QPS = queries.size() / query_time;
-  double avg_query_time = 1/QPS;
-  std::cout << "Number of Queries: " << queries.size() << std::endl;
-  std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
-  std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-  std::cout << "QPS: " << QPS << std::endl;
-  std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
 }
 
 int main(int argc, char* argv[]) {

@@ -17,6 +17,7 @@ struct Chamfer_Euclidian_Point {
     return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
   uint32_t get_id() const { return id; }
+  bool is_metric() const {return true; }
   float distance(const Chamfer_Euclidian_Point& x) const {
     return chamfer_euclidian_distance(values, n, x.values, x.n, dims);
   }
@@ -78,6 +79,7 @@ struct Chamfer_Mips_Point {
     return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
   uint32_t get_id() const { return id; }
+  bool is_metric() const {return false; }
   float distance(const Chamfer_Mips_Point& x) const {
     return chamfer_mips_distance(values, n, x.values, x.n, dims);
   }

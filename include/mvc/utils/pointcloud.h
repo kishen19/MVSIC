@@ -113,7 +113,7 @@ struct PointCloud {
     size_t coordinate_size =
       file_size - (2 * sizeof(uint32_t) + ((n) * sizeof(uint32_t)) +
         ((n + 1) * sizeof(size_t)));
-    values = static_cast<T*>(std::malloc(coordinate_size)); // TODO: p_malloc
+    values = static_cast<T*>(parlay::p_malloc(coordinate_size));
     reader.seekg(static_cast<int64_t>(2) * sizeof(uint32_t), std::ios::beg);
     reader.read((char*)values, coordinate_size);
     // [MMAP] values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
@@ -129,7 +129,7 @@ struct PointCloud {
       });
     parlay::scan_inclusive_inplace(offsets);
     size_t total_coords = offsets[n];
-    values = static_cast<T*>(std::malloc(total_coords * sizeof(T))); // TODO: p_malloc
+    values = static_cast<T*>(parlay::p_malloc(total_coords * sizeof(T)));
     parlay::parallel_for(0, n, [&](size_t i) {
       size_t offset = offsets[i];
       parlay::parallel_for(0, data[i].size(), [&](size_t j) {
@@ -152,7 +152,7 @@ struct PointCloud {
       });
     parlay::scan_inclusive_inplace(offsets);
     size_t total_coords = offsets[n];
-    values = static_cast<T*>(std::malloc(total_coords * sizeof(T))); // TODO: p_malloc
+    values = static_cast<T*>(parlay::p_malloc(total_coords * sizeof(T)));
     parlay::parallel_for(0, n, [&](size_t i) {
       size_t offset = offsets[i];
       parlay::parallel_for(0, data[i].size(), [&](size_t j) {
@@ -174,13 +174,13 @@ struct PointCloud {
       offsets = other.offsets;
       ids = other.ids;
       if (values != nullptr) {
-        free(values); // TODO: p_free
+        parlay::p_free(values);
         values = nullptr;
       }
       if (other.values) {
         size_t total_coords = offsets[n];
         size_t coordinate_size = total_coords * sizeof(T);
-        values = static_cast<T*>(std::malloc(coordinate_size)); // TODO: p_malloc
+        values = static_cast<T*>(parlay::p_malloc(coordinate_size));
         std::memcpy(values, other.values, coordinate_size);
       }
     }
@@ -195,20 +195,20 @@ struct PointCloud {
     offsets = other.offsets;
     ids = other.ids;
     if (values != nullptr) {
-      free(values); // TODO: p_free
+      parlay::p_free(values);
       values = nullptr;
     }
     if (other.values) {
       size_t total_coords = offsets[n];
       size_t coordinate_size = total_coords * sizeof(T);
-      values = static_cast<T*>(std::malloc(coordinate_size)); // TODO: p_malloc
+      values = static_cast<T*>(parlay::p_malloc(coordinate_size));
       std::memcpy(values, other.values, coordinate_size);
     }
   }
 
   ~PointCloud() {
     if (values != nullptr) {
-      free(values); // TODO: p_free
+      parlay::p_free(values);
       values = nullptr;
     }
   }

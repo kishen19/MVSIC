@@ -70,3 +70,30 @@ cc_library(
 )
 """
 )
+
+git_repository(
+    name = "faiss",
+    remote = "https://github.com/facebookresearch/faiss.git",
+    tag = "v1.11.0",
+    build_file_content = """
+cc_library(
+    name = "faiss_core",
+    srcs = glob([
+        "faiss/**/*.cpp",
+    ], exclude = [
+        "faiss/gpu/**/*.cpp",
+        "faiss/python/**/*.cpp",
+    ]),
+    hdrs = glob([
+        "faiss/**/*.h",
+    ], exclude = [
+        "faiss/gpu/**/*.h",
+        "faiss/python/**/*.h",
+    ]),
+    includes = ["."],
+    copts = ["-fopenmp", "-lopenblas"],
+    linkopts = ["-fopenmp", "-lopenblas"],
+    visibility = ["//visibility:public"],
+)
+"""
+)
