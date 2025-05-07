@@ -1,5 +1,6 @@
 #pragma once
 
+#include <set>
 #include "parlay/primitives.h"
 #include "utils/utils.h"
 #include "mvc/mvkmeans.h"
@@ -28,18 +29,19 @@ struct Index {
 
   Index() : root(nullptr) {}
 
-  void Build(PointCloud& points, uint32_t maxsize = 0, long s = 0, long iters = 5, 
-      std::string seeding = "Random", std::string kmeans_dist_algo = "ANNS", 
-      std::string kmeans_seeding = "PrefixDoubling", long kmeans_iters = 10) {
+  void Build(PointCloud& points, uint32_t maxsize=0, long s=0, long iters=5,
+      std::string seeding = "Random") {
+    // , std::string kmeans_dist_algo = "ANNS", 
+      // std::string kmeans_seeding = "PrefixDoubling", long kmeans_iters = 10
     root = new ind_node();
-    BuildHelper(root, points, maxsize, s, iters, seeding, kmeans_dist_algo, 
-      kmeans_seeding, kmeans_iters);
+    BuildHelper(root, points, maxsize, s, iters, seeding);
+      // , kmeans_dist_algo, kmeans_seeding, kmeans_iters
   }
 
   // Recursively builds the kmeans tree
-  void BuildHelper(ind_node* node, PointCloud& data, uint32_t maxsize, long s, long 
-      iters, std::string seeding, std::string kmeans_dist_algo, std::string 
-      kmeans_seeding, long kmeans_iters = 10) {
+  void BuildHelper(ind_node* node, PointCloud& data, uint32_t maxsize, long s,
+      long iters, std::string seeding) {
+    //  , std::string kmeans_dist_algo, std::string kmeans_seeding, long kmeans_iters = 10
     if (maxsize == 0) { 
       maxsize = std::sqrt(data.size()); 
     }
@@ -52,7 +54,7 @@ struct Index {
     parlay::sequence<uint32_t> cluster_ids;
     // Step 1: Run MV-Lloyd on data and collect clusters
     std::tie(centers, cluster_ids) = mvkmeans<Range>(data, num_clusters, s, 
-      iters, seeding, kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      iters, seeding);//, kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     auto id_pt = parlay::delayed_seq<std::pair<uint32_t, uint32_t>>(data.size
       (), [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = parlay::group_by_index(id_pt, num_clusters);
@@ -68,8 +70,8 @@ struct Index {
     parlay::parallel_for(0, num_clusters, [&](size_t i) {
       auto child_data = PointCloud(data.filter(grouped[i]), data.get_dims());
       if (child_data.size() > maxsize) {
-        BuildHelper(children[i], child_data, maxsize, s, iters, seeding,
-          kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+        BuildHelper(children[i], child_data, maxsize, s, iters, seeding);
+        // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
       }
       else {
         children[i]->set_points(child_data);

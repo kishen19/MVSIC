@@ -62,20 +62,6 @@ auto check_stats(Index& index, PointCloud& base_points, PointCloud& query_points
   return std::make_tuple(QPS_seq, QPS_par, recall_1_k, recall_k_k);
 }
 
-// TODO: batch queries
-
-template <typename Index, typename PointCloud, typename GT>
-void search_and_parse(Index& index, PointCloud& base_points, PointCloud& query_points, GT& gt, const char* res_file, int k) {
-  parlay::sequence<std::tuple<double, double, double, double>> results;
-  std::vector<int> nprobes_vals = {1, 2, 4, 8, 16, 32, 64};
-
-  for (int nprobes : nprobes_vals) {
-    auto result = check_stats_seq(index, base_points, query_points, gt, k, nprobes);
-    results.push_back(result);
-  }
-  write_to_csv(std::string(res_file), results, k, query_points.size());
-}
-
 inline void write_to_csv(std::string csv_filename,
                          parlay::sequence<std::tuple<double, double, double, double>>& results, int k, size_t num_queries) {
   csvfile csv(csv_filename);
@@ -89,6 +75,20 @@ inline void write_to_csv(std::string csv_filename,
   }
   csv << endrow;
   csv << endrow;
+}
+
+// TODO: batch queries
+
+template <typename Index, typename PointCloud, typename GT>
+void search_and_parse(Index& index, PointCloud& base_points, PointCloud& query_points, GT& gt, const char* res_file, int k) {
+  parlay::sequence<std::tuple<double, double, double, double>> results;
+  std::vector<int> nprobes_vals = {1, 2, 4, 8, 16, 32, 64};
+
+  for (int nprobes : nprobes_vals) {
+    auto result = check_stats(index, base_points, query_points, gt, k, nprobes);
+    results.push_back(result);
+  }
+  write_to_csv(std::string(res_file), results, k, query_points.size());
 }
 
 auto ReadGT(std::string& file_path, int num_points) {

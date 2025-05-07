@@ -6,7 +6,7 @@ cc_library(
   hdrs = ["mvkmeans.h"],
   deps = [
     "@parlaylib//parlay:sequence",
-    "@kmeans//lloyds:kmeans",
+    # "@kmeans//lloyds:kmeans",
     "//mvc/seeding:uniformlyrandom",
     "//mvc/utils:faiss_kmeans",
   ],

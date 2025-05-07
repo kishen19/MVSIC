@@ -11,7 +11,8 @@ int main(int argc, char* argv[]) {
     "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
     "[-data_type <tp>] [-dist_func <dist_func>]"
     "[-seed <algorithm>] [-iters <num_iters>]"
-    "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]");
+    // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
+  );
 
   std::string tp = P.getOptionValue("-data_type", "float");
   std::string df = P.getOptionValue("-dist_func", "Euclidian");
@@ -27,9 +28,9 @@ int main(int argc, char* argv[]) {
   auto s = P.getOptionLongValue("-s", 0);
   auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
-  auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
-  auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "Pairwise");
-  auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
+  // auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
+  // auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "Pairwise");
+  // auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
 
 
   if (tp == "float") {
@@ -38,15 +39,15 @@ int main(int argc, char* argv[]) {
       using Point = Euclidian_Point<float>;
       using Range = PointRange<float, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
-      mvkmeans<Range>(points, k, s, iters, seeding,
-        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      mvkmeans<Range>(points, k, s, iters, seeding);
+      // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     } else if (df == "Mips") {
       using ChPoint = Chamfer_Mips_Point<float>;
       using Point = Mips_Point<float>;
       using Range = PointRange<float, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
-      mvkmeans<Range>(points, k, s, iters, seeding,
-        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      mvkmeans<Range>(points, k, s, iters, seeding);
+      // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     }
   } else if (tp == "uint8") {
     if (df == "Euclidian") {
@@ -54,15 +55,15 @@ int main(int argc, char* argv[]) {
       using Point = Euclidian_Point<uint8_t>;
       using Range = PointRange<uint8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
-      mvkmeans<Range>(points, k, s, iters, seeding,
-        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      mvkmeans<Range>(points, k, s, iters, seeding);
+      // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     } else if (df == "Mips") {
       using ChPoint = Chamfer_Mips_Point<uint8_t>;
       using Point = Mips_Point<uint8_t>;
       using Range = PointRange<uint8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
-      mvkmeans<Range>(points, k, s, iters, seeding,
-        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      mvkmeans<Range>(points, k, s, iters, seeding);
+      // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     }
   } else if (tp == "int8") {
     if (df == "Euclidian") {
@@ -70,15 +71,15 @@ int main(int argc, char* argv[]) {
       using Point = Euclidian_Point<int8_t>;
       using Range = PointRange<int8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
-      mvkmeans<Range>(points, k, s, iters, seeding,
-        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      mvkmeans<Range>(points, k, s, iters, seeding);
+      // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     } else if (df == "Mips") {
       using ChPoint = Chamfer_Mips_Point<int8_t>;
       using Point = Mips_Point<int8_t>;
       using Range = PointRange<int8_t, Point>;
       auto points = PointCloud<ChPoint, Range>(P.getOptionValue("-i"));
-      mvkmeans<Range>(points, k, s, iters, seeding,
-        kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+      mvkmeans<Range>(points, k, s, iters, seeding);
+      // ,kmeans_dist_algo, kmeans_seeding, kmeans_iters);
     }
   }
   return 0;

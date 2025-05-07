@@ -5,8 +5,8 @@
 
 #include "mvc/utils/pointcloud.h"
 #include "mvc/utils/chamferpoint.h"
-#include "utils/stats.h"
-#include "index.h"
+#include "mvivf/utils/stats.h"
+#include "mvivf/index.h"
 
 
 template <typename ChPoint, typename Range>
@@ -14,61 +14,53 @@ void bench(commandLine& P) {
   using T = typename ChPoint::distance_type;
   using PC = PointCloud<ChPoint, Range>;
 
-  char* inFile = P.getOptionValue("-i");
-  char* qFile = P.getOptionValue("-q");
-  std::string QFile;
-  if (qFile != nullptr){
-    QFile = P.getOptionValue("-q");
-  } else {
-    QFile = "";
-  }
-  std::string gtFile = P.getOptionValue("-gt", "");
-  std::string outFile = P.getOptionValue("-o", "");
-  std::string indexFile = P.getOptionValue("-index", "");
+  char* inFile = P.getOptionValue("-i"); // Base Points
+  char* resFile = P.getOptionValue("-r"); // CSV file to store stats
+  std::string qFile = P.getOptionValue("-q", ""); // Query Points
+  std::string gtFile = P.getOptionValue("-gt", ""); // Ground Truth
+  std::string outFile = P.getOptionValue("-o", ""); // File to store index 
+  std::string indexFile = P.getOptionValue("-index", ""); // File containing index
   long maxsize = P.getOptionLongValue("-maxsize", 100);
-  long nprobes = P.getOptionLongValue("-nprobes", 1);
   long k = P.getOptionLongValue("-k", 10);
-  long s = P.getOptionLongValue("-s", 0);
-  auto seeding = P.getOptionValue("-seed", "Random");
+  long s = P.getOptionLongValue("-s", 0); // Deprecate after clustering evals
+  auto seeding = P.getOptionValue("-seed", "Random"); // Deprecate after clustering evals
   auto iters = P.getOptionLongValue("-iters", 5);
-  // auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
-  // auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
-  // auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
+  long rounds = P.getOptionLongValue("-rounds", 1);
 
   auto points = PC(inFile);
-  mvivf::Index<T, PC> index;
-  if (indexFile != ""){
+  if (indexFile != ""){ // Stats Benchmark
+    mvivf::Index<T, PC> index;
     std::cout << "Loading index from " << indexFile << std::endl;
     index.Load(indexFile, points);
     std::cout << "Index loaded" << std::endl;
-  } else {
-    std::cout << "Building index..." << std::endl;
-    parlay::internal::timer it;
-    it.start();
-    index.Build(points, maxsize, s, iters, seeding); 
-        // kmeans_dist_algo, kmeans_seeding, kmeans_iters);
-    it.stop();
-    std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
-  }
-  if (outFile != ""){
-    std::cout << "Saving index to " << outFile << std::endl;
-    index.Save(P.getOptionValue("-o"));
-    std::cout << "Index saved." << std::endl;
-  }
-  
-  if (QFile != ""){
-    auto queries = PC(qFile);
+    
+    auto queries = PC(P.getOptionValue("-q"));
     auto gt = ReadGT(gtFile, queries.size());
-    // Compute Stats:
+    // Compute Stats
     std::cout << "Computing stats..." << std::endl;
-    auto result = check_stats(index, points, queries, gt, k, nprobes);
-    double QPS_seq, QPS_par, recall_1_k, recall_k_k;
-    std::tie(QPS_seq, QPS_par, recall_1_k, recall_k_k) = result;
-    std::cout << "Number of Queries: " << queries.size() << std::endl
-              << "QPS_seq: " << QPS_seq << std::endl
-              << "QPS_par: " << QPS_par << std::endl
-              << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
-              << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+    search_and_parse(index, points, queries, gt, resFile, k);
+    std::cout << "Stats computed and saved to " << resFile << std::endl;
+  } else { // Indexing Benchmark
+    std::cout << "Starting Indexing Benchmark..." << std::endl;
+    parlay::internal::timer t;
+    double index_time = 0.0;
+    for (long it=0; it<=rounds; it++){
+      t.start();
+      mvivf::Index<T, PC> index;
+      index.Build(points, maxsize, s, iters, seeding);
+      t.stop();
+      if (it!=0){
+        index_time += t.total_time();
+      } else{
+        if (outFile != ""){
+          std::cout << "Saving index to " << outFile << std::endl;
+          index.Save(P.getOptionValue("-o"));
+          std::cout << "Index saved." << std::endl;
+        }
+      }
+      t.reset();
+    }
+    std::cout << "Average Indexing Time: " << index_time/rounds << " seconds." << std::endl;
   }
 }
 
@@ -77,8 +69,7 @@ int main(int argc, char* argv[]) {
                 "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                 "[-data_type <tp>] [-dist_func <dist_func>]" 
                 "[-seed <algorithm>] [-iters <num_iters>]" 
-                // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
-              );
+                "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]");
 
   std::string tp = P.getOptionValue("-data_type", "float");
   std::string df = P.getOptionValue("-dist_func", "Euclidian");
