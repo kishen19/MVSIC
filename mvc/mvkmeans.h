@@ -3,7 +3,7 @@
 #include "parlay/sequence.h"
 #include "lloyds/kmeans.h"
 #include "seeding/uniformlyrandom.h"
-#include "faisskmeans.h"
+#include "utils/faiss_kmeans.h"
 
 template <typename T, typename PointCloud>
 T sum_of_squared_cost(const PointCloud& points, const PointCloud& centers,

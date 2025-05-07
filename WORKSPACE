@@ -37,12 +37,7 @@ git_repository(
 
 local_repository(
   name = "kmeans",
-  path = "../external/kmeans/",
-)
-
-local_repository(
-  name = "mvc",
-  path = "../include/",
+  path = "./external/kmeans/",
 )
 
 http_archive(

@@ -5,9 +5,9 @@
 
 #include "mvc/utils/pointcloud.h"
 #include "mvc/utils/chamferpoint.h"
-
+#include "utils/stats.h"
 #include "index.h"
-#include "stats.h"
+
 
 template <typename ChPoint, typename Range>
 void bench(commandLine& P) {
@@ -69,50 +69,6 @@ void bench(commandLine& P) {
               << "QPS_par: " << QPS_par << std::endl
               << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
               << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-
-    parlay::internal::timer t;
-    recall_1_k = 0.0;
-    recall_k_k = 0.0;
-    double query_time = 0.0;
-    for(size_t i = 0; i < queries.size(); i++) {
-      if (i % 100 == 0) {
-        std::cout << queries.size()-i << " queries left" << std::endl;
-      }
-      // Run Brute-force search
-      auto bf_results = mvivf::get_knn(queries[i], points, k);
-      std::unordered_set<uint32_t> bf_set;
-      for (const auto& [id, dist] : bf_results) {
-        bf_set.insert(id);
-      }
-
-      // Run Index search
-      t.start();
-      auto results = index.Search(queries[i], k, nprobes);
-      t.stop();
-      query_time += t.total_time();
-      t.reset();
-
-      // Calculate recall
-      size_t correct = 0;
-      for (const auto& [id, dist] : results) {
-        if (bf_set.find(id) != bf_set.end()) {
-          correct++;
-        }
-        if (id == bf_results[0].first) {
-          recall_1_k += 1.0;
-        }
-      }
-      recall_k_k += static_cast<float>(correct)/k;
-    }
-    recall_1_k /= queries.size();
-    recall_k_k /= queries.size();
-    double QPS = queries.size() / query_time;
-    double avg_query_time = 1/QPS;
-    std::cout << "Number of Queries: " << queries.size() << std::endl;
-    std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
-    std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-    std::cout << "QPS: " << QPS << std::endl;
-    std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
   }
 }
 

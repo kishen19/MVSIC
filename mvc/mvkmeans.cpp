@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
   auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
   auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
-  auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
+  auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "Pairwise");
   auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
 
 

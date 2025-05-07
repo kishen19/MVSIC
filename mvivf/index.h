@@ -1,7 +1,7 @@
 #pragma once
 
 #include "parlay/primitives.h"
-#include "utils.h"
+#include "utils/utils.h"
 #include "mvc/mvkmeans.h"
 
 namespace mvivf {

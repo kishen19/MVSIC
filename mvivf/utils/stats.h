@@ -11,7 +11,6 @@ auto compute_recall(parlay::sequence<parlay::sequence<std::pair<uint32_t, T>>>& 
     std::cout << "Not enough pred values" << std::endl;
     exit(-1);
   }
-  std::cout << "Computing Recall " << k_gt << " @ " << k << std::endl;
   parlay::internal::timer t;
   auto ind_recall = parlay::sequence<double>::from_function(pred.size(), 
       [&](size_t i) {
@@ -30,7 +29,6 @@ auto compute_recall(parlay::sequence<parlay::sequence<std::pair<uint32_t, T>>>& 
     return static_cast<double>(correct)/k_gt;
   });
   double recall = parlay::reduce(ind_recall)/ind_recall.size();
-  std::cout << "Recall " << k_gt << " @ " << k << ": " << recall << std::endl;
   return recall;
 }
 
