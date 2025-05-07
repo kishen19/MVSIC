@@ -58,10 +58,21 @@ void bench(commandLine& P) {
   
   if (QFile != ""){
     auto queries = PC(qFile);
-    // auto gt = ReadGT(gtFile, queries.size());
+    auto gt = ReadGT(gtFile, queries.size());
+    // Compute Stats:
+    std::cout << "Computing stats..." << std::endl;
+    auto result = check_stats(index, points, queries, gt, k, nprobes);
+    double QPS_seq, QPS_par, recall_1_k, recall_k_k;
+    std::tie(QPS_seq, QPS_par, recall_1_k, recall_k_k) = result;
+    std::cout << "Number of Queries: " << queries.size() << std::endl
+              << "QPS_seq: " << QPS_seq << std::endl
+              << "QPS_par: " << QPS_par << std::endl
+              << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
+              << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+
     parlay::internal::timer t;
-    double recall_1_k = 0.0;
-    double recall_k_k = 0.0;
+    recall_1_k = 0.0;
+    recall_k_k = 0.0;
     double query_time = 0.0;
     for(size_t i = 0; i < queries.size(); i++) {
       if (i % 100 == 0) {

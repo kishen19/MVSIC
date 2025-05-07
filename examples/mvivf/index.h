@@ -280,7 +280,7 @@ struct Index {
                 point_values.size() * sizeof(uint32_t));
 
     // Build the index 
-    unsigned int dim = data.get_dims();
+    size_t dim = data.get_dims();
     auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(data.size());
     parlay::parallel_for(0, data.size(), [&](size_t i) {
       point_id_to_data_id[data.get_id(i)] = i;

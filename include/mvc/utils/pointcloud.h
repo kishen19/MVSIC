@@ -9,7 +9,7 @@ struct PointCloud {
   using point_type = ChPoint;
 
   inline size_t size() const { return n; }
-  inline unsigned int get_dims() const { return dims; }
+  inline size_t get_dims() const { return dims; }
   inline ChPoint operator[](long i) const {
     return ChPoint(ids[i], get_coords(i), get_size(i), dims);
   }
@@ -60,28 +60,20 @@ struct PointCloud {
 
   PointCloud() {}
 
-  PointCloud(const char* filename) { // Doesn't support mmap at the moment.
+  PointCloud(const char* filename) {
     std::cout << "filename = " << filename << std::endl;
-    if (filename == nullptr) { return; }
-    size_t file_size = 0;
-    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    std::ifstream file(filename, std::ios::binary | std::ios::in);
     if (!file.is_open()) {
       std::cerr << "Error opening file!" << std::endl;
       exit(-1);
     }
-    file_size = file.tellg();
-    std::ifstream reader(filename);
-    assert(reader.is_open());
-    // [MMAP] auto [fileptr, length] = mmapStringFromFile(filename);
     // Step 1: Read num points and dimension [uint32_t, uint32_t]
-    uint32_t num_points;
-    unsigned int d;
-    reader.read((char*)(&num_points), sizeof(uint32_t));
-    n = num_points;
-    reader.read((char*)(&d), sizeof(uint32_t));
-    dims = d;
-    std::cout << "Detected " << num_points
-      << " points with embedding dimension " << d << std::endl;
+    file.read(reinterpret_cast<char*>(&dims), sizeof(dims));
+    file.read(reinterpret_cast<char*>(&n), sizeof(n));
+    size_t num_vectors;
+    file.read(reinterpret_cast<char*>(&num_vectors), sizeof(num_vectors));
+    std::cout << "Detected " << n
+      << " points with embedding dimension " << dims << std::endl;
     aligned_dims = dim_round_up(dims, sizeof(T));
     std::cout << "Aligned dims = " << aligned_dims << std::endl;
     if (aligned_dims != dims) {
@@ -89,40 +81,24 @@ struct PointCloud {
         << std::endl;
       exit(-1);
     }
-    // [MMAP] char* ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t));
-    // Step 2: Skip to the last N entries and read perm [uint32_t]
-    // Document with id i is stored at perm[i].
-    reader.seekg(-static_cast<int64_t>(n) * sizeof(uint32_t), std::ios::end);
-    auto perm = parlay::sequence<uint32_t>::uninitialized(n);
-    ids = parlay::sequence<uint32_t>::uninitialized(n);
-    //[MMAP] std::memcpy(perm.begin(), ptr, n * sizeof(uint32_t));
-    reader.read((char*)perm.begin(), n * sizeof(uint32_t));
-    parlay::parallel_for(0, n, [&](size_t i) {
-      ids[perm[i]] = i;
-      });
-    // Step 3: Skip to the offsets [size_t]
-    reader.seekg(-1LL * (static_cast<int64_t>(n) * sizeof(uint32_t) +
-      static_cast<int64_t>(n + 1) * sizeof(size_t)),
-      std::ios::end);
-    // [MMAP] ptr = fileptr + length - (static_cast<int64_t>(n) * sizeof(uint32_t)) -
-          // (static_cast<int64_t>(n + 1) * sizeof(size_t));
-    offsets = parlay::sequence<size_t>(n + 1);
-    // [MMAP] std::memcpy(offsets.begin(), ptr, (n + 1) * sizeof(size_t));
-    reader.read((char*)offsets.begin(), (n + 1) * sizeof(size_t));
-    // Step 4: Read the coordinates [T]
-    size_t coordinate_size =
-      file_size - (2 * sizeof(uint32_t) + ((n) * sizeof(uint32_t)) +
-        ((n + 1) * sizeof(size_t)));
+    // Step 2: Read values
+    size_t coordinate_size = num_vectors * dims * sizeof(T);
     values = static_cast<T*>(parlay::p_malloc(coordinate_size));
-    reader.seekg(static_cast<int64_t>(2) * sizeof(uint32_t), std::ios::beg);
-    reader.read((char*)values, coordinate_size);
-    // [MMAP] values = reinterpret_cast<T*>(fileptr + 2 * sizeof(uint32_t));
-    reader.close();
+    file.read(reinterpret_cast<char*>(values), coordinate_size);
+    // Step 3: Read offsets
+    size_t num_offsets=n+1;
+    offsets.resize(num_offsets);
+    file.read(reinterpret_cast<char*>(offsets.begin()), num_offsets * sizeof(size_t));
+    // Step 4: Set ids
+    ids = parlay::sequence<uint32_t>::from_function(n, [&](size_t i) {
+      return static_cast<uint32_t>(i);
+      });
+    file.close();
   }
 
   // Sequence of Chamfer Points
   template <typename Seq>
-  PointCloud(const Seq& data, unsigned int _d)
+  PointCloud(const Seq& data, size_t _d)
     : dims(_d), aligned_dims(dim_round_up(dims, sizeof(T))), n(data.size()) {
     offsets = parlay::sequence<size_t>::from_function(n + 1, [&](size_t i) {
       return (i == 0) ? 0 : (data[i - 1].size() * dims);
@@ -133,7 +109,7 @@ struct PointCloud {
     parlay::parallel_for(0, n, [&](size_t i) {
       size_t offset = offsets[i];
       parlay::parallel_for(0, data[i].size(), [&](size_t j) {
-        for (unsigned int t = 0; t < dims; ++t) {
+        for (size_t t = 0; t < dims; ++t) {
           values[offset + j * dims + t] = data[i][j][t];
         }
         });
@@ -145,7 +121,7 @@ struct PointCloud {
 
   // Arbitrary random-access range
   template <typename Seq>
-  PointCloud(const Seq& data, unsigned int _d, parlay::sequence<uint32_t> _ids)
+  PointCloud(const Seq& data, size_t _d, parlay::sequence<uint32_t> _ids)
     : dims(_d), aligned_dims(dim_round_up(dims, sizeof(T))), n(data.size()) {
     offsets = parlay::sequence<size_t>::from_function(n + 1, [&](size_t i) {
       return (i == 0) ? 0 : (data[i - 1].size() * dims);
@@ -156,7 +132,7 @@ struct PointCloud {
     parlay::parallel_for(0, n, [&](size_t i) {
       size_t offset = offsets[i];
       parlay::parallel_for(0, data[i].size(), [&](size_t j) {
-        for (unsigned int t = 0; t < dims; ++t) {
+        for (size_t t = 0; t < dims; ++t) {
           values[offset + j * dims + t] = data[i][j][t];
         }
         });
@@ -216,7 +192,7 @@ struct PointCloud {
   T* values = nullptr;
   parlay::sequence<size_t> offsets;
   parlay::sequence<uint32_t> ids;
-  unsigned int dims = 0;
-  unsigned int aligned_dims = 0;
+  size_t dims = 0;
+  size_t aligned_dims = 0;
   size_t n = 0;
 };

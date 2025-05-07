@@ -2,17 +2,17 @@
 #include <Eigen/Core>
 
 template <typename T>
-T chamfer_euclidian_distance(const T*, size_t, const T*, size_t, unsigned int);
+T chamfer_euclidian_distance(const T*, size_t, const T*, size_t, size_t);
 
 template <typename T>
-T chamfer_mips_distance(const T*, size_t, const T*, size_t, unsigned int);
+T chamfer_mips_distance(const T*, size_t, const T*, size_t, size_t);
 
 template <typename T>
 struct Chamfer_Euclidian_Point {
   using distance_type = T;
 
   inline size_t size() const { return n; }
-  inline unsigned int get_dims() const { return dims; }
+  inline size_t get_dims() const { return dims; }
   inline auto operator[](long i) const {
     return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
@@ -27,10 +27,10 @@ struct Chamfer_Euclidian_Point {
   }
 
   Chamfer_Euclidian_Point() {}
-  Chamfer_Euclidian_Point(long id_, T* values_, size_t num_, unsigned int dims_)
+  Chamfer_Euclidian_Point(long id_, T* values_, size_t num_, size_t dims_)
     : id(id_), values(values_), dims(dims_), n(num_), owns(false) {
   }
-  Chamfer_Euclidian_Point(T* values_, size_t num_, unsigned int dims_)
+  Chamfer_Euclidian_Point(T* values_, size_t num_, size_t dims_)
     : dims(dims_), n(num_), owns(true) {
     values = static_cast<T*>(parlay::p_malloc(n * dims * sizeof(T)));
     std::memcpy(values, values_, n * dims * sizeof(T));
@@ -63,8 +63,8 @@ struct Chamfer_Euclidian_Point {
   private:
   T* values;
   uint32_t id = std::numeric_limits<uint32_t>::max();
-  unsigned int dims = 0;
-  unsigned int aligned_dims = 0;
+  size_t dims = 0;
+  size_t aligned_dims = 0;
   size_t n = 0;
   bool owns = false;
 };
@@ -74,7 +74,7 @@ struct Chamfer_Mips_Point {
   using distance_type = T;
 
   inline size_t size() const { return n; }
-  inline unsigned int get_dims() const { return dims; }
+  inline size_t get_dims() const { return dims; }
   inline auto operator[](long i) const {
     return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
@@ -89,10 +89,10 @@ struct Chamfer_Mips_Point {
   }
 
   Chamfer_Mips_Point() {}
-  Chamfer_Mips_Point(long id_, T* values_, size_t num_, unsigned int dims_)
+  Chamfer_Mips_Point(long id_, T* values_, size_t num_, size_t dims_)
     : id(id_), values(values_), dims(dims_), n(num_), owns(false) {
   }
-  Chamfer_Mips_Point(T* values_, size_t num_, unsigned int dims_)
+  Chamfer_Mips_Point(T* values_, size_t num_, size_t dims_)
     : dims(dims_), n(num_), owns(true) {
     values = static_cast<T*>(parlay::p_malloc(n * dims * sizeof(T)));
     std::memcpy(values, values_, n * dims * sizeof(T));
@@ -125,15 +125,15 @@ struct Chamfer_Mips_Point {
   private:
   T* values;
   uint32_t id = std::numeric_limits<uint32_t>::max();
-  unsigned int dims = 0;
-  unsigned int aligned_dims = 0;
+  size_t dims = 0;
+  size_t aligned_dims = 0;
   size_t n = 0;
   bool owns = false;
 };
 
 template <typename T>
 T chamfer_euclidian_distance(const T* a, size_t n_a,
-  const T* b, size_t n_b, unsigned int dim) {
+  const T* b, size_t n_b, size_t dim) {
   Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
     mat_a(a, n_a, dim);
   Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
@@ -157,7 +157,7 @@ T chamfer_euclidian_distance(const T* a, size_t n_a,
 
 template <typename T>
 T chamfer_mips_distance(const T* a, size_t n_a,
-  const T* b, size_t n_b, unsigned int dim) {
+  const T* b, size_t n_b, size_t dim) {
   Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
     mat_a(a, n_a, dim);
   Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>

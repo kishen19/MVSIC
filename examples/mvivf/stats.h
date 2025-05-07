@@ -1,56 +1,97 @@
 #pragma once
 
+#include "csvfile.h"
 
+template <typename T>
+auto compute_recall(parlay::sequence<parlay::sequence<std::pair<uint32_t, T>>>& pred, parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>>& gt, int k, int k_gt){
+  if (k_gt > gt[0].size()){
+    std::cout << "Not enough gt values" << std::endl;
+    exit(-1);
+  } else if (k > pred[0].size()){
+    std::cout << "Not enough pred values" << std::endl;
+    exit(-1);
+  }
+  std::cout << "Computing Recall " << k_gt << " @ " << k << std::endl;
+  parlay::internal::timer t;
+  auto ind_recall = parlay::sequence<double>::from_function(pred.size(), 
+      [&](size_t i) {
+    std::unordered_set<uint32_t> out_set;
+    for (size_t j=0; j<k; j++) {
+      auto [id, dist] = pred[i][j];
+      out_set.insert(id);
+    }
+    size_t correct = 0;
+    for (size_t j=0; j<k_gt; j++) {
+      auto [dist, id] = gt[i][j];
+      if (out_set.find(id) != out_set.end()) {
+        correct++;
+      }
+    }
+    return static_cast<double>(correct)/k_gt;
+  });
+  double recall = parlay::reduce(ind_recall)/ind_recall.size();
+  std::cout << "Recall " << k_gt << " @ " << k << ": " << recall << std::endl;
+  return recall;
+}
 
+template <typename Index, typename PointCloud, typename GT>
+auto check_stats(Index& index, PointCloud& base_points, PointCloud& query_points, GT& gt, int k, int nprobes) {
+  using ChPoint = typename PointCloud::point_type;
+  using T = typename ChPoint::distance_type;
+  parlay::internal::timer t;
+  double query_time_seq = 0.0;
+  auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, T>>>(query_points.size());
+  for (size_t i = 0; i < query_points.size(); i++) {
+    t.start();
+    auto results = index.Search(query_points[i], k, nprobes);
+    t.stop();
+    query_time_seq += t.total_time();
+    t.reset();
+    pred[i] = results;
+  }
+  t.start();
+  parlay::parallel_for(0, query_points.size(), [&](size_t i) {
+    auto results = index.Search(query_points[i], k, nprobes);
+    pred[i] = results;
+  });
+  t.stop();
+  double query_time_par = t.total_time();
+  t.reset();
+  double QPS_seq = query_points.size() / query_time_seq;
+  double QPS_par = query_points.size() / query_time_par;
+  double recall_1_k = compute_recall(pred, gt, k, 1);
+  double recall_k_k = compute_recall(pred, gt, k, k);
+  return std::make_tuple(QPS_seq, QPS_par, recall_1_k, recall_k_k);
+}
 
-// template <typename PointCloud>
-// auto checkRecall(const PointCloud& query_points, Index& index, 
-//     ){
-//   parlay::internal::timer t;
-//     double recall_1_k = 0.0;
-//     double recall_k_k = 0.0;
-//     double query_time = 0.0;
-//     for(size_t i = 0; i < queries.size(); i++) {
-//       if (i % 100 == 0) {
-//         std::cout << queries.size()-i << " queries left" << std::endl;
-//       }
-//       // Run Brute-force search
-//       auto bf_results = mvivf::get_knn(queries[i], points, k);
-//       std::unordered_set<uint32_t> bf_set;
-//       for (const auto& [id, dist] : bf_results) {
-//         bf_set.insert(id);
-//       }
+// TODO: batch queries
 
-//       // Run Index search
-//       t.start();
-//       auto results = index.Search(queries[i], k, nprobes);
-//       t.stop();
-//       query_time += t.total_time();
-//       t.reset();
+template <typename Index, typename PointCloud, typename GT>
+void search_and_parse(Index& index, PointCloud& base_points, PointCloud& query_points, GT& gt, const char* res_file, int k) {
+  parlay::sequence<std::tuple<double, double, double, double>> results;
+  std::vector<int> nprobes_vals = {1, 2, 4, 8, 16, 32, 64};
 
-//       // Calculate recall
-//       size_t correct = 0;
-//       for (const auto& [id, dist] : results) {
-//         if (bf_set.find(id) != bf_set.end()) {
-//           correct++;
-//         }
-//         if (id == bf_results[0].first) {
-//           recall_1_k += 1.0;
-//         }
-//       }
-//       recall_k_k += static_cast<float>(correct)/k;
-//     }
-//     recall_1_k /= queries.size();
-//     recall_k_k /= queries.size();
-//     double QPS = queries.size() / query_time;
-//     double avg_query_time = 1/QPS;
-//     std::cout << "Number of Queries: " << queries.size() << std::endl;
-//     std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
-//     std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-//     std::cout << "QPS: " << QPS << std::endl;
-//     std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
-// }
+  for (int nprobes : nprobes_vals) {
+    auto result = check_stats_seq(index, base_points, query_points, gt, k, nprobes);
+    results.push_back(result);
+  }
+  write_to_csv(std::string(res_file), results, k, query_points.size());
+}
 
+inline void write_to_csv(std::string csv_filename,
+                         parlay::sequence<std::tuple<double, double, double, double>>& results, int k, size_t num_queries) {
+  csvfile csv(csv_filename);
+  csv << "Num queries" << "k" << "nprobes" << "QPS_seq" << "QPS_par" << "Recall 1@k" << "Recall k@k" << endrow;
+  int nprobes = 1;
+  for (auto& result : results) {
+    double QPS_seq, QPS_par, recall_1_k, recall_k_k;
+    std::tie(QPS_seq, QPS_par, recall_1_k, recall_k_k) = result;
+    csv << num_queries << k << nprobes << QPS_seq << QPS_par << recall_1_k << recall_k_k << endrow;
+    nprobes *= 2;
+  }
+  csv << endrow;
+  csv << endrow;
+}
 
 auto ReadGT(std::string& file_path, int num_points) {
   std::ifstream file(file_path, std::ios::binary | std::ios::in);
