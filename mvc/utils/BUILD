@@ -5,7 +5,6 @@ cc_library(
     hdrs = ["chamfer_ip_point.h"],
     deps = [
       "@eigen//:eigen",
-      "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
     ],
 )
@@ -15,7 +14,6 @@ cc_library(
     hdrs = ["chamfer_l2_point.h"],
     deps = [
       "@eigen//:eigen",
-      "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
     ],
 )
@@ -35,7 +33,6 @@ cc_library(
   name = "faiss_kmeans",
   hdrs = ["faiss_kmeans.h"],
   deps = [
-    "@parlaylib//parlay:parallel",
     "@parlaylib//parlay:primitives",
     "@faiss//:faiss_core",
   ],
@@ -79,12 +76,10 @@ cc_library(
 )
 
 cc_library(
-    name = "pointcloudset",
-    hdrs = ["pointcloudset.h"],
+    name = "point_cloud_set",
+    hdrs = ["point_cloud_set.h"],
     deps = [
-      "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
-      "@parlaylib//parlay:sequence",
     ],
 )
 

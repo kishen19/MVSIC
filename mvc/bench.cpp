@@ -4,7 +4,7 @@
 #include "utils/point_range.h"
 #include "utils/chamfer_l2_point.h"
 #include "utils/chamfer_ip_point.h"
-#include "utils/pointcloudset.h"
+#include "utils/point_cloud_set.h"
 #include "mvkmeans.h"
 
 int main(int argc, char* argv[]) {

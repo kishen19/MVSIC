@@ -1,6 +1,5 @@
 #pragma once
 
-#include "parlay/parallel.h"
 #include "parlay/primitives.h"
 #include "faiss/Clustering.h"
 #include "faiss/IndexFlat.h"
@@ -10,13 +9,14 @@ auto faiss_kmeans(const Seq& data, size_t d, uint32_t k, bool is_metric) {
   size_t n = data.size();
 
   // Flatten input into raw float array for FAISS
-  auto flat_data = parlay::map(parlay::flatten(data), [](auto x) { return static_cast<float>(x); });
+  auto flat_data = parlay::flatten(data);
 
   // Setup clustering parameters
   faiss::Clustering clus(d, k);
   clus.verbose = false;
   clus.min_points_per_centroid = 1;
   // clus.max_points_per_centroid = 1000000000;
+
 
   if (is_metric) {
     // Index used to assign points during clustering (L2 distance)
@@ -30,9 +30,9 @@ auto faiss_kmeans(const Seq& data, size_t d, uint32_t k, bool is_metric) {
 
   // Extract centroids
   float* centroids_ptr = clus.centroids.data();
-  parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>(d));
+  parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>::uninitialized(d));
   parlay::parallel_for(0, k, [&](size_t i) {
-    std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float)); // TODO: optimize
+    std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
   return centroids;
 }
@@ -42,7 +42,7 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, uint32_t k, bool is_metric) 
   size_t n = data.size();
 
   // Flatten input into raw float array for FAISS
-  auto flat_data = parlay::map(parlay::flatten(data), [](auto x) { return static_cast<float>(x); });
+  auto flat_data = parlay::flatten(data);
 
   // Setup clustering parameters
   faiss::Clustering clus(d, k);
@@ -77,9 +77,9 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, uint32_t k, bool is_metric) 
 
   // Extract centroids
   float* centroids_ptr = clus.centroids.data();
-  parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>(d));
+  parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>::uninitialized(d));
   parlay::parallel_for(0, k, [&](size_t i) {
-    std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float)); // TODO: optimize
+    std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
 
   return std::make_pair(centroids, assignments);
@@ -91,7 +91,7 @@ auto faiss_wgh_kmeans(const Seq& data, size_t d, uint32_t k,
   size_t n = data.size();
 
   // Flatten input into raw float array for FAISS
-  auto flat_data = parlay::map(parlay::flatten(data), [](auto x) { return static_cast<float>(x); });
+  auto flat_data = parlay::flatten(data);
 
   // Setup clustering parameters
   faiss::Clustering clus(d, k);
@@ -111,9 +111,9 @@ auto faiss_wgh_kmeans(const Seq& data, size_t d, uint32_t k,
 
   // Extract centroids
   float* centroids_ptr = clus.centroids.data();
-  parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>(d));
+  parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>::uninitialized(d));
   parlay::parallel_for(0, k, [&](size_t i) {
-    std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float)); // TODO: optimize
+    std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
 
   return centroids;
@@ -129,7 +129,7 @@ auto faiss_kmeans_cost(const Seq& data, size_t d, uint32_t k,
   }
 
   // Flatten input into raw float array for FAISS
-  auto flat_data = parlay::map(parlay::flatten(data), [](auto x) { return static_cast<float>(x); });
+  auto flat_data = parlay::flatten(data);
 
   // Setup clustering parameters
   faiss::Clustering clus(d, k);

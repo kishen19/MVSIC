@@ -5,9 +5,7 @@ cc_library(
     name = "uniformlyrandom",
     hdrs = ["uniformlyrandom.h"],
     deps = [
-      "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
-      "@parlaylib//parlay:sequence",
-      "//mvc/utils:pointcloudset",
+      "//mvc/utils:point_cloud_set",
     ],
 )

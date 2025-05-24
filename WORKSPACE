@@ -91,7 +91,7 @@ cc_library(
         "faiss/python/**/*.h",
     ]),
     includes = ["."],
-    copts = ["-fopenmp", "-lopenblas"],
+    copts = ["-fopenmp"],
     linkopts = ["-fopenmp", "-lopenblas"],
     visibility = ["//visibility:public"],
 )

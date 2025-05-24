@@ -3,7 +3,7 @@
 #include "parlay/primitives.h"
 #include "utils/chamfer_l2_point.h"
 #include "utils/chamfer_ip_point.h"
-#include "utils/pointcloudset.h"
+#include "utils/point_cloud_set.h"
 #include "seeding/uniformlyrandom.h"
 #include "utils/faiss_kmeans.h"
 #include "lower_bounds.h"
@@ -32,25 +32,25 @@ struct MVClustering : MVClusteringParams {
   parlay::sequence<size_t> cluster_ids;
   // TODO: stats for each Lloyds iteration
 
-  MVClustering(size_t d, size_t k);
-  MVClustering(size_t d, size_t k, size_t s);
+  MVClustering(size_t d, size_t k) noexcept;
+  MVClustering(size_t d, size_t k, size_t s) noexcept;
   MVClustering(size_t d, size_t k, const MVClusteringParams& params);
   MVClustering(size_t d, size_t k, size_t s, const MVClusteringParams& params);
 
   void compute_cluster_ids(const PointCloudSet<ChPoint>& points, 
     parlay::sequence<size_t>& cluster_ids);
   float sum_of_squared_cost(const PointCloudSet<ChPoint>& points,
-    const parlay::sequence<size_t>& cluster_ids);
+    const parlay::sequence<size_t>& cluster_ids) const;
 
   void train(size_t n, const float* data, const size_t* offsets, 
              const size_t* ids);
-  void train(PointCloudSet<ChPoint>& data);
+  void train(const PointCloudSet<ChPoint>& data);
 };
 
 template <bool metric>
-MVClustering<metric>::MVClustering(size_t d, size_t k) : d(d), k(k), s(0) {}
+MVClustering<metric>::MVClustering(size_t d, size_t k) noexcept : d(d), k(k), s(0) {}
 template <bool metric>
-MVClustering<metric>::MVClustering(size_t d, size_t k, size_t s) : d(d), k(k), s(s) {}
+MVClustering<metric>::MVClustering(size_t d, size_t k, size_t s) noexcept : d(d), k(k), s(s) {}
 template <bool metric>
 MVClustering<metric>::MVClustering(size_t d, size_t k, const MVClusteringParams& params) 
   : MVClusteringParams(params), d(d), k(k), s(0) {}
@@ -64,15 +64,15 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& poi
   size_t n = points.size();
   size_t k = centers.size();
   parlay::parallel_for(0, n, [&](size_t i) {
-    parlay::sequence<float> dist = parlay::tabulate(k, [&](size_t j) { 
+    auto dist = parlay::delayed_tabulate(k, [&](size_t j) { 
       return points[i].distance(centers[j]); });
-    cluster_ids[i] = parlay::min_element(dist) - begin(dist);
+    cluster_ids[i] = parlay::min_element(dist) - dist.begin();
   });
 }
 
 template <bool metric>
 float MVClustering<metric>::sum_of_squared_cost(const PointCloudSet<ChPoint>& points,
-    const parlay::sequence<size_t>& cluster_ids) {
+    const parlay::sequence<size_t>& cluster_ids) const {
   auto distances = parlay::delayed_tabulate(points.size(), [&](size_t i) {
     return points[i].distance(centers[cluster_ids[i]]);});
   return parlay::reduce(distances);
@@ -86,7 +86,7 @@ void MVClustering<metric>::train(size_t n, const float* data, const size_t* offs
 }
 
 template <bool metric>
-void MVClustering<metric>::train(PointCloudSet<ChPoint>& points){
+void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points){
   size_t n = points.size();
   if (s == 0) {
     auto pc_sizes = parlay::delayed_seq<size_t>(points.size(),
@@ -134,6 +134,7 @@ void MVClustering<metric>::train(PointCloudSet<ChPoint>& points){
       [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = parlay::group_by_index(id_pt, k);
     parlay::sequence<parlay::sequence<parlay::sequence<float>>> new_centers(k);
+    static size_t seed = 42;
     parlay::parallel_for(0, k, [&](size_t i) {
       if (grouped[i].size() > 0) {
         auto data = points.filter_flattened(grouped[i]);
@@ -147,16 +148,16 @@ void MVClustering<metric>::train(PointCloudSet<ChPoint>& points){
           std::cout << "Cluster " << i << ": empty" << std::endl;
           std::cout << "Sampling from input" << std::endl;
         }
-        static size_t seed = 42;
-        parlay::sequence<size_t> id = {parlay::hash32(seed++) % n};
+        parlay::sequence<size_t> id = {parlay::hash32(seed+i) % n};
         auto data = points.filter_flattened(id);
         if (s >= data.size()) {
-          new_centers[i] = data; // TODO: copy
+          new_centers[i] = data;
         } else {
-          new_centers[i] = faiss_kmeans(data, d, s, metric); // TODO: copy
+          new_centers[i] = faiss_kmeans(data, d, s, metric);
         }
       }
     });
+    seed += k;
     centers = PointCloudSet<ChPoint>(new_centers, d, {});
     // Step 2B: Reassign points
     compute_cluster_ids(points, cluster_ids);

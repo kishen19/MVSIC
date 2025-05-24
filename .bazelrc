@@ -7,13 +7,13 @@ build --repo_env=CC=g++
 build --cxxopt=-std=c++20
 build --cxxopt=-mcx16        # 16 byte CAS
 build --cxxopt=-DHOMEGROWN   # use the homegrown scheduler
-build --cxxopt=-DPARLAY_USE_STD_ALLOC
+# build --cxxopt=-DPARLAY_USE_STD_ALLOC # TODO: Try removing this
 build --cxxopt=-pthread      # necessary for homegrown scheduler
 build --cxxopt=-march=native
 build --cxxopt=-fvisibility=hidden
 build --cxxopt=-fvisibility-inlines-hidden
 build --cxxopt=-fsized-deallocation  # https://github.com/pybind/pybind11/issues/1604 (for clang)
-build --cxxopt=-UNDEBUG
+# build --cxxopt=-UNDEBUG # TODO: try removing this
 build --cxxopt=-DFINTEGER=int # Required by Faiss
 build -c opt
 
@@ -31,6 +31,12 @@ build --cxxopt=-Wvla
 # Build without parallelism.
 build:serial --cxxopt=-UHOMEGROWN
 build:serial --cxxopt=-DPARLAY_SEQUENTIAL
+
+# Build using OpenMP for parallelism.
+build:openmp --cxxopt=-UHOMEGROWN
+build:openmp --cxxopt=-DOPENMP
+build:openmp --cxxopt=-fopenmp
+build:openmp --linkopt=-fopenmp
 
 # Build with debug
 build:debug --cxxopt=-UHOMEGROWN
