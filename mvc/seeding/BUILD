@@ -8,5 +8,6 @@ cc_library(
       "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
       "@parlaylib//parlay:sequence",
+      "//mvc/utils:pointcloudset",
     ],
 )

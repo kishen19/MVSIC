@@ -1,14 +1,33 @@
-# package(default_visibility = ["//:__subpackages__"])
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
-    name = "chamferpoint",
-    hdrs = ["chamferpoint.h"],
+    name = "chamfer_ip_point",
+    hdrs = ["chamfer_ip_point.h"],
     deps = [
+      "@eigen//:eigen",
       "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
-      "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_library(
+    name = "chamfer_l2_point",
+    hdrs = ["chamfer_l2_point.h"],
+    deps = [
       "@eigen//:eigen",
+      "@parlaylib//parlay:parallel",
+      "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "euclidian_point",
+    hdrs = ["euclidian_point.h"],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay/internal:file_map",
+        ":NSGDist",
     ],
 )
 
@@ -16,19 +35,56 @@ cc_library(
   name = "faiss_kmeans",
   hdrs = ["faiss_kmeans.h"],
   deps = [
+    "@parlaylib//parlay:parallel",
     "@parlaylib//parlay:primitives",
     "@faiss//:faiss_core",
   ],
 )
 
+
 cc_library(
-    name = "pointcloud",
-    hdrs = ["pointcloud.h"],
+    name = "mips_point",
+    hdrs = ["mips_point.h"],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay/internal:file_map",
+        ":NSGDist",
+    ],
+)
+
+cc_library(
+    name = "NSGDist",
+    hdrs = ["NSGDist.h"],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "parse_command_line",
+    hdrs = ["parse_command_line.h"],
+    deps = [],
+)
+
+cc_library(
+    name = "point_range",
+    hdrs = ["point_range.h"],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay/internal:file_map",
+    ],
+)
+
+cc_library(
+    name = "pointcloudset",
+    hdrs = ["pointcloudset.h"],
     deps = [
       "@parlaylib//parlay:parallel",
       "@parlaylib//parlay:primitives",
       "@parlaylib//parlay:sequence",
-      ":chamferpoint",
     ],
 )
 
