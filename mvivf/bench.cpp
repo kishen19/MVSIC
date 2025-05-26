@@ -1,18 +1,13 @@
-#include "algorithms/bench/parse_command_line.h"
-#include "algorithms/utils/euclidian_point.h"
-#include "algorithms/utils/mips_point.h"
-#include "algorithms/utils/point_range.h"
-
-#include "mvc/utils/pointcloud.h"
-#include "mvc/utils/chamferpoint.h"
+#include "mvc/utils/chamfer_ip_point.h"
+#include "mvc/utils/chamfer_l2_point.h"
+#include "mvc/utils/parse_command_line.h"
+#include "mvc/utils/point_cloud_set.h"
 #include "utils/stats.h"
-#include "index.h"
+#include "mvivf.h"
 
-
-template <typename ChPoint, typename Range>
+template <typename ChPoint, bool metric>
 void bench(commandLine& P) {
-  using T = typename ChPoint::distance_type;
-  using PC = PointCloud<ChPoint, Range>;
+  using PC = PointCloudSet<ChPoint>;
 
   char* inFile = P.getOptionValue("-i");
   char* qFile = P.getOptionValue("-q");
@@ -25,50 +20,98 @@ void bench(commandLine& P) {
   std::string gtFile = P.getOptionValue("-gt", "");
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
-  long maxsize = P.getOptionLongValue("-maxsize", 100);
+
+  long minsize = P.getOptionLongValue("-minsize", 100);
+  long maxsize = P.getOptionLongValue("-maxsize", 500);
   long nprobes = P.getOptionLongValue("-nprobes", 1);
+  long beamsize = P.getOptionLongValue("-beamsize", 0);
   long k = P.getOptionLongValue("-k", 10);
   long s = P.getOptionLongValue("-s", 0);
   auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
-  // auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
-  // auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
-  // auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
 
   auto points = PC(inFile);
-  mvivf::Index<T, PC> index;
+  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, true);
+  mvivf::SearchParams search_params(nprobes, beamsize);
+  mvivf::IndexMVIVF<metric> index(points.get_dims(), index_params);
   if (indexFile != ""){
     std::cout << "Loading index from " << indexFile << std::endl;
-    index.Load(indexFile, points);
+    index.load(indexFile, points);
     std::cout << "Index loaded" << std::endl;
   } else {
     std::cout << "Building index..." << std::endl;
     parlay::internal::timer it;
     it.start();
-    index.Build(points, maxsize, s, iters, seeding); 
-        // kmeans_dist_algo, kmeans_seeding, kmeans_iters);
+    index.build(points);
     it.stop();
     std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
   }
   if (outFile != ""){
     std::cout << "Saving index to " << outFile << std::endl;
-    index.Save(P.getOptionValue("-o"));
+    index.save(P.getOptionValue("-o"));
     std::cout << "Index saved." << std::endl;
   }
   
   if (QFile != ""){
     auto queries = PC(qFile);
     auto gt = ReadGT(gtFile, queries.size());
+    double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
+    
     // Compute Stats:
-    std::cout << "Computing stats..." << std::endl;
-    auto result = check_stats(index, points, queries, gt, k, nprobes);
-    double QPS_seq, QPS_par, recall_1_k, recall_k_k;
-    std::tie(QPS_seq, QPS_par, recall_1_k, recall_k_k) = result;
-    std::cout << "Number of Queries: " << queries.size() << std::endl
-              << "QPS_seq: " << QPS_seq << std::endl
-              << "QPS_par: " << QPS_par << std::endl
-              << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
-              << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+    parlay::internal::timer t;
+    recall_1_k = 0.0;
+    recall_k_k = 0.0;
+    double query_time = 0.0;
+    for(size_t i = 0; i < queries.size(); i++) {
+      if (i % 100 == 0) {
+        std::cout << queries.size()-i << " queries left" << std::endl;
+      }
+      std::unordered_set<size_t> out_set;
+      // Run Index search
+      t.start();
+      auto [results_new, _cmps] = index.search(queries[i], points, 
+        k, search_params);
+      t.stop();
+      query_time += t.total_time();
+      t.reset();
+      for (const auto& [id, dist] : results_new) {
+        out_set.insert(id);
+      }
+
+      // Run Brute-force search
+      auto [bf_results, dist_cmps] = mvivf::get_knn(queries[i], points, k);
+
+      // Calculate recall
+      float correct = 0.0;
+      for (const auto& [id, dist] : bf_results) {
+        if (out_set.find(id) != out_set.end()) {
+          correct += 1.0;
+        }
+      }
+      recall_k_k += correct/k;
+      if (out_set.find(bf_results[0].first) != out_set.end()) {
+        recall_1_k += 1.0;
+      }
+    }
+    recall_1_k /= queries.size();
+    recall_k_k /= queries.size();
+    double QPS = queries.size() / query_time;
+    double avg_query_time = 1/QPS;
+    std::cout << "Number of Queries: " << queries.size() << std::endl;
+    std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
+    std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+    std::cout << "QPS: " << QPS << std::endl;
+    std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
+    // Compute Stats:
+    // std::cout << "Computing stats..." << std::endl;
+    // auto result = check_stats(index, points, queries, gt, k, nprobes);
+    // std::tie(QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k) = result;
+    // std::cout << "Number of Queries: " << queries.size() << std::endl
+    //           << "QPS_seq: " << QPS_seq << std::endl
+    //           << "QPS_par: " << QPS_par << std::endl
+    //           << "Average cmps: " << avg_cmps << std::endl
+    //           << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
+    //           << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
   }
 }
 
@@ -79,59 +122,14 @@ int main(int argc, char* argv[]) {
                 "[-seed <algorithm>] [-iters <num_iters>]" 
                 // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
               );
+  std::string df = P.getOptionValue("-dist_func", "IP");
 
-  std::string tp = P.getOptionValue("-data_type", "float");
-  std::string df = P.getOptionValue("-dist_func", "Euclidian");
-
-  if ((tp != "uint8") && (tp != "int8") && (tp != "float")) {
-    std::cout << "Error: vector type not specified correctly, specify int8, "
-                 "uint8, or float"
-              << std::endl;
-    abort();
-  }
-
-  // auto seeding = P.getOptionValue("-seed", "Random");
-  // auto iters = P.getOptionLongValue("-iters", 5);
-  // auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
-  // auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
-  // auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
-
-  if (tp == "float") {
-    if (df == "Euclidian"){
-      using ChPoint = Chamfer_Euclidian_Point<float>;
-      using Point = Euclidian_Point<float>;
-      using Range = PointRange<float, Point>;
-      bench<ChPoint, Range>(P);
-    } else if (df == "Mips") {
-      using ChPoint = Chamfer_Mips_Point<float>;
-      using Point = Mips_Point<float>;
-      using Range = PointRange<float, Point>;
-      bench<ChPoint, Range>(P);
-    }
-  } else if (tp == "uint8") {
-    if (df == "Euclidian"){
-      using ChPoint = Chamfer_Euclidian_Point<uint8_t>;
-      using Point = Euclidian_Point<uint8_t>;
-      using Range = PointRange<uint8_t, Point>;
-      bench<ChPoint, Range>(P);
-    } else if (df == "Mips") {
-      using ChPoint = Chamfer_Mips_Point<uint8_t>;
-      using Point = Mips_Point<uint8_t>;
-      using Range = PointRange<uint8_t, Point>;
-      bench<ChPoint, Range>(P);
-    }
-  } else if (tp == "int8") {
-    if (df == "Euclidian"){
-      using ChPoint = Chamfer_Euclidian_Point<int8_t>;
-      using Point = Euclidian_Point<int8_t>;
-      using Range = PointRange<int8_t, Point>;
-      bench<ChPoint, Range>(P);
-    } else if (df == "Mips") {
-      using ChPoint = Chamfer_Mips_Point<int8_t>;
-      using Point = Mips_Point<int8_t>;
-      using Range = PointRange<int8_t, Point>;
-      bench<ChPoint, Range>(P);
-    }
+  if (df == "L2"){
+    using ChPoint = ChamferL2_Point;
+    bench<ChPoint, mvivf::L2>(P);
+  } else if (df == "IP") {
+    using ChPoint = ChamferIP_Point;
+    bench<ChPoint, mvivf::IP>(P);
   }
   return 0;
 }

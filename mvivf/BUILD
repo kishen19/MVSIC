@@ -2,26 +2,36 @@ package(default_visibility = ["//visibility:public"])
 
 
 cc_library(
-    name = "index",
-    hdrs = ["index.h"],
-    deps = [
-      "@parlaylib//parlay:primitives",
-      "//mvc:mvkmeans",
-      "//mvivf/utils:utils",
-    ],
+  name = "index",
+  hdrs = ["index.h"],
+  deps = [
+    "@parlaylib//parlay:primitives",
+    "//mvc/utils:chamfer_ip_point",
+    "//mvc/utils:chamfer_l2_point",
+    "//mvc/utils:point_cloud_set",
+    "//mvivf/utils:search_params",
+  ],
+)
+
+cc_library(
+  name = "mvivf",
+  hdrs = ["mvivf.h"],
+  deps = [
+    "//mvc:mvkmeans",
+    "//mvivf/utils:top_neighbors",
+    ":index",
+  ],
 )
 
 cc_binary(
-    name = "bench",
-    srcs = ["bench.cpp"],
-    deps = [
-      ":index",
-      "@parlayann//algorithms/utils:point_range",
-      "@parlayann//algorithms/utils:euclidian_point",
-      "@parlayann//algorithms/utils:mips_point",
-      "@parlayann//algorithms/bench:parse_command_line",
-      "//mvc/utils:pointcloud",
-      "//mvc/utils:chamferpoint",
-      "//mvivf/utils:stats",
-    ],
+  name = "bench",
+  srcs = ["bench.cpp"],
+  deps = [
+    "//mvc/utils:chamfer_ip_point",
+    "//mvc/utils:chamfer_l2_point",
+    "//mvc/utils:parse_command_line",
+    "//mvc/utils:point_cloud_set",
+    "//mvivf/utils:stats",
+    ":mvivf",
+  ],
 )

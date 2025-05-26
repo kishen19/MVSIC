@@ -183,6 +183,6 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points){
 }
 
 template struct MVClustering<true>;  // Instantiates for L2 metric (metric = true)
-template struct MVClustering<false>; // Instantiates for MIPS metric (metric = false)
+template struct MVClustering<false>; // Instantiates for MIPS      (metric = false)
 
 }
