@@ -1,0 +1,99 @@
+#include "mvc/utils/chamfer_ip_point.h"
+#include "mvc/utils/chamfer_l2_point.h"
+#include "mvc/utils/euclidian_point.h"
+#include "mvc/utils/mips_point.h"
+#include "mvc/utils/parse_command_line.h"
+#include "mvc/utils/point_cloud_set.h"
+#include "mvc/utils/point_range.h"
+#include "mvivf/utils/stats.h"
+#include "svheuristic.h"
+
+
+template <typename Point, typename ChPoint, bool metric>
+void bench(commandLine& P) {
+  using PC = PointCloudSet<ChPoint>;
+  using Range = PointRange<float, Point>;
+
+  char* inFile = P.getOptionValue("-i");
+  char* qFile = P.getOptionValue("-q");
+  std::string QFile;
+  if (qFile != nullptr){
+    QFile = P.getOptionValue("-q");
+  } else {
+    QFile = "";
+  }
+  std::string gtFile = P.getOptionValue("-gt", "");
+  std::string outFile = P.getOptionValue("-o", "");
+  std::string indexFile = P.getOptionValue("-index", "");
+
+    size_t minsize = P.getOptionLongValue("-minsize", 100);
+  size_t maxsize = P.getOptionLongValue("-maxsize", 500);
+  size_t nprobes = P.getOptionLongValue("-nprobes", 1);
+  size_t beamsize = P.getOptionLongValue("-beamsize", 0);
+  size_t k = P.getOptionLongValue("-k", 10);
+  bool verbose = P.getOption("-v");
+
+  auto points = PC(inFile);
+  svh::IndexSVHParams index_params(minsize, maxsize, verbose);
+  mvivf::SearchParams search_params(k, 0, nprobes, beamsize);
+  svh::IndexSVH<metric> index(points.get_dims(), index_params);
+  // if (indexFile != ""){
+  //   std::cout << "Loading index from " << indexFile << std::endl;
+  //   index.Load(indexFile, points);
+  //   std::cout << "Index loaded" << std::endl;
+  // } else {
+    std::cout << "Building index..." << std::endl;
+    parlay::internal::timer it;
+    it.start();
+    index.build(points); 
+    it.stop();
+    std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
+  // }
+  // if (outFile != ""){
+  //   std::cout << "Saving index to " << outFile << std::endl;
+  //   index.Save(P.getOptionValue("-o"));
+  //   std::cout << "Index saved." << std::endl;
+  // }
+  
+  if (QFile != ""){
+    auto queries = PC(qFile);
+    auto gt = ReadGT(gtFile, queries.size());
+    double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
+    
+    std::cout << "Computing stats..." << std::endl;
+    mvivf::Stats result = compute_stats(index, points, queries, gt, search_params);
+    QPS_seq = result.QPS_seq;
+    QPS_par = result.QPS_par;
+    avg_cmps = result.avg_cmps;
+    recall_1_k = result.recall_1_k;
+    recall_k_k = result.recall_k_k;
+    std::cout << "Number of Queries: " << queries.size() << std::endl
+              << "QPS_seq: " << QPS_seq << std::endl
+              << "QPS_par: " << QPS_par << std::endl
+              << "Average cmps: " << avg_cmps << std::endl
+              << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
+              << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+  }
+}
+
+int main(int argc, char* argv[]) {
+  commandLine P(argc, argv,
+                "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
+                "[-data_type <tp>] [-dist_func <dist_func>]" 
+                "[-seed <algorithm>] [-iters <num_iters>]" 
+                // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
+              );
+
+  std::string df = P.getOptionValue("-dist_func", "IP");
+
+  if (df == "L2"){
+    using Point = Euclidian_Point<float>;
+    using ChPoint = ChamferL2_Point;
+    bench<Point, ChPoint, mvivf::L2>(P);
+  } else if (df == "IP") {
+    using Point = Mips_Point<float>;
+    using ChPoint = ChamferIP_Point;
+    bench<Point, ChPoint, mvivf::IP>(P);
+  }
+  return 0;
+}

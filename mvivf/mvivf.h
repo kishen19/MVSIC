@@ -99,7 +99,7 @@ void IndexMVIVF<metric>::build_helper(node_t* node, const PointCloudSet<ChPoint>
         child->set_points(child_points);
       }
       return child;
-    }, 10000);
+    });
   node->children = children;
 }
 
@@ -166,10 +166,10 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     });
 
     // Add new nodes to beam and probe list
-    for (size_t i = 0; i < std::min((size_t)beam_length, new_nodes_to_beam.size()); i++) {
+    for (size_t i = 0; i < std::min(beam_length, new_nodes_to_beam.size()); i++) {
       add_to_beam(new_nodes_to_beam[i].second, new_nodes_to_beam[i].first);
     }
-    for (size_t i = 0; i < std::min((size_t)nprobes, new_nodes_to_probe.size()); i++) {
+    for (size_t i = 0; i < std::min(nprobes, new_nodes_to_probe.size()); i++) {
       add_to_probe_list(new_nodes_to_probe[i].second, new_nodes_to_probe[i].first);
     }
   }
