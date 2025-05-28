@@ -5,13 +5,11 @@ cc_binary(
     name = "mvivf_benchmark",
     srcs = ["mvivf_benchmark.cpp"],
     deps = [
-      "@parlayann//algorithms/utils:point_range",
-      "@parlayann//algorithms/utils:euclidian_point",
-      "@parlayann//algorithms/utils:mips_point",
-      "@parlayann//algorithms/bench:parse_command_line",
-      "//mvc/utils:pointcloud",
-      "//mvc/utils:chamferpoint",
+      "//mvc/utils:chamfer_ip_point",
+      "//mvc/utils:chamfer_l2_point",
+      "//mvc/utils:parse_command_line",
+      "//mvc/utils:point_cloud_set",
       "//mvivf/utils:stats",
-      "//mvivf:index",
+      "//mvivf:mvivf",
     ],
 )

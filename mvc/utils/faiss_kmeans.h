@@ -5,7 +5,7 @@
 #include "faiss/IndexFlat.h"
 
 template <typename Seq>
-auto faiss_kmeans(const Seq& data, size_t d, uint32_t k, bool is_metric) {
+auto faiss_kmeans(const Seq& data, size_t d, size_t k, bool is_metric) {
   size_t n = data.size();
 
   // Flatten input into raw float array for FAISS
@@ -34,11 +34,11 @@ auto faiss_kmeans(const Seq& data, size_t d, uint32_t k, bool is_metric) {
   parlay::parallel_for(0, k, [&](size_t i) {
     std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
-  return centroids;
+  return std::move(centroids);
 }
 
 template <typename Seq>
-auto faiss_kmeans_assign(const Seq& data, size_t d, uint32_t k, bool is_metric) {
+auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, bool is_metric) {
   size_t n = data.size();
 
   // Flatten input into raw float array for FAISS
@@ -57,23 +57,17 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, uint32_t k, bool is_metric) 
     // Index used to assign points during clustering (L2 distance)
     faiss::IndexFlatL2 index(d);
     clus.train(n, flat_data.data(), index);
-
-    // index.reset();
-    // index.add(k, clus.centroids.data());
-    index.search(n, flat_data.data(), 1, distances.data(), assignments.data());
+    faiss::IndexFlatL2 search_index(d);
+    search_index.add(k, clus.centroids.data());
+    search_index.search(n, flat_data.data(), 1, distances.data(), assignments.data());
   } else{
     // Index used to assign points during clustering (cosine distance)
     faiss::IndexFlatIP index(d);
     clus.train(n, flat_data.data(), index);
-
-    // index.reset();
-    // index.add(k, clus.centroids.data());
-    index.search(n, flat_data.data(), 1, distances.data(), assignments.data());
+    faiss::IndexFlatIP search_index(d);
+    search_index.add(k, clus.centroids.data());
+    search_index.search(n, flat_data.data(), 1, distances.data(), assignments.data());
   }
-  for (size_t i=0; i<10; i++){
-    std::cout << "(" << distances[i] << ", " << assignments[i] << ") ";
-  }
-  std::cout << std::endl;
 
   // Extract centroids
   float* centroids_ptr = clus.centroids.data();
@@ -82,11 +76,11 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, uint32_t k, bool is_metric) 
     std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
 
-  return std::make_pair(centroids, assignments);
+  return std::make_pair(std::move(centroids), std::move(assignments));
 }
 
 template <typename Seq>
-auto faiss_wgh_kmeans(const Seq& data, size_t d, uint32_t k, 
+auto faiss_wgh_kmeans(const Seq& data, size_t d, size_t k, 
     parlay::sequence<float>& wghs, bool is_metric) {
   size_t n = data.size();
 
@@ -120,7 +114,7 @@ auto faiss_wgh_kmeans(const Seq& data, size_t d, uint32_t k,
 }
 
 template <typename Seq>
-auto faiss_kmeans_cost(const Seq& data, size_t d, uint32_t k, 
+auto faiss_kmeans_cost(const Seq& data, size_t d, size_t k, 
     parlay::sequence<float>& wghs={}, bool is_metric=false) {
   size_t n = data.size();
 

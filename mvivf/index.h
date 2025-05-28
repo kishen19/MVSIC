@@ -28,7 +28,7 @@ struct Index {
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
   virtual std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
-    const ChPoint& query, const PointCloudSet<ChPoint>& points, size_t k, 
+    const ChPoint& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) {}
 
   // Write the index to a file in disk

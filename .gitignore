@@ -21,3 +21,5 @@ bazel-*
 
 # VSCode files
 .vscode
+
+*.csv

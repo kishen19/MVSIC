@@ -25,12 +25,12 @@ struct IndexMVIVFNode {
   IndexMVIVFNode() : children(parlay::sequence<IndexMVIVFNode*>(0)), center(ChPoint()), 
     points(PointCloudSet<ChPoint>()) {}
 
-  inline void set_center(const ChPoint& center_) { center = center_; } // TODO: check this
-  inline void set_points(const PointCloudSet<ChPoint>& points_) { points = points_; } // TODO: check this
+  inline void set_center(const ChPoint& center_) { center = center_; }
+  inline void set_points(const PointCloudSet<ChPoint>& points_) { points = points_; }
 };
 
 template <bool metric>
-struct IndexMVIVF : Index<metric>, IndexMVIVFParams{
+struct IndexMVIVF :Index<metric>, IndexMVIVFParams{
   using ChPoint = Index<metric>::ChPoint;
   using node_t = IndexMVIVFNode<ChPoint>;
   using Index<metric>::d;
@@ -51,7 +51,7 @@ struct IndexMVIVF : Index<metric>, IndexMVIVFParams{
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
-    const ChPoint& query, const PointCloudSet<ChPoint>& points, size_t k, 
+    const ChPoint& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) override;
   // Traversing the k-means tree: returns the height of the tree
   // TODO: get more stats about the tree
@@ -93,7 +93,6 @@ void IndexMVIVF<metric>::build_helper(node_t* node, const PointCloudSet<ChPoint>
       child->set_center(centers[i]);
       PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(
         points.filter(grouped[i]), d);
-      std::cout << "Child size: " << child_points.size() << std::endl;
       if (child_points.size() > maxsize) {
         build_helper(child, child_points);
       } else {
@@ -108,19 +107,20 @@ void IndexMVIVF<metric>::build_helper(node_t* node, const PointCloudSet<ChPoint>
 // Output format: < [<id, distance>, ...], # distance comparisons>
 template <bool metric>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>::search(
-    const ChPoint& query, const PointCloudSet<ChPoint>& points, size_t k, 
+    const ChPoint& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) {
+  size_t k = params.k;
   size_t nprobes = params.nprobes;
   size_t beam_length = params.beam_length;
-  if (beam_length == 0) { beam_length = 2 * nprobes; } // Default
+  if (beam_length == 0) { beam_length = nprobes; } // Default
   // probe_list contains the final candidate leaf nodes to probe
-  std::set<std::pair<float, node_t*>> probe_list; // Change to absl
-  std::set<std::pair<float, node_t*>> beam; // Change to absl
+  std::set<std::pair<float, node_t*>> probe_list; // TODO: Change to absl
+  std::set<std::pair<float, node_t*>> beam; // TODO: Change to absl
   size_t dist_cmps=0;
   auto add_to_probe_list = [&](node_t* node, float dist) {
     if (probe_list.size() < nprobes || dist < probe_list.rbegin()->first) {
       probe_list.insert({ dist, node });
-      if (probe_list.size() > k) {
+      if (probe_list.size() > nprobes) {
         probe_list.erase(--probe_list.end()); // Remove the farthest probe
       }
     }
@@ -192,7 +192,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     return a.second < b.second; // Sort by distance
   });
   auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min((size_t)k, flattened_results.size()), [&](size_t i) { 
+      std::min(k, flattened_results.size()), [&](size_t i) { 
     return flattened_results[i]; });
   return std::make_pair(final_results, dist_cmps);
 }

@@ -1,44 +1,54 @@
-#include "algorithms/bench/parse_command_line.h"
-#include "algorithms/utils/euclidian_point.h"
-#include "algorithms/utils/mips_point.h"
-#include "algorithms/utils/point_range.h"
-
-#include "mvc/utils/pointcloud.h"
-#include "mvc/utils/chamferpoint.h"
+#include "mvc/utils/chamfer_ip_point.h"
+#include "mvc/utils/chamfer_l2_point.h"
+#include "mvc/utils/parse_command_line.h"
+#include "mvc/utils/point_cloud_set.h"
 #include "mvivf/utils/stats.h"
-#include "mvivf/index.h"
+#include "mvivf/mvivf.h"
 
 
-template <typename ChPoint, typename Range>
+template <typename ChPoint, bool metric>
 void bench(commandLine& P) {
-  using T = typename ChPoint::distance_type;
-  using PC = PointCloud<ChPoint, Range>;
+  using PC = PointCloudSet<ChPoint>;
 
+  // Files
   char* inFile = P.getOptionValue("-i"); // Base Points
-  char* resFile = P.getOptionValue("-r"); // CSV file to store stats
   std::string qFile = P.getOptionValue("-q", ""); // Query Points
   std::string gtFile = P.getOptionValue("-gt", ""); // Ground Truth
   std::string outFile = P.getOptionValue("-o", ""); // File to store index 
   std::string indexFile = P.getOptionValue("-index", ""); // File containing index
-  long maxsize = P.getOptionLongValue("-maxsize", 100);
-  long k = P.getOptionLongValue("-k", 10);
-  long s = P.getOptionLongValue("-s", 0); // Deprecate after clustering evals
-  auto seeding = P.getOptionValue("-seed", "Random"); // Deprecate after clustering evals
+  char* resFile = P.getOptionValue("-r"); // CSV file to store stats
+  // Params
+  size_t minsize = P.getOptionLongValue("-minsize", 100);
+  size_t maxsize = P.getOptionLongValue("-maxsize", 500);
+  size_t nprobesl = P.getOptionLongValue("-npl", 1);
+  size_t nprobesr = P.getOptionLongValue("-npr", 8);
+  size_t nprobesmp = P.getOptionLongValue("-npmp", 2);
+  size_t nprobesad = P.getOptionLongValue("-npad", 0);
+  // size_t beamsize = P.getOptionLongValue("-beamsize", 0);
+  size_t k = P.getOptionLongValue("-k", 10);
+  size_t s = P.getOptionLongValue("-s", 0);
+  auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
-  long rounds = P.getOptionLongValue("-rounds", 1);
+  int rounds = P.getOptionLongValue("-rounds", 1);
+  bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
+  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, verbose);
+  mvivf::IndexMVIVF<metric> index(points.get_dims(), index_params);
   if (indexFile != ""){ // Stats Benchmark
-    mvivf::Index<T, PC> index;
-    std::cout << "Loading index from " << indexFile << std::endl;
-    index.Load(indexFile, points);
+    index.load(indexFile, points);
     std::cout << "Index loaded" << std::endl;
-    
     auto queries = PC(P.getOptionValue("-q"));
     auto gt = ReadGT(gtFile, queries.size());
+    parlay::sequence<mvivf::SearchParams> search_params_list;
+    size_t nprobes = nprobesl;
+    while (nprobes<=nprobesr) {
+      search_params_list.push_back(mvivf::SearchParams(k,s,nprobes,0));
+      nprobes = nprobesmp * nprobes + nprobesad;
+    }
     // Compute Stats
     std::cout << "Computing stats..." << std::endl;
-    search_and_parse(index, points, queries, gt, resFile, k);
+    search_all(index, points, queries, gt, resFile, search_params_list);
     std::cout << "Stats computed and saved to " << resFile << std::endl;
   } else { // Indexing Benchmark
     std::cout << "Starting Indexing Benchmark..." << std::endl;
@@ -46,17 +56,18 @@ void bench(commandLine& P) {
     double index_time = 0.0;
     for (long it=0; it<=rounds; it++){
       t.start();
-      mvivf::Index<T, PC> index;
-      index.Build(points, maxsize, s, iters, seeding);
+      mvivf::IndexMVIVF<metric> index(points.get_dims(), index_params);
+      index.build(points);
       t.stop();
       if (it!=0){
         index_time += t.total_time();
       } else{
         if (outFile != ""){
           std::cout << "Saving index to " << outFile << std::endl;
-          index.Save(P.getOptionValue("-o"));
+          index.save(P.getOptionValue("-o"));
           std::cout << "Index saved." << std::endl;
         }
+        std::cout << "Warm up Time: " << t.total_time() << " seconds." << std::endl;
       }
       t.reset();
     }
@@ -71,58 +82,14 @@ int main(int argc, char* argv[]) {
                 "[-seed <algorithm>] [-iters <num_iters>]" 
                 "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]");
 
-  std::string tp = P.getOptionValue("-data_type", "float");
-  std::string df = P.getOptionValue("-dist_func", "Euclidian");
+  std::string df = P.getOptionValue("-dist_func", "IP");
 
-  if ((tp != "uint8") && (tp != "int8") && (tp != "float")) {
-    std::cout << "Error: vector type not specified correctly, specify int8, "
-                 "uint8, or float"
-              << std::endl;
-    abort();
-  }
-
-  // auto seeding = P.getOptionValue("-seed", "Random");
-  // auto iters = P.getOptionLongValue("-iters", 5);
-  // auto kmeans_seeding = P.getOptionValue("-kmeans_seed", "PrefixDoubling");
-  // auto kmeans_dist_algo = P.getOptionValue("-kmeans_dist", "ANNS");
-  // auto kmeans_iters = P.getOptionLongValue("-kmeans_iters", 20);
-
-  if (tp == "float") {
-    if (df == "Euclidian"){
-      using ChPoint = Chamfer_Euclidian_Point<float>;
-      using Point = Euclidian_Point<float>;
-      using Range = PointRange<float, Point>;
-      bench<ChPoint, Range>(P);
-    } else if (df == "Mips") {
-      using ChPoint = Chamfer_Mips_Point<float>;
-      using Point = Mips_Point<float>;
-      using Range = PointRange<float, Point>;
-      bench<ChPoint, Range>(P);
-    }
-  } else if (tp == "uint8") {
-    if (df == "Euclidian"){
-      using ChPoint = Chamfer_Euclidian_Point<uint8_t>;
-      using Point = Euclidian_Point<uint8_t>;
-      using Range = PointRange<uint8_t, Point>;
-      bench<ChPoint, Range>(P);
-    } else if (df == "Mips") {
-      using ChPoint = Chamfer_Mips_Point<uint8_t>;
-      using Point = Mips_Point<uint8_t>;
-      using Range = PointRange<uint8_t, Point>;
-      bench<ChPoint, Range>(P);
-    }
-  } else if (tp == "int8") {
-    if (df == "Euclidian"){
-      using ChPoint = Chamfer_Euclidian_Point<int8_t>;
-      using Point = Euclidian_Point<int8_t>;
-      using Range = PointRange<int8_t, Point>;
-      bench<ChPoint, Range>(P);
-    } else if (df == "Mips") {
-      using ChPoint = Chamfer_Mips_Point<int8_t>;
-      using Point = Mips_Point<int8_t>;
-      using Range = PointRange<int8_t, Point>;
-      bench<ChPoint, Range>(P);
-    }
+  if (df == "L2"){
+    using ChPoint = ChamferL2_Point;
+    bench<ChPoint, mvivf::L2>(P);
+  } else if (df == "IP") {
+    using ChPoint = ChamferIP_Point;
+    bench<ChPoint, mvivf::IP>(P);
   }
   return 0;
 }

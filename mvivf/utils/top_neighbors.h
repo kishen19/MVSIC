@@ -16,7 +16,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(const ChPo
   dist_cmps += dists.size();
   parlay::sort_inplace(dists);
   auto knn = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min((size_t)k, dists.size()), [&](size_t i) { 
+      std::min(k, dists.size()), [&](size_t i) { 
     return std::make_pair(dists[i].second, dists[i].first); });
   return std::make_pair(knn, dist_cmps);
 }
@@ -31,7 +31,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn_ids(const 
   dist_cmps += dists.size();
   parlay::sort_inplace(dists);
   auto knn = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min((size_t)k, dists.size()), [&](size_t i) { 
+      std::min(k, dists.size()), [&](size_t i) { 
     return std::make_pair(dists[i].second, dists[i].first); });
   return std::make_pair(knn, dist_cmps);
 }

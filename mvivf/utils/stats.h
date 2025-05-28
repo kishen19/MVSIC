@@ -7,18 +7,24 @@
 
 namespace mvivf{
 struct Stats{
-  double QPS_seq;
-  double QPS_par;
-  double avg_cmps;
-  double recall_1_k;
-  double recall_k_k;
+  double QPS_seq = 0.0;
+  double QPS_par = 0.0;
+  double avg_cmps = 0.0;
+  double recall_1_k = 0.0;
+  double recall_k_k = 0.0;
+
+  Stats() {}
+
+  Stats(double QPS_seq, double QPS_par, double avg_cmps, double recall_1_k, double recall_k_k)
+    : QPS_seq(QPS_seq), QPS_par(QPS_par), avg_cmps(avg_cmps), recall_1_k(recall_1_k), 
+      recall_k_k(recall_k_k) {}
 };
 } // namespace mvivf
 
 double compute_recall(
-    parlay::sequence<parlay::sequence<std::pair<size_t, float>>>& pred, 
-    parlay::sequence<parlay::sequence<std::pair<float, size_t>>>& gt, 
-    int k, int k_gt){
+    const parlay::sequence<parlay::sequence<std::pair<size_t, float>>>& pred, 
+    const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>>& gt, 
+    size_t k, size_t k_gt){
   if (k_gt > gt[0].size()){
     std::cerr << "Not enough gt values" << std::endl;
     exit(-1);
@@ -41,23 +47,25 @@ double compute_recall(
         correct++;
       }
     }
-    return static_cast<double>(correct)/k_gt;
+    return static_cast<double>(correct)/static_cast<double>(k_gt);
   });
-  return parlay::reduce(ind_recall)/ind_recall.size();
+  auto val = parlay::reduce(ind_recall);
+  return parlay::reduce(ind_recall)/static_cast<double>(ind_recall.size());
 }
 
 template <typename Index, typename ChPoint, typename GT>
-auto compute_stats(const Index& index, const PointCloudSet<ChPoint>& points, 
+mvivf::Stats compute_stats(Index& index, const PointCloudSet<ChPoint>& points, 
     const PointCloudSet<ChPoint>& query_points, 
-    const GT& gt, int k, const mvivf::SearchParams& params) {
+    const GT& gt, const mvivf::SearchParams& params) {
   parlay::internal::timer t;
+  size_t k = params.k;
   double query_time_seq = 0.0;
   auto pred = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>(
     query_points.size());
   auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
   for (size_t i = 0; i < query_points.size(); i++) {
     t.start();
-    auto [results, dist_cmps_i] = index.search(query_points[i], points, k, params);
+    auto [results, dist_cmps_i] = index.search(query_points[i], points, params);
     t.stop();
     query_time_seq += t.total_time();
     t.reset();
@@ -66,7 +74,7 @@ auto compute_stats(const Index& index, const PointCloudSet<ChPoint>& points,
   }
   t.start();
   parlay::parallel_for(0, query_points.size(), [&](size_t i) {
-    auto [results, dist_cmps_i] = index.search(query_points[i], points, k, params);
+    auto [results, dist_cmps_i] = index.search(query_points[i], points, params);
     pred[i] = results;
     assert(cmps[i] == dist_cmps_i);
     cmps[i] = dist_cmps_i;
@@ -82,31 +90,41 @@ auto compute_stats(const Index& index, const PointCloudSet<ChPoint>& points,
   return mvivf::Stats(QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k);
 }
 
-// inline void write_to_csv(std::string csv_filename, mvivf::Stats& result, 
-//     int k, size_t num_queries) {
-//   csvfile csv(csv_filename);
-//   csv << "Num queries" << "k" << "nprobes" << "QPS_seq" << "QPS_par" << "Avg Cmps" 
-//       << "Recall 1@k" << "Recall k@k" << endrow;
-//   int nprobes = 1;
-//   csv << num_queries << k << nprobes << QPS_seq << QPS_par << avg_cmps 
-//       << recall_1_k << recall_k_k << endrow;
-//   csv << endrow;
-// }
+inline void write_to_csv(const std::string csv_filename, 
+    const parlay::sequence<mvivf::Stats>& results, 
+    const parlay::sequence<mvivf::SearchParams>& params) {
+  assert(results.size() == params.size());
+  csvfile csv(csv_filename);
+  csv << "k" << "s" << "nprobes" << "beam_length" << "QPS_seq" << "QPS_par" << "Avg Cmps" 
+      << "Recall 1@k" << "Recall k@k" << endrow;
+  for (size_t i=0; i<results.size(); ++i) {
+    csv << params[i].k << params[i].s << params[i].nprobes << params[i].beam_length 
+        << results[i].QPS_seq << results[i].QPS_par << results[i].avg_cmps 
+        << results[i].recall_1_k << results[i].recall_k_k << endrow;
+  }
+  csv << endrow;
+}
 
 // TODO: batch queries
 
-// template <typename Index, typename ChPoint, typename GT>
-// void search_and_parse(Index& index, PointCloudSet<ChPoint>& base_points, 
-//     PointCloudSet<ChPoint>& query_points, GT& gt, const char* res_file, int k) {
-//   parlay::sequence<std::tuple<double, double, double, double, double>> results;
-//   std::vector<int> nprobes_vals = {1, 2, 4, 8, 16, 32, 64};
+template <typename Index, typename ChPoint, typename GT>
+void search_all(Index& index, const PointCloudSet<ChPoint>& base_points, 
+    const PointCloudSet<ChPoint>& query_points, GT& gt, const char* res_file,
+    const parlay::sequence<mvivf::SearchParams>& params) {
+  parlay::sequence<mvivf::Stats> results;
+  for (size_t i=0; i<params.size(); ++i) {
+    auto result = compute_stats(index, base_points, query_points, gt, params[i]);
+    results.push_back(result);
+  }
+  write_to_csv(std::string(res_file), results, params);
+}
 
-//   for (int nprobes : nprobes_vals) {
-//     auto result = check_stats(index, base_points, query_points, gt, k, nprobes);
-//     results.push_back(result);
-//   }
-//   write_to_csv(std::string(res_file), results, k, query_points.size());
-// }
+template <typename Index, typename ChPoint, typename GT>
+void search_all(Index& index, const PointCloudSet<ChPoint>& base_points, 
+    const PointCloudSet<ChPoint>& query_points, GT& gt, const char* res_file,
+    const mvivf::SearchParams& params){
+  search_all(index, base_points, query_points, gt, res_file, {params});
+}
 
 auto ReadGT(std::string& file_path, size_t num_points) {
   std::ifstream file(file_path, std::ios::binary | std::ios::in);
@@ -117,11 +135,11 @@ auto ReadGT(std::string& file_path, size_t num_points) {
   int num_neighbors = 0;
   file.read(reinterpret_cast<char*>(&num_neighbors), sizeof(num_neighbors));
 
-  parlay::sequence<parlay::sequence<std::pair<float, size_t>>> result(num_points);
+  parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> result(num_points);
   for (int i = 0; i < num_points; ++i) {
-    parlay::sequence<std::pair<float, size_t>> neighbors(num_neighbors);
+    parlay::sequence<std::pair<float, uint32_t>> neighbors(num_neighbors);
     file.read(reinterpret_cast<char*>(neighbors.data()),
-              num_neighbors * sizeof(std::pair<float, size_t>));
+              num_neighbors * sizeof(std::pair<float, uint32_t>));
     result[i] = std::move(neighbors);
   }
   file.close();
