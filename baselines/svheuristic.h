@@ -6,9 +6,12 @@
 #include "mvc/utils/faiss_kmeans.h"
 #include "mvc/utils/mips_point.h"
 #include "mvc/utils/point_range.h"
-#include "mvivf/utils/utils.h"
+#include "mvivf/index.h"
+#include "mvivf/utils/top_neighbors.h"
+
 
 namespace svh {
+using namespace mvivf;
 
 struct IndexSVHParams{
   size_t minsize = 100;
@@ -57,11 +60,11 @@ struct IndexSVH :Index<metric>, IndexSVHParams {
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search_each(
-    const Point& query, const PointCloudSet<ChPoint> points,
+    const Point& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params);
   // 
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
-    const Point& query, const PointCloudSet<ChPoint> points,
+    const ChPoint& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) override;
   // Write the index to a file in disk
   void save(const std::string& filename) override{}
@@ -70,23 +73,20 @@ struct IndexSVH :Index<metric>, IndexSVHParams {
 };
 
 template <bool metric>
-void IndexSVH<mteric>::build(const PointCloudSet<ChPoint>& points) {
+void IndexSVH<metric>::build(const PointCloudSet<ChPoint>& points) {
   size_t n = points.size();
   auto iota = parlay::iota(n);
-  auto data = points.filter_flattened(iota);
-  std::cout << "Here" << std::endl;
+  parlay::sequence<parlay::sequence<float>> data = points.filter_flattened(iota);
   auto ids = parlay::sequence<size_t>::uninitialized(points.total_size());
   auto num_embs = parlay::delayed_tabulate(n, [&](size_t i){
     return points.get_size(i);
   });
   auto [offsets, _] = parlay::scan(num_embs);
-  std::cout << "Here" << std::endl;
   parlay::parallel_for(0, n, [&](size_t i){
     for (size_t j = 0; j < num_embs[i]; ++j) {
       ids[offsets[i] + j] = i;
     }
   });
-  std::cout << "Before First BuildHelper" << std::endl;
   root = new node_t();
   build_helper(root, data, ids);
 }
@@ -95,7 +95,7 @@ void IndexSVH<mteric>::build(const PointCloudSet<ChPoint>& points) {
 template <bool metric>
 void IndexSVH<metric>::build_helper(node_t* node, 
     const parlay::sequence<parlay::sequence<float>>& points, 
-    parlay::sequence<size_t>& ids) {
+    const parlay::sequence<size_t>& ids) {
   size_t n = points.size();
   size_t mp = std::max((size_t)4, maxsize/minsize);
   // Num Clusters = min(sqrt(n), mp*n/maxsize)
@@ -105,24 +105,17 @@ void IndexSVH<metric>::build_helper(node_t* node,
     std::cout << "Building index with " << n << " points, maxsize: " 
               << maxsize << ", num_clusters: " << num_clusters << std::endl;
   }
-  std::cout << "Before kmeans call" << std::endl;
   // Step 1: Run k-means on data and collect clusters
-  auto [centers_, cluster_ids] = faiss_kmeans_assign(points, d, 
+  auto [centers_, cluster_ids, active_indices] = faiss_kmeans_assign(points, d, 
     num_clusters, metric);
   Range centers = Range(centers_, d);
-  std::cout << "Kmeans call done" << std::endl;
   auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(n, [&](size_t i) { 
     return std::make_pair(cluster_ids[i], i); });
   auto grouped = parlay::group_by_index(id_pt, num_clusters);
-  if (verbose){
-    for (size_t i=0; i< grouped.size(); i++){
-      std::cout << grouped[i].size() << " ";
-    }
-    std::cout << std::endl;
-  }
   // Step 2: Update children nodes and recurse for large nodes
-  parlay::sequence<node_t*> children = parlay::sequence<node_t*>::from_function(num_clusters,
-    [&](size_t i) {
+  parlay::sequence<node_t*> children = parlay::sequence<node_t*>::from_function(active_indices.size(),
+    [&](size_t id) {
+      size_t i = active_indices[id];
       node_t* child = new node_t(); // TODO: use parlay allocator
       child->set_center(centers[i]);
       auto child_points = parlay::tabulate(grouped[i].size(), [&](size_t j) {
@@ -132,7 +125,7 @@ void IndexSVH<metric>::build_helper(node_t* node,
       if (child_points.size() > maxsize) {
         build_helper(child, child_points, child_ids);
       } else {
-        auto child_range = Range(child_data, d);
+        auto child_range = Range(child_points, d);
         child->set_points(child_range, child_ids);
       }
       return child;
@@ -142,10 +135,11 @@ void IndexSVH<metric>::build_helper(node_t* node,
 
 template <bool metric>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::search(
-    const ChPoint& query, PointCloudSet<ChPoint>& points, 
+    const ChPoint& query, const PointCloudSet<ChPoint>& points, 
     const SearchParams& params) {
   size_t q = query.size();
-  auto results = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>::uninitialized(q);
+  size_t k = params.k;
+  auto results = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>(q);
   auto dist_cmps = parlay::sequence<size_t>::uninitialized(q);
   parlay::parallel_for(0, q, [&](size_t i) {
     std::tie(results[i], dist_cmps[i]) = search_each(Point(query.get_coords(i), 
@@ -186,7 +180,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
 
 template <bool metric>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::search_each(
-    const Point& query, const PointCloudSet<ChPoint> points,
+    const Point& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) {
   size_t k = params.k;
   size_t nprobes = params.nprobes;
@@ -256,7 +250,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   // Step 2: Probe clusters in probe_list
   auto probe_dist_cmps = parlay::sequence<size_t>::uninitialized(probe_list.size());
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, 
-    float>>>::from_function(probe_list.size(), [&](size_t id  ) {
+    float>>>::from_function(probe_list.size(), [&](size_t i) {
       std::pair<float, node_t*> p = *std::next(probe_list.begin(), i);
       node_t* node = p.second;
       auto cluster_points = node->points;

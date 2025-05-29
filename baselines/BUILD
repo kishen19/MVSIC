@@ -10,7 +10,8 @@ cc_library(
       "//mvc/utils:faiss_kmeans",
       "//mvc/utils:mips_point",
       "//mvc/utils:point_range",
-      "//mvivf/utils:utils",
+      "//mvivf:index",
+      "//mvivf/utils:top_neighbors",
     ],
 )
 

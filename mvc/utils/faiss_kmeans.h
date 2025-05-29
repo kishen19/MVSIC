@@ -76,7 +76,22 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, bool is_metric) {
     std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
 
-  return std::make_pair(std::move(centroids), std::move(assignments));
+  // Remove clusters with all almost-duplicates
+  auto id_pt = parlay::delayed_tabulate(n, [&](size_t i) { return std::make_pair(assignments[i], i); });
+  auto grouped = parlay::group_by_index(id_pt, k);
+  parlay::sequence<bool> active(k,true);
+  parlay::parallel_for(0, k, [&](size_t i) {
+    // average distance to center
+    auto dists = parlay::delayed_tabulate(grouped[i].size(), [&](size_t j) {
+      return distances[grouped[i][j]];
+    });
+    float avg_dist = parlay::reduce(dists) / grouped[i].size();
+    if (avg_dist < 1e-5) {
+      active[i] = false;
+    }
+  });
+  auto active_indices = parlay::pack_index(active);
+  return std::make_tuple(std::move(centroids), std::move(assignments), std::move(active_indices));
 }
 
 template <typename Seq>

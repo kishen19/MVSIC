@@ -89,11 +89,11 @@ int main(int argc, char* argv[]) {
   if (df == "L2"){
     using Point = Euclidian_Point<float>;
     using ChPoint = ChamferL2_Point;
-    bench<Point, ChPoint, mvivf::L2>(P);
+    bench<Point, ChPoint, true>(P);
   } else if (df == "IP") {
     using Point = Mips_Point<float>;
     using ChPoint = ChamferIP_Point;
-    bench<Point, ChPoint, mvivf::IP>(P);
+    bench<Point, ChPoint, false>(P);
   }
   return 0;
 }
