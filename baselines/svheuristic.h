@@ -107,7 +107,7 @@ void IndexSVH<metric>::build_helper(node_t* node,
   }
   // Step 1: Run k-means on data and collect clusters
   auto [centers_, cluster_ids, active_indices] = faiss_kmeans_assign(points, d, 
-    num_clusters, metric);
+    num_clusters, metric, maxsize);
   Range centers = Range(centers_, d);
   auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(n, [&](size_t i) { 
     return std::make_pair(cluster_ids[i], i); });
@@ -139,21 +139,22 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     const SearchParams& params) {
   size_t q = query.size();
   size_t k = params.k;
+  size_t k_out = params.k_out;
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>(q);
   auto dist_cmps = parlay::sequence<size_t>::uninitialized(q);
   parlay::parallel_for(0, q, [&](size_t i) {
     std::tie(results[i], dist_cmps[i]) = search_each(Point(query.get_coords(i), 
-      query.get_dims(), query.get_dims(), query.get_id()), points, params);
+      query.get_dims(), query.get_dims()), points, params);
   });
-  auto flattened_results = parlay::flatten(results);
+  parlay::sequence<std::pair<size_t, float>> flattened_results = parlay::flatten(results);
   parlay::sort_inplace(flattened_results); // Sort by ids and then distance
   // Take sum of distances for same ids.
-  auto cutoff_indices = parlay::delayed_seq<size_t>(q + 1, [&](size_t i) {
-    return i == 0 || i == q ||
-          flattened_results[i].first != flattened_results[i - 1].first;
+  auto cutoff_indices = parlay::delayed_seq<size_t>(flattened_results.size() + 1, [&](size_t i) {
+    return i == 0 || i == flattened_results.size() ||
+      flattened_results[i].first != flattened_results[i - 1].first;
   });
   auto offsets = parlay::pack_index(cutoff_indices);
-  auto candidates = parlay::sequence<std::pair<size_t, float>>::uninitialized(offsets.size()-1);
+  auto candidates = parlay::sequence<std::pair<float, size_t>>::uninitialized(offsets.size()-1);
   parlay::parallel_for(0, offsets.size() - 1, [&](size_t i) {
     size_t start_index = offsets[i];
     size_t end_index = offsets[i + 1];
@@ -161,21 +162,24 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
         parlay::delayed_seq<float>(end_index - start_index, [&](size_t j) {
           return flattened_results[start_index + j].second;
         });
-    auto estimate_dis = parlay::reduce(subset_points);
-    candidates[i] = std::make_pair(flattened_results[start_index].first, estimate_dis/(end_index - start_index));
+    float estimate_dis = parlay::reduce(subset_points);
+    candidates[i] = std::make_pair(estimate_dis/(end_index - start_index), 
+      flattened_results[start_index].first);
   });
   parlay::sort_inplace(candidates);
   // Final re-ranking
-  auto new_cands = parlay::sequence<std::pair<size_t, float>>::from_function(candidates.size(), 
-  [&](size_t i) {
-    size_t id = candidates[i].first;
+  auto new_cands = parlay::sequence<std::pair<float, size_t>>::from_function(std::min(k_out, 
+      candidates.size()), [&](size_t i) {
+    size_t id = candidates[i].second;
     float new_dist = query.distance(points[id]);
-    return std::make_pair(id, new_dist);
+    return std::make_pair(new_dist, id);
   });
   parlay::sort_inplace(new_cands);
-  auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(std::min(k, new_cands.size()), 
-      [&](size_t i) { return new_cands[i]; });
-  return std::make_pair(final_results, parlay::reduce(dist_cmps) + candidates.size());
+  auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
+    std::min(k, new_cands.size()), [&](size_t i) { 
+      return std::make_pair(new_cands[i].second, new_cands[i].first);
+    });
+  return std::make_pair(final_results, parlay::reduce(dist_cmps) + new_cands.size());
 }
 
 template <bool metric>
@@ -183,6 +187,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     const Point& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) {
   size_t k = params.k;
+  size_t k_in = params.k_in;
   size_t nprobes = params.nprobes;
   size_t beam_length = params.beam_length;
   if (beam_length == 0) { beam_length = nprobes; } // Default
@@ -254,7 +259,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
       std::pair<float, node_t*> p = *std::next(probe_list.begin(), i);
       node_t* node = p.second;
       auto cluster_points = node->points;
-      auto [res, d_c] = mvivf::get_knn_ids(query, cluster_points, node->ids, k);
+      auto [res, d_c] = mvivf::get_knn_ids(query, cluster_points, node->ids, k_in);
       probe_dist_cmps[i] = d_c;
       return res;
     });

@@ -2,7 +2,6 @@ dataset=$1
 
 DATAPATH=/ssd2/laxman/multivector
 RESULTSPATH=/ssd2/kishen/MVC
-flags="OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=16"
 
 maxsizes=(500)
 iters=(0 10)

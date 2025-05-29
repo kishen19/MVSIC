@@ -35,60 +35,135 @@
 #include "parlay/internal/file_map.h"
 #include "NSGDist.h"
 
-
-
-  float mips_distance(const uint8_t *p, const uint8_t *q, unsigned d) {
-    int result = 0;
-    for (int i = 0; i < d; i++) {
-      result += ((int32_t)q[i]) * ((int32_t)p[i]);
-    }
-    return -((float)result);
+float mips_distance(const uint8_t *p, const uint8_t *q, unsigned d) {
+  int result = 0;
+  for (int i = 0; i < d; i++) {
+    result += ((int32_t)q[i]) * ((int32_t)p[i]);
   }
+  return -((float)result);
+}
 
-  float mips_distance(const int8_t *p, const int8_t *q, unsigned d) {
-    int result = 0;
-    for (int i = 0; i < d; i++) {
-      result += ((int32_t)q[i]) * ((int32_t)p[i]);
-    }
-    return -((float)result);
+float mips_distance(const int8_t *p, const int8_t *q, unsigned d) {
+  int result = 0;
+  for (int i = 0; i < d; i++) {
+    result += ((int32_t)q[i]) * ((int32_t)p[i]);
   }
+  return -((float)result);
+}
 
-  float mips_distance(const float *p, const float *q, unsigned d) {
-    float result = 0;
-    for (int i = 0; i < d; i++) {
-      result += (q[i]) * (p[i]);
-    }
-    return -result;
+float mips_distance(const float *p, const float *q, unsigned d) {
+  float result = 0;
+  for (int i = 0; i < d; i++) {
+    result += (q[i]) * (p[i]);
   }
+  return -result;
+}
 
 template<typename T>
 struct Mips_Point {
+private:
+  T* values;
+  unsigned int d;
+  unsigned int aligned_d;
+  long id_;
+  bool owns;
+
+public:
   using distanceType = T; 
   template<class C> friend struct Quantized_Mips_Point;
-  
+
+  Mips_Point()
+    : values(nullptr), d(0), aligned_d(0), id_(-1), owns(false) {}
+  // Non-owning version
+  Mips_Point(T* values, unsigned int d, unsigned int ad, long id)
+    : values(values), d(d), aligned_d(ad), id_(id), owns(false) {}
+  // Owning version, creates a copy. Typically no id associated
+  Mips_Point(T* values_, unsigned int d, unsigned int ad)
+    : values(nullptr), d(d), aligned_d(ad), id_(-1), owns(true) {
+    values = static_cast<float*>(parlay::p_malloc(d * sizeof(T)));
+    std::memcpy(values, values_, d * sizeof(T));
+  }
+  // Copy Constructor
+  Mips_Point(const Mips_Point& p)
+    : values(nullptr), d(p.d), aligned_d(p.aligned_d), id_(p.id_), owns(p.owns) {
+    if (owns) {
+      values = static_cast<float*>(parlay::p_malloc(d * sizeof(T)));
+      std::memcpy(values, p.values, d * sizeof(T));
+    } else {
+      values = p.values;
+    }
+  }
+  // Move Constructor
+  Mips_Point(Mips_Point&& p)
+    : values(p.values), d(p.d), aligned_d(p.aligned_d), id_(p.id_), 
+      owns(p.owns) {
+    p.values = nullptr;
+    p.d = 0;
+    p.aligned_d = 0;
+    p.id_ = -1;
+    p.owns = false;
+  }
+  // Copy Assignment Operator: creates owning copy of values 
+  Mips_Point& operator=(const Mips_Point& p) {
+    if (this != &p) {
+      if (owns) {
+        parlay::p_free(values);
+        owns = false;
+      }
+      d = p.d;
+      aligned_d = p.aligned_d;
+      id_ = p.id_;
+      if (p.values == nullptr) {
+        values = nullptr;
+        owns = false;
+      } else {
+        values = static_cast<float*>(parlay::p_malloc(d * sizeof(T)));
+        std::memcpy(values, p.values, d * sizeof(T));
+        owns = true;
+      }
+    }
+    return *this;
+  }
+  // Move Assignment Operator
+  Mips_Point& operator=(Mips_Point&& p) {
+    if (this != &p) {
+      if (owns) {
+        parlay::p_free(values);
+        owns = false;
+      }
+      values = p.values;
+      d = p.d;
+      aligned_d = p.aligned_d;
+      id_ = p.id_;
+      owns = p.owns;
+      p.values = nullptr;
+      p.d = 0;
+      p.aligned_d = 0;
+      p.id_ = -1;
+      p.owns = false;
+    }
+    return *this;
+  }
+  ~Mips_Point() {
+    if (owns && (values != nullptr)) {
+      parlay::p_free(values);
+      values = nullptr;
+      owns = false;
+    }
+  }
+
   static distanceType d_min() {return -std::numeric_limits<float>::max();}
   static bool is_metric() {return false;}
   T operator [](long i) const {return *(values + i);}
   T& operator [](long i) {return *(values + i);}
-
   float distance(const Mips_Point<T>& x) const {
-    return mips_distance(this->values, x.values, d);
-  }
-
+    return mips_distance(this->values, x.values, d);}
   void prefetch() const {
     int l = (aligned_d * sizeof(T))/64;
     for (int i=0; i < l; i++)
-      __builtin_prefetch((char*) values + i* 64);
+      __builtin_prefetch((char*) values + i * 64);
   }
-
   long id() const {return id_;}
-
-  Mips_Point()
-    : values(nullptr), d(0), aligned_d(0), id_(-1) {}
-
-  Mips_Point(T* values, unsigned int d, unsigned int ad, long id)
-    : values(values), d(d), aligned_d(ad), id_(id) {}
-
   bool operator==(const Mips_Point<T>& q) const {
     for (int i = 0; i < d; i++) {
       if (values[i] != q.values[i]) {
@@ -97,16 +172,9 @@ struct Mips_Point {
     }
     return true;
   }
-
   bool same_as(const Mips_Point<T>& q){
     return values == q.values;
   }
-
-private:
-  T* values;
-  unsigned int d;
-  unsigned int aligned_d;
-  long id_;
 };
 
 template<typename T>
@@ -144,7 +212,7 @@ float quantized_mips_distance(const T* q, const T* p, unsigned d, float max_coor
 
 template<typename T>
 struct Quantized_Mips_Point{
-    using distanceType = T; 
+  using distanceType = T; 
   
   static distanceType d_min() {return -std::numeric_limits<float>::max();}
   static bool is_metric() {return false;}
@@ -177,7 +245,6 @@ struct Quantized_Mips_Point{
     }
     return true;
   }
-
 
 private:
   T* values;

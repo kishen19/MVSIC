@@ -38,7 +38,7 @@ auto faiss_kmeans(const Seq& data, size_t d, size_t k, bool is_metric) {
 }
 
 template <typename Seq>
-auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, bool is_metric) {
+auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, bool is_metric, size_t maxsize) {
   size_t n = data.size();
 
   // Flatten input into raw float array for FAISS
@@ -86,7 +86,7 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, bool is_metric) {
       return distances[grouped[i][j]];
     });
     float avg_dist = parlay::reduce(dists) / grouped[i].size();
-    if (avg_dist < 1e-5) {
+    if (avg_dist < 1e-5 && grouped[i].size() > maxsize) {
       active[i] = false;
     }
   });

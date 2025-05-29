@@ -61,31 +61,108 @@ float euclidian_distance(const float *p, const float *q, unsigned d) {
 
 template<typename T>
 struct Euclidian_Point {
+private:
+  T* values;
+  unsigned int d;
+  unsigned int aligned_d;
+  long id_;
+  bool owns;
+
+public:
   using distanceType = T;
 
+  Euclidian_Point()
+    : values(nullptr), d(0), aligned_d(0), id_(-1), owns(false) {}
+  // Non-owning version
+  Euclidian_Point(T* values, unsigned int d, unsigned int ad, long id)
+    : values(values), d(d), aligned_d(ad), id_(id), owns(false) {}
+  // Owning version, creates a copy. Typically no id associated
+  Euclidian_Point(T* values_, unsigned int d, unsigned int ad)
+    : values(nullptr), d(d), aligned_d(ad), id_(-1), owns(true) {
+    values = static_cast<float*>(parlay::p_malloc(d * sizeof(T)));
+    std::memcpy(values, values_, d * sizeof(T));
+  }
+  // Copy Constructor
+  Euclidian_Point(const Euclidian_Point& p)
+    : values(nullptr), d(p.d), aligned_d(p.aligned_d), id_(p.id_), owns(p.owns) {
+    if (owns) {
+      values = static_cast<float*>(parlay::p_malloc(d * sizeof(T)));
+      std::memcpy(values, p.values, d * sizeof(T));
+    } else {
+      values = p.values;
+    }
+  }
+  // Move Constructor
+  Euclidian_Point(Euclidian_Point&& p)
+    : values(p.values), d(p.d), aligned_d(p.aligned_d), id_(p.id_), 
+      owns(p.owns) {
+    p.values = nullptr;
+    p.d = 0;
+    p.aligned_d = 0;
+    p.id_ = -1;
+    p.owns = false;
+  }
+  // Copy Assignment Operator: creates owning copy of values 
+  Euclidian_Point& operator=(const Euclidian_Point& p) {
+    if (this != &p) {
+      if (owns) {
+        parlay::p_free(values);
+        owns = false;
+      }
+      d = p.d;
+      aligned_d = p.aligned_d;
+      id_ = p.id_;
+      if (p.values == nullptr) {
+        values = nullptr;
+        owns = false;
+      } else {
+        values = static_cast<float*>(parlay::p_malloc(d * sizeof(T)));
+        std::memcpy(values, p.values, d * sizeof(T));
+        owns = true;
+      }
+    }
+    return *this;
+  }
+  // Move Assignment Operator
+  Euclidian_Point& operator=(Euclidian_Point&& p) {
+    if (this != &p) {
+      if (owns) {
+        parlay::p_free(values);
+        owns = false;
+      }
+      values = p.values;
+      d = p.d;
+      aligned_d = p.aligned_d;
+      id_ = p.id_;
+      owns = p.owns;
+      p.values = nullptr;
+      p.d = 0;
+      p.aligned_d = 0;
+      p.id_ = -1;
+      p.owns = false;
+    }
+    return *this;
+  }
+  ~Euclidian_Point() {
+    if (owns && (values != nullptr)) {
+      parlay::p_free(values);
+      values = nullptr;
+      owns = false;
+    }
+  }
+  
   static distanceType d_min() {return 0;}
   static bool is_metric() {return true;}
   T operator[](long i) const {return *(values + i);}
   T &operator[](long i) {return *(values + i);}
-
   float distance(const Euclidian_Point<T>& x) const {
-    return euclidian_distance(this->values, x.values, d);
-  }
-
+    return euclidian_distance(this->values, x.values, d);}
   void prefetch() const {
     int l = (aligned_d * sizeof(T))/64;
     for (int i=0; i < l; i++)
       __builtin_prefetch((char*) values + i* 64);
   }
-
   long id() const {return id_;}
-
-  Euclidian_Point()
-    : values(nullptr), d(0), aligned_d(0), id_(-1) {}
-
-  Euclidian_Point(T* values, unsigned int d, unsigned int ad, long id)
-    : values(values), d(d), aligned_d(ad), id_(id) {}
-
   bool operator==(const Euclidian_Point<T>& q) const {
     for (int i = 0; i < d; i++) {
       if (values[i] != q.values[i]) {
@@ -98,11 +175,4 @@ struct Euclidian_Point {
   bool same_as(const Euclidian_Point<T>& q){
     return values == q.values;
   }
-
-
-private:
-  T* values;
-  unsigned int d;
-  unsigned int aligned_d;
-  long id_;
 };

@@ -29,7 +29,7 @@ double compute_recall(
     std::cerr << "Not enough gt values" << std::endl;
     exit(-1);
   } else if (k > pred[0].size()){
-    std::cout << "Not enough pred values" << std::endl;
+    std::cout << "Not enough pred values: " << pred[0].size() << " out of " << k << std::endl;
     // exit(-1);
   }
   parlay::internal::timer t;
