@@ -29,14 +29,14 @@ double compute_recall(
     std::cerr << "Not enough gt values" << std::endl;
     exit(-1);
   } else if (k > pred[0].size()){
-    std::cerr << "Not enough pred values" << std::endl;
-    exit(-1);
+    std::cout << "Not enough pred values" << std::endl;
+    // exit(-1);
   }
   parlay::internal::timer t;
   auto ind_recall = parlay::sequence<double>::from_function(pred.size(), 
       [&](size_t i) {
     std::unordered_set<size_t> out_set;
-    for (size_t j=0; j<k; j++) {
+    for (size_t j=0; j<pred[i].size(); j++) {
       auto [id, dist] = pred[i][j];
       out_set.insert(id);
     }
