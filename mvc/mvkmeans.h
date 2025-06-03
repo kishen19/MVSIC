@@ -18,6 +18,7 @@ struct MVClusteringParams{
   std::string seeding = "Random";
   bool comp_lb = false;
   bool verbose = false;
+  size_t os_rate = 20;
 };
 
 template <bool metric>
@@ -141,7 +142,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points){
         if (s >= data.size()) {
           new_centers[i] = data;
         } else {
-          new_centers[i] = faiss_kmeans(data, d, s, metric);
+          new_centers[i] = faiss_kmeans(data, d, s, metric, os_rate);
         }
       } else { // Empty Cluster, sample from input
         if (verbose){
@@ -153,7 +154,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points){
         if (s >= data.size()) {
           new_centers[i] = data;
         } else {
-          new_centers[i] = faiss_kmeans(data, d, s, metric);
+          new_centers[i] = faiss_kmeans(data, d, s, metric, os_rate);
         }
       }
     });

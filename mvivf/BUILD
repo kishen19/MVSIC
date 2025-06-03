@@ -17,6 +17,7 @@ cc_library(
   name = "mvivf",
   hdrs = ["mvivf.h"],
   deps = [
+    "@absl//absl/container:btree",
     "//mvc:mvkmeans",
     "//mvivf/utils:top_neighbors",
     ":index",

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <set>
+#include <queue>
+// #include "absl/container/btree_set.h"
 #include "mvc/mvkmeans.h"
 #include "utils/top_neighbors.h"
 #include "index.h"
@@ -14,6 +16,7 @@ struct IndexMVIVFParams{
   size_t iters = 5;
   std::string seeding = "Random";
   bool verbose = false;
+  size_t os_rate = 20;
 };
 
 template <typename ChPoint>
@@ -78,7 +81,7 @@ void IndexMVIVF<metric>::build_helper(node_t* node, const PointCloudSet<ChPoint>
               << maxsize << ", num_clusters: " << num_clusters << std::endl;
   }
   // Step 1: Run MV-Lloyds on points and collect clusters
-  MVClusteringParams params(iters, seeding, false, verbose);
+  MVClusteringParams params(iters, seeding, false, verbose, os_rate);
   MVClustering<metric> clus(d, num_clusters, s, params);
   clus.train(points);
   PointCloudSet<ChPoint> centers = clus.centers;
@@ -112,36 +115,33 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
   size_t k = params.k;
   size_t nprobes = params.nprobes;
   size_t beam_length = params.beam_length;
-  if (beam_length == 0) { beam_length = nprobes; } // Default
   // probe_list contains the final candidate leaf nodes to probe
-  std::set<std::pair<float, node_t*>> probe_list; // TODO: Change to absl
-  std::set<std::pair<float, node_t*>> beam; // TODO: Change to absl
+  parlay::sequence<std::pair<float, node_t*>> probe_list;
+  std::set<std::pair<float, node_t*>> beam;
+  // absl::btree_set<std::pair<float, node_t*>> probe_list;
+  // absl::btree_set<std::pair<float, node_t*>> beam;
   size_t dist_cmps=0;
-  auto add_to_probe_list = [&](node_t* node, float dist) {
-    if (probe_list.size() < nprobes || dist < probe_list.rbegin()->first) {
-      probe_list.insert({ dist, node });
-      if (probe_list.size() > nprobes) {
-        probe_list.erase(--probe_list.end()); // Remove the farthest probe
-      }
-    }
+  auto add_to_probe_list = [&](std::pair<float, node_t*> p) {
+    probe_list.push_back(p);
   };
-  auto add_to_beam = [&](node_t* node, float dist) {
-    if (beam.size() < beam_length || dist < beam.rbegin()->first) {
-      beam.insert({ dist, node });
+  auto add_to_beam = [&](std::pair<float, node_t*> p) -> bool {
+    if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
+      beam.insert(p);
       if (beam.size() > beam_length) {
-        beam.erase(--beam.end()); // Remove the farthest node
+        beam.erase(std::prev(beam.end())); // Remove the farthest node
       }
+      return true;
     }
+    return false;
   };
   // Step 1: Greedy search to find candidate probe clusters
   // Add root to beam
-  add_to_beam(root, std::numeric_limits<float>::max());
+  add_to_beam({std::numeric_limits<float>::max(), root});
   while (beam.size() > 0) {
     // Pop the best node from the beam
     std::pair<float, node_t*> best = *beam.begin();
     beam.erase(beam.begin());
     node_t* current_node = best.second;
-
     // Compute distances from query to children
     auto res = parlay::sequence<std::pair<float, node_t*>>::from_function(
       current_node->children.size(), [&](size_t i) {
@@ -150,7 +150,6 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
         return std::make_pair(dist, child);
       });
     dist_cmps += res.size();
-
     // Collect leaf and non-leaf nodes
     auto new_nodes_to_beam = parlay::filter(res, [](const auto& p) {
       return p.second->children.size() != 0; // Only keep nodes that are not leaves
@@ -161,39 +160,44 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     parlay::sort_inplace(new_nodes_to_beam, [](const auto& a, const auto& b) {
       return a.first < b.first; // Sort by distance
     });
-    parlay::sort_inplace(new_nodes_to_probe, [](const auto& a, const auto& b) {
-      return a.first < b.first; // Sort by distance
-    });
-
     // Add new nodes to beam and probe list
     for (size_t i = 0; i < std::min(beam_length, new_nodes_to_beam.size()); i++) {
-      add_to_beam(new_nodes_to_beam[i].second, new_nodes_to_beam[i].first);
+      if (!add_to_beam(new_nodes_to_beam[i])) break;
     }
-    for (size_t i = 0; i < std::min(nprobes, new_nodes_to_probe.size()); i++) {
-      add_to_probe_list(new_nodes_to_probe[i].second, new_nodes_to_probe[i].first);
+    for (size_t i = 0; i < new_nodes_to_probe.size(); i++) {
+      add_to_probe_list(new_nodes_to_probe[i]);
     }
   }
   // Step 2: Probe clusters in probe_list
-  auto probe_dist_cmps = parlay::sequence<size_t>::uninitialized(probe_list.size());
+  parlay::sort_inplace(probe_list);
+  size_t nprobes_minimal=0, cur=0;
+  while (nprobes_minimal < probe_list.size() && cur <= k){
+    cur += probe_list[nprobes_minimal].second->points.size();
+    nprobes_minimal++;
+  }
+  nprobes = std::min(probe_list.size(), std::max(nprobes, nprobes_minimal));
+  auto probe_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>::from_function(
-      probe_list.size(), [&](size_t i) {
-    std::pair<float, node_t*> p = *std::next(probe_list.begin(), i);
-    node_t* node = p.second;
-    PointCloudSet<ChPoint> cluster_points = node->points;
-    auto [res, d_c] = get_knn(query, cluster_points, k);
-    probe_dist_cmps[i] = d_c;
-    return res;
-  });
+    nprobes, [&](size_t i) {
+      std::pair<float, node_t*> p = *std::next(probe_list.begin(), i);
+      node_t* node = p.second;
+      PointCloudSet<ChPoint> cluster_points = node->points;
+      auto [res, d_c] = get_knn(query, cluster_points, k);
+      probe_dist_cmps[i] = d_c;
+      return res;
+    });
   dist_cmps += parlay::reduce(probe_dist_cmps);
   // Step 3: Re-ranking (lightweight; no new distance cmps)
   // Flatten, sort and return top k // TODO: coarse and fine distances for better performance
+  // TODO: make a separate function called re-ranking, to test other strategies
   auto flattened_results = parlay::flatten(results);
   parlay::sort_inplace(flattened_results, [](const auto& a, const auto& b) {
     return a.second < b.second; // Sort by distance
   });
   auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min(k, flattened_results.size()), [&](size_t i) { 
-    return flattened_results[i]; });
+    std::min(k, flattened_results.size()), [&](size_t i) { 
+      return flattened_results[i]; 
+    });
   return std::make_pair(final_results, dist_cmps);
 }
 

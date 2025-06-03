@@ -97,3 +97,10 @@ cc_library(
 )
 """
 )
+
+http_archive(
+    name = "absl",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20240116.0.tar.gz"],
+    strip_prefix = "abseil-cpp-20240116.0",
+    # sha256 = "028934475a8079392171008890a908191c7050f190000bf28f0471c380990390",
+)

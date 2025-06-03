@@ -5,6 +5,26 @@
 #include "faiss/IndexFlat.h"
 
 template <typename Seq>
+auto faiss_kmeans(const Seq& data, size_t d, size_t k, bool is_metric);
+
+template <typename Seq>
+auto faiss_kmeans(const Seq& data, size_t d, size_t k, bool is_metric, size_t os_rate){
+  if (os_rate*k >= data.size()){
+    return faiss_kmeans(data, d, k, is_metric);
+  } else {
+    size_t n = data.size();
+    auto sampled_ids = parlay::sequence<uint32_t>::from_function(os_rate * k, 
+      [&](uint32_t i) {
+        return parlay::hash32(i) % n;
+      });
+    auto samples = parlay::tabulate(sampled_ids.size(), [&](size_t i) {
+      return data[sampled_ids[i]];
+    });
+    return faiss_kmeans(samples, d, k, is_metric);
+  }
+}
+
+template <typename Seq>
 auto faiss_kmeans(const Seq& data, size_t d, size_t k, bool is_metric) {
   size_t n = data.size();
 

@@ -24,31 +24,41 @@ void bench(commandLine& P) {
   size_t nprobesr = P.getOptionLongValue("-npr", 8);
   size_t nprobesmp = P.getOptionLongValue("-npmp", 2);
   size_t nprobesad = P.getOptionLongValue("-npad", 0);
-  // size_t beamsize = P.getOptionLongValue("-beamsize", 0);
   size_t k = P.getOptionLongValue("-k", 10);
   size_t s = P.getOptionLongValue("-s", 0);
+  size_t os_rate = P.getOptionLongValue("-osr", 20);
   auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
   int rounds = P.getOptionLongValue("-rounds", 1);
   bool verbose = P.getOption("-v");
+  bool is_gold = P.getOption("-gold");
 
   auto points = PC(inFile);
-  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, verbose);
+  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, verbose, os_rate);
   mvivf::IndexMVIVF<metric> index(points.get_dims(), index_params);
   if (indexFile != ""){ // Stats Benchmark
     index.load(indexFile, points);
     std::cout << "Index loaded" << std::endl;
     auto queries = PC(P.getOptionValue("-q"));
-    auto gt = ReadGT(gtFile, queries.size());
+    parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> gt;
+    if (is_gold){
+      gt = ReadGoldGT(gtFile, queries.size());
+    } else {
+      gt = ReadGT(gtFile, queries.size());
+    }
     parlay::sequence<mvivf::SearchParams> search_params_list;
     size_t nprobes = nprobesl;
     while (nprobes<=nprobesr) {
-      search_params_list.push_back(mvivf::SearchParams(k,s,nprobes,0));
+      search_params_list.push_back(mvivf::SearchParams(k,nprobes,0));
       nprobes = nprobesmp * nprobes + nprobesad;
     }
     // Compute Stats
     std::cout << "Computing stats..." << std::endl;
-    search_all(index, points, queries, gt, resFile, search_params_list);
+    if (is_gold){
+      search_all_gold(index, points, queries, gt, resFile, search_params_list);
+    } else {
+      search_all(index, points, queries, gt, resFile, search_params_list);
+    }
     std::cout << "Stats computed and saved to " << resFile << std::endl;
   } else { // Indexing Benchmark
     std::cout << "Starting Indexing Benchmark..." << std::endl;
