@@ -31,14 +31,13 @@ void bench(commandLine& P) {
   size_t nprobes = P.getOptionLongValue("-nprobes", 1);
   size_t beamsize = P.getOptionLongValue("-beamsize", 0);
   size_t k = P.getOptionLongValue("-k", 10);
-  size_t k_in = P.getOptionLongValue("-kin", 50*k);
-  size_t k_out = P.getOptionLongValue("-kout", 5*k);
+  size_t cands = P.getOptionLongValue("-cands", 10*k);
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  svh::IndexSVHParams index_params(minsize, maxsize, verbose);
-  mvivf::SearchParams search_params(k, 0, nprobes, beamsize, k_in, k_out);
-  svh::IndexSVH<metric> index(points.get_dims(), index_params);
+  mvivf::IndexSVHParams index_params(minsize, maxsize, verbose);
+  mvivf::SearchParams search_params(k, nprobes, beamsize, cands);
+  mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
   // if (indexFile != ""){
   //   std::cout << "Loading index from " << indexFile << std::endl;
   //   index.Load(indexFile, points);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <set>
+// #include "absl/container/btree_set.h"
 #include "parlay/primitives.h"
 #include "mvc/utils/euclidian_point.h"
 #include "mvc/utils/faiss_kmeans.h"
@@ -10,13 +11,14 @@
 #include "mvivf/utils/top_neighbors.h"
 
 
-namespace svh {
+namespace mvivf {
 using namespace mvivf;
 
 struct IndexSVHParams{
   size_t minsize = 100;
   size_t maxsize = 500;
   bool verbose = false;
+  size_t os_rate = 20;
 };
 
 template <typename Point, typename Range>
@@ -107,7 +109,7 @@ void IndexSVH<metric>::build_helper(node_t* node,
   }
   // Step 1: Run k-means on data and collect clusters
   auto [centers_, cluster_ids, active_indices] = faiss_kmeans_assign(points, d, 
-    num_clusters, metric, maxsize);
+    num_clusters, metric, maxsize, os_rate);
   Range centers = Range(centers_, d);
   auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(n, [&](size_t i) { 
     return std::make_pair(cluster_ids[i], i); });
@@ -139,38 +141,31 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     const SearchParams& params) {
   size_t q = query.size();
   size_t k = params.k;
-  size_t k_out = params.k_out;
+  size_t cands = params.cands;
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>(q);
   auto dist_cmps = parlay::sequence<size_t>::uninitialized(q);
   parlay::parallel_for(0, q, [&](size_t i) {
     std::tie(results[i], dist_cmps[i]) = search_each(Point(query.get_coords(i), 
       query.get_dims(), query.get_dims()), points, params);
   });
-  parlay::sequence<std::pair<size_t, float>> flattened_results = parlay::flatten(results);
-  parlay::sort_inplace(flattened_results); // Sort by ids and then distance
-  // Take sum of distances for same ids.
-  auto cutoff_indices = parlay::delayed_seq<size_t>(flattened_results.size() + 1, [&](size_t i) {
-    return i == 0 || i == flattened_results.size() ||
-      flattened_results[i].first != flattened_results[i - 1].first;
-  });
-  auto offsets = parlay::pack_index(cutoff_indices);
-  auto candidates = parlay::sequence<std::pair<float, size_t>>::uninitialized(offsets.size()-1);
-  parlay::parallel_for(0, offsets.size() - 1, [&](size_t i) {
-    size_t start_index = offsets[i];
-    size_t end_index = offsets[i + 1];
-    auto subset_points =
-        parlay::delayed_seq<float>(end_index - start_index, [&](size_t j) {
-          return flattened_results[start_index + j].second;
-        });
-    float estimate_dis = parlay::reduce(subset_points);
-    candidates[i] = std::make_pair(estimate_dis/(end_index - start_index), 
-      flattened_results[start_index].first);
-  });
-  parlay::sort_inplace(candidates);
+  parlay::sequence<size_t> candidates;
+  size_t done = 0, i=0;
+  while (done < q){
+    for (size_t j=0; j<q; j++){
+      if (i < results[j].size()){
+        candidates.push_back(results[j][i].first);
+      }
+      if (i == results[j].size()-1){
+        done++;
+      }
+    }
+    i++;
+  }
+  // TODO: dedup candidates, keep earliest copy
   // Final re-ranking
-  auto new_cands = parlay::sequence<std::pair<float, size_t>>::from_function(std::min(k_out, 
-      candidates.size()), [&](size_t i) {
-    size_t id = candidates[i].second;
+  auto new_cands = parlay::sequence<std::pair<float, size_t>>::from_function( 
+      candidates.size(), [&](size_t i) {
+    size_t id = candidates[i];
     float new_dist = query.distance(points[id]);
     return std::make_pair(new_dist, id);
   });
@@ -186,25 +181,22 @@ template <bool metric>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::search_each(
     const Point& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) {
-  size_t k = params.k;
-  size_t k_in = params.k_in;
+  // size_t k = params.k;
+  size_t cands = params.cands;
   size_t nprobes = params.nprobes;
   size_t beam_length = params.beam_length;
   if (beam_length == 0) { beam_length = nprobes; } // Default
   // TODO: have separete nprobes for indiv points and reranking
   // probe_list will contain the candidate nodes to probe
-  std::set<std::pair<float, node_t*>> probe_list; // TODO: Change to absl
-  std::set<std::pair<float, node_t*>> beam; // TODO: Change to absl
+  parlay::sequence<std::pair<float, node_t*>> probe_list;
+  std::set<std::pair<float, node_t*>> beam;
+  // absl::btree_set<std::pair<float, node_t*>> probe_list;
+  // absl::btree_set<std::pair<float, node_t*>> beam;
   size_t dist_cmps=0;
-  auto add_to_probe_list = [&](node_t* node, float dist) {
-    if (probe_list.size() < nprobes || dist < probe_list.rbegin()->first) {
-      probe_list.insert({ dist, node });
-      if (probe_list.size() > nprobes) {
-        probe_list.erase(--probe_list.end()); // Remove the farthest probe
-      }
-    }
+  auto add_to_probe_list = [&](std::pair<float, node_t*> p) {
+    probe_list.push_back(p);
   };
-  auto add_to_beam = [&](node_t* node, float dist) {
+  auto add_to_beam = [&](std::pair<float, node_t*> p) {
     if (beam.size() < beam_length || dist < beam.rbegin()->first) {
       beam.insert({ dist, node });
       if (beam.size() > beam_length) {
@@ -214,13 +206,12 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   };
   // Step 1: Greedy search to find candidate probe clusters
   // Add root to beam
-  add_to_beam(root, std::numeric_limits<float>::max());
+  add_to_beam({std::numeric_limits<float>::max(), root});
   while (beam.size() > 0) {
     // Pop the best node from the beam
     auto best = *beam.begin();
     beam.erase(beam.begin());
     node_t* current_node = best.second;
-
     // Compute distances from query to children
     auto res = parlay::sequence<std::pair<float, node_t*>>::from_function(
       current_node->children.size(), [&](size_t i) {
@@ -229,37 +220,34 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
         return std::make_pair(dist, child);
       });
     dist_cmps += res.size();
-
     // Collect leaf and non-leaf nodes
     auto new_nodes_to_beam = parlay::filter(res, [](const auto& p) {
       return p.second->children.size() != 0; // Only keep nodes that are not leaves
-      });
+    });
     auto new_nodes_to_probe = parlay::filter(res, [](const auto& p) {
       return p.second->children.size() == 0; // Only keep leaf nodes
-      });
+    });
     parlay::sort_inplace(new_nodes_to_beam, [](const auto& a, const auto& b) {
       return a.first < b.first; // Sort by distance
-      });
-    parlay::sort_inplace(new_nodes_to_probe, [](const auto& a, const auto& b) {
-      return a.first < b.first; // Sort by distance
-      });
-
+    });
     // Add new nodes to beam and probe list
     for (size_t i = 0; i < std::min(beam_length, new_nodes_to_beam.size()); i++) {
-      add_to_beam(new_nodes_to_beam[i].second, new_nodes_to_beam[i].first);
+      add_to_beam(new_nodes_to_beam[i]);
     }
     for (size_t i = 0; i < std::min(nprobes, new_nodes_to_probe.size()); i++) {
-      add_to_probe_list(new_nodes_to_probe[i].second, new_nodes_to_probe[i].first);
+      add_to_probe_list(new_nodes_to_probe[i]);
     }
   }
   // Step 2: Probe clusters in probe_list
-  auto probe_dist_cmps = parlay::sequence<size_t>::uninitialized(probe_list.size());
+  parlay::sort_inplace(probe_list);
+  size_t nprobes = std::min(nprobes, probe_list.size());
+  auto probe_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, 
-    float>>>::from_function(probe_list.size(), [&](size_t i) {
+    float>>>::from_function(nprobes, [&](size_t i) {
       std::pair<float, node_t*> p = *std::next(probe_list.begin(), i);
       node_t* node = p.second;
-      auto cluster_points = node->points;
-      auto [res, d_c] = mvivf::get_knn_ids(query, cluster_points, node->ids, k_in);
+      Range cluster_points = node->points;
+      auto [res, d_c] = mvivf::get_knn_ids(query, cluster_points, node->ids, cands);
       probe_dist_cmps[i] = d_c;
       return res;
     });
@@ -276,10 +264,12 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   auto filtered_results = parlay::tabulate(indices.size(), [&](size_t i){
     return flattened_results[indices[i]];
   });
-  parlay::sort_inplace(filtered_results); // Sort by distance
+  parlay::sort_inplace(filtered_results, [](const auto& a, const auto& b) {
+    return a.second < b.second; // Sort by distance
+  });
   auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
-    std::min(k, flattened_results.size()), [&](size_t i) { 
-      return flattened_results[i]; });
+    std::min(cands, filtered_results.size()), [&](size_t i) { 
+      return filtered_results[i]; });
   return std::make_pair(final_results, dist_cmps);
 }
 
@@ -448,4 +438,4 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
 template struct IndexSVH<true>;  // Instantiates for L2 metric (metric = true)
 template struct IndexSVH<false>; // Instantiates for MIPS      (metric = false)
 
-} // namespace svh
+} // namespace mvivf

@@ -11,8 +11,7 @@ struct SearchParams{
   // MVIVF Specific Params
 
   // Single Vector Heuristic Specific Params
-  size_t k_in;
-  size_t k_out;
+  size_t cands;
 
   // mvivf search params
   SearchParams(size_t k, size_t nprobes, size_t beam_length_)
@@ -25,8 +24,8 @@ struct SearchParams{
     }
 
   // single vector heuristic
-  SearchParams(size_t k, size_t nprobes, size_t beam_length_, size_t k_in, 
-    size_t k_out) : k(k), nprobes(nprobes), k_in(k_in), k_out(k_out) {
+  SearchParams(size_t k, size_t nprobes, size_t beam_length_, size_t cands) 
+    : k(k), nprobes(nprobes), cands(cands) {
       if (beam_length_ == 0) {
         beam_length = nprobes;
       } else {
