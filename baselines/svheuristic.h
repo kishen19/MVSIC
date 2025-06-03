@@ -27,15 +27,12 @@ struct IndexSVHNode {
   Point center; // Except root, every node has a center-set
   Range points; // Only leaf nodes have points
   parlay::sequence<size_t> ids; // Only leaf nodes have ids
-
   IndexSVHNode() : children(parlay::sequence<IndexSVHNode*>(0)), center(Point()), 
     points(Range()) {}
-
   inline void set_points(const Range& points_, const parlay::sequence<size_t>& ids_) { 
     points = points_; 
     ids = ids_; 
   }
-
   inline void set_center(const Point& center_) { center = center_; }
 };
 
@@ -59,12 +56,12 @@ struct IndexSVH :Index<metric>, IndexSVHParams {
   void build_helper(node_t* node, 
     const parlay::sequence<parlay::sequence<float>>& points,
     const parlay::sequence<size_t>& ids);
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
+  // 
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search_each(
     const Point& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params);
-  // 
+  // Returns the top-k point clouds for the query point cloud
+  // Output format: < [<id, distance>, ...], # distance comparisons>
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
     const ChPoint& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) override;
@@ -197,8 +194,8 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     probe_list.push_back(p);
   };
   auto add_to_beam = [&](std::pair<float, node_t*> p) {
-    if (beam.size() < beam_length || dist < beam.rbegin()->first) {
-      beam.insert({ dist, node });
+    if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
+      beam.insert(p);
       if (beam.size() > beam_length) {
         beam.erase(--beam.end()); // Remove the farthest node
       }
@@ -240,7 +237,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   }
   // Step 2: Probe clusters in probe_list
   parlay::sort_inplace(probe_list);
-  size_t nprobes = std::min(nprobes, probe_list.size());
+  nprobes = std::min(nprobes, probe_list.size());
   auto probe_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, 
     float>>>::from_function(nprobes, [&](size_t i) {

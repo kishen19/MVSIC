@@ -57,15 +57,15 @@ auto faiss_kmeans(const Seq& data, size_t d, size_t k, bool is_metric) {
   return std::move(centroids);
 }
 
-template <typename Seq>
-auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, 
+template <typename Seq1, typename Seq2>
+auto faiss_kmeans_assign(const Seq1& data, const Seq2& full_data, size_t d, size_t k, 
   bool is_metric, size_t maxsize);
 
 template <typename Seq>
 auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, 
   bool is_metric, size_t maxsize, size_t os_rate){
   if (os_rate*k >= data.size()){
-    return faiss_kmeans_assign(data, d, k, is_metric, maxsize);
+    return faiss_kmeans_assign(data, data, d, k, is_metric, maxsize);
   } else {
     size_t n = data.size();
     auto sampled_ids = parlay::sequence<uint32_t>::from_function(os_rate * k, 
@@ -75,26 +75,25 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k,
     auto samples = parlay::tabulate(sampled_ids.size(), [&](size_t i) {
       return data[sampled_ids[i]];
     });
-    return faiss_kmeans_assign(samples, d, k, is_metric, maxsize);
+    return faiss_kmeans_assign(samples, data, d, k, is_metric, maxsize);
   }
 }
 
-template <typename Seq>
-auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k, 
+template <typename Seq1, typename Seq2>
+auto faiss_kmeans_assign(const Seq1& data, const Seq2& full_data, size_t d, size_t k, 
   bool is_metric, size_t maxsize) {
   size_t n = data.size();
-
+  size_t n_full = full_data.size();
   // Flatten input into raw float array for FAISS
   auto flat_data = parlay::flatten(data);
-
+  auto flat_full_data = parlay::flatten(full_data);
   // Setup clustering parameters
   faiss::Clustering clus(d, k);
   clus.verbose = false;
   clus.min_points_per_centroid = 1;
   // clus.max_points_per_centroid = 1000000000;
-
-  parlay::sequence<faiss::idx_t> assignments(n); // To store cluster assignments
-  parlay::sequence<float> distances(n);
+  parlay::sequence<faiss::idx_t> assignments(n_full); // To store cluster assignments
+  parlay::sequence<float> distances(n_full);
 
   if (is_metric) {
     // Index used to assign points during clustering (L2 distance)
@@ -102,25 +101,23 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k,
     clus.train(n, flat_data.data(), index);
     faiss::IndexFlatL2 search_index(d);
     search_index.add(k, clus.centroids.data());
-    search_index.search(n, flat_data.data(), 1, distances.data(), assignments.data());
+    search_index.search(n_full, flat_full_data.data(), 1, distances.data(), assignments.data());
   } else{
     // Index used to assign points during clustering (cosine distance)
     faiss::IndexFlatIP index(d);
     clus.train(n, flat_data.data(), index);
     faiss::IndexFlatIP search_index(d);
     search_index.add(k, clus.centroids.data());
-    search_index.search(n, flat_data.data(), 1, distances.data(), assignments.data());
+    search_index.search(n_full, flat_full_data.data(), 1, distances.data(), assignments.data());
   }
-
   // Extract centroids
   float* centroids_ptr = clus.centroids.data();
   parlay::sequence<parlay::sequence<float>> centroids(k, parlay::sequence<float>::uninitialized(d));
   parlay::parallel_for(0, k, [&](size_t i) {
     std::memcpy(centroids[i].begin(), centroids_ptr + i * d, d*sizeof(float));
   });
-
   // Remove clusters with all almost-duplicates
-  auto id_pt = parlay::delayed_tabulate(n, [&](size_t i) { return std::make_pair(assignments[i], i); });
+  auto id_pt = parlay::delayed_tabulate(n_full, [&](size_t i) { return std::make_pair(assignments[i], i); });
   auto grouped = parlay::group_by_index(id_pt, k);
   parlay::sequence<bool> active(k,true);
   parlay::parallel_for(0, k, [&](size_t i) {
@@ -134,7 +131,7 @@ auto faiss_kmeans_assign(const Seq& data, size_t d, size_t k,
     }
   });
   auto active_indices = parlay::pack_index(active);
-  return std::make_tuple(std::move(centroids), std::move(assignments), std::move(active_indices));
+  return std::make_tuple(centroids, assignments, active_indices);
 }
 
 template <typename Seq>
