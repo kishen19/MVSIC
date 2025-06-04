@@ -61,7 +61,7 @@ void bench(commandLine& P) {
     auto gt = ReadGT(gtFile, queries.size());
     double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
     
-    // // Compute Stats:
+    // Compute Stats:
     parlay::internal::timer t;
     recall_1_k = 0.0;
     recall_k_k = 0.0;

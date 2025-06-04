@@ -23,10 +23,10 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(const ChPo
 
 template <typename Point, typename Range>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn_ids(const Point& q, 
-    const Range& points, const parlay::sequence<size_t>& ids, size_t k){
+    const Range& points, const parlay::sequence<std::pair<size_t,size_t>>& ids, size_t k){
   size_t dist_cmps = 0;
   auto dists = parlay::tabulate(points.size(), [&](size_t i) {
-    return std::pair(ids[i], q.distance(points[i]));
+    return std::pair(ids[i].first, q.distance(points[i]));
   });
   dist_cmps += dists.size();
   parlay::sort_inplace(dists);

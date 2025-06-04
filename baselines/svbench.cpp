@@ -32,35 +32,37 @@ void bench(commandLine& P) {
   size_t beamsize = P.getOptionLongValue("-beamsize", 0);
   size_t k = P.getOptionLongValue("-k", 10);
   size_t cands = P.getOptionLongValue("-cands", 10*k);
+  size_t os_rate = P.getOptionLongValue("-osr", 20);
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  mvivf::IndexSVHParams index_params(minsize, maxsize, verbose);
+  mvivf::IndexSVHParams index_params(minsize, maxsize, verbose, os_rate);
   mvivf::SearchParams search_params(k, nprobes, beamsize, cands);
   mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
-  // if (indexFile != ""){
-  //   std::cout << "Loading index from " << indexFile << std::endl;
-  //   index.Load(indexFile, points);
-  //   std::cout << "Index loaded" << std::endl;
-  // } else {
+  if (indexFile != ""){
+    std::cout << "Loading index from " << indexFile << std::endl;
+    index.load(indexFile, points);
+    std::cout << "Index loaded" << std::endl;
+  } else {
     std::cout << "Building index..." << std::endl;
     parlay::internal::timer it;
     it.start();
     index.build(points); 
     it.stop();
     std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
-  // }
-  // if (outFile != ""){
-  //   std::cout << "Saving index to " << outFile << std::endl;
-  //   index.Save(P.getOptionValue("-o"));
-  //   std::cout << "Index saved." << std::endl;
-  // }
+  }
+  if (outFile != ""){
+    std::cout << "Saving index to " << outFile << std::endl;
+    index.save(P.getOptionValue("-o"));
+    std::cout << "Index saved." << std::endl;
+  }
   
   if (QFile != ""){
     auto queries = PC(qFile);
     auto gt = ReadGT(gtFile, queries.size());
     double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
     
+    // Compute Stats:
     std::cout << "Computing stats..." << std::endl;
     mvivf::Stats result = compute_stats(index, points, queries, gt, search_params);
     QPS_seq = result.QPS_seq;

@@ -171,8 +171,11 @@ public:
     }
     return true;
   }
-
+  inline unsigned int get_dims() const {return d;}
   bool same_as(const Euclidian_Point<T>& q){
     return values == q.values;
+  }
+  inline auto get_slice() const {
+    return parlay::make_slice(values, values+d);
   }
 };

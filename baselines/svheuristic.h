@@ -26,13 +26,14 @@ struct IndexSVHNode {
   parlay::sequence<IndexSVHNode*> children; // Children
   Point center; // Except root, every node has a center-set
   Range points; // Only leaf nodes have points
-  parlay::sequence<size_t> ids; // Only leaf nodes have ids
+  parlay::sequence<std::pair<size_t,size_t>> ids; // Only leaf nodes have ids
   IndexSVHNode() : children(parlay::sequence<IndexSVHNode*>(0)), center(Point()), 
     points(Range()) {}
-  inline void set_points(const Range& points_, const parlay::sequence<size_t>& ids_) { 
-    points = points_; 
-    ids = ids_; 
-  }
+  inline void set_points(const Range& points_, 
+    const parlay::sequence<std::pair<size_t,size_t>>& ids_) { 
+      points = points_; 
+      ids = ids_;
+    }
   inline void set_center(const Point& center_) { center = center_; }
 };
 
@@ -55,7 +56,7 @@ struct IndexSVH :Index<metric>, IndexSVHParams {
   // Recursively builds the kmeans tree
   void build_helper(node_t* node, 
     const parlay::sequence<parlay::sequence<float>>& points,
-    const parlay::sequence<size_t>& ids);
+    const parlay::sequence<std::pair<size_t,size_t>>& ids);
   // 
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search_each(
     const Point& query, const PointCloudSet<ChPoint>& points,
@@ -65,10 +66,16 @@ struct IndexSVH :Index<metric>, IndexSVHParams {
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
     const ChPoint& query, const PointCloudSet<ChPoint>& points,
     const SearchParams& params) override;
+  // Traversing the k-means tree: returns the height of the tree
+  // TODO: get more stats about the tree
+  size_t traverse_tree(node_t* node, parlay::sequence<node_t*>& ind_to_node,
+    std::unordered_map<node_t*, size_t>& node_to_ind, parlay::sequence<size_t>& center_offsets,
+    parlay::sequence<size_t>& children_offsets, parlay::sequence<size_t>& point_offsets, 
+    size_t height);
   // Write the index to a file in disk
-  void save(const std::string& filename) override{}
+  void save(const std::string& filename) override;
   // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override{}
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
 };
 
 template <bool metric>
@@ -76,14 +83,14 @@ void IndexSVH<metric>::build(const PointCloudSet<ChPoint>& points) {
   size_t n = points.size();
   auto iota = parlay::iota(n);
   parlay::sequence<parlay::sequence<float>> data = points.filter_flattened(iota);
-  auto ids = parlay::sequence<size_t>::uninitialized(points.total_size());
+  auto ids = parlay::sequence<std::pair<size_t,size_t>>::uninitialized(points.total_size());
   auto num_embs = parlay::delayed_tabulate(n, [&](size_t i){
     return points.get_size(i);
   });
   auto [offsets, _] = parlay::scan(num_embs);
   parlay::parallel_for(0, n, [&](size_t i){
     for (size_t j = 0; j < num_embs[i]; ++j) {
-      ids[offsets[i] + j] = i;
+      ids[offsets[i] + j] = {i,j};
     }
   });
   root = new node_t();
@@ -94,7 +101,7 @@ void IndexSVH<metric>::build(const PointCloudSet<ChPoint>& points) {
 template <bool metric>
 void IndexSVH<metric>::build_helper(node_t* node, 
     const parlay::sequence<parlay::sequence<float>>& points, 
-    const parlay::sequence<size_t>& ids) {
+    const parlay::sequence<std::pair<size_t,size_t>>& ids) {
   size_t n = points.size();
   size_t mp = std::max((size_t)4, maxsize/minsize);
   // Num Clusters = min(sqrt(n), mp*n/maxsize)
@@ -270,167 +277,176 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   return std::make_pair(final_results, dist_cmps);
 }
 
-// size_t traverse_tree(node_t* node, parlay::sequence<node_t*>& ind_to_node,
-//   std::unordered_map<node_t*, size_t>& node_to_ind, parlay::sequence<size_t>& center_offsets,
-//   parlay::sequence<size_t>& children_offsets, parlay::sequence<size_t>& point_offsets, size_t height) {
-//   node_to_ind[node] = ind_to_node.size();
-//   ind_to_node.push_back(node);
-//   center_offsets.push_back((node->center.size())*(node->center.get_dims()));
-//   children_offsets.push_back(node->children.size());
-//   point_offsets.push_back(node->points.size());
-//   size_t h = height+1;
-//   for (auto child : node->children) {
-//     h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, 
-//       center_offsets, children_offsets, point_offsets, height+1));
-//   }
-//   return h;
-// }
+template <bool metric>
+size_t IndexSVH<metric>::traverse_tree(node_t* node, 
+  parlay::sequence<node_t*>& ind_to_node,
+  std::unordered_map<node_t*, size_t>& node_to_ind, 
+  parlay::sequence<size_t>& center_offsets,
+  parlay::sequence<size_t>& children_offsets, 
+  parlay::sequence<size_t>& point_offsets, size_t height) {
+  node_to_ind[node] = ind_to_node.size();
+  ind_to_node.push_back(node);
+  center_offsets.push_back(node->center.get_dims()); // 0 if empty center
+  children_offsets.push_back(node->children.size());
+  point_offsets.push_back(node->points.size());
+  size_t h = height+1;
+  for (node_t* child : node->children) {
+    h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, 
+      center_offsets, children_offsets, point_offsets, height+1));
+  }
+  return h;
+}
 
-// void Save(const std::string& filename) {
-//   std::ofstream outfile(filename, std::ios::binary);
-//   std::cout << "Saving index to " << filename << std::endl;
-//   if (!outfile.is_open()) {
-//     std::cerr << "Error opening file for writing: " << filename << std::endl;
-//     return;
-//   }
-//   // Collect data
-//   parlay::sequence<node_t*> ind_to_node;
-//   std::unordered_map<node_t*, size_t> node_to_ind;
-//   parlay::sequence<size_t> center_offsets;
-//   parlay::sequence<size_t> children_offsets;
-//   parlay::sequence<size_t> point_offsets;
+template <bool metric>
+void IndexSVH<metric>::save(const std::string& filename) {
+  std::ofstream outfile(filename, std::ios::binary);
+  std::cout << "Saving index to " << filename << std::endl;
+  if (!outfile.is_open()) {
+    std::cerr << "Error opening file for writing: " << filename << std::endl;
+    return;
+  }
+  // Collect data
+  parlay::sequence<node_t*> ind_to_node;
+  std::unordered_map<node_t*, size_t> node_to_ind;
+  parlay::sequence<size_t> center_offsets;
+  parlay::sequence<size_t> children_offsets;
+  parlay::sequence<size_t> point_offsets;
 
-//   auto height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, children_offsets, point_offsets, 0);
-//   std::cout << "Height of tree: " << height << std::endl;
+  size_t height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, 
+    children_offsets, point_offsets, 0);
+  std::cout << "Height of tree: " << height << std::endl;
   
-//   auto total_center_sizes = parlay::scan_inplace(center_offsets);
-//   center_offsets.push_back(total_center_sizes);
-//   auto total_children_sizes = parlay::scan_inplace(children_offsets);
-//   children_offsets.push_back(total_children_sizes);
-//   auto total_point_sizes = parlay::scan_inplace(point_offsets);
-//   point_offsets.push_back(total_point_sizes);
+  size_t total_center_sizes = parlay::scan_inplace(center_offsets);
+  center_offsets.push_back(total_center_sizes);
+  size_t total_children_sizes = parlay::scan_inplace(children_offsets);
+  children_offsets.push_back(total_children_sizes);
+  size_t total_point_sizes = parlay::scan_inplace(point_offsets);
+  point_offsets.push_back(total_point_sizes);
   
-//   // Write num
-//   size_t num = ind_to_node.size();
-//   outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
-//   // Write center offsets
-//   outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
-//                 center_offsets.size() * sizeof(size_t));
-//   // Write center values
-//   for (size_t i = 0; i < num; ++i) {// TODO: make parallel
-//     auto node = ind_to_node[i];
-//     if (node->center.size() > 0) {
-//       auto coords = node->center.coords();
-//       outfile.write(reinterpret_cast<const char*>(coords.begin()),
-//                     coords.size() * sizeof(T));
-//     }
-//   }
-//   // Write children offsets
-//   outfile.write(reinterpret_cast<const char*>(children_offsets.begin()),
-//                 children_offsets.size() * sizeof(size_t));
-//   // Write children values
-//   for (size_t i = 0; i < num; ++i) {
-//     auto node = ind_to_node[i];
-//     auto children = node->children;
-//     for (size_t j = 0; j < children.size(); ++j) { // TODO: make parallel
-//       auto child = children[j];
-//       size_t child_id = node_to_ind[child];
-//       outfile.write(reinterpret_cast<const char*>(&child_id), sizeof(size_t));
-//     }
-//   }
-//   // Write point offsets
-//   outfile.write(reinterpret_cast<const char*>(point_offsets.begin()),
-//                 point_offsets.size() * sizeof(size_t));
-//   // Write point values
-//   for (size_t i = 0; i < num; ++i) {
-//     auto node = ind_to_node[i];
-//     auto points = node->points;
-//     for (size_t j = 0; j < points.size(); ++j) {
-//       auto point_id = points.get_id(j);
-//       outfile.write(reinterpret_cast<const char*>(&point_id), sizeof(size_t));
-//     }
-//   }
-//   outfile.close();
-// }
+  // Write num
+  size_t num = ind_to_node.size();
+  outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
+  // Write center offsets
+  outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
+                center_offsets.size() * sizeof(size_t));
+  // Write center values
+  for (size_t i = 0; i < num; ++i) {// TODO: make parallel
+    node_t* node = ind_to_node[i];
+    if (node->center.get_dims() > 0) {
+      auto coords = node->center.get_slice();
+      outfile.write(reinterpret_cast<const char*>(coords.begin()),
+                    coords.size() * sizeof(float));
+    }
+  }
+  // Write children offsets
+  outfile.write(reinterpret_cast<const char*>(children_offsets.begin()),
+                children_offsets.size() * sizeof(size_t));
+  // Write children values
+  for (size_t i = 0; i < num; ++i) {
+    node_t* node = ind_to_node[i];
+    parlay::sequence<node_t*> children = node->children;
+    for (size_t j = 0; j < children.size(); ++j) { // TODO: make parallel
+      node_t* child = children[j];
+      size_t child_id = node_to_ind[child];
+      outfile.write(reinterpret_cast<const char*>(&child_id), sizeof(size_t));
+    }
+  }
+  // Write point offsets
+  outfile.write(reinterpret_cast<const char*>(point_offsets.begin()),
+                point_offsets.size() * sizeof(size_t));
+  // Write point values (pairs)
+  for (size_t i = 0; i < num; ++i) {
+    node_t* node = ind_to_node[i];
+    auto point_ids = node->ids;
+    outfile.write(reinterpret_cast<const char*>(point_ids.begin()),
+                  point_ids.size() * sizeof(std::pair<size_t,size_t>));
+  }
+  outfile.close();
+}
 
-// void Load(const std::string& filename, PointCloud& data) {
-//   std::ifstream infile(filename, std::ios::binary);
-//   std::cout << "Loading index from " << filename << std::endl;
-//   if (!infile.is_open()) {
-//     std::cerr << "Error opening file for reading: " << filename << std::endl;
-//     return;
-//   }
-//   // Read number of nodes
-//   size_t num = 0;
-//   infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
-//   // Read center offsets
-//   parlay::sequence<size_t> center_offsets(num + 1);
-//   infile.read(reinterpret_cast<char*>(center_offsets.begin()),
-//               center_offsets.size() * sizeof(size_t));
-//   // Read center values
-//   parlay::sequence<T> center_values(center_offsets[center_offsets.size() - 1]);
-//   infile.read(reinterpret_cast<char*>(center_values.begin()),
-//               center_values.size() * sizeof(T));
-//   // Read children offsets
-//   parlay::sequence<size_t> children_offsets(num + 1);
-//   infile.read(reinterpret_cast<char*>(children_offsets.begin()),
-//               children_offsets.size() * sizeof(size_t));
-//   // Read children values
-//   parlay::sequence<size_t> children_values(children_offsets[children_offsets.size() - 1]);
-//   infile.read(reinterpret_cast<char*>(children_values.begin()),
-//               children_values.size() * sizeof(size_t));
-//   // Read point offsets
-//   parlay::sequence<size_t> point_offsets(num + 1);
-//   infile.read(reinterpret_cast<char*>(point_offsets.begin()),
-//               point_offsets.size() * sizeof(size_t));
-//   // Read point values
-//   parlay::sequence<size_t> point_values(point_offsets[point_offsets.size() - 1]);
-//   infile.read(reinterpret_cast<char*>(point_values.begin()),
-//               point_values.size() * sizeof(size_t));
+template <bool metric>
+void IndexSVH<metric>::load(const std::string& filename, 
+    const PointCloudSet<ChPoint>& points) {
+  std::ifstream infile(filename, std::ios::binary);
+  std::cout << "Loading index from " << filename << std::endl;
+  if (!infile.is_open()) {
+    std::cerr << "Error opening file for reading: " << filename << std::endl;
+    return;
+  }
+  // Read number of nodes
+  size_t num = 0;
+  infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
+  // Read center offsets
+  parlay::sequence<size_t> center_offsets(num + 1);
+  infile.read(reinterpret_cast<char*>(center_offsets.begin()),
+              center_offsets.size() * sizeof(size_t));
+  // Read center values
+  parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
+  infile.read(reinterpret_cast<char*>(center_values.begin()),
+              center_values.size() * sizeof(float));
+  // Read children offsets
+  parlay::sequence<size_t> children_offsets(num + 1);
+  infile.read(reinterpret_cast<char*>(children_offsets.begin()),
+              children_offsets.size() * sizeof(size_t));
+  // Read children values
+  parlay::sequence<size_t> children_values(children_offsets[children_offsets.size() - 1]);
+  infile.read(reinterpret_cast<char*>(children_values.begin()),
+              children_values.size() * sizeof(size_t));
+  // Read point offsets
+  parlay::sequence<size_t> point_offsets(num + 1);
+  infile.read(reinterpret_cast<char*>(point_offsets.begin()),
+              point_offsets.size() * sizeof(size_t));
+  // Read point values
+  parlay::sequence<std::pair<size_t,size_t>> point_values(point_offsets[point_offsets.size() - 1]);
+  infile.read(reinterpret_cast<char*>(point_values.begin()),
+              point_values.size() * sizeof(std::pair<size_t, size_t>));
 
-//   // Build the index 
-//   size_t dim = data.get_dims();
-//   auto point_id_to_data_id = parlay::sequence<size_t>::uninitialized(data.size());
-//   parlay::parallel_for(0, data.size(), [&](size_t i) {
-//     point_id_to_data_id[data.get_id(i)] = i;
-//   });
-//   auto center_sizes = parlay::sequence<size_t>::from_function(num, 
-//     [&](size_t i) { return center_offsets[i + 1] - center_offsets[i]; });
-//   auto children_sizes = parlay::sequence<size_t>::from_function(num, 
-//     [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
-//   auto point_sizes = parlay::sequence<size_t>::from_function(num, 
-//     [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
-//   auto ind_to_node = parlay::sequence<node_t*>::from_function(num, 
-//     [&](size_t i) { 
-//     auto node = new node_t();
-//     if (center_sizes[i] > 0) {
-//       node->set_center(ChPoint(center_values.begin() + center_offsets[i], 
-//         center_sizes[i]/dim, dim)); 
-//     }
-//     node->children.resize(children_sizes[i]);
-//     if (point_sizes[i] > 0){
-//       auto point_group = parlay::sequence<size_t>::from_function(
-//         point_sizes[i], [&](size_t j) {
-//           auto point_id = point_values[point_offsets[i] + j];
-//           return point_id_to_data_id[point_id]; 
-//         });
-//       node->set_points(PointCloud(data.filter(point_group), dim));
-//     }
-//     return node;
-//   });
+  // Build the index 
+  size_t dim = points.get_dims();
+  auto point_id_to_data_id = parlay::sequence<size_t>::uninitialized(points.size());
+  parlay::parallel_for(0, points.size(), [&](size_t i) {
+    point_id_to_data_id[points.get_id(i)] = i;
+  });
+  parlay::sequence<size_t> center_sizes = parlay::sequence<size_t>::from_function(num, 
+    [&](size_t i) { return center_offsets[i + 1] - center_offsets[i]; });
+  parlay::sequence<size_t> children_sizes = parlay::sequence<size_t>::from_function(num, 
+    [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
+  parlay::sequence<size_t> point_sizes = parlay::sequence<size_t>::from_function(num, 
+    [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
+  parlay::sequence<node_t*> ind_to_node = parlay::sequence<node_t*>::from_function(num, 
+    [&](size_t i) { 
+    node_t* node = new node_t(); // TODO: use paralay allocator
+    if (center_sizes[i] > 0) {
+      node->set_center(Point(center_values.begin() + center_offsets[i], 
+        dim, dim));
+    }
+    node->children.resize(children_sizes[i]);
+    if (point_sizes[i] > 0){
+      auto point_ids = parlay::tabulate(point_sizes[i], [&](size_t j) {
+        return point_values[point_offsets[i] + j];
+      });
+      auto point_group = parlay::tabulate(point_sizes[i], [&](size_t j) {
+        auto [point_id, emb_id] = point_ids[j];
+        auto act_point_id = point_id_to_data_id[point_id];
+        return points[act_point_id][emb_id];
+      });
+      node->set_points(Range(point_group, dim), point_ids);
+    }
+    return node;
+  });
   
-//   // Set children pointers
-//   parlay::parallel_for(0, num, [&](size_t i) {
-//     auto node = ind_to_node[i];
-//     auto& children = node->children;
-//     parlay::parallel_for(0, children.size(), [&](size_t j) {
-//       auto child_id = children_values[children_offsets[i] + j];
-//       children[j] = ind_to_node[child_id];
-//     });
-//   });
-//   root = ind_to_node[0];
-//   infile.close();
-// }
+  // Set children pointers
+  parlay::parallel_for(0, num, [&](size_t i) {
+    node_t* node = ind_to_node[i];
+    parlay::sequence<node_t*>& children = node->children;
+    parlay::parallel_for(0, children.size(), [&](size_t j) {
+      size_t child_id = children_values[children_offsets[i] + j];
+      children[j] = ind_to_node[child_id];
+    });
+  });
+  root = ind_to_node[0];
+  infile.close();
+}
 
 template struct IndexSVH<true>;  // Instantiates for L2 metric (metric = true)
 template struct IndexSVH<false>; // Instantiates for MIPS      (metric = false)
