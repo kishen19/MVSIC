@@ -121,13 +121,17 @@ auto faiss_kmeans_assign(const Seq1& data, const Seq2& full_data, size_t d, size
   auto grouped = parlay::group_by_index(id_pt, k);
   parlay::sequence<bool> active(k,true);
   parlay::parallel_for(0, k, [&](size_t i) {
-    // average distance to center
-    auto dists = parlay::delayed_tabulate(grouped[i].size(), [&](size_t j) {
-      return distances[grouped[i][j]];
-    });
-    float avg_dist = parlay::reduce(dists) / grouped[i].size();
-    if (avg_dist < 1e-5 && grouped[i].size() > maxsize) {
+    if (grouped[i].size()==0){
       active[i] = false;
+    } else{
+      // average distance to center
+      auto dists = parlay::delayed_tabulate(grouped[i].size(), [&](size_t j) {
+        return distances[grouped[i][j]];
+      });
+      float avg_dist = parlay::reduce(dists) / grouped[i].size();
+      if (avg_dist < 1e-5 && grouped[i].size() > maxsize) {
+        active[i] = false;
+      }
     }
   });
   auto active_indices = parlay::pack_index(active);

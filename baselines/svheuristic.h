@@ -153,31 +153,46 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
       query.get_dims(), query.get_dims()), points, params);
   });
   parlay::sequence<size_t> candidates;
+  std::unordered_set<size_t> seen;
   size_t done = 0, i=0;
   while (done < q){
     for (size_t j=0; j<q; j++){
       if (i < results[j].size()){
-        candidates.push_back(results[j][i].first);
+        if (seen.find(results[j][i].first) == seen.end()){
+          candidates.push_back(results[j][i].first);
+          seen.insert(results[j][i].first);
+        }
       }
-      if (i == results[j].size()-1){
+      if (i == results[j].size()-1 || (i==0 && results[j].size()==0)){
         done++;
       }
     }
     i++;
   }
-  // TODO: dedup candidates, keep earliest copy
   // Final re-ranking
   auto new_cands = parlay::sequence<std::pair<float, size_t>>::from_function( 
-      candidates.size(), [&](size_t i) {
+      std::min(cands, candidates.size()), [&](size_t i) {
     size_t id = candidates[i];
     float new_dist = query.distance(points[id]);
     return std::make_pair(new_dist, id);
   });
   parlay::sort_inplace(new_cands);
-  auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
-    std::min(k, new_cands.size()), [&](size_t i) { 
-      return std::make_pair(new_cands[i].second, new_cands[i].first);
-    });
+  parlay::sequence<std::pair<size_t, float>> final_results;
+  final_results.push_back({new_cands[0].second, new_cands[0].first});
+  auto [prev_id, prev_dist] = final_results[0];
+  for (size_t i = 1; i < new_cands.size(); i++) {
+    if (final_results.size() < k) {
+      auto [dist, id] = new_cands[i];
+      if (id != prev_id) {
+        final_results.push_back({id, dist});
+        prev_dist = dist;
+        prev_id = id;
+      }
+    }
+    if (final_results.size() == k) {
+      break;
+    }
+  }
   return std::make_pair(final_results, parlay::reduce(dist_cmps) + new_cands.size());
 }
 

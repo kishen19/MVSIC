@@ -11,7 +11,7 @@ struct SearchParams{
   // MVIVF Specific Params
 
   // Single Vector Heuristic Specific Params
-  size_t cands;
+  size_t cands=0;
 
   // mvivf search params
   SearchParams(size_t k, size_t nprobes, size_t beam_length_)
