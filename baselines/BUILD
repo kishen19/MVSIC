@@ -5,6 +5,7 @@ cc_library(
     name = "svheuristic",
     hdrs = ["svheuristic.h"],
     deps = [
+      "@absl//absl/container:btree",
       "@parlaylib//parlay:primitives",
       "//mvc/utils:euclidian_point",
       "//mvc/utils:faiss_kmeans",

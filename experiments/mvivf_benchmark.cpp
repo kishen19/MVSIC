@@ -5,9 +5,8 @@
 #include "mvivf/utils/stats.h"
 #include "mvivf/mvivf.h"
 
-
 template <typename ChPoint, bool metric>
-void bench(commandLine& P) {
+void bench(mvivf::commandLine& P) {
   using PC = PointCloudSet<ChPoint>;
 
   // Files
@@ -86,7 +85,7 @@ void bench(commandLine& P) {
 }
 
 int main(int argc, char* argv[]) {
-  commandLine P(argc, argv,
+  mvivf::commandLine P(argc, argv,
                 "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                 "[-data_type <tp>] [-dist_func <dist_func>]" 
                 "[-seed <algorithm>] [-iters <num_iters>]" 

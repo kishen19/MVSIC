@@ -8,11 +8,10 @@
 #include "mvivf/utils/stats.h"
 #include "baselines/svheuristic.h"
 
-
 template <typename Point, typename ChPoint, bool metric>
-void bench(commandLine& P) {
+void bench(mvivf::commandLine& P) {
   using PC = PointCloudSet<ChPoint>;
-  using Range = PointRange<float, Point>;
+  using Range = mvivf::PointRange<float, Point>;
 
   // Files
   char* inFile = P.getOptionValue("-i"); // Base Points
@@ -91,7 +90,7 @@ void bench(commandLine& P) {
 }
 
 int main(int argc, char* argv[]) {
-  commandLine P(argc, argv,
+  mvivf::commandLine P(argc, argv,
                 "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                 "[-data_type <tp>] [-dist_func <dist_func>]" 
                 "[-seed <algorithm>] [-iters <num_iters>]" 
@@ -100,11 +99,11 @@ int main(int argc, char* argv[]) {
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2"){
-    using Point = Euclidian_Point<float>;
+    using Point = mvivf::Euclidian_Point<float>;
     using ChPoint = ChamferL2_Point;
     bench<Point, ChPoint, true>(P);
   } else if (df == "IP") {
-    using Point = Mips_Point<float>;
+    using Point = mvivf::Mips_Point<float>;
     using ChPoint = ChamferIP_Point;
     bench<Point, ChPoint, false>(P);
   }
