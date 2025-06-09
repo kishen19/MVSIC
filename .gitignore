@@ -22,4 +22,5 @@ bazel-*
 # VSCode files
 .vscode
 
+# Stats files
 *.csv

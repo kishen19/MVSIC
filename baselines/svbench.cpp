@@ -8,8 +8,7 @@
 #include "mvivf/utils/stats.h"
 #include "svheuristic.h"
 
-
-template <typename Point, typename ChPoint, bool metric>
+template<typename Point, typename ChPoint, bool metric>
 void bench(mvivf::commandLine& P) {
   using PC = PointCloudSet<ChPoint>;
   using Range = mvivf::PointRange<float, Point>;
@@ -17,7 +16,7 @@ void bench(mvivf::commandLine& P) {
   char* inFile = P.getOptionValue("-i");
   char* qFile = P.getOptionValue("-q");
   std::string QFile;
-  if (qFile != nullptr){
+  if (qFile != nullptr) {
     QFile = P.getOptionValue("-q");
   } else {
     QFile = "";
@@ -31,7 +30,7 @@ void bench(mvivf::commandLine& P) {
   size_t nprobes = P.getOptionLongValue("-nprobes", 1);
   size_t beamsize = P.getOptionLongValue("-beamsize", 0);
   size_t k = P.getOptionLongValue("-k", 10);
-  size_t cands = P.getOptionLongValue("-cands", 10*k);
+  size_t cands = P.getOptionLongValue("-cands", 10 * k);
   size_t os_rate = P.getOptionLongValue("-osr", 20);
   bool verbose = P.getOption("-v");
 
@@ -39,7 +38,7 @@ void bench(mvivf::commandLine& P) {
   mvivf::IndexSVHParams index_params(minsize, maxsize, verbose, os_rate);
   mvivf::SearchParams search_params(k, nprobes, beamsize, cands);
   mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
-  if (indexFile != ""){
+  if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;
     index.load(indexFile, points);
     std::cout << "Index loaded" << std::endl;
@@ -47,21 +46,21 @@ void bench(mvivf::commandLine& P) {
     std::cout << "Building index..." << std::endl;
     parlay::internal::timer it;
     it.start();
-    index.build(points); 
+    index.build(points);
     it.stop();
     std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
   }
-  if (outFile != ""){
+  if (outFile != "") {
     std::cout << "Saving index to " << outFile << std::endl;
     index.save(P.getOptionValue("-o"));
     std::cout << "Index saved." << std::endl;
   }
-  
-  if (QFile != ""){
+
+  if (QFile != "") {
     auto queries = PC(qFile);
     auto gt = ReadGT(gtFile, queries.size());
     double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
-    
+
     // Compute Stats:
     std::cout << "Computing stats..." << std::endl;
     mvivf::Stats result = compute_stats(index, points, queries, gt, search_params);
@@ -81,15 +80,15 @@ void bench(mvivf::commandLine& P) {
 
 int main(int argc, char* argv[]) {
   mvivf::commandLine P(argc, argv,
-                "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
-                "[-data_type <tp>] [-dist_func <dist_func>]" 
-                "[-seed <algorithm>] [-iters <num_iters>]" 
-                // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
-              );
+                       "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
+                       "[-data_type <tp>] [-dist_func <dist_func>]"
+                       "[-seed <algorithm>] [-iters <num_iters>]"
+                       // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
+  );
 
   std::string df = P.getOptionValue("-dist_func", "IP");
 
-  if (df == "L2"){
+  if (df == "L2") {
     using Point = mvivf::Euclidian_Point<float>;
     using ChPoint = ChamferL2_Point;
     bench<Point, ChPoint, true>(P);

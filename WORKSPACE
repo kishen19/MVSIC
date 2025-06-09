@@ -1,50 +1,45 @@
-load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
-
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
 load("@bazel_tools//tools/cpp:cc_configure.bzl", "cc_configure")
 
 cc_configure()
 
 git_repository(
-	name = "cpam",
-	commit = "f0eaf81a4b4070a4ac56114e1eca17a308c26b02",  # cpam commit
-	remote = "https://github.com/ParAlg/CPAM.git",
-	strip_prefix = "include/",
+    name = "cpam",
+    commit = "f0eaf81a4b4070a4ac56114e1eca17a308c26b02",
+    remote = "https://github.com/ParAlg/CPAM.git",
+    strip_prefix = "include/",
 )
 
 http_archive(
-  name = "parlaylib",
-  sha256 = "68c062ad116fd49d77651d7a24fb985aa66e8ec9ad05176b6af3ab5d29a16b1f",
-  strip_prefix = "parlaylib-bazel/include/",
-  urls = ["https://github.com/ParAlg/parlaylib/archive/refs/tags/bazel.tar.gz"],
+    name = "parlaylib",
+    sha256 = "68c062ad116fd49d77651d7a24fb985aa66e8ec9ad05176b6af3ab5d29a16b1f",
+    strip_prefix = "parlaylib-bazel/include/",
+    urls = ["https://github.com/ParAlg/parlaylib/archive/refs/tags/bazel.tar.gz"],
 )
 
 http_archive(
-  name = "googletest",
-  sha256 = "b4870bf121ff7795ba20d20bcdd8627b8e088f2d1dab299a031c1034eddc93d5",
-  strip_prefix = "googletest-release-1.11.0",
-  urls = ["https://github.com/google/googletest/archive/release-1.11.0.tar.gz"],
+    name = "googletest",
+    sha256 = "b4870bf121ff7795ba20d20bcdd8627b8e088f2d1dab299a031c1034eddc93d5",
+    strip_prefix = "googletest-release-1.11.0",
+    urls = ["https://github.com/google/googletest/archive/release-1.11.0.tar.gz"],
 )
 
 git_repository(
-  name = "parlayann",
-  branch = "bazel",
-  remote = "https://github.com/kishen19/ParlayANN.git",
-  # remote = "https://github.com/cmuparlay/parlayann.git",
-#  commit = "a4ba8585235789b555ce0ae920e548946d714b9d"
+    name = "parlayann",
+    branch = "bazel",
+    remote = "https://github.com/kishen19/ParlayANN.git",
+    # remote = "https://github.com/cmuparlay/parlayann.git",
 )
 
 local_repository(
-  name = "kmeans",
-  path = "./external/kmeans/",
+    name = "kmeans",
+    path = "./external/kmeans/",
 )
 
 http_archive(
     name = "eigen",
-    # sha256 = "3a66f9bfce85aff39bc255d5a341f87336ec6f5911e8d816dd4a3fdc500f8acf",
-    url = "https://gitlab.com/libeigen/eigen/-/archive/3.4-rc1/eigen-3.4-rc1.tar.gz",
-    strip_prefix = "eigen-3.4-rc1",
     build_file_content = """
 cc_library(
     name = "eigen",
@@ -68,13 +63,13 @@ cc_library(
     includes = ["."],
     visibility = ["//visibility:public"],
 )
-"""
+""",
+    strip_prefix = "eigen-3.4-rc1",
+    url = "https://gitlab.com/libeigen/eigen/-/archive/3.4-rc1/eigen-3.4-rc1.tar.gz",
 )
 
 git_repository(
     name = "faiss",
-    remote = "https://github.com/facebookresearch/faiss.git",
-    tag = "v1.11.0",
     build_file_content = """
 cc_library(
     name = "faiss_core",
@@ -95,12 +90,13 @@ cc_library(
     linkopts = ["-fopenmp", "-lopenblas"],
     visibility = ["//visibility:public"],
 )
-"""
+""",
+    remote = "https://github.com/facebookresearch/faiss.git",
+    tag = "v1.11.0",
 )
 
 http_archive(
     name = "absl",
-    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20240116.0.tar.gz"],
     strip_prefix = "abseil-cpp-20240116.0",
-    # sha256 = "028934475a8079392171008890a908191c7050f190000bf28f0471c380990390",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20240116.0.tar.gz"],
 )
