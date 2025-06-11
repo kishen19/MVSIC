@@ -1,15 +1,18 @@
 index=$1
 dataset=$2
-reduced=""
-# reduced="_reduced"
+# reduced="" # Use for scidocs and arguana
+reduced="_reduced" # Use for quora, nq, hotpotqa and msmarco
 
 DATAPATH=/ssd2/laxman/multivector
 RESULTSPATH=/ssd2/kishen/MVC
 
-maxsizes=(100 500)
-iters=(10)
-ks=(10 100)
-cands=(1 4 16 64)
+mkdir -p ${RESULTSPATH}/${dataset}/stats
+
+
+maxsizes=(500)
+iters=(5)
+ks=(10)
+cands=(1 2 4 8 16)
 
 if [ "$index" == "mvivf" ]; then
   for maxsize in ${maxsizes[@]}; do
@@ -20,8 +23,8 @@ if [ "$index" == "mvivf" ]; then
           -i  ${DATAPATH}/${dataset}/${dataset}_points.pcs  \
           -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
           -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
-          -index ${RESULTSPATH}/${dataset}/${index}_maxsize${maxsize}_iters${iter}.bin \
-          -r ${RESULTSPATH}/${dataset}/${index}_maxsize${maxsize}_iters${iter}_k=${k}.csv \
+          -index ${RESULTSPATH}/${dataset}/indices/${index}_maxsize${maxsize}_iters${iter}.bin \
+          -r ${RESULTSPATH}/${dataset}/stats/${index}_maxsize${maxsize}_iters${iter}_k=${k}.csv \
           -k ${k} \
           -npl 1 -npr 128 -npmp 2 -npad 0
         echo ${dataset} ${maxsize} ${iter} ${k} done
@@ -38,8 +41,8 @@ elif [ "$index" == "svh" ]; then
           -i  ${DATAPATH}/${dataset}/${dataset}_points.pcs  \
           -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
           -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
-          -index ${RESULTSPATH}/${dataset}/${index}_maxsize${maxsize}.bin \
-          -r ${RESULTSPATH}/${dataset}/${index}_maxsize${maxsize}_k=${k}_cand=${cand}.csv \
+          -index ${RESULTSPATH}/${dataset}/indices/${index}_maxsize${maxsize}.bin \
+          -r ${RESULTSPATH}/${dataset}/stats/${index}_maxsize${maxsize}_k=${k}_cand=${cand}.csv \
           -k ${k} -cands ${prod} \
           -npl 1 -npr 128 -npmp 2 -npad 0 
         echo ${dataset} ${maxsize} ${cand} ${k} done

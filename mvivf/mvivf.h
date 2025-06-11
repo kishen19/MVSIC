@@ -149,13 +149,16 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     beam.erase(beam.begin());
     node_t *current_node = best.second;
     // Compute distances from query to children
-    auto res = parlay::sequence<std::pair<float, node_t *>>::from_function(
-        current_node->children.size(), [&](size_t i) {
-          node_t *child = current_node->children[i];
+    parlay::sequence<size_t> cmps(current_node->children.size());
+    auto children = current_node->children;
+    auto res =
+        parlay::sequence<std::pair<float, node_t *>>::from_function(children.size(), [&](size_t i) {
+          node_t *child = children[i];
           float dist = query.distance(child->center);
+          cmps[i] = (query.size() * child->center.size());
           return std::make_pair(dist, child);
         });
-    dist_cmps += res.size();
+    dist_cmps += parlay::reduce(cmps);
     // Collect leaf and non-leaf nodes
     auto new_nodes_to_beam = parlay::filter(res, [](const auto &p) {
       return p.second->children.size() != 0;  // Only keep nodes that are not leaves

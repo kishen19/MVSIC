@@ -9,9 +9,12 @@ template<typename ChPoint>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(
     const ChPoint &q, const PointCloudSet<ChPoint> &points, size_t k) {
   size_t dist_cmps = 0;
-  auto dists = parlay::tabulate(
-      points.size(), [&](size_t i) { return std::pair(q.distance(points[i]), points.get_id(i)); });
-  dist_cmps += dists.size();
+  parlay::sequence<size_t> cmps(points.size());
+  auto dists = parlay::tabulate(points.size(), [&](size_t i) {
+    cmps[i] = (q.size() * points[i].size());
+    return std::pair(q.distance(points[i]), points.get_id(i));
+  });
+  dist_cmps += parlay::reduce(cmps);
   parlay::sort_inplace(dists);
   auto knn = parlay::sequence<std::pair<size_t, float>>::from_function(
       std::min(k, dists.size()),
