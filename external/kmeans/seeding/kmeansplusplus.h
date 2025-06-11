@@ -7,9 +7,8 @@
 #include "parlay/primitives.h"
 #include "parlay/sequence.h"
 
-template <typename T, typename Range>
-T UpdateDistances(const Range &points, parlay::sequence<T> &distances,
-                  uint32_t new_center_id) {
+template<typename T, typename Range>
+T UpdateDistances(const Range &points, parlay::sequence<T> &distances, uint32_t new_center_id) {
   // for (size_t i = 0; i < points.size(); i++) {
   parlay::parallel_for(0, points.size(), [&](size_t i) {
     T new_distance = points[i].distance(points[new_center_id]);
@@ -19,10 +18,9 @@ T UpdateDistances(const Range &points, parlay::sequence<T> &distances,
   return parlay::reduce(distances);
 }
 
-template <typename T, typename Range>
+template<typename T, typename Range>
 parlay::sequence<uint32_t> SequentialPlusPlus(
-    const Range &points, uint32_t k,
-    const parlay::sequence<T> &weights = parlay::sequence<T>{}) {
+    const Range &points, uint32_t k, const parlay::sequence<T> &weights = parlay::sequence<T>{}) {
   size_t n = points.size();
 
   int seed = 0;

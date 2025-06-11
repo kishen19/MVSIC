@@ -4,18 +4,14 @@
 #include "parlay/primitives.h"
 #include "parlay/sequence.h"
 
-std::pair<parlay::sequence<size_t>,
-          parlay::sequence<std::pair<uint32_t, uint32_t>>>
-symmetrize(parlay::sequence<std::pair<uint32_t, uint32_t>> &edges, size_t n) {
+std::pair<parlay::sequence<size_t>, parlay::sequence<std::pair<uint32_t, uint32_t>>> symmetrize(
+    parlay::sequence<std::pair<uint32_t, uint32_t>> &edges, size_t n) {
   size_t m = edges.size();
   edges.resize(m * 2);
-  parlay::parallel_for(0, m, [&](size_t i) {
-    edges[i + m] = {edges[i].second, edges[i].first};
-  });
+  parlay::parallel_for(0, m, [&](size_t i) { edges[i + m] = {edges[i].second, edges[i].first}; });
   sort_inplace(make_slice(edges));
   auto pred = parlay::delayed_seq<bool>(m * 2, [&](size_t i) {
-    if (i != 0 && edges[i].first == edges[i - 1].first &&
-        edges[i].second == edges[i - 1].second) {
+    if (i != 0 && edges[i].first == edges[i - 1].first && edges[i].second == edges[i - 1].second) {
       return false;
     }
     return true;
@@ -27,15 +23,13 @@ symmetrize(parlay::sequence<std::pair<uint32_t, uint32_t>> &edges, size_t n) {
       offsets[edges[i].first] = i;
     }
   });
-  parlay::scan_inclusive_inplace(
-      parlay::make_slice(offsets.rbegin(), offsets.rend()),
-      parlay::minm<size_t>());
+  parlay::scan_inclusive_inplace(parlay::make_slice(offsets.rbegin(), offsets.rend()),
+                                 parlay::minm<size_t>());
   return {offsets, edges};
 }
 
-template <typename T, typename PointTy, typename Range>
-parlay::sequence<uint32_t> KSetCover(Range &points, uint32_t k,
-                                     BuildParams &BP) {
+template<typename T, typename PointTy, typename Range>
+parlay::sequence<uint32_t> KSetCover(Range &points, uint32_t k, BuildParams &BP) {
   size_t n = points.size();
   constexpr int num_samples = 1000;
 
@@ -48,8 +42,8 @@ parlay::sequence<uint32_t> KSetCover(Range &points, uint32_t k,
   auto QP = QueryParams(k, BP.L, cut, (long)G.size(), (long)G.max_degree());
   parlay::parallel_for(0, n, [&](size_t i) {
     parlay::sequence<uint32_t> start_points = {I.get_start()};
-    auto [pairElts, dist_cmps] = beam_search<PointTy, Range, uint32_t>(
-        points[i], G, points, start_points, QP);
+    auto [pairElts, dist_cmps] =
+        beam_search<PointTy, Range, uint32_t>(points[i], G, points, start_points, QP);
     auto [beamElts, visitedElts] = pairElts;
     id_and_dist[i] = beamElts;
   });

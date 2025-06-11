@@ -28,6 +28,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 
 #include "parlay/internal/file_map.h"

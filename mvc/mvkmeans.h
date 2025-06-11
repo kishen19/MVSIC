@@ -17,20 +17,9 @@
 
 namespace mvivf {
 
+// Runs kmeans on a subsample of size os_rate*k
 template<typename DistTy, typename Point, typename Range>
-auto kmeans_subsample(const Range &data, size_t k, size_t os_rate) {
-  size_t n = data.size();
-  if (os_rate * k >= n) {
-    return kmeans<DistTy, Point>(data, k);
-  } else {
-    auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
-      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
-      return data[id];
-    });
-    auto sampled_data = Range(sampled_points, data.get_dims());
-    return kmeans<DistTy, Point>(sampled_data, k);
-  }
-}
+auto kmeans_subsample(Range &data, size_t k, size_t os_rate);
 
 constexpr bool L2 = true;
 constexpr bool IP = false;
@@ -38,9 +27,9 @@ constexpr bool IP = false;
 struct MVClusteringParams {
   int iters = 5;
   std::string seeding = "Random";
+  size_t os_rate = 20;
   bool comp_lb = false;
   bool verbose = false;
-  size_t os_rate = 20;
 };
 
 template<bool metric>
@@ -211,6 +200,21 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
     for (auto t : lloyds_times) {
       std::cout << t << std::endl;
     }
+  }
+}
+
+template<typename DistTy, typename Point, typename Range>
+auto kmeans_subsample(Range &data, size_t k, size_t os_rate) {
+  size_t n = data.size();
+  if (os_rate * k >= n) {
+    return kmeans<DistTy, Point>(data, k);
+  } else {
+    auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
+      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+      return data[id];
+    });
+    auto sampled_data = Range(sampled_points, data.get_dims());
+    return kmeans<DistTy, Point>(sampled_data, k);
   }
 }
 

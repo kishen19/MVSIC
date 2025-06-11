@@ -4,7 +4,7 @@
 #include "parlay/primitives.h"
 #include "parlay/sequence.h"
 
-template <typename T, typename Range>
+template<typename T, typename Range>
 parlay::sequence<uint32_t> UniformlyRandom(const Range &points, uint32_t k) {
   size_t n = points.size();
   parlay::sequence<uint32_t> centers(k);

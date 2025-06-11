@@ -7,7 +7,7 @@
 #include "parlay/sequence.h"
 #include "utils.h"
 
-template <typename T, typename Range>
+template<typename T, typename Range>
 parlay::sequence<uint32_t> ParallelPlusPlus(const Range &points, uint32_t k) {
   size_t n = points.size();
   parlay::sequence<T> distances(n, std::numeric_limits<T>::max());
@@ -21,15 +21,14 @@ parlay::sequence<uint32_t> ParallelPlusPlus(const Range &points, uint32_t k) {
   constexpr double oversampling_factor = 1;
   size_t num_centers_to_add = k * oversampling_factor;
 
-  for (size_t round_id = 0; round_id < num_iterations || selected_centers < k;
-       round_id++) {
+  for (size_t round_id = 0; round_id < num_iterations || selected_centers < k; round_id++) {
     parlay::sequence<uint32_t> new_centers;
     if (round_id == 0) {
       uint32_t random_center = parlay::hash32(round_id) % n;
       new_centers.push_back(random_center);
     } else {
-      new_centers = PickRandomCenters(
-          distances, round_id, sum_squared_distances, num_centers_to_add);
+      new_centers =
+          PickRandomCenters(distances, round_id, sum_squared_distances, num_centers_to_add);
     }
     centers.resize(centers.size() + new_centers.size());
     parlay::parallel_for(0, new_centers.size(), [&](size_t i) {
@@ -41,8 +40,7 @@ parlay::sequence<uint32_t> ParallelPlusPlus(const Range &points, uint32_t k) {
       new_centers.resize(k - selected_centers);
     }
     selected_centers += new_centers.size();
-    sum_squared_distances =
-        BatchUpdateDistances(points, distances, new_centers);
+    sum_squared_distances = BatchUpdateDistances(points, distances, new_centers);
   }
   // parlay::sequence<T> weights(centers.size());
   // parlay::parallel_for(0, n, [&](size_t i) {

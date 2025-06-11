@@ -4,7 +4,7 @@
 #include "parlay/primitives.h"
 #include "parlay/sequence.h"
 
-template <typename T, typename Range>
+template<typename T, typename Range>
 parlay::sequence<uint32_t> PrefixDoubling(const Range &points, uint32_t k) {
   size_t n = points.size();
   parlay::sequence<T> distances(n, std::numeric_limits<T>::max());
@@ -22,10 +22,9 @@ parlay::sequence<uint32_t> PrefixDoubling(const Range &points, uint32_t k) {
       // TODO: add command line options for alpha
       constexpr double alpha = 2;
       size_t num_centers_to_add =
-          std::min(static_cast<size_t>(floor(pow(alpha, round_id))),
-                   n - selected_centers);
-      new_centers = PickRandomCenters(
-          distances, round_id, sum_squared_distances, num_centers_to_add);
+          std::min(static_cast<size_t>(floor(pow(alpha, round_id))), n - selected_centers);
+      new_centers =
+          PickRandomCenters(distances, round_id, sum_squared_distances, num_centers_to_add);
     }
     // resize if more than k centers are selected
     if (selected_centers + new_centers.size() > k) {
@@ -38,8 +37,7 @@ parlay::sequence<uint32_t> PrefixDoubling(const Range &points, uint32_t k) {
         centers[selected_centers + i] = c;
       });
       selected_centers += new_centers.size();
-      sum_squared_distances =
-          BatchUpdateDistances(points, distances, new_centers);
+      sum_squared_distances = BatchUpdateDistances(points, distances, new_centers);
     }
   }
   return centers;

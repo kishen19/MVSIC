@@ -34,7 +34,7 @@ void bench(mvivf::commandLine &P) {
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, verbose, os_rate);
+  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, os_rate, seeding, verbose);
   mvivf::SearchParams search_params(k, nprobes, beamsize);
   mvivf::IndexMVIVF<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
