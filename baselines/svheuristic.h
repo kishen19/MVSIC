@@ -16,8 +16,8 @@ using namespace mvivf;
 struct IndexSVHParams {
   size_t minsize = 100;
   size_t maxsize = 500;
-  bool verbose = false;
   size_t os_rate = 20;
+  bool verbose = false;
 };
 
 template<typename Point, typename Range>
@@ -112,23 +112,24 @@ void IndexSVH<metric>::build_helper(node_t* node,
       n, [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
   auto grouped = parlay::group_by_index(id_pt, num_clusters);
   // Step 2: Update children nodes and recurse for large nodes
-  parlay::sequence<node_t*> children =
-      parlay::sequence<node_t*>::from_function(active_indices.size(), [&](size_t id) {
-        size_t i = active_indices[id];
-        node_t* child = new node_t();  // TODO: use parlay allocator
-        child->set_center(centers[i]);
-        auto child_points =
-            parlay::tabulate(grouped[i].size(), [&](size_t j) { return points[grouped[i][j]]; });
-        auto child_ids =
-            parlay::tabulate(grouped[i].size(), [&](size_t j) { return ids[grouped[i][j]]; });
-        if (child_points.size() > maxsize) {
-          build_helper(child, child_points, child_ids);
-        } else {
-          auto child_range = Range(child_points, d);
-          child->set_points(child_range, child_ids);
-        }
-        return child;
-      });
+  parlay::sequence<node_t*> children = parlay::sequence<node_t*>(active_indices.size());
+  // for (size_t id = 0; id < active_indices.size(); id++) {
+  parlay::parallel_for(0, active_indices.size(), [&](size_t id) {
+    size_t i = active_indices[id];
+    node_t* child = new node_t();  // TODO: use parlay allocator
+    child->set_center(centers[i]);
+    auto child_points =
+        parlay::tabulate(grouped[i].size(), [&](size_t j) { return points[grouped[i][j]]; });
+    auto child_ids =
+        parlay::tabulate(grouped[i].size(), [&](size_t j) { return ids[grouped[i][j]]; });
+    if (child_points.size() > maxsize) {
+      build_helper(child, child_points, child_ids);
+    } else {
+      auto child_range = Range(child_points, d);
+      child->set_points(child_range, child_ids);
+    }
+    children[id] = child;
+  });
   node->children = children;
 }
 

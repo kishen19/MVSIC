@@ -52,6 +52,7 @@ cc_library(
     name = "pairwise",
     hdrs = ["pairwise.h"],
     deps = [
+        "@eigen",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",
         "@parlaylib//parlay:sequence",

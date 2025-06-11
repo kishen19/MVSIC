@@ -38,7 +38,7 @@ template<bool metric>
 struct IndexMVIVF : Index<metric>, IndexMVIVFParams {
   using ChPoint = Index<metric>::ChPoint;
   using node_t = IndexMVIVFNode<ChPoint>;
-  using node_allocator = parlay::type_allocator<node_t>;
+  // using node_allocator = parlay::type_allocator<node_t>;
   using Index<metric>::d;
 
   node_t *root = nullptr;
@@ -51,8 +51,8 @@ struct IndexMVIVF : Index<metric>, IndexMVIVFParams {
 
   // Builds the index given a point cloud set.
   void build(const PointCloudSet<ChPoint> &points) override {
-    // root = new node_t();
-    root = node_allocator::create();
+    root = new node_t();
+    // root = node_allocator::create();
     build_helper(root, points);
   }
   // Recursively builds the kmeans tree
@@ -99,9 +99,10 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
   auto grouped = parlay::group_by_index(id_pt, num_clusters);
   // Step 2: Update children nodes and recurse for large nodes
   parlay::sequence<node_t *> children = parlay::sequence<node_t *>(num_clusters);
-  for (size_t i = 0; i < num_clusters; i++) {
-    // node_t *child = new node_t();
-    node_t *child = node_allocator::create();
+  // for (size_t i = 0; i < num_clusters; i++) {
+  parlay::parallel_for(0, num_clusters, [&](size_t i) {
+    node_t *child = new node_t();
+    // node_t *child = node_allocator::create();
     child->set_center(centers[i]);
     PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(points.filter(grouped[i]), d);
     if (child_points.size() > maxsize) {
@@ -110,8 +111,8 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
       child->set_points(child_points);
     }
     children[i] = child;
-  }
-  node->children = std::move(children);
+  });
+  node->children = children;
 }
 
 // Returns the top-k point clouds for the query point cloud
@@ -340,8 +341,8 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
       num, [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
   parlay::sequence<node_t *> ind_to_node =
       parlay::sequence<node_t *>::from_function(num, [&](size_t i) {
-        // node_t *node = new node_t();
-        node_t *node = node_allocator::create();
+        node_t *node = new node_t();
+        // node_t *node = node_allocator::create();
         if (center_sizes[i] > 0) {
           node->set_center(
               ChPoint(center_sizes[i] / dim, dim, center_values.begin() + center_offsets[i]));
@@ -373,16 +374,19 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
 
 template<bool metric>
 void IndexMVIVF<metric>::traverse_and_delete(node_t *node) {
-  for (node_t *child : node->children) {
+  for (size_t i = 0; i < node->children.size(); i++) {
+    node_t *child = node->children[i];
     traverse_and_delete(child);
+    delete child;
+    // node_allocator::destroy(node);
   }
-  // delete node;
-  node_allocator::destroy(node);
 }
 
 template<bool metric>
 IndexMVIVF<metric>::~IndexMVIVF() {
-  traverse_and_delete(root);
+  // traverse_and_delete(root);
+  // delete root;
+  // node_allocator::destroy(root);
   root = nullptr;
 }
 

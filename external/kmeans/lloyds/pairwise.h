@@ -6,12 +6,11 @@
 #include "parlay/sequence.h"
 
 template<typename PointTy, typename DistTy = typename PointTy::distanceType, typename Range>
-PointRange<DistTy, PointTy> copyPoints(const Range &points,
-                                       const parlay::sequence<uint32_t> &center_ids) {
+Range copyPoints(const Range &points, const parlay::sequence<uint32_t> &center_ids) {
   auto centers = parlay::delayed_seq<PointTy>(center_ids.size(),
                                               [&](size_t i) { return points[center_ids[i]]; });
   int d = points.get_dims();
-  return PointRange<DistTy, PointTy>(centers, d);
+  return Range(centers, d);
 }
 
 template<typename PointTy, typename Seq, typename Range>

@@ -38,7 +38,7 @@ void bench(mvivf::commandLine& P) {
   bool is_gold = P.getOption("-gold");
 
   auto points = PC(inFile);
-  mvivf::IndexSVHParams index_params(minsize, maxsize, verbose, os_rate);
+  mvivf::IndexSVHParams index_params(minsize, maxsize, os_rate, verbose);
   mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {  // Stats Benchmark
     index.load(indexFile, points);

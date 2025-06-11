@@ -149,7 +149,8 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
     // static size_t seed = 42;
     // size_t current_seed = seed;
     // parlay::parallel_for(0, k, [&](size_t i) {
-    for (size_t i = 0; i < k; i++) {
+    // for (size_t i = 0; i < k; i++) {
+    parlay::parallel_for(0, k, [&](size_t i) {
       if (grouped[i].size() > 0) {
         auto data = points.filter_flattened(grouped[i]);
         if (s >= data.size()) {
@@ -177,7 +178,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
           new_centers[i] = kmeans_subsample<float, Point>(data_range, s, os_rate);
         }
       }
-    }  //);
+    });
     // seed += k;
     centers = PointCloudSet<ChPoint>(new_centers, d, {});
     // Step 2B: Reassign points
@@ -206,16 +207,27 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
 template<typename DistTy, typename Point, typename Range>
 auto kmeans_subsample(Range &data, size_t k, size_t os_rate) {
   size_t n = data.size();
+  Range centers;
   if (os_rate * k >= n) {
-    return kmeans<DistTy, Point>(data, k);
+    centers = kmeans<DistTy, Point>(data, k).first;
   } else {
     auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
       size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
       return data[id];
     });
     auto sampled_data = Range(sampled_points, data.get_dims());
-    return kmeans<DistTy, Point>(sampled_data, k);
+    centers = kmeans<DistTy, Point>(sampled_data, k).first;
   }
+  // Convert centers_range to sequence of floats
+  parlay::sequence<parlay::sequence<float>> final_centers(k);
+  parlay::parallel_for(0, k, [&](size_t i) {
+    parlay::sequence<float> center(data.get_dims());
+    for (size_t j = 0; j < data.get_dims(); j++) {
+      center[j] = centers[i][j];
+    }
+    final_centers[i] = std::move(center);
+  });
+  return final_centers;
 }
 
 template struct MVClustering<true>;   // Instantiates for L2 metric (metric = true)

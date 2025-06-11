@@ -1,3 +1,4 @@
+#include <iostream>
 #include "mvc/utils/chamfer_ip_point.h"
 #include "mvc/utils/chamfer_l2_point.h"
 #include "mvc/utils/parse_command_line.h"

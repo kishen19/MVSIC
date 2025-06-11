@@ -1,6 +1,6 @@
 #pragma once
 
-#include "algorithms/utils/point_range.h"
+// #include "algorithms/utils/point_range.h"
 #include "algorithms/utils/types.h"
 #include "anns.h"
 #include "multi-swap.h"
@@ -49,7 +49,7 @@ auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPl
             double deltaw = 1.0, double samw = 20, bool wghw = true) {
   parlay::sequence<uint32_t> center_ids;
   parlay::sequence<uint32_t> cluster_ids;
-  PointRange<DistTy, PointTy> centers;
+  Range centers;
   BuildParams BP(R, L, alpha, two_pass);
   // Seeding
   if (seed_algo == "SequentialPlusPlus") {
@@ -114,13 +114,5 @@ auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPl
                 << "): " << SumOfSquaredCost<PointTy>(points, centers) << std::endl;
     }
   }
-  parlay::sequence<parlay::sequence<float>> final_centers(k);
-  parlay::parallel_for(0, k, [&](size_t i) {
-    parlay::sequence<float> center(points.get_dims());
-    for (size_t j = 0; j < points.get_dims(); j++) {
-      center[j] = centers[i][j];
-    }
-    final_centers[i] = std::move(center);
-  });
-  return final_centers;
+  return std::make_pair(centers, cluster_ids);
 }
