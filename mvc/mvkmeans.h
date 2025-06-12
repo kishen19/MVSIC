@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Eigen/Dense>
 #include "parlay/primitives.h"
 #include "utils/chamfer_ip_point.h"
 #include "utils/chamfer_l2_point.h"
@@ -53,6 +54,8 @@ struct MVClustering : MVClusteringParams {
 
   void compute_cluster_ids(const PointCloudSet<ChPoint> &points,
                            parlay::sequence<size_t> &cluster_ids);
+  void compute_cluster_ids_blocked(const PointCloudSet<ChPoint> &points,
+                                   parlay::sequence<size_t> &cluster_ids);
   float sum_of_squared_cost(const PointCloudSet<ChPoint> &points,
                             const parlay::sequence<size_t> &cluster_ids) const;
 
@@ -80,6 +83,88 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &poi
     auto dist =
         parlay::delayed_tabulate(k, [&](size_t j) { return points[i].distance(centers[j]); });
     cluster_ids[i] = parlay::min_element(dist) - dist.begin();
+  });
+}
+
+template<bool metric>
+void MVClustering<metric>::compute_cluster_ids_blocked(const PointCloudSet<ChPoint> &points,
+                                                       parlay::sequence<size_t> &cluster_ids) {
+  // --- 1. Setup ---
+  const size_t n = points.size();
+  const size_t k = centers.size();
+  const size_t d = points.get_dims();
+
+  const size_t DOC_BLOCK_SIZE = (size_t)std::ceil(128.0 / float(s));
+
+  // --- 2. Blocked Computation ---
+  parlay::parallel_for(0, (n + DOC_BLOCK_SIZE - 1) / DOC_BLOCK_SIZE, [&](size_t doc_block_idx) {
+    const size_t doc_start_idx = doc_block_idx * DOC_BLOCK_SIZE;
+    const size_t num_docs_in_block = std::min(DOC_BLOCK_SIZE, n - doc_start_idx);
+    const size_t doc_end_idx = doc_start_idx + num_docs_in_block;
+
+    const size_t p_float_start_offset = points.offsets[doc_start_idx];
+    const size_t num_p_vectors_in_block = (points.offsets[doc_end_idx] - p_float_start_offset) / d;
+    if (num_p_vectors_in_block == 0) return;
+
+    Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> P_block(
+        points.values + p_float_start_offset, num_p_vectors_in_block, d);
+
+    Eigen::Matrix<float, Eigen::Dynamic, 1> P_block_sq_norms;
+    if constexpr (metric) {
+      P_block_sq_norms = P_block.rowwise().squaredNorm();
+    }
+
+    // Create a matrix to store all chamfer distances for this block.
+    Eigen::MatrixXf chamfer_dists_block(num_docs_in_block, k);
+
+    // --- 3. Parallelize the Centroid Loop ---
+    // This is now the main source of work-level parallelism within the block.
+    parlay::parallel_for(0, k, [&](size_t j) {
+      const size_t center_vec_count = (centers.offsets[j + 1] - centers.offsets[j]) / d;
+      if (center_vec_count == 0) {
+        // If a centroid is empty, set its distance to max for all docs in the block
+        for (size_t i = 0; i < num_docs_in_block; i++) {
+          chamfer_dists_block(i, j) = std::numeric_limits<float>::max();
+        }
+        return;
+      }
+
+      Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> C_j(
+          centers.values + centers.offsets[j], center_vec_count, d);
+
+      Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> dist_matrix_block_j(
+          num_p_vectors_in_block, center_vec_count);
+
+      if constexpr (metric) {  // L2 Logic
+        dist_matrix_block_j.noalias() = -2 * (P_block * C_j.transpose());
+        dist_matrix_block_j.colwise() += P_block_sq_norms;
+        Eigen::Matrix<float, 1, Eigen::Dynamic> c_j_sq_norms = C_j.rowwise().squaredNorm();
+        dist_matrix_block_j.rowwise() += c_j_sq_norms;
+      } else {  // IP Logic
+        dist_matrix_block_j.noalias() = -1 * (P_block * C_j.transpose());
+      }
+
+      // Post-process for each doc, writing to a unique column j
+      for (size_t i = 0; i < num_docs_in_block; ++i) {
+        const size_t doc_vec_offset_in_block =
+            (points.offsets[doc_start_idx + i] - p_float_start_offset) / d;
+        const size_t doc_vec_count =
+            (points.offsets[doc_start_idx + i + 1] - points.offsets[doc_start_idx + i]) / d;
+
+        auto doc_dist_slice =
+            dist_matrix_block_j.middleRows(doc_vec_offset_in_block, doc_vec_count);
+        chamfer_dists_block(i, j) = doc_dist_slice.rowwise().minCoeff().mean();
+      }
+    });  // End of parallel loop over K centroids
+
+    // --- 4. Final Assignment ---
+    // Find the best cluster for each document from the results matrix.
+    // This loop is fast and can also be parallelized if num_docs_in_block is large.
+    for (size_t i = 0; i < num_docs_in_block; ++i) {
+      Eigen::Index best_cluster_for_doc;
+      chamfer_dists_block.row(i).minCoeff(&best_cluster_for_doc);
+      cluster_ids[doc_start_idx + i] = best_cluster_for_doc;
+    }
   });
 }
 
@@ -122,7 +207,8 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
     std::cout << "Error: seeding algorithm not specified correctly" << std::endl;
     abort();
   }
-  compute_cluster_ids(points, cluster_ids);
+  // compute_cluster_ids(points, cluster_ids);
+  compute_cluster_ids_blocked(points, cluster_ids);
   st.stop();
 
   std::vector<float> lloyds_times;  // TODO: move this to a struct
@@ -182,7 +268,8 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
     // seed += k;
     centers = PointCloudSet<ChPoint>(new_centers, d, {});
     // Step 2B: Reassign points
-    compute_cluster_ids(points, cluster_ids);
+    // compute_cluster_ids(points, cluster_ids);
+    compute_cluster_ids_blocked(points, cluster_ids);
     it_timer.stop();
     double round_time = it_timer.total_time();
     lloyds_times.push_back(round_time);
@@ -192,14 +279,6 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
       costs.push_back(cost);
       std::cout << "Lloyd's iteration " << it << ": cost = " << cost << ", time = " << round_time
                 << " seconds" << std::endl;
-    }
-  }
-  if (verbose) {
-    for (auto c : costs) {
-      std::cout << -c << std::endl;
-    }
-    for (auto t : lloyds_times) {
-      std::cout << t << std::endl;
     }
   }
 }

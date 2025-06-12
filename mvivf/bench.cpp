@@ -1,3 +1,4 @@
+#include <Eigen/Dense>
 #include <iostream>
 #include "mvc/utils/chamfer_ip_point.h"
 #include "mvc/utils/chamfer_l2_point.h"
@@ -8,6 +9,7 @@
 
 template<typename ChPoint, bool metric>
 void bench(mvivf::commandLine &P) {
+  Eigen::setNbThreads(1);
   using PC = PointCloudSet<ChPoint>;
 
   char *inFile = P.getOptionValue("-i");
