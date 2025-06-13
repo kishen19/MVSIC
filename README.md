@@ -7,9 +7,9 @@ A library for multi-vector clustering algorithms
 ### Build MVIVF Indices
 - Update the data path and results path in index.sh
 - Update params like `maxsize`, `iters`, etc.
-- Run `bash experiments/index.sh <dataset>`
+- Run `bash experiments/index.sh <index> <dataset>`
 
 ### Computing Stats
 - Update the data path and results path in stats.sh (and stats_gold.sh)
 - Update params like `maxsize`, `iters`, `k`, etc.
-- Run `bash experiments/stats.sh <dataset>`
+- Run `bash experiments/stats.sh <index> <dataset>`

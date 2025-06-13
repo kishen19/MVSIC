@@ -2,23 +2,24 @@
 
 #include <queue>
 #include <set>
-// #include "absl/container/btree_set.h"
-#include "index.h"
-#include "mvc/mvkmeans.h"
-#include "utils/top_neighbors.h"
+#include "src/common/index.h"
+#include "src/mvc/mvkmeans.h"
+#include "src/utils/top_neighbors.h"
 
 namespace mvivf {
 
+/* Params Type */
 struct IndexMVIVFParams {
-  size_t minsize = 100;
-  size_t maxsize = 500;
-  size_t s = 0;
-  size_t iters = 5;
-  size_t os_rate = 20;
-  std::string seeding = "Random";
-  bool verbose = false;
+  size_t minsize = 100;  // (Expected) Minsize of leaf clusters (not enforced)
+  size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
+  size_t s = 0;          // Number of vectors in a center. Default 0 - average # vectors/doc
+  size_t iters = 5;      // Number of Outer Lloyd's Iterations
+  std::string seeding = "Random";  // Seeding Algorithm
+  size_t os_rate = 20;             // Oversampling rate for Inner Kmeans
+  bool verbose = false;            // Print debug statements
 };
 
+/* Multi-Vector IVF Internal Node Type */
 template<typename ChPoint>
 struct IndexMVIVFNode {
   parlay::sequence<IndexMVIVFNode *> children;  // Children
@@ -34,8 +35,10 @@ struct IndexMVIVFNode {
   inline void set_points(const PointCloudSet<ChPoint> &points_) { points = points_; }
 };
 
+/* Main Multi-Vector IVF Class */
 template<bool metric>
-struct IndexMVIVF : Index<metric>, IndexMVIVFParams {
+class IndexMVIVF : Index<metric>, IndexMVIVFParams {
+ public:
   using ChPoint = Index<metric>::ChPoint;
   using node_t = IndexMVIVFNode<ChPoint>;
   // using node_allocator = parlay::type_allocator<node_t>;
@@ -76,6 +79,8 @@ struct IndexMVIVF : Index<metric>, IndexMVIVFParams {
   // Traversing the tree and deleting nodes
   void traverse_and_delete(node_t *node);
 };
+
+/* -----------------------------------------Implementation-----------------------------------------*/
 
 // Recursively builds the kmeans tree
 template<bool metric>

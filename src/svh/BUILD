@@ -1,23 +1,24 @@
 package(default_visibility = ["//visibility:public"])
 
-cc_binary(
-    name = "mvivf_benchmark",
-    srcs = ["mvivf_benchmark.cpp"],
+cc_library(
+    name = "svheuristic",
+    hdrs = ["svheuristic.h"],
     deps = [
-        "//src/mvivf",
-        "//src/utils:chamfer_ip_point",
-        "//src/utils:chamfer_l2_point",
-        "//src/utils:parse_command_line",
-        "//src/utils:point_cloud_set",
-        "//src/utils:stats",
+        "//src/common:index",
+        "//src/utils:euclidian_point",
+        "//src/utils:kmeans_util",
+        "//src/utils:mips_point",
+        "//src/utils:point_range",
+        "//src/utils:top_neighbors",
+        "@parlaylib//parlay:primitives",
     ],
 )
 
 cc_binary(
-    name = "svh_benchmark",
-    srcs = ["svh_benchmark.cpp"],
+    name = "bench",
+    srcs = ["bench.cpp"],
     deps = [
-        "//src/svh:svheuristic",
+        ":svheuristic",
         "//src/utils:chamfer_ip_point",
         "//src/utils:chamfer_l2_point",
         "//src/utils:euclidian_point",

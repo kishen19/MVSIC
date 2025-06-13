@@ -30,10 +30,11 @@
 #include <algorithm>
 #include <iostream>
 
-#include "NSGDist.h"
 #include "parlay/internal/file_map.h"
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
+
+#include "NSGDist.h"
 
 namespace mvivf {
 

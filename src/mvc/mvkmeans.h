@@ -2,39 +2,32 @@
 
 #include <Eigen/Dense>
 #include "parlay/primitives.h"
-#include "utils/chamfer_ip_point.h"
-#include "utils/chamfer_l2_point.h"
-// #include "utils/euclidian_point.h"
 #include "algorithms/utils/euclidian_point.h"
-// #include "utils/mips_point.h"
 #include "algorithms/utils/mips_point.h"
-#include "utils/point_cloud_set.h"
-// #include "utils/point_range.h"
 #include "algorithms/utils/point_range.h"
-#include "lloyds/kmeans.h"
-#include "lower_bounds.h"
+
+#include "src/utils/chamfer_ip_point.h"
+#include "src/utils/chamfer_l2_point.h"
+#include "src/utils/kmeans_util.h"
+#include "src/utils/point_cloud_set.h"
 #include "seeding/uniformlyrandom.h"
-// #include "utils/faiss_kmeans.h"
+// #include "lower_bounds.h"
 
 namespace mvivf {
 
-// Runs kmeans on a subsample of size os_rate*k
-template<typename DistTy, typename Point, typename Range>
-auto kmeans_subsample(Range &data, size_t k, size_t os_rate);
-
-constexpr bool L2 = true;
-constexpr bool IP = false;
-
+/* Params Type */
 struct MVClusteringParams {
-  int iters = 5;
-  std::string seeding = "Random";
-  size_t os_rate = 20;
-  bool comp_lb = false;
-  bool verbose = false;
+  int iters = 5;                   // Number of Outer Lloyd's Iterations
+  std::string seeding = "Random";  // Seeding Algorithm
+  size_t os_rate = 20;             // Oversampling rate for Inner Kmeans
+  bool verbose = false;            // Print debug statements
+  bool comp_lb = false;            // Compute a naive lower bound (TODO: fix)
 };
 
+/* Main Multi-Vector Clustering Class */
 template<bool metric>
-struct MVClustering : MVClusteringParams {
+class MVClustering : MVClusteringParams {
+ public:
   using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
   using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
   using Range = PointRange<float, Point>;
@@ -45,23 +38,33 @@ struct MVClustering : MVClusteringParams {
 
   PointCloudSet<ChPoint> centers;
   parlay::sequence<size_t> cluster_ids;
-  // TODO: stats for each Lloyds iteration
+  // TODO: stats type for each Lloyds iteration
 
   MVClustering(size_t d, size_t k) noexcept;
   MVClustering(size_t d, size_t k, size_t s) noexcept;
   MVClustering(size_t d, size_t k, const MVClusteringParams &params);
   MVClustering(size_t d, size_t k, size_t s, const MVClusteringParams &params);
 
+  // Naive: Computes the cluster ids of each input doc, given centers
   void compute_cluster_ids(const PointCloudSet<ChPoint> &points,
                            parlay::sequence<size_t> &cluster_ids);
+  // Optimized (eigen): Computes the cluster ids of each input doc, given centers
   void compute_cluster_ids_blocked(const PointCloudSet<ChPoint> &points,
                                    parlay::sequence<size_t> &cluster_ids);
+  // Utility to compute the MV Kmeans cost
   float sum_of_squared_cost(const PointCloudSet<ChPoint> &points,
                             const parlay::sequence<size_t> &cluster_ids) const;
-
+  // Raw data given
   void train(size_t n, const float *data, const size_t *offsets, const size_t *ids);
+  // Data given as a range type
+  template<template<typename> class seqA, template<typename> class seqB,
+           template<typename> class seqC>
+  void train(const seqA<seqB<seqC<float>>> &data);
+  // Data given as a PointCloudSet Object
   void train(const PointCloudSet<ChPoint> &data);
 };
+
+/* -----------------------------------------Implementation-----------------------------------------*/
 
 template<bool metric>
 MVClustering<metric>::MVClustering(size_t d, size_t k) noexcept : d(d), k(k), s(0) {}
@@ -78,7 +81,6 @@ template<bool metric>
 void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &points,
                                                parlay::sequence<size_t> &cluster_ids) {
   size_t n = points.size();
-  size_t k = centers.size();
   parlay::parallel_for(0, n, [&](size_t i) {
     auto dist =
         parlay::delayed_tabulate(k, [&](size_t j) { return points[i].distance(centers[j]); });
@@ -89,38 +91,36 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &poi
 template<bool metric>
 void MVClustering<metric>::compute_cluster_ids_blocked(const PointCloudSet<ChPoint> &points,
                                                        parlay::sequence<size_t> &cluster_ids) {
-  // --- 1. Setup ---
   const size_t n = points.size();
-  const size_t k = centers.size();
-  const size_t d = points.get_dims();
+  auto points_offsets = points.get_offsets();
+  auto centers_offsets = centers.get_offsets();
 
+  // Block Size: Want the entire block to fit in cache
+  // TODO: Make generic based on cache size
   const size_t DOC_BLOCK_SIZE = static_cast<size_t>(std::ceil(128.0 / static_cast<float>(s)));
 
-  // --- 2. Blocked Computation ---
   parlay::parallel_for(0, (n + DOC_BLOCK_SIZE - 1) / DOC_BLOCK_SIZE, [&](size_t doc_block_idx) {
     const size_t doc_start_idx = doc_block_idx * DOC_BLOCK_SIZE;
     const size_t num_docs_in_block = std::min(DOC_BLOCK_SIZE, n - doc_start_idx);
     const size_t doc_end_idx = doc_start_idx + num_docs_in_block;
 
-    const size_t p_float_start_offset = points.offsets[doc_start_idx];
-    const size_t num_p_vectors_in_block = (points.offsets[doc_end_idx] - p_float_start_offset) / d;
+    const size_t p_float_start_offset = points_offsets[doc_start_idx];
+    const size_t num_p_vectors_in_block = (points_offsets[doc_end_idx] - p_float_start_offset) / d;
+
     if (num_p_vectors_in_block == 0) return;
 
     Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> P_block(
-        points.values + p_float_start_offset, num_p_vectors_in_block, d);
-
+        points.data() + p_float_start_offset, num_p_vectors_in_block, d);
     Eigen::Matrix<float, Eigen::Dynamic, 1> P_block_sq_norms;
-    if constexpr (metric) {
+    if constexpr (metric) {  // Only for L2
       P_block_sq_norms = P_block.rowwise().squaredNorm();
     }
 
     // Create a matrix to store all chamfer distances for this block.
     Eigen::MatrixXf chamfer_dists_block(num_docs_in_block, k);
 
-    // --- 3. Parallelize the Centroid Loop ---
-    // This is now the main source of work-level parallelism within the block.
     parlay::parallel_for(0, k, [&](size_t j) {
-      const size_t center_vec_count = (centers.offsets[j + 1] - centers.offsets[j]) / d;
+      const size_t center_vec_count = (centers_offsets[j + 1] - centers_offsets[j]) / d;
       if (center_vec_count == 0) {
         // If a centroid is empty, set its distance to max for all docs in the block
         for (size_t i = 0; i < num_docs_in_block; i++) {
@@ -128,38 +128,30 @@ void MVClustering<metric>::compute_cluster_ids_blocked(const PointCloudSet<ChPoi
         }
         return;
       }
-
       Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> C_j(
-          centers.values + centers.offsets[j], center_vec_count, d);
-
+          centers.data() + centers_offsets[j], center_vec_count, d);
       Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> dist_matrix_block_j(
           num_p_vectors_in_block, center_vec_count);
-
-      if constexpr (metric) {  // L2 Logic
+      if constexpr (metric) {  // L2
         dist_matrix_block_j.noalias() = -2 * (P_block * C_j.transpose());
         dist_matrix_block_j.colwise() += P_block_sq_norms;
         Eigen::Matrix<float, 1, Eigen::Dynamic> c_j_sq_norms = C_j.rowwise().squaredNorm();
         dist_matrix_block_j.rowwise() += c_j_sq_norms;
-      } else {  // IP Logic
+      } else {  // IP
         dist_matrix_block_j.noalias() = -1 * (P_block * C_j.transpose());
       }
 
-      // Post-process for each doc, writing to a unique column j
       for (size_t i = 0; i < num_docs_in_block; ++i) {
         const size_t doc_vec_offset_in_block =
-            (points.offsets[doc_start_idx + i] - p_float_start_offset) / d;
+            (points_offsets[doc_start_idx + i] - p_float_start_offset) / d;
         const size_t doc_vec_count =
-            (points.offsets[doc_start_idx + i + 1] - points.offsets[doc_start_idx + i]) / d;
+            (points_offsets[doc_start_idx + i + 1] - points_offsets[doc_start_idx + i]) / d;
 
         auto doc_dist_slice =
             dist_matrix_block_j.middleRows(doc_vec_offset_in_block, doc_vec_count);
         chamfer_dists_block(i, j) = doc_dist_slice.rowwise().minCoeff().mean();
       }
-    });  // End of parallel loop over K centroids
-
-    // --- 4. Final Assignment ---
-    // Find the best cluster for each document from the results matrix.
-    // This loop is fast and can also be parallelized if num_docs_in_block is large.
+    });
     for (size_t i = 0; i < num_docs_in_block; ++i) {
       Eigen::Index best_cluster_for_doc;
       chamfer_dists_block.row(i).minCoeff(&best_cluster_for_doc);
@@ -180,6 +172,14 @@ template<bool metric>
 void MVClustering<metric>::train(size_t n, const float *data, const size_t *offsets,
                                  const size_t *ids) {
   PointCloudSet<ChPoint> points(n, d, data, offsets, ids);
+  train(points);
+}
+
+template<bool metric>
+template<template<typename> class seqA, template<typename> class seqB,
+         template<typename> class seqC>
+void MVClustering<metric>::train(const seqA<seqB<seqC<float>>> &data) {
+  PointCloudSet<ChPoint> points(data, d, {});
   train(points);
 }
 
@@ -281,32 +281,6 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
                 << " seconds" << std::endl;
     }
   }
-}
-
-template<typename DistTy, typename Point, typename Range>
-auto kmeans_subsample(Range &data, size_t k, size_t os_rate) {
-  size_t n = data.size();
-  Range centers;
-  if (os_rate * k >= n) {
-    centers = kmeans<DistTy, Point>(data, k);
-  } else {
-    auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
-      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
-      return data[id];
-    });
-    auto sampled_data = Range(sampled_points, data.get_dims());
-    centers = kmeans<DistTy, Point>(sampled_data, k);
-  }
-  // Convert centers_range to sequence of floats
-  parlay::sequence<parlay::sequence<float>> final_centers(k);
-  parlay::parallel_for(0, k, [&](size_t i) {
-    parlay::sequence<float> center(data.get_dims());
-    for (size_t j = 0; j < data.get_dims(); j++) {
-      center[j] = centers[i][j];
-    }
-    final_centers[i] = std::move(center);
-  });
-  return final_centers;
 }
 
 template struct MVClustering<true>;   // Instantiates for L2 metric (metric = true)

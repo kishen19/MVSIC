@@ -3,8 +3,12 @@
 #include <fstream>
 #include "parlay/primitives.h"
 
+namespace mvivf {
+
+/* Set of Point Clouds Type */
 template<typename ChPoint>
 struct PointCloudSet {
+ private:
   size_t n = 0;
   size_t dims = 0;
   size_t aligned_dims = 0;
@@ -12,6 +16,7 @@ struct PointCloudSet {
   parlay::sequence<size_t> offsets;
   parlay::sequence<size_t> ids;
 
+ public:
   PointCloudSet() noexcept {}
   // Load point clouds from file
   PointCloudSet(const char *filename);
@@ -26,16 +31,16 @@ struct PointCloudSet {
   template<template<typename> class seqA, template<typename> class seqB,
            template<typename> class seqC>
   PointCloudSet(const seqA<seqB<seqC<float>>> &data, size_t d, parlay::sequence<size_t> ids);
-  // Move Assignment Operator
-  PointCloudSet &operator=(PointCloudSet &&other) noexcept;
-  // Copy Assignment Operator
-  PointCloudSet &operator=(const PointCloudSet &other);
   // Move Constructor
   PointCloudSet(PointCloudSet &&other) noexcept;
   // Copy Constructor
   PointCloudSet(const PointCloudSet &other);
   // Destructor
   ~PointCloudSet() noexcept;
+  // Move Assignment Operator
+  PointCloudSet &operator=(PointCloudSet &&other) noexcept;
+  // Copy Assignment Operator
+  PointCloudSet &operator=(const PointCloudSet &other);
 
   // Returns number of point clouds
   inline size_t size() const noexcept { return n; }
@@ -64,7 +69,13 @@ struct PointCloudSet {
   // point clouds whose indices are given in sequence cluster_ids
   template<typename seq>
   auto filter_flattened(const seq &cluster_ids) const;
+  inline float *data() const noexcept { return values; }
+  inline auto get_offsets() const noexcept {
+    return parlay::make_slice(offsets.begin(), offsets.end());
+  }
 };
+
+/* -----------------------------------------Implementation-----------------------------------------*/
 
 // Load point clouds from file
 template<typename ChPoint>
@@ -159,6 +170,43 @@ PointCloudSet<ChPoint>::PointCloudSet(const seqA<seqB<seqC<float>>> &data, size_
   });
 }
 
+// Move Constructor
+template<typename ChPoint>
+PointCloudSet<ChPoint>::PointCloudSet(PointCloudSet &&other) noexcept :
+    n(other.n),
+    dims(other.dims),
+    aligned_dims(other.aligned_dims),
+    values(other.values),
+    offsets(std::move(other.offsets)),
+    ids(std::move(other.ids)) {
+  other.n = 0;
+  other.dims = 0;
+  other.aligned_dims = 0;
+  other.values = nullptr;
+}
+
+// Copy Constructor
+template<typename ChPoint>
+PointCloudSet<ChPoint>::PointCloudSet(const PointCloudSet &other) :
+    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims) {
+  offsets = other.offsets;
+  ids = other.ids;
+  if (other.values) {
+    size_t total_coords = offsets[n];
+    size_t coordinate_size = total_coords * sizeof(float);
+    values = static_cast<float *>(parlay::p_malloc(coordinate_size));
+    std::memcpy(values, other.values, coordinate_size);
+  }
+}
+
+template<typename ChPoint>
+PointCloudSet<ChPoint>::~PointCloudSet() noexcept {
+  if (values != nullptr) {
+    parlay::p_free(values);
+    values = nullptr;
+  }
+}
+
 // Move Assignment Operator
 template<typename ChPoint>
 PointCloudSet<ChPoint> &PointCloudSet<ChPoint>::operator=(PointCloudSet &&other) noexcept {
@@ -204,43 +252,6 @@ PointCloudSet<ChPoint> &PointCloudSet<ChPoint>::operator=(const PointCloudSet &o
   return *this;
 }
 
-// Move Constructor
-template<typename ChPoint>
-PointCloudSet<ChPoint>::PointCloudSet(PointCloudSet &&other) noexcept :
-    n(other.n),
-    dims(other.dims),
-    aligned_dims(other.aligned_dims),
-    values(other.values),
-    offsets(std::move(other.offsets)),
-    ids(std::move(other.ids)) {
-  other.n = 0;
-  other.dims = 0;
-  other.aligned_dims = 0;
-  other.values = nullptr;
-}
-
-// Copy Constructor
-template<typename ChPoint>
-PointCloudSet<ChPoint>::PointCloudSet(const PointCloudSet &other) :
-    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims) {
-  offsets = other.offsets;
-  ids = other.ids;
-  if (other.values) {
-    size_t total_coords = offsets[n];
-    size_t coordinate_size = total_coords * sizeof(float);
-    values = static_cast<float *>(parlay::p_malloc(coordinate_size));
-    std::memcpy(values, other.values, coordinate_size);
-  }
-}
-
-template<typename ChPoint>
-PointCloudSet<ChPoint>::~PointCloudSet() noexcept {
-  if (values != nullptr) {
-    parlay::p_free(values);
-    values = nullptr;
-  }
-}
-
 template<typename ChPoint>
 template<typename seq>
 auto PointCloudSet<ChPoint>::filter_flattened(const seq &cluster_ids) const {
@@ -259,3 +270,5 @@ auto PointCloudSet<ChPoint>::filter_flattened(const seq &cluster_ids) const {
   });
   return result;
 }
+
+}  // namespace mvivf

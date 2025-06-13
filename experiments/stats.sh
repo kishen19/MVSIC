@@ -1,7 +1,9 @@
 index=$1
 dataset=$2
-# reduced="" # Use for scidocs and arguana
-reduced="_reduced" # Use for quora, nq, hotpotqa and msmarco
+reduced=""
+if [ "$dataset" = "quora" ] || [ "$dataset" = "nq" ] || [ "$dataset" = "hotpotqa" ] || [ "$dataset" = "msmarco" ]; then
+  reduced="_reduced"
+fi
 
 DATAPATH=/ssd2/laxman/multivector
 RESULTSPATH=/ssd2/kishen/MVC

@@ -1,11 +1,11 @@
-#include "utils/parse_command_line.h"
-// #include "utils/euclidian_point.h"
-// #include "utils/mips_point.h"
-// #include "utils/point_range.h"
+#include "src/utils/parse_command_line.h"
+#include "src/utils/chamfer_ip_point.h"
+#include "src/utils/chamfer_l2_point.h"
+#include "src/utils/point_cloud_set.h"
+
 #include "mvkmeans.h"
-#include "utils/chamfer_ip_point.h"
-#include "utils/chamfer_l2_point.h"
-#include "utils/point_cloud_set.h"
+
+using namespace mvivf;
 
 int main(int argc, char *argv[]) {
   mvivf::commandLine P(argc, argv,
@@ -22,14 +22,14 @@ int main(int argc, char *argv[]) {
   bool lb = P.getOption("-lb");
   bool verbose = P.getOption("-v");
 
-  mvivf::MVClusteringParams params(iters, seeding, os_rate, lb, verbose);
+  MVClusteringParams params(iters, seeding, os_rate, verbose, lb);
   if (df == "L2") {
     auto points = PointCloudSet<ChamferL2_Point>(P.getOptionValue("-i"));
-    mvivf::MVClustering<mvivf::L2> clus(points.get_dims(), k, s, params);
+    MVClustering<true> clus(points.get_dims(), k, s, params);
     clus.train(points);
   } else if (df == "IP") {
     auto points = PointCloudSet<ChamferIP_Point>(P.getOptionValue("-i"));
-    mvivf::MVClustering<mvivf::IP> clus(points.get_dims(), k, s, params);
+    MVClustering<false> clus(points.get_dims(), k, s, params);
     clus.train(points);
   }
   return 0;

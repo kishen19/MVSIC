@@ -1,7 +1,7 @@
 #pragma once
 
-#include "mvc/utils/point_cloud_set.h"
 #include "parlay/primitives.h"
+#include "point_cloud_set.h"
 
 namespace mvivf {
 

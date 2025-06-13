@@ -1,12 +1,14 @@
-#include "baselines/svheuristic.h"
-#include "mvc/utils/chamfer_ip_point.h"
-#include "mvc/utils/chamfer_l2_point.h"
-#include "mvc/utils/euclidian_point.h"
-#include "mvc/utils/mips_point.h"
-#include "mvc/utils/parse_command_line.h"
-#include "mvc/utils/point_cloud_set.h"
-#include "mvc/utils/point_range.h"
-#include "mvivf/utils/stats.h"
+#include "src/utils/chamfer_ip_point.h"
+#include "src/utils/chamfer_l2_point.h"
+#include "src/utils/euclidian_point.h"
+#include "src/utils/mips_point.h"
+#include "src/utils/parse_command_line.h"
+#include "src/utils/point_cloud_set.h"
+#include "src/utils/point_range.h"
+#include "src/utils/stats.h"
+#include "src/svh/svheuristic.h"
+
+using namespace mvivf;
 
 template<typename Point, typename ChPoint, bool metric>
 void bench(mvivf::commandLine& P) {
@@ -38,8 +40,8 @@ void bench(mvivf::commandLine& P) {
   bool is_gold = P.getOption("-gold");
 
   auto points = PC(inFile);
-  mvivf::IndexSVHParams index_params(minsize, maxsize, os_rate, verbose);
-  mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
+  IndexSVHParams index_params(minsize, maxsize, os_rate, verbose);
+  IndexSVH<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {  // Stats Benchmark
     index.load(indexFile, points);
     std::cout << "Index loaded" << std::endl;
@@ -50,10 +52,10 @@ void bench(mvivf::commandLine& P) {
     } else {
       gt = ReadGT(gtFile, queries.size());
     }
-    parlay::sequence<mvivf::SearchParams> search_params_list;
+    parlay::sequence<SearchParams> search_params_list;
     size_t nprobes = nprobesl;
     while (nprobes <= nprobesr) {
-      search_params_list.push_back(mvivf::SearchParams(k, nprobes, 0, cands));
+      search_params_list.push_back(SearchParams(k, nprobes, 0, cands));
       nprobes = nprobesmp * nprobes + nprobesad;
     }
     // Compute Stats
@@ -70,7 +72,7 @@ void bench(mvivf::commandLine& P) {
     double index_time = 0.0;
     for (long it = 0; it <= rounds; it++) {
       t.start();
-      mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
+      IndexSVH<metric> index(points.get_dims(), index_params);
       index.build(points);
       t.stop();
       if (it != 0) {

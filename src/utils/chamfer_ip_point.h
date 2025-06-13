@@ -3,8 +3,12 @@
 #include <Eigen/Core>
 #include "parlay/primitives.h"
 
+namespace mvivf {
+
+// Computes the Chamfer IP distance, given two point clouds
 float chamfer_ip_distance(const float *a, size_t n_a, const float *b, size_t n_b, size_t dim);
 
+/* Chamfer IP Point Cloud Type */
 struct ChamferIP_Point {
  private:
   size_t n = 0;
@@ -19,16 +23,11 @@ struct ChamferIP_Point {
   // Non-owning version
   ChamferIP_Point(size_t n, size_t dims, float *values, size_t id) noexcept :
       n(n), dims(dims), values(values), id(id), owns(false) {}
-  // Owning version, creates a copy. Typically no id associated.
+  // Owning version, creates a copy. Typically no id associated. TODO: deprecate
   ChamferIP_Point(size_t n, size_t dims, const float *values_) : n(n), dims(dims), owns(true) {
     values = static_cast<float *>(parlay::p_malloc(n * dims * sizeof(float)));
     std::memcpy(values, values_, n * dims * sizeof(float));
   }
-  // Move Assignment Operator: does exactly what the input does
-  ChamferIP_Point &operator=(ChamferIP_Point &&other) noexcept;
-  // *Copy Assignment Operator: creates owning copy of values regardless of
-  // input
-  ChamferIP_Point &operator=(const ChamferIP_Point &other);
   // Move Constructor: does exactly what the input does
   ChamferIP_Point(ChamferIP_Point &&other) noexcept;
   // Copy Constructor: does exactly what the input does
@@ -41,37 +40,37 @@ struct ChamferIP_Point {
       owns = false;
     }
   }
-
+  // Move Assignment Operator: does exactly what the input does
+  ChamferIP_Point &operator=(ChamferIP_Point &&other) noexcept;
+  // *Copy Assignment Operator: creates owning copy of values regardless of
+  // input TODO: deprecate
+  ChamferIP_Point &operator=(const ChamferIP_Point &other);
   // Returns number of embeddings in the point cloud
   inline size_t size() const noexcept { return n; }
-
   // Returns embedding dimension
   inline size_t get_dims() const noexcept { return dims; }
-
   // Returns id of the pointcloud
   inline size_t get_id() const noexcept { return id; }
-
   // Returns non-owning view of the i-th embedding
   inline auto operator[](size_t i) const noexcept {
     return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
-
   // Returns pointer to i-th embedding
   inline float *get_coords(size_t i) const noexcept { return values + i * dims; }
-
   // Returns False since IP is not a metric
   constexpr inline bool is_metric() const noexcept { return false; }
-
   // Computes the (asymmetric) distance from the current point cloud
   // to the given point cloud
   float distance(const ChamferIP_Point &x) const {
     return chamfer_ip_distance(values, n, x.values, x.n, dims);
   }
-
   // Returns non-owning view of all coordinates
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }
 };
 
+/* -----------------------------------------Implementation-----------------------------------------*/
+
+// Computes the Chamfer IP distance, given two point clouds
 float chamfer_ip_distance(const float *a, size_t n_a, const float *b, size_t n_b, size_t dim) {
   if (n_a == 0 || n_b == 0) {
     std::cout << "Invalid input to Chamfer IP distance, na = " << n_a << ", nb = " << n_b
@@ -90,6 +89,33 @@ float chamfer_ip_distance(const float *a, size_t n_a, const float *b, size_t n_b
       inner_product_matrix.rowwise().maxCoeff();
   float sim = max_ips_A_to_B.mean();
   return -sim;
+}
+
+// Move Constructor
+ChamferIP_Point::ChamferIP_Point(ChamferIP_Point &&other) noexcept :
+    n(other.n),
+    dims(other.dims),
+    aligned_dims(other.aligned_dims),
+    values(other.values),
+    id(other.id),
+    owns(other.owns) {
+  other.n = 0;
+  other.dims = 0;
+  other.aligned_dims = 0;
+  other.values = nullptr;
+  other.id = std::numeric_limits<size_t>::max();
+  other.owns = false;
+}
+
+// Copy Constructor: does exactly what the input does
+ChamferIP_Point::ChamferIP_Point(const ChamferIP_Point &other) :
+    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims), id(other.id), owns(other.owns) {
+  if (owns) {
+    values = static_cast<float *>(parlay::p_malloc(n * dims * sizeof(float)));
+    std::memcpy(values, other.values, n * dims * sizeof(float));
+  } else {
+    values = other.values;
+  }
 }
 
 // Move Assignment Operator
@@ -140,29 +166,4 @@ ChamferIP_Point &ChamferIP_Point::operator=(const ChamferIP_Point &other) {
   return *this;
 }
 
-// Move Constructor
-ChamferIP_Point::ChamferIP_Point(ChamferIP_Point &&other) noexcept :
-    n(other.n),
-    dims(other.dims),
-    aligned_dims(other.aligned_dims),
-    values(other.values),
-    id(other.id),
-    owns(other.owns) {
-  other.n = 0;
-  other.dims = 0;
-  other.aligned_dims = 0;
-  other.values = nullptr;
-  other.id = std::numeric_limits<size_t>::max();
-  other.owns = false;
-}
-
-// Copy Constructor: does exactly what the input does
-ChamferIP_Point::ChamferIP_Point(const ChamferIP_Point &other) :
-    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims), id(other.id), owns(other.owns) {
-  if (owns) {
-    values = static_cast<float *>(parlay::p_malloc(n * dims * sizeof(float)));
-    std::memcpy(values, other.values, n * dims * sizeof(float));
-  } else {
-    values = other.values;
-  }
-}
+}  // namespace mvivf

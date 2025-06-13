@@ -21,6 +21,11 @@ cc_library(
 )
 
 cc_library(
+    name = "csvfile",
+    hdrs = ["csvfile.h"],
+)
+
+cc_library(
     name = "euclidian_point",
     hdrs = ["euclidian_point.h"],
     deps = [
@@ -32,10 +37,19 @@ cc_library(
 )
 
 cc_library(
-    name = "faiss_kmeans",
-    hdrs = ["faiss_kmeans.h"],
+    name = "faiss_kmeans_util",
+    hdrs = ["faiss_kmeans_util.h"],
     deps = [
         "@faiss//:faiss_core",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "kmeans_util",
+    hdrs = ["kmeans_util.h"],
+    deps = [
+        "@kmeans//lloyds:kmeans",
         "@parlaylib//parlay:primitives",
     ],
 )
@@ -63,7 +77,6 @@ cc_library(
 cc_library(
     name = "parse_command_line",
     hdrs = ["parse_command_line.h"],
-    deps = [],
 )
 
 cc_library(
@@ -81,5 +94,24 @@ cc_library(
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",
         "@parlaylib//parlay/internal:file_map",
+    ],
+)
+
+cc_library(
+    name = "stats",
+    hdrs = ["stats.h"],
+    deps = [
+        ":csvfile",
+        "//src/common:search_params",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "top_neighbors",
+    hdrs = ["top_neighbors.h"],
+    deps = [
+        ":point_cloud_set",
+        "@parlaylib//parlay:primitives",
     ],
 )

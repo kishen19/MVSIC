@@ -1,6 +1,8 @@
 #pragma once
-#include "../utils/point_cloud_set.h"
+
 #include "parlay/primitives.h"
+
+#include "src/utils/point_cloud_set.h"
 
 namespace mvivf {
 

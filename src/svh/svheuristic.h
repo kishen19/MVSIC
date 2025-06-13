@@ -1,35 +1,34 @@
 #pragma once
 
 #include <set>
-// #include "absl/container/btree_set.h"
-#include "lloyds/kmeans.h"
-#include "mvc/utils/euclidian_point.h"
-#include "mvc/utils/mips_point.h"
-#include "mvc/utils/point_range.h"
-#include "mvivf/index.h"
-#include "mvivf/utils/top_neighbors.h"
 #include "parlay/primitives.h"
+#include "src/common/index.h"
+#include "src/utils/kmeans_util.h"
+#include "src/utils/euclidian_point.h"
+#include "src/utils/mips_point.h"
+#include "src/utils/point_range.h"
+#include "src/utils/top_neighbors.h"
 
 namespace mvivf {
 
-template<typename DistTy, typename Point, typename Range>
-auto kmeans_subsample_assign(Range& data, size_t k, size_t os_rate, size_t maxsize, bool metric,
-                             bool verbose);
-
+/* Params Type */
 struct IndexSVHParams {
-  size_t minsize = 100;
-  size_t maxsize = 500;
-  size_t os_rate = 20;
-  bool verbose = false;
+  size_t minsize = 100;  // (Expected) Minsize of leaf clusters (not enforced)
+  size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
+  size_t os_rate = 20;   // Oversampling rate for Inner Kmeans
+  bool verbose = false;  // Print debug statements
 };
 
+/* Single-vector Heuristic Internal Node Type */
 template<typename Point, typename Range>
 struct IndexSVHNode {
   parlay::sequence<IndexSVHNode*> children;         // Children
   Point center;                                     // Except root, every node has a center-set
   Range points;                                     // Only leaf nodes have points
   parlay::sequence<std::pair<size_t, size_t>> ids;  // Only leaf nodes have ids
+
   IndexSVHNode() : children(parlay::sequence<IndexSVHNode*>(0)), center(Point()), points(Range()) {}
+
   inline void set_points(const Range& points_,
                          const parlay::sequence<std::pair<size_t, size_t>>& ids_) {
     points = points_;
@@ -38,8 +37,10 @@ struct IndexSVHNode {
   inline void set_center(const Point& center_) { center = center_; }
 };
 
+/* Main Single-Vector Heuristic Class */
 template<bool metric>
-struct IndexSVH : Index<metric>, IndexSVHParams {
+class IndexSVH : Index<metric>, IndexSVHParams {
+ public:
   using ChPoint = Index<metric>::ChPoint;
   using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
   using Range = PointRange<float, Point>;
@@ -56,7 +57,8 @@ struct IndexSVH : Index<metric>, IndexSVHParams {
   // Recursively builds the kmeans tree
   void build_helper(node_t* node, const parlay::sequence<parlay::sequence<float>>& points,
                     const parlay::sequence<std::pair<size_t, size_t>>& ids);
-  //
+  // Returns top-cand point clouds for a given query vector
+  // Output format: < [<id, distance>, ...], # distance comparisons>
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search_each(
       const Point& query, const PointCloudSet<ChPoint>& points, const SearchParams& params);
   // Returns the top-k point clouds for the query point cloud
@@ -76,6 +78,8 @@ struct IndexSVH : Index<metric>, IndexSVHParams {
   // Read the index from a file in disk
   void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
 };
+
+/* -----------------------------------------Implementation-----------------------------------------*/
 
 template<bool metric>
 void IndexSVH<metric>::build(const PointCloudSet<ChPoint>& points) {
@@ -455,47 +459,6 @@ void IndexSVH<metric>::load(const std::string& filename, const PointCloudSet<ChP
   });
   root = ind_to_node[0];
   infile.close();
-}
-
-template<typename DistTy, typename Point, typename Range>
-auto kmeans_subsample_assign(Range& data, size_t k, size_t os_rate, size_t maxsize, bool metric,
-                             bool verbose) {
-  size_t n = data.size();
-  Range centers;
-  if (os_rate * k >= n) {
-    centers = kmeans<DistTy, Point>(data, k, "SequentialPlusPlus", "Pairwise", 10, verbose);
-  } else {
-    auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
-      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
-      return data[id];
-    });
-    auto sampled_data = Range(sampled_points, data.get_dims());
-    centers = kmeans<DistTy, Point>(sampled_data, k, "SequentialPlusPlus", "Pairwise", 10, verbose);
-  }
-  parlay::sequence<uint32_t> cluster_ids_ =
-      compute_cluster_ids_pairwise_blocked<Point>(data, centers);
-  auto cluster_ids = parlay::sequence<size_t>::from_function(
-      cluster_ids_.size(), [&](size_t i) { return static_cast<size_t>(cluster_ids_[i]); });
-  // Remove clusters with all almost-duplicates
-  auto id_pt = parlay::delayed_tabulate(
-      data.size(), [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
-  auto grouped = parlay::group_by_index(id_pt, k);
-  parlay::sequence<bool> active(k, true);
-  parlay::parallel_for(0, k, [&](size_t i) {
-    if (grouped[i].size() == 0) {
-      active[i] = false;
-    } else {
-      // average distance to center
-      auto dists = parlay::delayed_tabulate(
-          grouped[i].size(), [&](size_t j) { return centers[i].distance(data[grouped[i][j]]); });
-      float avg_dist = parlay::reduce(dists) / grouped[i].size();
-      if (avg_dist == 0.0 && grouped[i].size() > maxsize) {
-        active[i] = false;
-      }
-    }
-  });
-  auto active_indices = parlay::pack_index(active);
-  return std::make_tuple(centers, cluster_ids, active_indices);
 }
 
 template struct IndexSVH<true>;   // Instantiates for L2 metric (metric = true)

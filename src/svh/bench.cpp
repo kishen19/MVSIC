@@ -1,12 +1,14 @@
-#include "mvc/utils/chamfer_ip_point.h"
-#include "mvc/utils/chamfer_l2_point.h"
-#include "mvc/utils/euclidian_point.h"
-#include "mvc/utils/mips_point.h"
-#include "mvc/utils/parse_command_line.h"
-#include "mvc/utils/point_cloud_set.h"
-#include "mvc/utils/point_range.h"
-#include "mvivf/utils/stats.h"
+#include "src/utils/chamfer_ip_point.h"
+#include "src/utils/chamfer_l2_point.h"
+#include "src/utils/euclidian_point.h"
+#include "src/utils/mips_point.h"
+#include "src/utils/parse_command_line.h"
+#include "src/utils/point_cloud_set.h"
+#include "src/utils/point_range.h"
+#include "src/utils/stats.h"
 #include "svheuristic.h"
+
+using namespace mvivf;
 
 template<typename Point, typename ChPoint, bool metric>
 void bench(mvivf::commandLine& P) {
@@ -35,9 +37,9 @@ void bench(mvivf::commandLine& P) {
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  mvivf::IndexSVHParams index_params(minsize, maxsize, os_rate, verbose);
-  mvivf::SearchParams search_params(k, nprobes, beamsize, cands);
-  mvivf::IndexSVH<metric> index(points.get_dims(), index_params);
+  IndexSVHParams index_params(minsize, maxsize, os_rate, verbose);
+  SearchParams search_params(k, nprobes, beamsize, cands);
+  IndexSVH<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;
     index.load(indexFile, points);
@@ -63,7 +65,7 @@ void bench(mvivf::commandLine& P) {
 
     // Compute Stats:
     std::cout << "Computing stats..." << std::endl;
-    mvivf::Stats result = compute_stats(index, points, queries, gt, search_params);
+    Stats result = compute_stats(index, points, queries, gt, search_params);
     QPS_seq = result.QPS_seq;
     QPS_par = result.QPS_par;
     avg_cmps = result.avg_cmps;

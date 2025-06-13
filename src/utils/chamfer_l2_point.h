@@ -3,8 +3,12 @@
 #include <Eigen/Core>
 #include "parlay/primitives.h"
 
+namespace mvivf {
+
+// Computes the Chamfer L2 distance, given two point clouds
 float chamfer_l2_distance(const float *a, size_t n_a, const float *b, size_t n_b, size_t dim);
 
+/* Chamfer L2 Point Cloud Type */
 struct ChamferL2_Point {
  private:
   size_t n = 0;
@@ -24,11 +28,6 @@ struct ChamferL2_Point {
     values = static_cast<float *>(parlay::p_malloc(n * dims * sizeof(float)));
     std::memcpy(values, values_, n * dims * sizeof(float));
   }
-  // Move Assignment Operator: does exactly what the input does
-  ChamferL2_Point &operator=(ChamferL2_Point &&other) noexcept;
-  // *Copy Assignment Operator: creates owning copy of values regardless of
-  // input
-  ChamferL2_Point &operator=(const ChamferL2_Point &other);
   // Move Constructor: does exactly what the input does
   ChamferL2_Point(ChamferL2_Point &&other) noexcept;
   // Copy Constructor: does exactly what the input does
@@ -41,37 +40,37 @@ struct ChamferL2_Point {
       owns = false;
     }
   }
-
+  // Move Assignment Operator: does exactly what the input does
+  ChamferL2_Point &operator=(ChamferL2_Point &&other) noexcept;
+  // *Copy Assignment Operator: creates owning copy of values regardless of
+  // input
+  ChamferL2_Point &operator=(const ChamferL2_Point &other);
   // Returns number of embeddings in the point cloud
   inline size_t size() const noexcept { return n; }
-
   // Returns embedding dimension
   inline size_t get_dims() const noexcept { return dims; }
-
   // Returns id of the pointcloud
   inline size_t get_id() const noexcept { return id; }
-
   // Returns non-owning view of the i-th embedding
   inline auto operator[](size_t i) const noexcept {
     return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
-
   // Returns pointer to i-th embedding
   inline float *get_coords(size_t i) const noexcept { return values + i * dims; }
-
   // Returns True since L2 is a metric
   constexpr inline bool is_metric() const noexcept { return true; }
-
   // Computes the (asymmetric) distance from the current point cloud
   // to the given point cloud
   float distance(const ChamferL2_Point &x) const {
     return chamfer_l2_distance(values, n, x.values, x.n, dims);
   }
-
   // Returns non-owning view of all coordinates
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }
 };
 
+/* -----------------------------------------Implementation-----------------------------------------*/
+
+// Computes the Chamfer L2 distance, given two point clouds
 float chamfer_l2_distance(const float *a, size_t n_a, const float *b, size_t n_b, size_t dim) {
   Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> mat_a(
       a, n_a, dim);
@@ -92,6 +91,33 @@ float chamfer_l2_distance(const float *a, size_t n_a, const float *b, size_t n_b
   Eigen::Matrix<float, Eigen::Dynamic, 1> min_dists_A_to_B = sq_dist_matrix.rowwise().minCoeff();
   float sum_min_dists = min_dists_A_to_B.sum();
   return sum_min_dists / static_cast<float>(n_a);
+}
+
+// Move Constructor
+ChamferL2_Point::ChamferL2_Point(ChamferL2_Point &&other) noexcept :
+    n(other.n),
+    dims(other.dims),
+    aligned_dims(other.aligned_dims),
+    values(other.values),
+    id(other.id),
+    owns(other.owns) {
+  other.n = 0;
+  other.dims = 0;
+  other.aligned_dims = 0;
+  other.values = nullptr;
+  other.id = std::numeric_limits<size_t>::max();
+  other.owns = false;
+}
+
+// Copy Constructor: does exactly what the input does
+ChamferL2_Point::ChamferL2_Point(const ChamferL2_Point &other) :
+    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims), id(other.id), owns(other.owns) {
+  if (owns) {
+    values = static_cast<float *>(parlay::p_malloc(n * dims * sizeof(float)));
+    std::memcpy(values, other.values, n * dims * sizeof(float));
+  } else {
+    values = other.values;
+  }
 }
 
 // Move Assignment Operator
@@ -142,29 +168,4 @@ ChamferL2_Point &ChamferL2_Point::operator=(const ChamferL2_Point &other) {
   return *this;
 }
 
-// Move Constructor
-ChamferL2_Point::ChamferL2_Point(ChamferL2_Point &&other) noexcept :
-    n(other.n),
-    dims(other.dims),
-    aligned_dims(other.aligned_dims),
-    values(other.values),
-    id(other.id),
-    owns(other.owns) {
-  other.n = 0;
-  other.dims = 0;
-  other.aligned_dims = 0;
-  other.values = nullptr;
-  other.id = std::numeric_limits<size_t>::max();
-  other.owns = false;
-}
-
-// Copy Constructor: does exactly what the input does
-ChamferL2_Point::ChamferL2_Point(const ChamferL2_Point &other) :
-    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims), id(other.id), owns(other.owns) {
-  if (owns) {
-    values = static_cast<float *>(parlay::p_malloc(n * dims * sizeof(float)));
-    std::memcpy(values, other.values, n * dims * sizeof(float));
-  } else {
-    values = other.values;
-  }
-}
+}  // namespace mvivf

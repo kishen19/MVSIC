@@ -1,11 +1,13 @@
 #include <Eigen/Dense>
 #include <iostream>
-#include "mvc/utils/chamfer_ip_point.h"
-#include "mvc/utils/chamfer_l2_point.h"
-#include "mvc/utils/parse_command_line.h"
-#include "mvc/utils/point_cloud_set.h"
+#include "src/utils/chamfer_ip_point.h"
+#include "src/utils/chamfer_l2_point.h"
+#include "src/utils/parse_command_line.h"
+#include "src/utils/point_cloud_set.h"
+#include "src/utils/stats.h"
 #include "mvivf.h"
-#include "utils/stats.h"
+
+using namespace mvivf;
 
 template<typename ChPoint, bool metric>
 void bench(mvivf::commandLine &P) {
@@ -36,9 +38,9 @@ void bench(mvivf::commandLine &P) {
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  mvivf::IndexMVIVFParams index_params(minsize, maxsize, s, iters, os_rate, seeding, verbose);
-  mvivf::SearchParams search_params(k, nprobes, beamsize);
-  mvivf::IndexMVIVF<metric> index(points.get_dims(), index_params);
+  IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, os_rate, verbose);
+  SearchParams search_params(k, nprobes, beamsize);
+  IndexMVIVF<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;
     index.load(indexFile, points);
@@ -108,7 +110,7 @@ void bench(mvivf::commandLine &P) {
     std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
     // Compute Stats:
     std::cout << "Computing stats..." << std::endl;
-    mvivf::Stats result = compute_stats(index, points, queries, gt, search_params);
+    Stats result = compute_stats(index, points, queries, gt, search_params);
     QPS_seq = result.QPS_seq;
     QPS_par = result.QPS_par;
     avg_cmps = result.avg_cmps;
@@ -134,10 +136,10 @@ int main(int argc, char *argv[]) {
 
   if (df == "L2") {
     using ChPoint = ChamferL2_Point;
-    bench<ChPoint, mvivf::L2>(P);
+    bench<ChPoint, true>(P);
   } else if (df == "IP") {
     using ChPoint = ChamferIP_Point;
-    bench<ChPoint, mvivf::IP>(P);
+    bench<ChPoint, false>(P);
   }
   return 0;
 }

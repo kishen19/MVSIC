@@ -1,5 +1,5 @@
 #include "parlay/sequence.h"
-#include "utils/faiss_kmeans.h"
+#include "src/utils/faiss_kmeans_util.h"
 
 template<typename Range>
 float brute_force_cost(const Range& points, const Range& centers,
