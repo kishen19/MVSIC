@@ -8,12 +8,12 @@ cc_library(
     hdrs = ["svheuristic.h"],
     deps = [
         "//mvc/utils:euclidian_point",
-        "//mvc/utils:faiss_kmeans",
         "//mvc/utils:mips_point",
         "//mvc/utils:point_range",
         "//mvivf:index",
         "//mvivf/utils:top_neighbors",
         "@absl//absl/container:btree",
+        "@kmeans//lloyds:kmeans",
         "@parlaylib//parlay:primitives",
     ],
 )

@@ -114,5 +114,5 @@ auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPl
                 << "): " << SumOfSquaredCost<PointTy>(points, centers) << std::endl;
     }
   }
-  return std::make_pair(centers, cluster_ids);
+  return centers;
 }

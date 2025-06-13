@@ -94,7 +94,7 @@ void MVClustering<metric>::compute_cluster_ids_blocked(const PointCloudSet<ChPoi
   const size_t k = centers.size();
   const size_t d = points.get_dims();
 
-  const size_t DOC_BLOCK_SIZE = (size_t)std::ceil(128.0 / float(s));
+  const size_t DOC_BLOCK_SIZE = static_cast<size_t>(std::ceil(128.0 / static_cast<float>(s)));
 
   // --- 2. Blocked Computation ---
   parlay::parallel_for(0, (n + DOC_BLOCK_SIZE - 1) / DOC_BLOCK_SIZE, [&](size_t doc_block_idx) {
@@ -288,14 +288,14 @@ auto kmeans_subsample(Range &data, size_t k, size_t os_rate) {
   size_t n = data.size();
   Range centers;
   if (os_rate * k >= n) {
-    centers = kmeans<DistTy, Point>(data, k).first;
+    centers = kmeans<DistTy, Point>(data, k);
   } else {
     auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
       size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
       return data[id];
     });
     auto sampled_data = Range(sampled_points, data.get_dims());
-    centers = kmeans<DistTy, Point>(sampled_data, k).first;
+    centers = kmeans<DistTy, Point>(sampled_data, k);
   }
   // Convert centers_range to sequence of floats
   parlay::sequence<parlay::sequence<float>> final_centers(k);
