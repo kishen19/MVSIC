@@ -65,9 +65,9 @@ class IndexVamana : Index<metric>, IndexVamanaParams {
       const ChPoint& query, const PointCloudSet<ChPoint>& points,
       const SearchParams& params) override;
   // Write the index to a file in disk
-  void save(const std::string& filename) override {}
+  void save(const std::string& filename) override;
   // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {}
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
 };
 
 /* -----------------------------------------Implementation-----------------------------------------*/
@@ -180,9 +180,9 @@ template<bool metric>
 void IndexVamana<metric>::build(const PointCloudSet<ChPoint>& Points) {
   std::cout << "Building graph..." << std::endl;
   set_start();
+  G = Graph<indexType>(R, Points.size());
   parlay::sequence<indexType> inserts =
       parlay::tabulate(Points.size(), [&](size_t i) { return static_cast<indexType>(i); });
-
   if (two_pass) batch_insert(inserts, Points, 1.0, true, 2, .02);
   batch_insert(inserts, Points, alpha, true, 2, .02);
   parlay::parallel_for(0, G.size(), [&](long i) {
@@ -259,7 +259,6 @@ void IndexVamana<metric>::batch_insert(parlay::sequence<indexType>& inserts,
           new_out_[i].size(), [&](size_t j) { return std::make_pair(new_out_[i][j], index); });
       return edges;
     });
-
     parlay::parallel_for(floor, ceiling, [&](size_t i) {
       G[shuffled_inserts[i]].update_neighbors(new_out_[i - floor]);
     });
@@ -309,153 +308,18 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexVamana<metric
   return std::make_pair(final_results, dist_cmps);
 }
 
-// template<bool metric>
-// void IndexVamana<metric>::save(const std::string& filename) {
-//   std::ofstream outfile(filename, std::ios::binary);
-//   std::cout << "Saving index to " << filename << std::endl;
-//   if (!outfile.is_open()) {
-//     std::cerr << "Error opening file for writing: " << filename << std::endl;
-//     return;
-//   }
-//   // Collect data
-//   parlay::sequence<node_t*> ind_to_node;
-//   std::unordered_map<node_t*, size_t> node_to_ind;
-//   parlay::sequence<size_t> center_offsets;
-//   parlay::sequence<size_t> children_offsets;
-//   parlay::sequence<size_t> point_offsets;
+template<bool metric>
+void IndexVamana<metric>::save(const std::string& filename) {
+  char* filename_c = (char*)filename.c_str();
+  G.save(filename_c);
+}
 
-//   size_t height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, children_offsets,
-//                                 point_offsets, 0);
-//   std::cout << "Height of tree: " << height << std::endl;
-
-//   size_t total_center_sizes = parlay::scan_inplace(center_offsets);
-//   center_offsets.push_back(total_center_sizes);
-//   size_t total_children_sizes = parlay::scan_inplace(children_offsets);
-//   children_offsets.push_back(total_children_sizes);
-//   size_t total_point_sizes = parlay::scan_inplace(point_offsets);
-//   point_offsets.push_back(total_point_sizes);
-
-//   // Write num
-//   size_t num = ind_to_node.size();
-//   outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
-//   // Write center offsets
-//   outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
-//                 center_offsets.size() * sizeof(size_t));
-//   // Write center values
-//   for (size_t i = 0; i < num; ++i) {  // TODO: make parallel
-//     node_t* node = ind_to_node[i];
-//     if (node->center.get_dims() > 0) {
-//       auto coords = node->center.get_slice();
-//       outfile.write(reinterpret_cast<const char*>(coords.begin()), coords.size() *
-//       sizeof(float));
-//     }
-//   }
-//   // Write children offsets
-//   outfile.write(reinterpret_cast<const char*>(children_offsets.begin()),
-//                 children_offsets.size() * sizeof(size_t));
-//   // Write children values
-//   for (size_t i = 0; i < num; ++i) {
-//     node_t* node = ind_to_node[i];
-//     parlay::sequence<node_t*> children = node->children;
-//     for (size_t j = 0; j < children.size(); ++j) {  // TODO: make parallel
-//       node_t* child = children[j];
-//       size_t child_id = node_to_ind[child];
-//       outfile.write(reinterpret_cast<const char*>(&child_id), sizeof(size_t));
-//     }
-//   }
-//   // Write point offsets
-//   outfile.write(reinterpret_cast<const char*>(point_offsets.begin()),
-//                 point_offsets.size() * sizeof(size_t));
-//   // Write point values (pairs)
-//   for (size_t i = 0; i < num; ++i) {
-//     node_t* node = ind_to_node[i];
-//     auto point_ids = node->ids;
-//     outfile.write(reinterpret_cast<const char*>(point_ids.begin()),
-//                   point_ids.size() * sizeof(std::pair<size_t, size_t>));
-//   }
-//   outfile.close();
-// }
-
-// template<bool metric>
-// void IndexVamana<metric>::load(const std::string& filename, const PointCloudSet<ChPoint>& points)
-// {
-//   std::ifstream infile(filename, std::ios::binary);
-//   std::cout << "Loading index from " << filename << std::endl;
-//   if (!infile.is_open()) {
-//     std::cerr << "Error opening file for reading: " << filename << std::endl;
-//     return;
-//   }
-//   // Read number of nodes
-//   size_t num = 0;
-//   infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
-//   // Read center offsets
-//   parlay::sequence<size_t> center_offsets(num + 1);
-//   infile.read(reinterpret_cast<char*>(center_offsets.begin()),
-//               center_offsets.size() * sizeof(size_t));
-//   // Read center values
-//   parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
-//   infile.read(reinterpret_cast<char*>(center_values.begin()), center_values.size() *
-//   sizeof(float));
-//   // Read children offsets
-//   parlay::sequence<size_t> children_offsets(num + 1);
-//   infile.read(reinterpret_cast<char*>(children_offsets.begin()),
-//               children_offsets.size() * sizeof(size_t));
-//   // Read children values
-//   parlay::sequence<size_t> children_values(children_offsets[children_offsets.size() - 1]);
-//   infile.read(reinterpret_cast<char*>(children_values.begin()),
-//               children_values.size() * sizeof(size_t));
-//   // Read point offsets
-//   parlay::sequence<size_t> point_offsets(num + 1);
-//   infile.read(reinterpret_cast<char*>(point_offsets.begin()),
-//               point_offsets.size() * sizeof(size_t));
-//   // Read point values
-//   parlay::sequence<std::pair<size_t, size_t>> point_values(point_offsets[point_offsets.size() -
-//   1]); infile.read(reinterpret_cast<char*>(point_values.begin()),
-//               point_values.size() * sizeof(std::pair<size_t, size_t>));
-
-//   // Build the index
-//   size_t dim = points.get_dims();
-//   auto point_id_to_data_id = parlay::sequence<size_t>::uninitialized(points.size());
-//   parlay::parallel_for(0, points.size(),
-//                        [&](size_t i) { point_id_to_data_id[points.get_id(i)] = i; });
-//   parlay::sequence<size_t> center_sizes = parlay::sequence<size_t>::from_function(
-//       num, [&](size_t i) { return center_offsets[i + 1] - center_offsets[i]; });
-//   parlay::sequence<size_t> children_sizes = parlay::sequence<size_t>::from_function(
-//       num, [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
-//   parlay::sequence<size_t> point_sizes = parlay::sequence<size_t>::from_function(
-//       num, [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
-//   parlay::sequence<node_t*> ind_to_node =
-//       parlay::sequence<node_t*>::from_function(num, [&](size_t i) {
-//         node_t* node = new node_t();  // TODO: use parlay allocator
-//         if (center_sizes[i] > 0) {
-//           node->set_center(Point(center_values.begin() + center_offsets[i], dim, dim));
-//         }
-//         node->children.resize(children_sizes[i]);
-//         if (point_sizes[i] > 0) {
-//           auto point_ids = parlay::tabulate(
-//               point_sizes[i], [&](size_t j) { return point_values[point_offsets[i] + j]; });
-//           auto point_group = parlay::tabulate(point_sizes[i], [&](size_t j) {
-//             auto [point_id, emb_id] = point_ids[j];
-//             auto act_point_id = point_id_to_data_id[point_id];
-//             return points[act_point_id][emb_id];
-//           });
-//           node->set_points(Range(point_group, dim), point_ids);
-//         }
-//         return node;
-//       });
-
-//   // Set children pointers
-//   parlay::parallel_for(0, num, [&](size_t i) {
-//     node_t* node = ind_to_node[i];
-//     parlay::sequence<node_t*>& children = node->children;
-//     parlay::parallel_for(0, children.size(), [&](size_t j) {
-//       size_t child_id = children_values[children_offsets[i] + j];
-//       children[j] = ind_to_node[child_id];
-//     });
-//   });
-//   root = ind_to_node[0];
-//   infile.close();
-// }
+template<bool metric>
+void IndexVamana<metric>::load(const std::string& filename, const PointCloudSet<ChPoint>& points) {
+  char* filename_c = (char*)filename.c_str();
+  G = Graph<indexType>(filename_c);
+  set_start();
+}
 
 template struct IndexVamana<true>;   // Instantiates for L2 metric (metric = true)
 template struct IndexVamana<false>;  // Instantiates for MIPS      (metric = false)
