@@ -187,8 +187,7 @@ template<bool metric>
 void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
   size_t n = points.size();
   if (s == 0) {
-    auto pc_sizes =
-        parlay::delayed_seq<size_t>(points.size(), [&](size_t i) { return points.get_size(i); });
+    auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
     s = parlay::reduce(pc_sizes) / n;
     if (verbose) std::cout << "Average number of embeddings per point: " << s << std::endl;
   }

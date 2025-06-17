@@ -11,7 +11,13 @@ struct SearchParams {
   // MVIVF Specific Params
 
   // Single Vector Heuristic Specific Params
-  size_t cands = 0;
+  size_t cands;
+
+  // Vamana Specific Params
+  size_t beamSize;
+  double cut;
+  size_t limit;
+  size_t degree_limit;
 
   // mvivf search params
   SearchParams(size_t k, size_t nprobes, size_t beam_length_) : k(k), nprobes(nprobes) {
@@ -31,6 +37,10 @@ struct SearchParams {
       beam_length = beam_length_;
     }
   }
+
+  // vamana
+  SearchParams(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) :
+      k(k), beamSize(L), cut(cut), limit(limit), degree_limit(degree_limit) {}
 };
 
 }  // namespace mvivf

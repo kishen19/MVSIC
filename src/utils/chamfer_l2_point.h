@@ -19,6 +19,7 @@ struct ChamferL2_Point {
   bool owns = false;
 
  public:
+  using distanceType = float;
   ChamferL2_Point() noexcept {}
   // Non-owning version
   ChamferL2_Point(size_t n, size_t dims, float *values, size_t id) noexcept :
@@ -66,6 +67,7 @@ struct ChamferL2_Point {
   }
   // Returns non-owning view of all coordinates
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }
+  inline float *data() const noexcept { return values; }
 };
 
 /* -----------------------------------------Implementation-----------------------------------------*/
