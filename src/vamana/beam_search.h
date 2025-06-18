@@ -95,13 +95,22 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
     return false;
   };
 
+  // counters
+  size_t dist_cmps = starting_points.size();
+  int remain = 1;
+  int num_visited = 0;
+  double total;
+
   // Frontier maintains the closest points found so far and its size
   // is always at most beamSize.  Each entry is a (id,distance) pair.
   // Initialized with starting points and kept sorted by distance.
   std::vector<std::pair<indexType, distanceType>> frontier;
   frontier.reserve(params.beamSize);
-  for (auto q : starting_points)
-    frontier.push_back(std::pair<indexType, distanceType>(q, p.distance(Points[q])));
+  for (auto q : starting_points) {
+    auto [dist, d_c] = p.distance_w_cmps(Points[q]);
+    dist_cmps += d_c;
+    frontier.push_back(std::pair<indexType, distanceType>(q, dist));
+  }
   std::sort(frontier.begin(), frontier.end(), less);
 
   // The subset of the frontier that has not been visited
@@ -112,12 +121,6 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
   // maintains sorted set of visited vertices (id-distance pairs)
   std::vector<std::pair<indexType, distanceType>> visited;
   visited.reserve(2 * params.beamSize);
-
-  // counters
-  size_t dist_cmps = starting_points.size();
-  int remain = 1;
-  int num_visited = 0;
-  double total;
 
   // used as temporaries in the loop
   std::vector<std::pair<indexType, distanceType>> new_frontier(
@@ -158,9 +161,9 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
         ((frontier.size() < params.beamSize) ? (distanceType)std::numeric_limits<int>::max()
                                              : frontier[frontier.size() - 1].second);
     for (auto a : keep) {
-      distanceType dist = Points[a].distance(p);
+      auto [dist, d_c] = p.distance_w_cmps(Points[a]);
       total += dist;
-      dist_cmps++;
+      dist_cmps += d_c;
       // skip if frontier not full and distance too large
       if (dist >= cutoff) continue;
       candidates.push_back(std::pair{a, dist});

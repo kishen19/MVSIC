@@ -19,6 +19,8 @@ struct SearchParams {
   size_t limit;
   size_t degree_limit;
 
+  std::string method;
+
   // mvivf search params
   SearchParams(size_t k, size_t nprobes, size_t beam_length_) : k(k), nprobes(nprobes) {
     if (beam_length_ == 0) {
@@ -26,6 +28,7 @@ struct SearchParams {
     } else {
       beam_length = beam_length_;
     }
+    method = "mvivf";
   }
 
   // single vector heuristic
@@ -36,11 +39,14 @@ struct SearchParams {
     } else {
       beam_length = beam_length_;
     }
+    method = "svh";
   }
 
   // vamana
   SearchParams(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) :
-      k(k), beamSize(L), cut(cut), limit(limit), degree_limit(degree_limit) {}
+      k(k), beamSize(L), cut(cut), limit(limit), degree_limit(degree_limit) {
+    method = "vamana";
+  }
 };
 
 }  // namespace mvivf

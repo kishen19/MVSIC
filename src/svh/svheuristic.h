@@ -180,8 +180,8 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   auto new_cands = parlay::sequence<std::pair<float, size_t>>::from_function(
       std::min(cands, candidates.size()), [&](size_t i) {
         size_t id = candidates[i];
-        float new_dist = query.distance(points[id]);
-        rerank_dist_cmps[i] = (query.size() * points[id].size());
+        auto [new_dist, d_c] = query.distance_w_cmps(points[id]);
+        rerank_dist_cmps[i] = d_c;
         return std::make_pair(new_dist, id);
       });
   parlay::sort_inplace(new_cands);
@@ -240,13 +240,16 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     beam.erase(beam.begin());
     node_t* current_node = best.second;
     // Compute distances from query to children
+    auto children = current_node->children;
+    parlay::sequence<size_t> cmps(children.size());
     auto res = parlay::sequence<std::pair<float, node_t*>>::from_function(
         current_node->children.size(), [&](size_t i) {
           node_t* child = current_node->children[i];
-          float dist = query.distance(child->center);
+          auto [dist, d_c] = query.distance_w_cmps(child->center);
+          cmps[i] = d_c;
           return std::make_pair(dist, child);
         });
-    dist_cmps += res.size();
+    dist_cmps += parlay::reduce(cmps);
     // Collect leaf and non-leaf nodes
     auto new_nodes_to_beam = parlay::filter(res, [](const auto& p) {
       return p.second->children.size() != 0;  // Only keep nodes that are not leaves

@@ -158,6 +158,9 @@ struct Euclidian_Point {
   float distance(const Euclidian_Point<T> &x) const {
     return euclidian_distance(this->values, x.values, d);
   }
+  std::pair<float, size_t> distance_w_cmps(const Euclidian_Point<T> &x) const {
+    return std::make_pair(euclidian_distance(this->values, x.values, d), 2);
+  }
   void prefetch() const {
     int l = (aligned_d * sizeof(T)) / 64;
     for (int i = 0; i < l; i++)

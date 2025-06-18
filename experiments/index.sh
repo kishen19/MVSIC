@@ -10,6 +10,8 @@ mkdir -p ${RESULTSPATH}/${dataset}/indices
 
 maxsizes=(500)
 iters=(5)
+Rs=(128 256 512)
+
 rounds=0
 
 if [ "$index" == "mvivf" ]; then
@@ -18,17 +20,24 @@ if [ "$index" == "mvivf" ]; then
       bazel-bin/experiments/${index}_benchmark \
         -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
         -o ${RESULTSPATH}/${dataset}/indices/${index}_maxsize${maxsize}_iters${iter}.bin \
-        -rounds ${rounds} -iters ${iter} -maxsize ${maxsize} -v > logs/${index}_${dataset}_maxsize${maxsize}_iters${iter}.log
-      echo ${dataset} ${maxsize} ${iter} done
+        -rounds ${rounds} -iters ${iter} -maxsize ${maxsize} > logs/${index}_${dataset}_maxsize${maxsize}_iters${iter}.log
+      echo ${index} ${dataset} ${maxsize} ${iter} done
     done
   done
 elif [ "$index" == "svh" ]; then
   for maxsize in ${maxsizes[@]}; do
-    OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=16 \
-      bazel-bin/experiments/${index}_benchmark \
+    bazel-bin/experiments/${index}_benchmark \
       -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
       -o ${RESULTSPATH}/${dataset}/indices/${index}_maxsize${maxsize}.bin \
-      -rounds ${rounds} -iters ${iter} -maxsize ${maxsize} -v > logs/${index}_${dataset}_maxsize${maxsize}.log
-    echo ${dataset} ${maxsize} ${iter} done
+      -rounds ${rounds} -iters ${iter} -maxsize ${maxsize} > logs/${index}_${dataset}_maxsize${maxsize}.log
+    echo ${index} ${dataset} ${maxsize} done
+  done
+elif [ "$index" == "vamana" ]; then
+  for R in ${Rs[@]}; do
+    bazel-bin/experiments/${index}_benchmark \
+      -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
+      -o ${RESULTSPATH}/${dataset}/indices/${index}_R${R}.bin \
+      -rounds ${rounds} -R ${R} -v > logs/${index}_${dataset}_R${R}.log
+    echo ${index} ${dataset} ${R} done
   done
 fi

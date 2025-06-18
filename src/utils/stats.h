@@ -151,16 +151,26 @@ inline void write_to_csv(const std::string csv_filename,
                          const parlay::sequence<mvivf::SearchParams> &params) {
   assert(results.size() == params.size());
   csvfile csv(csv_filename);
-  csv << "k"
-      << "nprobes"
-      << "QPS_seq"
+  csv << "k";
+  if (params[0].method == "mvivf" || params[0].method == "svh") {
+    csv << "nprobes";
+  } else if (params[0].method == "vamana") {
+    csv << "L";
+  }
+  csv << "QPS_seq"
       << "QPS_par"
       << "Avg Cmps"
       << "Recall 1@k"
       << "Recall k@k" << endrow;
   for (size_t i = 0; i < results.size(); ++i) {
-    csv << params[i].k << params[i].nprobes << results[i].QPS_seq << results[i].QPS_par
-        << results[i].avg_cmps << results[i].recall_1_k << results[i].recall_k_k << endrow;
+    csv << params[i].k;
+    if (params[i].method == "mvivf" || params[i].method == "svh") {
+      csv << params[i].nprobes;
+    } else if (params[i].method == "vamana") {
+      csv << params[i].beamSize;
+    }
+    csv << results[i].QPS_seq << results[i].QPS_par << results[i].avg_cmps << results[i].recall_1_k
+        << results[i].recall_k_k << endrow;
   }
   csv << endrow;
 }

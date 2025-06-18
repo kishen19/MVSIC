@@ -7,12 +7,13 @@ namespace mvivf {
 
 template<typename ChPoint>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(
-    const ChPoint &q, const PointCloudSet<ChPoint> &points, size_t k) {
+    const ChPoint& q, const PointCloudSet<ChPoint>& points, size_t k) {
   size_t dist_cmps = 0;
   parlay::sequence<size_t> cmps(points.size());
   auto dists = parlay::tabulate(points.size(), [&](size_t i) {
-    cmps[i] = (q.size() * points[i].size());
-    return std::pair(q.distance(points[i]), points.get_id(i));
+    auto [dist, d_c] = q.distance_w_cmps(points[i]);
+    cmps[i] = d_c;
+    return std::pair(dist, points.get_id(i));
   });
   dist_cmps += parlay::reduce(cmps);
   parlay::sort_inplace(dists);
@@ -24,12 +25,15 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(
 
 template<typename Point, typename Range>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn_ids(
-    const Point &q, const Range &points, const parlay::sequence<std::pair<size_t, size_t>> &ids,
+    const Point& q, const Range& points, const parlay::sequence<std::pair<size_t, size_t>>& ids,
     size_t k) {
-  size_t dist_cmps = 0;
-  auto dists = parlay::tabulate(
-      points.size(), [&](size_t i) { return std::pair(ids[i].first, q.distance(points[i])); });
-  dist_cmps += dists.size();
+  parlay::sequence<size_t> cmps(points.size());
+  auto dists = parlay::tabulate(points.size(), [&](size_t i) {
+    auto [dist, d_c] = q.distance_w_cmps(points[i]);
+    cmps[i] = d_c;
+    return std::pair(ids[i].first, dist);
+  });
+  size_t dist_cmps = parlay::reduce(cmps);
   parlay::sort_inplace(dists);
   // Pick only first copy of same id elements
   auto cutoff_indices = parlay::delayed_seq<size_t>(

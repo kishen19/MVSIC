@@ -154,13 +154,13 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     beam.erase(beam.begin());
     node_t *current_node = best.second;
     // Compute distances from query to children
-    parlay::sequence<size_t> cmps(current_node->children.size());
     auto children = current_node->children;
+    parlay::sequence<size_t> cmps(children.size());
     auto res =
         parlay::sequence<std::pair<float, node_t *>>::from_function(children.size(), [&](size_t i) {
           node_t *child = children[i];
-          float dist = query.distance(child->center);
-          cmps[i] = (query.size() * child->center.size());
+          auto [dist, d_c] = query.distance_w_cmps(child->center);
+          cmps[i] = d_c;
           return std::make_pair(dist, child);
         });
     dist_cmps += parlay::reduce(cmps);

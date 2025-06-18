@@ -159,6 +159,9 @@ struct Mips_Point {
   T operator[](long i) const { return *(values + i); }
   T &operator[](long i) { return *(values + i); }
   float distance(const Mips_Point<T> &x) const { return mips_distance(this->values, x.values, d); }
+  std::pair<float, size_t> distance_w_cmps(const Mips_Point<T> &x) const {
+    return std::make_pair(mips_distance(this->values, x.values, d), 2);
+  }
   void prefetch() const {
     int l = (aligned_d * sizeof(T)) / 64;
     for (int i = 0; i < l; i++)

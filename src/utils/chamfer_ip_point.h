@@ -65,6 +65,9 @@ struct ChamferIP_Point {
   float distance(const ChamferIP_Point &x) const {
     return chamfer_ip_distance(values, n, x.values, x.n, dims);
   }
+  std::pair<float, size_t> distance_w_cmps(const ChamferIP_Point &x) const {
+    return std::make_pair(chamfer_ip_distance(values, n, x.values, x.n, dims), n + x.n);
+  }
   // Returns non-owning view of all coordinates
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }
   inline float *data() const noexcept { return values; }
