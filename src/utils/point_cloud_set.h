@@ -73,6 +73,90 @@ struct PointCloudSet {
   inline auto get_offsets() const noexcept {
     return parlay::make_slice(offsets.begin(), offsets.end());
   }
+  // Return list of distances from a query to all point clouds
+  inline std::pair<parlay::sequence<float>, size_t> distances(const ChPoint &query) {
+    auto dists = parlay::sequence<float>::from_function(
+        n, [&](size_t i) { return query.distance((*this)[i]); });
+    return std::make_pair(dists, query.size() + this->total_size());
+  }
+  // Return list of distances from a query to all point clouds: using eigen
+  inline std::pair<parlay::sequence<float>, size_t> distances_optimized(const ChPoint &query) {
+    // Ensure there's something to compute.
+    if (query.num_points() == 0 || this->n == 0) {
+      return parlay::sequence<float>(this->n, 0.0f);
+    }
+    // Map the query and the entire dataset into Eigen matrices (zero-copy).
+    Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+        mat_query(query.data(), query.num_points(), this->dim);
+    Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+        mat_all_clouds(this->values, this->total_points, this->dim);
+    auto dists = parlay::sequence<float>::uninitialized(this->n);
+
+    // ========================================================================
+    // IF-CONDITION TO COMPUTE EUCLIDEAN DISTANCE
+    // ========================================================================
+    if ((*this)[0].is_metric()) {
+      // 1. Pre-compute squared norms for all query points. (query_points x 1)
+      Eigen::Matrix<float, Eigen::Dynamic, 1> query_sq_norms = mat_query.rowwise().squaredNorm();
+      // 2. Pre-compute squared norms for all points in the dataset. (total_points x 1)
+      Eigen::Matrix<float, Eigen::Dynamic, 1> db_sq_norms = mat_all_clouds.rowwise().squaredNorm();
+      // 3. Compute all inner products. (query_points x total_points)
+      Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> all_inner_products =
+          mat_query * mat_all_clouds.transpose();
+      // 4. In parallel, compute the Chamfer distance for each point cloud.
+      parlay::parallel_for(0, this->n, [&](size_t i) {
+        const size_t start_offset = this->offsets[i];
+        const size_t end_offset = this->offsets[i + 1];
+        const size_t cloud_size = end_offset - start_offset;
+
+        if (cloud_size == 0) {
+          dists[i] = std::numeric_limits<float>::infinity();
+          return;
+        }
+        // Get the relevant block of inner products for the i-th cloud. (View, no copy)
+        auto ip_block = all_inner_products.block(0, start_offset, query.num_points(), cloud_size);
+        // Get the relevant block of database squared norms. (View, no copy)
+        auto db_sq_norms_block = db_sq_norms.segment(start_offset, cloud_size);
+        // 5. Compute the squared Euclidean distance matrix for this block using broadcasting.
+        // dist_sq = a^2 - 2ab + b^2
+        Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> dist_sq_block =
+            query_sq_norms.replicate(1, cloud_size) - 2 * ip_block +
+            db_sq_norms_block.transpose().replicate(query.num_points(), 1);
+        // 6. Find the minimum squared distance for each query point (row-wise min).
+        Eigen::Matrix<float, Eigen::Dynamic, 1> min_sq_dists = dist_sq_block.rowwise().minCoeff();
+        // 7. The Chamfer distance is the mean of these minimum squared distances.
+        dists[i] = min_sq_dists.mean();
+      });
+    } else {
+      // ========================================================================
+      // ELSE: COMPUTE INNER PRODUCT BASED DISTANCE (Original optimized logic)
+      // ========================================================================
+      // 1. Perform the single, large matrix multiplication.
+      Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> all_inner_products =
+          mat_query * mat_all_clouds.transpose();
+
+      // 2. Compute distances for each point cloud in parallel.
+      parlay::parallel_for(0, this->n, [&](size_t i) {
+        const size_t start_offset = this->offsets[i];
+        const size_t end_offset = this->offsets[i + 1];
+        const size_t cloud_size = end_offset - start_offset;
+
+        if (cloud_size == 0) {
+          dists[i] = std::numeric_limits<float>::infinity();
+          return;
+        }
+        // Create a zero-copy block for the i-th point cloud.
+        auto ip_block = all_inner_products.block(0, start_offset, query.num_points(), cloud_size);
+
+        // Find the max inner product for each query point (row-wise max).
+        Eigen::Matrix<float, Eigen::Dynamic, 1> max_ips_to_cloud_i = ip_block.rowwise().maxCoeff();
+
+        // Compute the mean of these maximums and store the negative.
+        dists[i] = -max_ips_to_cloud_i.mean();
+      });
+    }
+    return std::make_pair(dists, query.num_points() + this->total_size());
+  }
 };
 
 /* -----------------------------------------Implementation-----------------------------------------*/

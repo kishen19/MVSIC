@@ -23,15 +23,15 @@ struct IndexMVIVFParams {
 template<typename ChPoint>
 struct IndexMVIVFNode {
   parlay::sequence<IndexMVIVFNode *> children;  // Children
-  ChPoint center;                               // Except root, every node has a center-set
+  PointCloudSet<ChPoint> centers;               // Centers of children
   PointCloudSet<ChPoint> points;                // Only leaf nodes have points
 
   IndexMVIVFNode() :
       children(parlay::sequence<IndexMVIVFNode *>(0)),
-      center(ChPoint()),
+      center(PointCloudSet<ChPoint>()),
       points(PointCloudSet<ChPoint>()) {}
 
-  inline void set_center(const ChPoint &center_) { center = center_; }
+  inline void set_centers(const PointCloudSet<ChPoint> &centers_) { centers = centers_; }
   inline void set_points(const PointCloudSet<ChPoint> &points_) { points = points_; }
 };
 
@@ -108,7 +108,7 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
   parlay::parallel_for(0, num_clusters, [&](size_t i) {
     node_t *child = new node_t();
     // node_t *child = node_allocator::create();
-    child->set_center(centers[i]);
+    // child->set_center(centers[i]);
     PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(points.filter(grouped[i]), d);
     if (child_points.size() > maxsize) {
       build_helper(child, child_points);
@@ -118,6 +118,7 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
     children[i] = child;
   });
   node->children = children;
+  node->set_centers(centers);
 }
 
 // Returns the top-k point clouds for the query point cloud
@@ -155,15 +156,20 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     node_t *current_node = best.second;
     // Compute distances from query to children
     auto children = current_node->children;
-    parlay::sequence<size_t> cmps(children.size());
-    auto res =
-        parlay::sequence<std::pair<float, node_t *>>::from_function(children.size(), [&](size_t i) {
-          node_t *child = children[i];
-          auto [dist, d_c] = query.distance_w_cmps(child->center);
-          cmps[i] = d_c;
-          return std::make_pair(dist, child);
-        });
-    dist_cmps += parlay::reduce(cmps);
+    auto child_centers = current_node->centers;
+    // parlay::sequence<size_t> cmps(child_centers.size());
+    // auto res =
+    //     parlay::sequence<std::pair<float, node_t *>>::from_function(child_centers.size(),
+    //     [&](size_t i) {
+    //       auto [dist, d_c] = query.distance_w_cmps(child->center);
+    //       cmps[i] = d_c;
+    //       return std::make_pair(dist, child);
+    //     });
+    auto [all_dists, dist_cmps] = query.distances(child_centers);
+    // auto [all_dists, dist_cmps] = query.distances_optimized(child_centers);
+    // dist_cmps += parlay::reduce(cmps);
+    auto res = parlay::sequence<std::pair<float, node_t *>>::from_function(
+        child_centers.size(), [&](size_t i) { return std::make_pair(all_dists[i], children[i]); });
     // Collect leaf and non-leaf nodes
     auto new_nodes_to_beam = parlay::filter(res, [](const auto &p) {
       return p.second->children.size() != 0;  // Only keep nodes that are not leaves
@@ -217,18 +223,22 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
 template<bool metric>
 size_t IndexMVIVF<metric>::traverse_tree(node_t *node, parlay::sequence<node_t *> &ind_to_node,
                                          std::unordered_map<node_t *, size_t> &node_to_ind,
-                                         parlay::sequence<size_t> &center_offsets,
+                                         parlay::sequence<size_t> &centers_offsets,
                                          parlay::sequence<size_t> &children_offsets,
                                          parlay::sequence<size_t> &point_offsets, size_t height) {
   node_to_ind[node] = ind_to_node.size();
   ind_to_node.push_back(node);
-  center_offsets.push_back((node->center.size()) * (node->center.get_dims()));
+  if (node->centers.size() == 0) {
+    centers_offsets.push_back(0);
+  } else {
+    centers_offsets.push_back((node->centers.total_size()) * (node->centers.get_dims()));
+  }
   children_offsets.push_back(node->children.size());
   point_offsets.push_back(node->points.size());
   size_t h = height + 1;
   for (node_t *child : node->children) {
-    h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, center_offsets, children_offsets,
-                                  point_offsets, height + 1));
+    h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, centers_offsets,
+                                  children_offsets, point_offsets, height + 1));
   }
   return h;
 }
@@ -244,16 +254,16 @@ void IndexMVIVF<metric>::save(const std::string &filename) {
   // Collect data
   parlay::sequence<node_t *> ind_to_node;
   std::unordered_map<node_t *, size_t> node_to_ind;
-  parlay::sequence<size_t> center_offsets;
+  parlay::sequence<size_t> centers_offsets;
   parlay::sequence<size_t> children_offsets;
   parlay::sequence<size_t> point_offsets;
 
-  size_t height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, children_offsets,
+  size_t height = traverse_tree(root, ind_to_node, node_to_ind, centers_offsets, children_offsets,
                                 point_offsets, 0);
   std::cout << "Height of tree: " << height << std::endl;
 
-  size_t total_center_sizes = parlay::scan_inplace(center_offsets);
-  center_offsets.push_back(total_center_sizes);
+  size_t total_centers_sizes = parlay::scan_inplace(centers_offsets);
+  centers_offsets.push_back(total_centers_sizes);
   size_t total_children_sizes = parlay::scan_inplace(children_offsets);
   children_offsets.push_back(total_children_sizes);
   size_t total_point_sizes = parlay::scan_inplace(point_offsets);
@@ -265,12 +275,13 @@ void IndexMVIVF<metric>::save(const std::string &filename) {
   // Write center offsets
   outfile.write(reinterpret_cast<const char *>(center_offsets.begin()),
                 center_offsets.size() * sizeof(size_t));
-  // Write center values
+  // Write centers values
   for (size_t i = 0; i < num; ++i) {  // TODO: make parallel
     node_t *node = ind_to_node[i];
-    if (node->center.size() > 0) {
-      auto coords = node->center.get_slice();
-      outfile.write(reinterpret_cast<const char *>(coords.begin()), coords.size() * sizeof(float));
+    if (node->centers.size() > 0) {
+      auto coords = node->centers.data();
+      size_t num_entries = (node->centers.total_size()) * (node->centers.get_dims());
+      outfile.write(reinterpret_cast<const char *>(coords), num_entries * sizeof(float));
     }
   }
   // Write children offsets
@@ -313,13 +324,13 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
   size_t num = 0;
   infile.read(reinterpret_cast<char *>(&num), sizeof(size_t));
   // Read center offsets
-  parlay::sequence<size_t> center_offsets(num + 1);
-  infile.read(reinterpret_cast<char *>(center_offsets.begin()),
-              center_offsets.size() * sizeof(size_t));
-  // Read center values
-  parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
-  infile.read(reinterpret_cast<char *>(center_values.begin()),
-              center_values.size() * sizeof(float));
+  parlay::sequence<size_t> centers_offsets(num + 1);
+  infile.read(reinterpret_cast<char *>(centers_offsets.begin()),
+              centers_offsets.size() * sizeof(size_t));
+  // Read centers values
+  parlay::sequence<float> centers_values(centers_offsets[centers_offsets.size() - 1]);
+  infile.read(reinterpret_cast<char *>(centers_values.begin()),
+              centers_values.size() * sizeof(float));
   // Read children offsets
   parlay::sequence<size_t> children_offsets(num + 1);
   infile.read(reinterpret_cast<char *>(children_offsets.begin()),
@@ -341,8 +352,8 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
   auto point_id_to_data_id = parlay::sequence<size_t>::uninitialized(points.size());
   parlay::parallel_for(0, points.size(),
                        [&](size_t i) { point_id_to_data_id[points.get_id(i)] = i; });
-  parlay::sequence<size_t> center_sizes = parlay::sequence<size_t>::from_function(
-      num, [&](size_t i) { return center_offsets[i + 1] - center_offsets[i]; });
+  parlay::sequence<size_t> centers_sizes = parlay::sequence<size_t>::from_function(
+      num, [&](size_t i) { return centers_offsets[i + 1] - centers_offsets[i]; });
   parlay::sequence<size_t> children_sizes = parlay::sequence<size_t>::from_function(
       num, [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
   parlay::sequence<size_t> point_sizes = parlay::sequence<size_t>::from_function(
@@ -351,8 +362,8 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
       parlay::sequence<node_t *>::from_function(num, [&](size_t i) {
         node_t *node = new node_t();
         // node_t *node = node_allocator::create();
-        if (center_sizes[i] > 0) {
-          node->set_center(
+        if (centers_sizes[i] > 0) {
+          node->set_centers(
               ChPoint(center_sizes[i] / dim, dim, center_values.begin() + center_offsets[i]));
         }
         node->children.resize(children_sizes[i]);
