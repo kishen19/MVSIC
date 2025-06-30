@@ -1,7 +1,7 @@
 #include "src/utils/chamfer_ip_point.h"
 #include "src/utils/chamfer_l2_point.h"
-#include "src/utils/euclidian_point.h"
-#include "src/utils/mips_point.h"
+#include "src/utils/ip_point.h"
+#include "src/utils/l2_point.h"
 #include "src/utils/parse_command_line.h"
 #include "src/utils/point_cloud_set.h"
 #include "src/utils/point_range.h"
@@ -101,11 +101,11 @@ int main(int argc, char* argv[]) {
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {
-    using Point = mvivf::Euclidian_Point<float>;
+    using Point = mvivf::L2_Point<float>;
     using ChPoint = ChamferL2_Point;
     bench<Point, ChPoint, true>(P);
   } else if (df == "IP") {
-    using Point = mvivf::Mips_Point<float>;
+    using Point = mvivf::IP_Point<float>;
     using ChPoint = ChamferIP_Point;
     bench<Point, ChPoint, false>(P);
   }

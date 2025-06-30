@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 #include "parlay/primitives.h"
+#include "l2_point.h"
 
 namespace mvivf {
 
@@ -32,7 +33,8 @@ struct ChamferL2_Point {
   inline size_t get_id() const noexcept { return id; }
   // Returns non-owning view of the i-th embedding
   inline auto operator[](size_t i) const noexcept {
-    return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
+    return L2_Point<float>(values + i * dims, dims, aligned_dims, id);
+    // return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
   // Returns pointer to i-th embedding
   inline float *get_coords(size_t i) const noexcept { return values + i * dims; }
@@ -44,7 +46,7 @@ struct ChamferL2_Point {
     return chamfer_l2_distance(values, n, x.values, x.n, dims);
   }
   std::pair<float, size_t> distance_w_cmps(const ChamferL2_Point &x) const {
-    return std::make_pair(chamfer_ip_distance(values, n, x.values, x.n, dims), n + x.n);
+    return std::make_pair(chamfer_l2_distance(values, n, x.values, x.n, dims), n + x.n);
   }
   // Returns non-owning view of all coordinates
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }

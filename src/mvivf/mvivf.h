@@ -108,7 +108,6 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
   parlay::parallel_for(0, num_clusters, [&](size_t i) {
     node_t *child = new node_t();
     // node_t *child = node_allocator::create();
-    // child->set_center(centers[i]);
     PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(points.filter(grouped[i]), d);
     if (child_points.size() > maxsize) {
       build_helper(child, child_points);
@@ -158,7 +157,8 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     auto children = current_node->children;
     auto centers = current_node->data;
     // Note: children.size() == centers.size()
-    auto [all_dists, dist_cmps] = centers.distances(query);
+    auto [all_dists, dist_cmps_node] = centers.distances(query);
+    dist_cmps += dist_cmps_node;
     auto res = parlay::sequence<std::pair<float, node_t *>>::from_function(
         children.size(), [&](size_t i) { return std::make_pair(all_dists[i], children[i]); });
     // Collect leaf and non-leaf nodes

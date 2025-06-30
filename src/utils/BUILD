@@ -6,6 +6,7 @@ cc_library(
     name = "chamfer_ip_point",
     hdrs = ["chamfer_ip_point.h"],
     deps = [
+        ":ip_point",
         "@eigen",
         "@parlaylib//parlay:primitives",
     ],
@@ -15,6 +16,7 @@ cc_library(
     name = "chamfer_l2_point",
     hdrs = ["chamfer_l2_point.h"],
     deps = [
+        ":l2_point",
         "@eigen",
         "@parlaylib//parlay:primitives",
     ],
@@ -26,8 +28,8 @@ cc_library(
 )
 
 cc_library(
-    name = "euclidian_point",
-    hdrs = ["euclidian_point.h"],
+    name = "l2_point",
+    hdrs = ["l2_point.h"],
     deps = [
         ":NSGDist",
         "@parlaylib//parlay:parallel",
@@ -50,13 +52,16 @@ cc_library(
     hdrs = ["kmeans_util.h"],
     deps = [
         "@kmeans//lloyds:kmeans",
+        "@parlayann//algorithms/utils:euclidian_point",
+        "@parlayann//algorithms/utils:mips_point",
+        "@parlayann//algorithms/utils:point_range",
         "@parlaylib//parlay:primitives",
     ],
 )
 
 cc_library(
-    name = "mips_point",
-    hdrs = ["mips_point.h"],
+    name = "ip_point",
+    hdrs = ["ip_point.h"],
     deps = [
         ":NSGDist",
         "@parlaylib//parlay:parallel",

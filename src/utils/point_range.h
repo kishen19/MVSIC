@@ -49,11 +49,9 @@ long dim_round_up(long dim, long tp_size) {
 
 template<typename T, class Point>
 struct PointRange {
-
-  long dimension() { return dims; }
-  long aligned_dimension() { return aligned_dims; }
-
-  PointRange() : values(std::shared_ptr<T[]>(nullptr, std::free)) { n = 0; }
+ public:
+  PointRange() noexcept :
+      values(std::shared_ptr<T[]>(nullptr, std::free)), dims(0), aligned_dims(0), n(0) {}
 
   PointRange(char *filename) : values(std::shared_ptr<T[]>(nullptr, std::free)) {
     if (filename == NULL) {
@@ -114,19 +112,18 @@ struct PointRange {
     values = std::shared_ptr<T[]>((T *)aligned_alloc(64, n * aligned_dims * sizeof(T)), std::free);
   }
 
-  size_t size() const { return n; }
-
-  unsigned int get_dims() const { return dims; }
-
-  unsigned int get_aligned_dims() const { return aligned_dims; }
-
+  size_t size() const noexcept { return n; }
+  unsigned int get_dims() const noexcept { return dims; }
+  unsigned int get_aligned_dims() const noexcept { return aligned_dims; }
+  long dimension() noexcept { return dims; }
+  long aligned_dimension() noexcept { return aligned_dims; }
   Point operator[](long i) const {
     return Point(values.get() + i * aligned_dims, dims, aligned_dims, i);
   }
 
   Point operator[](long i) { return Point(values.get() + i * aligned_dims, dims, aligned_dims, i); }
 
-  T *data() const { return values.get(); }
+  T *data() const noexcept { return values.get(); }
 
   std::shared_ptr<T[]> values;
   unsigned int dims;

@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 #include "parlay/primitives.h"
+#include "ip_point.h"
 
 namespace mvivf {
 
@@ -32,7 +33,8 @@ struct ChamferIP_Point {
   inline size_t get_id() const noexcept { return id; }
   // Returns non-owning view of the i-th embedding
   inline auto operator[](size_t i) const noexcept {
-    return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
+    return IP_Point<float>(values + i * dims, dims, aligned_dims, id);
+    // return parlay::make_slice(values + i * dims, values + (i + 1) * dims);
   }
   // Returns pointer to i-th embedding
   inline float *get_coords(size_t i) const noexcept { return values + i * dims; }

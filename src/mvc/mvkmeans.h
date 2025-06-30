@@ -2,9 +2,6 @@
 
 #include <Eigen/Dense>
 #include "parlay/primitives.h"
-#include "algorithms/utils/euclidian_point.h"
-#include "algorithms/utils/mips_point.h"
-#include "algorithms/utils/point_range.h"
 
 #include "src/utils/chamfer_ip_point.h"
 #include "src/utils/chamfer_l2_point.h"
@@ -29,8 +26,6 @@ template<bool metric>
 class MVClustering : MVClusteringParams {
  public:
   using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
-  using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Range = PointRange<float, Point>;
 
   size_t d;  // Dimension of vectors
   size_t k;  // Number of centroid-sets
@@ -243,8 +238,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
           new_centers[i] = data;
         } else {
           // new_centers[i] = faiss_kmeans(data, d, s, metric, os_rate);
-          auto data_range = Range(data, d);
-          new_centers[i] = kmeans_subsample<float, Point>(data_range, s, os_rate);
+          new_centers[i] = kmeans_subsample<metric>(data, s, os_rate, verbose);
         }
       } else {  // Empty Cluster, sample from input
         if (verbose) {
@@ -259,8 +253,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
           new_centers[i] = data;
         } else {
           // new_centers[i] = faiss_kmeans(data, d, s, metric, os_rate);
-          auto data_range = Range(data, d);
-          new_centers[i] = kmeans_subsample<float, Point>(data_range, s, os_rate);
+          new_centers[i] = kmeans_subsample<metric>(data, s, os_rate, verbose);
         }
       }
     });

@@ -31,7 +31,7 @@ void compute_mean(const Seq &points, Range &centers, uint32_t id, uint32_t d) {
     for (size_t i = 0; i < d; i++) {
       sum_sqrs += (centers[id][i] * centers[id][i]);
     }
-    if (sum_sqrs > 1e-6) {
+    if (sum_sqrs != 0.0) {
       float sqrt_sum_sqrs = std::sqrt(sum_sqrs);
       for (size_t i = 0; i < d; i++) {
         centers[id][i] /= sqrt_sum_sqrs;
