@@ -4,8 +4,8 @@
 #include "parlay/primitives.h"
 #include "src/common/index.h"
 #include "src/utils/kmeans_util.h"
-#include "src/utils/euclidian_point.h"
-#include "src/utils/mips_point.h"
+#include "src/utils/ip_point.h"
+#include "src/utils/l2_point.h"
 #include "src/utils/point_range.h"
 #include "src/utils/top_neighbors.h"
 
@@ -20,21 +20,25 @@ struct IndexSVHParams {
 };
 
 /* Single-vector Heuristic Internal Node Type */
-template<typename Point, typename Range>
+template<typename Range>
 struct IndexSVHNode {
-  parlay::sequence<IndexSVHNode*> children;         // Children
-  Point center;                                     // Except root, every node has a center-set
-  Range points;                                     // Only leaf nodes have points
+  parlay::sequence<IndexSVHNode*> children;  // Children
+  // For internal nodes: data = centers of children
+  // For leaves:         data = points in the cluster
+  Range data;
   parlay::sequence<std::pair<size_t, size_t>> ids;  // Only leaf nodes have ids
 
-  IndexSVHNode() : children(parlay::sequence<IndexSVHNode*>(0)), center(Point()), points(Range()) {}
+  IndexSVHNode() : children(parlay::sequence<IndexSVHNode*>(0)), data(Range()) {}
 
-  inline void set_points(const Range& points_,
-                         const parlay::sequence<std::pair<size_t, size_t>>& ids_) {
-    points = points_;
-    ids = ids_;
+  inline void set_children(const parlay::sequence<IndexSVHNode*>& children_) {
+    children = std::move(children_);
   }
-  inline void set_center(const Point& center_) { center = center_; }
+  inline void set_data(const Range& centers) { data = std::move(centers); }
+  inline void set_data(const Range& points,
+                       const parlay::sequence<std::pair<size_t, size_t>>& ids_) {
+    data = std::move(points);
+    ids = std::move(ids_);
+  }
 };
 
 /* Main Single-Vector Heuristic Class */
@@ -42,9 +46,9 @@ template<bool metric>
 class IndexSVH : Index<metric>, IndexSVHParams {
  public:
   using ChPoint = Index<metric>::ChPoint;
-  using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
+  using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
   using Range = PointRange<float, Point>;
-  using node_t = IndexSVHNode<Point, Range>;
+  using node_t = IndexSVHNode<Range>;
   using Index<metric>::d;
 
   node_t* root = nullptr;
@@ -105,7 +109,6 @@ void IndexSVH<metric>::build_helper(node_t* node,
                                     const parlay::sequence<std::pair<size_t, size_t>>& ids) {
   size_t n = points.size();
   size_t mp = std::max((size_t)4, maxsize / minsize);
-  // Num Clusters = min(sqrt(n), mp*n/maxsize)
   size_t num_clusters = std::min(mp * std::ceil(n / maxsize), std::ceil(std::sqrt(n)));
   if (verbose) {
     std::cout << "Building index with " << n << " points, maxsize: " << maxsize
@@ -116,11 +119,9 @@ void IndexSVH<metric>::build_helper(node_t* node,
   //     faiss_kmeans_assign(points, d, num_clusters, metric, maxsize, os_rate);
   // Range centers = Range(centers_, d);
   Range centers;
-  parlay::sequence<size_t> cluster_ids;
-  parlay::sequence<size_t> active_indices;
-  Range data_range = Range(points, d);  // TODO: Move to kmeans_subsample
-  std::tie(centers, cluster_ids, active_indices) = kmeans_subsample_assign<float, Point>(
-      data_range, num_clusters, os_rate, maxsize, metric, verbose);
+  auto [centers_, cluster_ids, active_indices] =
+      kmeans_subsample_assign<metric>(points, num_clusters, os_rate, maxsize, verbose);
+  centers = Range(centers_, d);
   auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(
       n, [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
   auto grouped = parlay::group_by_index(id_pt, num_clusters);
@@ -130,7 +131,6 @@ void IndexSVH<metric>::build_helper(node_t* node,
   parlay::parallel_for(0, active_indices.size(), [&](size_t id) {
     size_t i = active_indices[id];
     node_t* child = new node_t();  // TODO: use parlay allocator
-    child->set_center(centers[i]);
     auto child_points =
         parlay::tabulate(grouped[i].size(), [&](size_t j) { return points[grouped[i][j]]; });
     auto child_ids =
@@ -139,11 +139,12 @@ void IndexSVH<metric>::build_helper(node_t* node,
       build_helper(child, child_points, child_ids);
     } else {
       auto child_range = Range(child_points, d);
-      child->set_points(child_range, child_ids);
+      child->set_data(child_range, child_ids);
     }
     children[id] = child;
   });
-  node->children = children;
+  node->set_children(children);
+  node->set_data(centers);
 }
 
 template<bool metric>
@@ -154,10 +155,11 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   size_t cands = params.cands;
   auto results = parlay::sequence<parlay::sequence<std::pair<size_t, float>>>(q);
   auto in_dist_cmps = parlay::sequence<size_t>::uninitialized(q);
+  // std::cout << "Before Search Each" << std::endl;
   parlay::parallel_for(0, q, [&](size_t i) {
-    std::tie(results[i], in_dist_cmps[i]) =
-        search_each(Point(query.get_coords(i), query.get_dims(), query.get_dims()), points, params);
+    std::tie(results[i], in_dist_cmps[i]) = search_each(query[i], points, params);
   });
+  // std::cout << "After Search Each" << std::endl;
   parlay::sequence<size_t> candidates;
   std::unordered_set<size_t> seen;
   size_t done = 0, i = 0;
@@ -175,6 +177,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     }
     i++;
   }
+  // std::cout << "Before re-ranking" << std::endl;
   // Final re-ranking
   parlay::sequence<size_t> rerank_dist_cmps(std::min(cands, candidates.size()));
   auto new_cands = parlay::sequence<std::pair<float, size_t>>::from_function(
@@ -201,6 +204,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
       break;
     }
   }
+  // std::cout << "After re-ranking" << std::endl;
   return std::make_pair(final_results,
                         parlay::reduce(in_dist_cmps) + parlay::reduce(rerank_dist_cmps));
 }
@@ -215,7 +219,6 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   if (beam_length == 0) {
     beam_length = nprobes;
   }  // Default
-  // TODO: have separete nprobes for indiv points and reranking
   // probe_list will contain the candidate nodes to probe
   parlay::sequence<std::pair<float, node_t*>> probe_list;
   std::set<std::pair<float, node_t*>> beam;
@@ -227,7 +230,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
     if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
       beam.insert(p);
       if (beam.size() > beam_length) {
-        beam.erase(--beam.end());  // Remove the farthest node
+        beam.erase(std::prev(beam.end()));  // Remove the farthest node
       }
     }
   };
@@ -236,18 +239,19 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
   add_to_beam({std::numeric_limits<float>::max(), root});
   while (beam.size() > 0) {
     // Pop the best node from the beam
-    auto best = *beam.begin();
+    std::pair<float, node_t*> best = *beam.begin();
     beam.erase(beam.begin());
     node_t* current_node = best.second;
     // Compute distances from query to children
     auto children = current_node->children;
+    auto centers = current_node->data;
     parlay::sequence<size_t> cmps(children.size());
-    auto res = parlay::sequence<std::pair<float, node_t*>>::from_function(
-        current_node->children.size(), [&](size_t i) {
-          node_t* child = current_node->children[i];
-          auto [dist, d_c] = query.distance_w_cmps(child->center);
+    assert(children.size() == centers.size());
+    auto res =
+        parlay::sequence<std::pair<float, node_t*>>::from_function(children.size(), [&](size_t i) {
+          auto [dist, d_c] = query.distance_w_cmps(centers[i]);
           cmps[i] = d_c;
-          return std::make_pair(dist, child);
+          return std::make_pair(dist, children[i]);
         });
     dist_cmps += parlay::reduce(cmps);
     // Collect leaf and non-leaf nodes
@@ -276,8 +280,8 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexSVH<metric>::
       nprobes, [&](size_t i) {
         std::pair<float, node_t*> p = *std::next(probe_list.begin(), i);
         node_t* node = p.second;
-        Range cluster_points = node->points;
-        auto [res, d_c] = mvivf::get_knn_ids(query, cluster_points, node->ids, cands);
+        Range cluster_points = node->data;
+        auto [res, d_c] = get_knn_ids(query, cluster_points, node->ids, cands);
         probe_dist_cmps[i] = d_c;
         return res;
       });
@@ -308,9 +312,15 @@ size_t IndexSVH<metric>::traverse_tree(node_t* node, parlay::sequence<node_t*>& 
                                        parlay::sequence<size_t>& point_offsets, size_t height) {
   node_to_ind[node] = ind_to_node.size();
   ind_to_node.push_back(node);
-  center_offsets.push_back(node->center.get_dims());  // 0 if empty center
+  if (node->children.size() == 0) {  // leaves
+    center_offsets.push_back(0);
+    point_offsets.push_back(node->data.size());
+  } else {  // Internal nodes
+    point_offsets.push_back(0);
+    size_t dims = node->data.get_dims();
+    center_offsets.push_back(node->data.size() * dims);
+  }
   children_offsets.push_back(node->children.size());
-  point_offsets.push_back(node->points.size());
   size_t h = height + 1;
   for (node_t* child : node->children) {
     h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, center_offsets, children_offsets,
@@ -354,9 +364,10 @@ void IndexSVH<metric>::save(const std::string& filename) {
   // Write center values
   for (size_t i = 0; i < num; ++i) {  // TODO: make parallel
     node_t* node = ind_to_node[i];
-    if (node->center.get_dims() > 0) {
-      auto coords = node->center.get_slice();
-      outfile.write(reinterpret_cast<const char*>(coords.begin()), coords.size() * sizeof(float));
+    if (node->children.size() > 0) {  // Internal Nodes only
+      auto coords = node->data.data();
+      size_t num_entries = (node->data.size()) * (node->data.get_dims());
+      outfile.write(reinterpret_cast<const char*>(coords), num_entries * sizeof(float));
     }
   }
   // Write children offsets
@@ -434,19 +445,25 @@ void IndexSVH<metric>::load(const std::string& filename, const PointCloudSet<ChP
   parlay::sequence<node_t*> ind_to_node =
       parlay::sequence<node_t*>::from_function(num, [&](size_t i) {
         node_t* node = new node_t();  // TODO: use parlay allocator
-        if (center_sizes[i] > 0) {
-          node->set_center(Point(center_values.begin() + center_offsets[i], dim, dim));
+        if (children_sizes[i] > 0) {  // Internal Nodes
+          auto center_group = parlay::delayed_tabulate(children_sizes[i], [&](size_t j) {
+            return parlay::make_slice(center_values.begin() + center_offsets[i] + j * dim,
+                                      center_values.begin() + center_offsets[i] + j * dim + dim);
+          });
+          Range node_centers(center_group, dim);
+          node->set_data(node_centers);
         }
         node->children.resize(children_sizes[i]);
-        if (point_sizes[i] > 0) {
+        if (point_sizes[i] > 0) {  // Leaves
           auto point_ids = parlay::tabulate(
               point_sizes[i], [&](size_t j) { return point_values[point_offsets[i] + j]; });
-          auto point_group = parlay::tabulate(point_sizes[i], [&](size_t j) {
+          auto point_group = parlay::delayed_tabulate(point_sizes[i], [&](size_t j) {
             auto [point_id, emb_id] = point_ids[j];
             auto act_point_id = point_id_to_data_id[point_id];
             return points[act_point_id][emb_id];
           });
-          node->set_points(Range(point_group, dim), point_ids);
+          Range node_points(point_group, dim);
+          node->set_data(node_points, point_ids);
         }
         return node;
       });

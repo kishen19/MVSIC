@@ -85,16 +85,30 @@ void bench(mvivf::commandLine &P) {
       }
 
       // Run Brute-force search
-      auto [bf_results, dist_cmps] = mvivf::get_knn(queries[i], points, k);
+      auto [bf_results, dist_cmps] = mvivf::get_knn(queries[i], points, 2 * k);
 
       // Calculate recall
-      float correct = 0.0;
-      for (const auto &[id, dist] : bf_results) {
+      size_t correct = 0;
+      for (size_t j = 0; j < k; j++) {
+        auto [id, dist] = bf_results[j];
         if (out_set.find(id) != out_set.end()) {
-          correct += 1.0;
+          correct++;
         }
       }
-      recall_k_k += correct / k;
+      // Dealing with duplicates and near duplicates: fine to return
+      // any of the (near) duplicates of the last point
+      float last_dist = bf_results[k - 1].second;
+      for (size_t j = k; j < bf_results.size(); j++) {
+        auto [id, dist] = bf_results[j];
+        if (std::abs(dist - last_dist) < 1e-6) {
+          if (out_set.find(id) != out_set.end()) {
+            correct++;
+          }
+        } else {
+          break;
+        }
+      }
+      recall_k_k += static_cast<double>(correct) / k;
       if (out_set.find(bf_results[0].first) != out_set.end()) {
         recall_1_k += 1.0;
       }

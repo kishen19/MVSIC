@@ -12,7 +12,8 @@ struct PointCloudSet {
   size_t n = 0;
   size_t dims = 0;
   size_t aligned_dims = 0;
-  float *values = nullptr;
+  // float *values = nullptr;
+  std::shared_ptr<float[]> values;
   parlay::sequence<size_t> offsets;
   parlay::sequence<size_t> ids;
 
@@ -31,16 +32,6 @@ struct PointCloudSet {
   template<template<typename> class seqA, template<typename> class seqB,
            template<typename> class seqC>
   PointCloudSet(const seqA<seqB<seqC<float>>> &data, size_t d, parlay::sequence<size_t> ids);
-  // Move Constructor
-  PointCloudSet(PointCloudSet &&other) noexcept;
-  // Copy Constructor
-  PointCloudSet(const PointCloudSet &other);
-  // Destructor
-  ~PointCloudSet() noexcept;
-  // Move Assignment Operator
-  PointCloudSet &operator=(PointCloudSet &&other) noexcept;
-  // Copy Assignment Operator
-  PointCloudSet &operator=(const PointCloudSet &other);
 
   // Returns number of point clouds
   inline size_t size() const noexcept { return n; }
@@ -53,7 +44,7 @@ struct PointCloudSet {
   // Returns id of pointcloud i
   inline uint32_t get_id(size_t i) const noexcept { return (ids.size() > 0) ? ids[i] : i; }
   // Returns pointer to embeddings of pointcloud i
-  inline float *get_coords(size_t i) const noexcept { return values + offsets[i]; }
+  inline float *get_coords(size_t i) const noexcept { return values.get() + offsets[i]; }
   // Returns ChPoint type object on the embeddings of point cloud i
   inline ChPoint operator[](size_t i) const {
     return ChPoint(get_size(i), dims, get_coords(i), get_id(i));
@@ -69,9 +60,15 @@ struct PointCloudSet {
   // point clouds whose indices are given in sequence cluster_ids
   template<typename seq>
   auto filter_flattened(const seq &cluster_ids) const;
-  inline float *data() const noexcept { return values; }
+  inline float *data() const noexcept { return values.get(); }
   inline auto get_offsets() const noexcept {
     return parlay::make_slice(offsets.begin(), offsets.end());
+  }
+  // Return list of distances from a query to all point clouds
+  inline std::pair<parlay::sequence<float>, size_t> distances(const ChPoint &query) {
+    auto dists = parlay::sequence<float>::from_function(
+        n, [&](size_t i) { return query.distance((*this)[i]); });
+    return std::make_pair(dists, query.size() + this->total_size());
   }
 };
 
@@ -100,8 +97,9 @@ PointCloudSet<ChPoint>::PointCloudSet(const char *filename) {
   }
   // Step 2: Read values
   size_t coordinate_size = num_vectors * dims * sizeof(float);
-  values = static_cast<float *>(parlay::p_malloc(coordinate_size));
-  file.read(reinterpret_cast<char *>(values), coordinate_size);
+  values = std::shared_ptr<float[]>(static_cast<float *>(parlay::p_malloc(coordinate_size)),
+                                    parlay::p_free);
+  file.read(reinterpret_cast<char *>(values.get()), coordinate_size);
   // Step 3: Read offsets
   size_t num_offsets;
   file.read(reinterpret_cast<char *>(&num_offsets), sizeof(num_offsets));
@@ -123,8 +121,9 @@ PointCloudSet<ChPoint>::PointCloudSet(size_t n, size_t dims, const float *values
   if (ids_ != nullptr) {
     ids = parlay::tabulate(n, [&](size_t i) { return ids_[i]; });
   }
-  values = static_cast<float *>(parlay::p_malloc(offsets[n] * sizeof(float)));
-  std::memcpy(values, values_, offsets[n] * sizeof(float));
+  values = std::shared_ptr<float[]>(
+      static_cast<float *>(parlay::p_malloc(offsets[n] * sizeof(float))), parlay::p_free);
+  std::memcpy(values.get(), values_, offsets[n] * sizeof(float));
 }
 
 // Sequence of ChPoint type objects given
@@ -136,7 +135,8 @@ PointCloudSet<ChPoint>::PointCloudSet(const seq<ChPoint, x...> &data, size_t d) 
       n + 1, [&](size_t i) { return (i == 0) ? 0 : (data[i - 1].size() * dims); });
   parlay::scan_inclusive_inplace(offsets);
   size_t total_coords = offsets[n];
-  values = static_cast<float *>(parlay::p_malloc(total_coords * sizeof(float)));
+  values = std::shared_ptr<float[]>(
+      static_cast<float *>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
   parlay::parallel_for(0, n, [&](size_t i) {
     size_t offset = offsets[i];
     parlay::parallel_for(0, data[i].size(), [&](size_t j) {
@@ -159,7 +159,8 @@ PointCloudSet<ChPoint>::PointCloudSet(const seqA<seqB<seqC<float>>> &data, size_
       n + 1, [&](size_t i) { return (i == 0) ? 0 : (data[i - 1].size() * dims); });
   parlay::scan_inclusive_inplace(offsets);
   size_t total_coords = offsets[n];
-  values = static_cast<float *>(parlay::p_malloc(total_coords * sizeof(float)));
+  values = std::shared_ptr<float[]>(
+      static_cast<float *>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
   parlay::parallel_for(0, n, [&](size_t i) {
     size_t offset = offsets[i];
     parlay::parallel_for(0, data[i].size(), [&](size_t j) {
@@ -168,88 +169,6 @@ PointCloudSet<ChPoint>::PointCloudSet(const seqA<seqB<seqC<float>>> &data, size_
       }
     });
   });
-}
-
-// Move Constructor
-template<typename ChPoint>
-PointCloudSet<ChPoint>::PointCloudSet(PointCloudSet &&other) noexcept :
-    n(other.n),
-    dims(other.dims),
-    aligned_dims(other.aligned_dims),
-    values(other.values),
-    offsets(std::move(other.offsets)),
-    ids(std::move(other.ids)) {
-  other.n = 0;
-  other.dims = 0;
-  other.aligned_dims = 0;
-  other.values = nullptr;
-}
-
-// Copy Constructor
-template<typename ChPoint>
-PointCloudSet<ChPoint>::PointCloudSet(const PointCloudSet &other) :
-    n(other.n), dims(other.dims), aligned_dims(other.aligned_dims) {
-  offsets = other.offsets;
-  ids = other.ids;
-  if (other.values) {
-    size_t total_coords = offsets[n];
-    size_t coordinate_size = total_coords * sizeof(float);
-    values = static_cast<float *>(parlay::p_malloc(coordinate_size));
-    std::memcpy(values, other.values, coordinate_size);
-  }
-}
-
-template<typename ChPoint>
-PointCloudSet<ChPoint>::~PointCloudSet() noexcept {
-  if (values != nullptr) {
-    parlay::p_free(values);
-    values = nullptr;
-  }
-}
-
-// Move Assignment Operator
-template<typename ChPoint>
-PointCloudSet<ChPoint> &PointCloudSet<ChPoint>::operator=(PointCloudSet &&other) noexcept {
-  if (this != &other) {
-    if (values != nullptr) {
-      parlay::p_free(values);
-    }
-    n = other.n;
-    dims = other.dims;
-    aligned_dims = other.aligned_dims;
-    values = other.values;
-    offsets = std::move(other.offsets);
-    ids = std::move(other.ids);
-
-    other.n = 0;
-    other.dims = 0;
-    other.aligned_dims = 0;
-    other.values = nullptr;
-  }
-  return *this;
-}
-
-// Copy Assignment Operator
-template<typename ChPoint>
-PointCloudSet<ChPoint> &PointCloudSet<ChPoint>::operator=(const PointCloudSet &other) {
-  if (this != &other) {
-    n = other.n;
-    dims = other.dims;
-    aligned_dims = other.aligned_dims;
-    offsets = other.offsets;
-    ids = other.ids;
-    if (values != nullptr) {
-      parlay::p_free(values);
-      values = nullptr;
-    }
-    if (other.values) {
-      size_t total_coords = offsets[n];
-      size_t coordinate_size = total_coords * sizeof(float);
-      values = static_cast<float *>(parlay::p_malloc(coordinate_size));
-      std::memcpy(values, other.values, coordinate_size);
-    }
-  }
-  return *this;
 }
 
 template<typename ChPoint>

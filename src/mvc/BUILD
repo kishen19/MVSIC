@@ -19,9 +19,6 @@ cc_library(
         "//src/utils:chamfer_l2_point",
         "//src/utils:kmeans_util",
         "//src/utils:point_cloud_set",
-        "@parlayann//algorithms/utils:euclidian_point",
-        "@parlayann//algorithms/utils:mips_point",
-        "@parlayann//algorithms/utils:point_range",
         "@parlaylib//parlay:primitives",
     ],
 )
