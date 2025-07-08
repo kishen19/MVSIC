@@ -154,7 +154,7 @@ inline void write_to_csv(const std::string csv_filename,
   csv << "k";
   if (params[0].method == "mvivf" || params[0].method == "svh") {
     csv << "nprobes";
-  } else if (params[0].method == "vamana") {
+  } else if (params[0].method == "vamana" || params[0].method == "muvera") {
     csv << "L";
   }
   csv << "QPS_seq"
@@ -166,7 +166,7 @@ inline void write_to_csv(const std::string csv_filename,
     csv << params[i].k;
     if (params[i].method == "mvivf" || params[i].method == "svh") {
       csv << params[i].nprobes;
-    } else if (params[i].method == "vamana") {
+    } else if (params[i].method == "vamana" || params[i].method == "muvera") {
       csv << params[i].beamSize;
     }
     csv << results[i].QPS_seq << results[i].QPS_par << results[i].avg_cmps << results[i].recall_1_k
@@ -181,10 +181,13 @@ template<typename Index, typename PC, typename GT>
 void search_all(Index &index, const PC &base_points, const PC &query_points, GT &gt,
                 const char *res_file, const parlay::sequence<mvivf::SearchParams> &params) {
   parlay::sequence<mvivf::Stats> results;
+  std::cout << "[" << params.size() << "] : ";
   for (size_t i = 0; i < params.size(); ++i) {
     auto result = compute_stats(index, base_points, query_points, gt, params[i]);
     results.push_back(result);
+    std::cout << "#";
   }
+  std::cout << std::endl;
   write_to_csv(std::string(res_file), results, params);
 }
 

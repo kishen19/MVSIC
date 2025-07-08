@@ -69,7 +69,8 @@ struct PointRange {
     n = num_points;
     reader.read((char *)(&d), sizeof(unsigned int));
     dims = d;
-    std::cout << "Detected " << num_points << " points with dimension " << d << std::endl;
+    std::cout << "Detected " << num_points << " points with dimension " << d << " in " << filename
+              << std::endl;
     aligned_dims = dim_round_up(dims, sizeof(T));
     if (aligned_dims != dims) std::cout << "Aligning dimension to " << aligned_dims << std::endl;
     values = std::shared_ptr<T[]>((T *)aligned_alloc(64, n * aligned_dims * sizeof(T)), std::free);
@@ -124,6 +125,44 @@ struct PointRange {
   Point operator[](long i) { return Point(values.get() + i * aligned_dims, dims, aligned_dims, i); }
 
   T *data() const noexcept { return values.get(); }
+
+  void save(char *filename) {
+    std::ofstream writer(filename, std::ios::binary);
+    assert(writer.is_open());
+    std::cout << "Writing " << n << " points with dimension " << dims << " to " << filename
+              << std::endl;
+    unsigned int num_points = static_cast<unsigned int>(n);
+    unsigned int dims_u = dims;
+
+    // Write number of points and dimension
+    writer.write(reinterpret_cast<const char *>(&num_points), sizeof(unsigned int));
+    writer.write(reinterpret_cast<const char *>(&dims_u), sizeof(unsigned int));
+
+    // Write data: each point has dims entries (not aligned_dims)
+    size_t BLOCK_SIZE = 1000000;
+    size_t index = 0;
+    while (index < n) {
+      size_t floor = index;
+      size_t ceiling = std::min(index + BLOCK_SIZE, n);
+      size_t block_size = ceiling - floor;
+
+      // Allocate temporary buffer to hold unaligned block
+      T *temp_block = new T[block_size * dims];
+
+      parlay::parallel_for(floor, ceiling, [&](size_t i) {
+        const T *src = values.get() + i * aligned_dims;
+        T *dest = temp_block + (i - floor) * dims;
+        std::memcpy(dest, src, dims * sizeof(T));
+      });
+
+      writer.write(reinterpret_cast<const char *>(temp_block), block_size * dims * sizeof(T));
+
+      delete[] temp_block;
+      index = ceiling;
+    }
+
+    writer.close();
+  }
 
   std::shared_ptr<T[]> values;
   unsigned int dims;

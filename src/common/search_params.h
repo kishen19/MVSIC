@@ -13,7 +13,7 @@ struct SearchParams {
   // Single Vector Heuristic Specific Params
   size_t cands;
 
-  // Vamana Specific Params
+  // Vamana and MUVERA Specific Params
   size_t beamSize;
   double cut;
   size_t limit;
@@ -46,6 +46,13 @@ struct SearchParams {
   SearchParams(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) :
       k(k), beamSize(L), cut(cut), limit(limit), degree_limit(degree_limit) {
     method = "vamana";
+  }
+
+  // muvera
+  SearchParams(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
+               std::string method_) :
+      k(k), beamSize(L), cut(cut), limit(limit), degree_limit(degree_limit) {
+    method = method_;
   }
 };
 

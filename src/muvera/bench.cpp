@@ -26,14 +26,15 @@ void bench(mvivf::commandLine &P) {
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
 
-  size_t k = P.getOptionLongValue("-k", 10);
-  int num_repetitions = P.getOptionIntValue("-num_reps", 40);
-  int num_simhash_projections = P.getOptionIntValue("-num_simhash", 6);
+  int num_repetitions = P.getOptionIntValue("-num_reps", 20);
+  int num_simhash_projections = P.getOptionIntValue("-num_simhash", 4);
   int seed = 1;
-  int projection_dimension = P.getOptionIntValue("-projd", 128);
+  int projection_dimension = P.getOptionIntValue("-projd", 8);
   bool fill_empty_partitions = P.getOption("-fill_empty_partitions");
   int final_projection_dimension = P.getOptionIntValue("-final_projd", 0);
-  size_t R = P.getOptionLongValue("-R", 16);
+  size_t R = 200;
+  size_t L_build = 600;
+  size_t k = P.getOptionLongValue("-k", 10);
   size_t L = P.getOptionLongValue("-L", 16);
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   bool two_pass = P.getOption("-tp");
@@ -42,8 +43,8 @@ void bench(mvivf::commandLine &P) {
   auto points = PC(inFile);
   IndexMUVERAParams index_params(num_repetitions, num_simhash_projections, seed,
                                  projection_dimension, fill_empty_partitions,
-                                 final_projection_dimension, R, L, alpha, two_pass, verbose);
-  SearchParams search_params(k, L, 1.35, points.size(), R);
+                                 final_projection_dimension, R, L_build, alpha, two_pass, verbose);
+  SearchParams search_params(k, L, 1.35, points.size(), R, "muvera");
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

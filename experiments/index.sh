@@ -11,6 +11,7 @@ mkdir -p ${RESULTSPATH}/${dataset}/indices
 maxsizes=(500)
 iters=(5)
 Rs=(128 256 512)
+dfdes=(2560 5120 10240 20480)
 
 rounds=0
 
@@ -39,5 +40,13 @@ elif [ "$index" == "vamana" ]; then
       -o ${RESULTSPATH}/${dataset}/indices/${index}_R${R}.bin \
       -rounds ${rounds} -R ${R} -v > logs/${index}_${dataset}_R${R}.log
     echo ${index} ${dataset} ${R} done
+  done
+elif [ "$index" == "muvera" ]; then
+  for dfde in ${dfdes[@]}; do
+    bazel-bin/experiments/${index}_benchmark \
+      -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
+      -o ${RESULTSPATH}/${dataset}/indices/${index}_fde${dfde}.bin \
+      -rounds ${rounds} -d_fde ${dfde} -v > logs/${index}_${dataset}_fde${dfde}.log
+    echo ${index} ${dataset} ${dfde} done
   done
 fi

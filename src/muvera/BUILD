@@ -6,10 +6,10 @@ cc_library(
     deps = [
         "//src/common:index",
         "//src/muvera/fde:fixed_dimensional_encoding",
+        "//src/utils:point_range",
         "@parlayann//algorithms/utils:euclidian_point",
         "@parlayann//algorithms/utils:graph",
         "@parlayann//algorithms/utils:mips_point",
-        "@parlayann//algorithms/utils:point_range",
         "@parlayann//algorithms/utils:stats",
         "@parlayann//algorithms/utils:types",
         "@parlayann//algorithms/vamana:index",
