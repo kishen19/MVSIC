@@ -29,7 +29,7 @@ elif [ "$index" == "svh" ]; then
     bazel-bin/experiments/${index}_benchmark \
       -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
       -o ${RESULTSPATH}/${dataset}/indices/${index}_maxsize${maxsize}.bin \
-      -rounds ${rounds} -iters ${iter} -maxsize ${maxsize} > logs/${index}_${dataset}_maxsize${maxsize}.log
+      -rounds ${rounds} -maxsize ${maxsize} > logs/${index}_${dataset}_maxsize${maxsize}.log
     echo ${index} ${dataset} ${maxsize} done
   done
 elif [ "$index" == "vamana" ]; then

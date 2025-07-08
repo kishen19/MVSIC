@@ -10,16 +10,15 @@
 
 namespace mvivf {
 
-/* Params Type */
+/* =========================================Params Type======================================== */
 struct IndexVamanaParams {
-  size_t R;
-  size_t L;
-  double alpha;
-  bool two_pass;
-  bool verbose = false;  // Print debug statements
+  size_t R = 64;          // Max Outdegree of the routing graph
+  size_t L = 64;          // Beam length
+  double alpha = 1.2;     // Robust pruning parameter
+  bool two_pass = false;  // Two-pass graph construction
+  bool verbose = false;   // Print debug statements
 };
-
-/* Main MV Vamana Class */
+/* ==================================Multi-Vector Vamana Class================================= */
 template<bool metric>
 class IndexVamana : Index<metric>, IndexVamanaParams {
  public:
@@ -27,18 +26,22 @@ class IndexVamana : Index<metric>, IndexVamanaParams {
   using indexType = size_t;
   using distanceType = float;
   using pid = std::pair<indexType, distanceType>;
-  // using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  // using Range = PointRange<float, Point>;=
-  using Index<metric>::d;
-
-  Graph<size_t> G;
-  indexType start_point;
+  using Index<metric>::d;  // Embedding dimension
+  Graph<size_t> G;         // Vamana Graph
+  indexType start_point;   // Starting Point of the graph
 
   IndexVamana(size_t d_) noexcept { d = d_; }
   IndexVamana(size_t d_, const IndexVamanaParams& params) noexcept : IndexVamanaParams(params) {
     d = d_;
   }
-
+  /* ----------------------------Overridden Functions---------------------------- */
+  void build(const PointCloudSet<ChPoint>& points) override;
+  std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
+      const ChPoint& query, const PointCloudSet<ChPoint>& points,
+      const SearchParams& params) override;
+  void save(const std::string& filename) override;
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
+  /* ------------------------------Helper Functions------------------------------ */
   inline void set_start() noexcept;
   inline indexType get_start() noexcept;
   // Pruning routine
@@ -53,25 +56,13 @@ class IndexVamana : Index<metric>, IndexVamanaParams {
   // Adds neighbors to candidates without adding any repeats
   template<typename rangeType1, typename rangeType2>
   void add_neighbors_without_repeats(const rangeType1& ngh, rangeType2& candidates);
-  // Builds the index given a point cloud set.
-  void build(const PointCloudSet<ChPoint>& points) override;
   // Batch insert routine
   void batch_insert(parlay::sequence<indexType>& inserts, const PointCloudSet<ChPoint>& Points,
                     double alpha, bool random_order = false, double base = 2,
                     double max_fraction = .02, bool print = true);
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
-      const ChPoint& query, const PointCloudSet<ChPoint>& points,
-      const SearchParams& params) override;
-  // Write the index to a file in disk
-  void save(const std::string& filename) override;
-  // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
 };
 
-/* -----------------------------------------Implementation-----------------------------------------*/
-
+/* =======================================Implementation======================================= */
 template<bool metric>
 inline void IndexVamana<metric>::set_start() noexcept {
   start_point = 0;

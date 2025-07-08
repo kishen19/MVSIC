@@ -100,3 +100,9 @@ http_archive(
     strip_prefix = "abseil-cpp-20240116.0",
     urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20240116.0.tar.gz"],
 )
+
+git_repository(
+    name = "com_google_absl",
+    remote = "https://github.com/abseil/abseil-cpp.git",
+    tag = "20230125.2",
+)

@@ -11,15 +11,14 @@
 
 namespace mvivf {
 
-/* Params Type */
+/* =========================================Params Type======================================== */
 struct IndexSVHParams {
   size_t minsize = 100;  // (Expected) Minsize of leaf clusters (not enforced)
   size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
   size_t os_rate = 20;   // Oversampling rate for Inner Kmeans
   bool verbose = false;  // Print debug statements
 };
-
-/* Single-vector Heuristic Internal Node Type */
+/* =========================Single-vector Heuristic Internal Node Type========================= */
 template<typename Range>
 struct IndexSVHNode {
   parlay::sequence<IndexSVHNode*> children;  // Children
@@ -27,21 +26,18 @@ struct IndexSVHNode {
   // For leaves:         data = points in the cluster
   Range data;
   parlay::sequence<std::pair<size_t, size_t>> ids;  // Only leaf nodes have ids
-
-  IndexSVHNode() : children(parlay::sequence<IndexSVHNode*>(0)), data(Range()) {}
-
-  inline void set_children(const parlay::sequence<IndexSVHNode*>& children_) {
+  IndexSVHNode() noexcept : children(parlay::sequence<IndexSVHNode*>(0)), data(Range()) {}
+  inline void set_children(const parlay::sequence<IndexSVHNode*>& children_) noexcept {
     children = std::move(children_);
   }
-  inline void set_data(const Range& centers) { data = std::move(centers); }
+  inline void set_data(const Range& centers) noexcept { data = std::move(centers); }
   inline void set_data(const Range& points,
-                       const parlay::sequence<std::pair<size_t, size_t>>& ids_) {
+                       const parlay::sequence<std::pair<size_t, size_t>>& ids_) noexcept {
     data = std::move(points);
     ids = std::move(ids_);
   }
 };
-
-/* Main Single-Vector Heuristic Class */
+/* ================================Single-Vector Heuristic Class================================ */
 template<bool metric>
 class IndexSVH : Index<metric>, IndexSVHParams {
  public:
@@ -49,15 +45,20 @@ class IndexSVH : Index<metric>, IndexSVHParams {
   using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
   using Range = PointRange<float, Point>;
   using node_t = IndexSVHNode<Range>;
-  using Index<metric>::d;
-
-  node_t* root = nullptr;
+  using Index<metric>::d;  // Embedding dimension
+  node_t* root = nullptr;  // Root of the k-means tree
 
   IndexSVH(size_t d_) noexcept { d = d_; }
   IndexSVH(size_t d_, const IndexSVHParams& params) noexcept : IndexSVHParams(params) { d = d_; }
-
-  // Builds the index given a point cloud set.
+  /* ----------------------------Overridden Functions---------------------------- */
   void build(const PointCloudSet<ChPoint>& points) override;
+  std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
+      const ChPoint& query, const PointCloudSet<ChPoint>& points,
+      const SearchParams& params) override;
+  void save(const std::string& filename) override;
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
+
+  /* ------------------------------Helper Functions------------------------------ */
   // Recursively builds the kmeans tree
   void build_helper(node_t* node, const parlay::sequence<parlay::sequence<float>>& points,
                     const parlay::sequence<std::pair<size_t, size_t>>& ids);
@@ -65,11 +66,6 @@ class IndexSVH : Index<metric>, IndexSVHParams {
   // Output format: < [<id, distance>, ...], # distance comparisons>
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search_each(
       const Point& query, const PointCloudSet<ChPoint>& points, const SearchParams& params);
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
-      const ChPoint& query, const PointCloudSet<ChPoint>& points,
-      const SearchParams& params) override;
   // Traversing the k-means tree: returns the height of the tree
   // TODO: get more stats about the tree
   size_t traverse_tree(node_t* node, parlay::sequence<node_t*>& ind_to_node,
@@ -77,14 +73,9 @@ class IndexSVH : Index<metric>, IndexSVHParams {
                        parlay::sequence<size_t>& center_offsets,
                        parlay::sequence<size_t>& children_offsets,
                        parlay::sequence<size_t>& point_offsets, size_t height);
-  // Write the index to a file in disk
-  void save(const std::string& filename) override;
-  // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override;
 };
 
-/* -----------------------------------------Implementation-----------------------------------------*/
-
+/* =======================================Implementation======================================= */
 template<bool metric>
 void IndexSVH<metric>::build(const PointCloudSet<ChPoint>& points) {
   size_t n = points.size();

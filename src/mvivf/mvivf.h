@@ -8,7 +8,7 @@
 
 namespace mvivf {
 
-/* Params Type */
+/* =========================================Params Type======================================== */
 struct IndexMVIVFParams {
   size_t minsize = 100;  // (Expected) Minsize of leaf clusters (not enforced)
   size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
@@ -18,54 +18,45 @@ struct IndexMVIVFParams {
   size_t os_rate = 20;             // Oversampling rate for Inner Kmeans
   bool verbose = false;            // Print debug statements
 };
-
-/* Multi-Vector IVF Internal Node Type */
+/* =============================Multi-Vector IVF Internal Node Type============================ */
 template<typename ChPoint>
 struct IndexMVIVFNode {
-  parlay::sequence<IndexMVIVFNode *> children;  // Children
+  parlay::sequence<IndexMVIVFNode *> children;
   // For internal nodes: data = centers of children
   // For leaves:         data = points in the cluster
   PointCloudSet<ChPoint> data;
-
-  IndexMVIVFNode() :
+  IndexMVIVFNode() noexcept :
       children(parlay::sequence<IndexMVIVFNode *>(0)), data(PointCloudSet<ChPoint>()) {}
-
-  inline void set_children(const parlay::sequence<IndexMVIVFNode *> &children_) {
+  inline void set_children(const parlay::sequence<IndexMVIVFNode *> &children_) noexcept {
     children = std::move(children_);
   }
-  inline void set_data(const PointCloudSet<ChPoint> &data_) { data = std::move(data_); }
+  inline void set_data(const PointCloudSet<ChPoint> &data_) noexcept { data = std::move(data_); }
 };
-
-/* Main Multi-Vector IVF Class */
+/* ===================================Multi-Vector IVF Class=================================== */
 template<bool metric>
 class IndexMVIVF : Index<metric>, IndexMVIVFParams {
  public:
   using ChPoint = Index<metric>::ChPoint;
   using node_t = IndexMVIVFNode<ChPoint>;
-  // using node_allocator = parlay::type_allocator<node_t>;
-  using Index<metric>::d;
-
-  node_t *root = nullptr;
+  using Index<metric>::d;  // Embedding dimension
+  node_t *root = nullptr;  // Root of the k-means tree
 
   IndexMVIVF(size_t d_) noexcept { d = d_; }
   IndexMVIVF(size_t d_, const IndexMVIVFParams &params) noexcept : IndexMVIVFParams(params) {
     d = d_;
   }
   ~IndexMVIVF();
-
-  // Builds the index given a point cloud set.
-  void build(const PointCloudSet<ChPoint> &points) override {
-    root = new node_t();
-    // root = node_allocator::create();
-    build_helper(root, points);
-  }
-  // Recursively builds the kmeans tree
-  void build_helper(node_t *node, const PointCloudSet<ChPoint> &points);
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
+  /* ----------------------------Overridden Functions---------------------------- */
+  void build(const PointCloudSet<ChPoint> &points) override;
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
       const ChPoint &query, const PointCloudSet<ChPoint> &points,
       const SearchParams &params) override;
+  void save(const std::string &filename) override;
+  void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override;
+
+  /* ------------------------------Helper Functions------------------------------ */
+  // Recursively builds the kmeans tree
+  void build_helper(node_t *node, const PointCloudSet<ChPoint> &points);
   // Traversing the k-means tree: returns the height of the tree
   // TODO: get more stats about the tree
   size_t traverse_tree(node_t *node, parlay::sequence<node_t *> &ind_to_node,
@@ -73,15 +64,17 @@ class IndexMVIVF : Index<metric>, IndexMVIVFParams {
                        parlay::sequence<size_t> &center_offsets,
                        parlay::sequence<size_t> &children_offsets,
                        parlay::sequence<size_t> &point_offsets, size_t height);
-  // Write the index to a file in disk
-  void save(const std::string &filename) override;
-  // Read the index from a file in disk
-  void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override;
   // Traversing the tree and deleting nodes
   void traverse_and_delete(node_t *node);
 };
 
-/* -----------------------------------------Implementation-----------------------------------------*/
+/* =======================================Implementation======================================= */
+// Builds the index given a point cloud set.
+template<bool metric>
+void IndexMVIVF<metric>::build(const PointCloudSet<ChPoint> &points) {
+  root = new node_t();
+  build_helper(root, points);
+}
 
 // Recursively builds the kmeans tree
 template<bool metric>
@@ -104,14 +97,12 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
   auto grouped = parlay::group_by_index(id_pt, num_clusters);
   // Step 2: Update children nodes and recurse for large nodes
   parlay::sequence<node_t *> children = parlay::sequence<node_t *>(num_clusters);
-  // for (size_t i = 0; i < num_clusters; i++) {
   parlay::parallel_for(0, num_clusters, [&](size_t i) {
     node_t *child = new node_t();
-    // node_t *child = node_allocator::create();
     PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(points.filter(grouped[i]), d);
-    if (child_points.size() > maxsize) {
+    if (child_points.size() > maxsize) {  // Recurse
       build_helper(child, child_points);
-    } else {
+    } else {  // Leaf Node
       child->set_data(child_points);
     }
     children[i] = child;
@@ -121,19 +112,16 @@ void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint>
 }
 
 // Returns the top-k point clouds for the query point cloud
-// Output format: < [<id, distance>, ...], # distance comparisons>
+// Output format: < [<id, distance>, ...], No. of distance computations >
 template<bool metric>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>::search(
     const ChPoint &query, const PointCloudSet<ChPoint> &points, const SearchParams &params) {
   size_t k = params.k;
   size_t nprobes = params.nprobes;
   size_t beam_length = params.beam_length;
-  // probe_list contains the final candidate leaf nodes to probe
+  // probe_list: contains the final candidate leaf nodes to probe
   parlay::sequence<std::pair<float, node_t *>> probe_list;
   std::set<std::pair<float, node_t *>> beam;
-  // absl::btree_set<std::pair<float, node_t*>> probe_list;
-  // absl::btree_set<std::pair<float, node_t*>> beam;
-  size_t dist_cmps = 0;
   auto add_to_probe_list = [&](std::pair<float, node_t *> p) { probe_list.push_back(p); };
   auto add_to_beam = [&](std::pair<float, node_t *> p) -> bool {
     if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
@@ -148,6 +136,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
   // Step 1: Greedy search to find candidate probe clusters
   // Add root to beam
   add_to_beam({std::numeric_limits<float>::max(), root});
+  size_t dist_cmps = 0;
   while (beam.size() > 0) {
     // Pop the best node from the beam
     std::pair<float, node_t *> best = *beam.begin();
@@ -181,6 +170,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
   }
   // Step 2: Probe clusters in probe_list
   parlay::sort_inplace(probe_list);
+  // Find the minimum number of probes needed to obtain k neighbors
   size_t nprobes_minimal = 0, cur = 0;
   while (nprobes_minimal < probe_list.size() && cur <= k) {
     cur += probe_list[nprobes_minimal].second->data.size();
@@ -199,9 +189,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
       });
   dist_cmps += parlay::reduce(probe_dist_cmps);
   // Step 3: Re-ranking (lightweight; no new distance cmps)
-  // Flatten, sort and return top k // TODO: coarse and fine distances for
-  // better performance
-  // TODO: make a separate function called re-ranking, to test other strategies
+  // Flatten, sort and return top k
   auto flattened_results = parlay::flatten(results);
   parlay::sort_inplace(flattened_results, [](const auto &a, const auto &b) {
     return a.second < b.second;  // Sort by distance
@@ -220,7 +208,6 @@ size_t IndexMVIVF<metric>::traverse_tree(node_t *node, parlay::sequence<node_t *
   node_to_ind[node] = ind_to_node.size();
   ind_to_node.push_back(node);
   if (node->children.size() == 0) {  // leaves
-    // center_offsets.push_back(0);
     point_offsets.push_back(node->data.size());
   } else {  // Internal nodes
     point_offsets.push_back(0);
@@ -353,8 +340,6 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
   auto point_id_to_data_id = parlay::sequence<size_t>::uninitialized(points.size());
   parlay::parallel_for(0, points.size(),
                        [&](size_t i) { point_id_to_data_id[points.get_id(i)] = i; });
-  // parlay::sequence<size_t> center_sizes = parlay::sequence<size_t>::from_function(
-  //     num, [&](size_t i) { return centers_offsets[i + 1] - centers_offsets[i]; });
   parlay::sequence<size_t> children_sizes = parlay::sequence<size_t>::from_function(
       num, [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
   auto [children_sizes_scan, total_children_sizes] = parlay::scan(children_sizes);
@@ -365,7 +350,6 @@ void IndexMVIVF<metric>::load(const std::string &filename, const PointCloudSet<C
   parlay::sequence<node_t *> ind_to_node =
       parlay::sequence<node_t *>::from_function(num, [&](size_t i) {
         node_t *node = new node_t();
-        // node_t *node = node_allocator::create();
         if (children_sizes[i] > 0) {  // Internal Nodes
           size_t start_offset = children_sizes_scan[i];
           size_t end_offset = children_sizes_scan[i + 1];
@@ -409,7 +393,6 @@ void IndexMVIVF<metric>::traverse_and_delete(node_t *node) {
     node_t *child = node->children[i];
     traverse_and_delete(child);
     delete child;
-    // node_allocator::destroy(node);
   }
 }
 
@@ -417,12 +400,10 @@ template<bool metric>
 IndexMVIVF<metric>::~IndexMVIVF() {
   // traverse_and_delete(root);
   // delete root;
-  // node_allocator::destroy(root);
-  root = nullptr;
+  // root = nullptr;
 }
 
 template struct IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)
-template struct IndexMVIVF<false>;  // Instantiates for MIPS      (metric =
-                                    // false)
+template struct IndexMVIVF<false>;  // Instantiates for MIPS      (metric = false)
 
 }  // namespace mvivf
