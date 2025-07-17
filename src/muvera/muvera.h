@@ -111,7 +111,7 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMUVERA<metric
   assert(query_fde.size() == d_fde);
   // Step 2: Run beam search and collect top cand neighbors
   size_t start_point = I.get_start();
-  auto QP = QueryParams(1, params.beamSize, params.cut, params.limit, params.degree_limit);
+  auto QP = QueryParams(k, params.beamSize, params.cut, params.limit, params.degree_limit);
   auto query_point = Point(query_fde.data(), d_fde, d_fde, -1);
   auto [result, dist_cmps] =
       beam_search<Point, Range, size_t>(query_point, G, points_fdes, start_point, QP);
