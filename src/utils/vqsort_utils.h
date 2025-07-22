@@ -12,6 +12,12 @@ void VQSort(Iter b, Iter e) {
   hwy::VQSort(b, e - b, hwy::SortAscending());
 }
 
+template<class Iter>
+void VQPartialSort(Iter b, Iter e, size_t k) {
+  //  std::sort(b, e);
+  hwy::VQPartialSort(b, e - b, k, hwy::SortAscending());
+}
+
 // A union allows us to access the same piece of memory in different ways.
 // Here, we can write a 'double' and read its raw 64 bits as a 'uint64_t'.
 union DoubleConverter {

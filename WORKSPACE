@@ -109,6 +109,6 @@ git_repository(
 
 http_archive(
     name = "highway",
-    strip_prefix = "highway-1.1.0",
-    url = "https://github.com/google/highway/archive/refs/tags/1.1.0.zip",  # set version as needed
+    strip_prefix = "highway-1.2.0",
+    url = "https://github.com/google/highway/archive/refs/tags/1.2.0.zip",
 )

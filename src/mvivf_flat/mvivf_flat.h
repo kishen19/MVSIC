@@ -91,19 +91,21 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVFFlat<met
   // Step 1: Compute distances to centers
   auto [all_dists, dist_cmps_node] = centers.distances(query);
   dist_cmps += dist_cmps_node;
-  // TODO: Add support for vqsort and vqpartialsort
-  // auto dist_id = parlay::sequence<std::pair<size_t, float>>::from_function(
-  //     all_dists.size(), [&](size_t i) { return std::make_pair(i, all_dists[i]); });
-  // parlay::sort_inplace(dist_id, [](const auto &a, const auto &b) { return a.second < b.second;
-  // });
+#ifdef USE_HWY
   auto dist_id_d = parlay::sequence<double>::from_function(
       all_dists.size(), [&](size_t i) { return packFloatAndInt(all_dists[i], i); });
-  VQSort(dist_id_d.begin(), dist_id_d.end());
+  // VQSort(dist_id_d.begin(), dist_id_d.end());
+  VQPartialSort(dist_id_d.begin(), dist_id_d.end(), std::min(nprobes * 2, all_dists.size()));
   auto dist_id = parlay::sequence<std::pair<size_t, float>>::uninitialized(all_dists.size());
   parlay::parallel_for(0, dist_id_d.size(), [&](size_t i) {
     auto [ext_float, ind] = unpackDouble2(dist_id_d[i]);
     dist_id[i] = std::make_pair(ind, ext_float);
   });
+#else
+  auto dist_id = parlay::sequence<std::pair<size_t, float>>::from_function(
+      all_dists.size(), [&](size_t i) { return std::make_pair(i, all_dists[i]); });
+  parlay::sort_inplace(dist_id, [](const auto &a, const auto &b) { return a.second < b.second; });
+#endif
 
   // Step 2: Probe top nprobe clusters
   // Find the minimum number of probes needed to obtain k neighbors
@@ -125,12 +127,24 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVFFlat<met
   });
   dist_cmps += parlay::reduce(probe_dist_cmps);
   // Step 3: Re-ranking
-  // TODO: replace with vqsort and vqpartialsort
+#ifdef USE_HWY
+  auto results_d = parlay::sequence<double>::from_function(results.size(), [&](size_t i) {
+    return packFloatAndInt(results[i].second, results[i].first);
+  });
+  // VQSort(dist_id_d.begin(), dist_id_d.end());
+  VQPartialSort(results_d.begin(), results_d.end(), std::min(k, results.size()));
+  auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
+      std::min(k, results.size()), [&](size_t i) {
+        auto [ext_float, ind] = unpackDouble2(results_d[i]);
+        return std::make_pair(ind, ext_float);
+      });
+#else
   parlay::sort_inplace(results, [](const auto &a, const auto &b) {
     return a.second < b.second;  // Sort by distance
   });
   auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
       std::min(k, results.size()), [&](size_t i) { return results[i]; });
+#endif
   return std::make_pair(final_results, dist_cmps);
 }
 
