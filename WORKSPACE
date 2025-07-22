@@ -106,3 +106,9 @@ git_repository(
     remote = "https://github.com/abseil/abseil-cpp.git",
     tag = "20230125.2",
 )
+
+http_archive(
+    name = "highway",
+    strip_prefix = "highway-1.1.0",
+    url = "https://github.com/google/highway/archive/refs/tags/1.1.0.zip",  # set version as needed
+)

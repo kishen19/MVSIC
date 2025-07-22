@@ -6,6 +6,7 @@
 #include "src/utils/chamfer_l2_point.h"
 #include "src/utils/point_cloud_set.h"
 #include "search_params.h"
+#include "index_params.h"
 
 namespace mvivf {
 

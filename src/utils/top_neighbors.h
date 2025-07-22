@@ -13,14 +13,35 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(
   auto dists = parlay::tabulate(points.size(), [&](size_t i) {
     auto [dist, d_c] = q.distance_w_cmps(points[i]);
     cmps[i] = d_c;
-    return std::pair(dist, points.get_id(i));
+    return std::pair(points.get_id(i), dist);
   });
   dist_cmps += parlay::reduce(cmps);
-  parlay::sort_inplace(dists);
+  // TODO: use vq sort or partial sort here
+  parlay::sort_inplace(dists, [](const auto& a, const auto& b) {
+    return a.second < b.second;  // Sort by distance
+  });
   auto knn = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min(k, dists.size()),
-      [&](size_t i) { return std::make_pair(dists[i].second, dists[i].first); });
+      std::min(k, dists.size()), [&](size_t i) { return dists[i]; });
   return std::make_pair(knn, dist_cmps);
+}
+
+template<typename ChPoint>
+size_t get_knn_into_uninitialized(const ChPoint& q, const PointCloudSet<ChPoint>& points, size_t k,
+                                  std::pair<size_t, float>* knn) {
+  size_t dist_cmps = 0;
+  parlay::sequence<size_t> cmps(points.size());
+  auto dists = parlay::tabulate(points.size(), [&](size_t i) {
+    auto [dist, d_c] = q.distance_w_cmps(points[i]);
+    cmps[i] = d_c;
+    return std::pair(points.get_id(i), dist);
+  });
+  dist_cmps += parlay::reduce(cmps);
+  // TODO: use vq sort or partial sort here
+  parlay::sort_inplace(dists, [](const auto& a, const auto& b) {
+    return a.second < b.second;  // Sort by distance
+  });
+  parlay::parallel_for(0, std::min(k, dists.size()), [&](size_t i) { knn[i] = dists[i]; });
+  return dist_cmps;
 }
 
 template<typename Point, typename Range>

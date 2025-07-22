@@ -120,3 +120,11 @@ cc_library(
         "@parlaylib//parlay:primitives",
     ],
 )
+
+cc_library(
+    name = "vqsort_utils",
+    hdrs = ["vqsort_utils.h"],
+    deps = [
+        "@highway//hwy/contrib/sort:vqsort",
+    ],
+)

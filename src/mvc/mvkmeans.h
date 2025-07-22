@@ -29,16 +29,16 @@ class MVClustering : MVClusteringParams {
 
   size_t d;  // Dimension of vectors
   size_t k;  // Number of centroid-sets
-  size_t s;  // Number of points per centroid-set
+  double s;  // Number of points per centroid-set
 
   PointCloudSet<ChPoint> centers;
   parlay::sequence<size_t> cluster_ids;
   // TODO: stats type for each Lloyds iteration
 
   MVClustering(size_t d, size_t k) noexcept;
-  MVClustering(size_t d, size_t k, size_t s) noexcept;
+  MVClustering(size_t d, size_t k, double s) noexcept;
   MVClustering(size_t d, size_t k, const MVClusteringParams &params);
-  MVClustering(size_t d, size_t k, size_t s, const MVClusteringParams &params);
+  MVClustering(size_t d, size_t k, double s, const MVClusteringParams &params);
 
   // Naive: Computes the cluster ids of each input doc, given centers
   void compute_cluster_ids(const PointCloudSet<ChPoint> &points,
@@ -62,14 +62,14 @@ class MVClustering : MVClusteringParams {
 /* -----------------------------------------Implementation-----------------------------------------*/
 
 template<bool metric>
-MVClustering<metric>::MVClustering(size_t d, size_t k) noexcept : d(d), k(k), s(0) {}
+MVClustering<metric>::MVClustering(size_t d, size_t k) noexcept : d(d), k(k), s(0.0) {}
 template<bool metric>
-MVClustering<metric>::MVClustering(size_t d, size_t k, size_t s) noexcept : d(d), k(k), s(s) {}
+MVClustering<metric>::MVClustering(size_t d, size_t k, double s) noexcept : d(d), k(k), s(s) {}
 template<bool metric>
 MVClustering<metric>::MVClustering(size_t d, size_t k, const MVClusteringParams &params) :
-    MVClusteringParams(params), d(d), k(k), s(0) {}
+    MVClusteringParams(params), d(d), k(k), s(0.0) {}
 template<bool metric>
-MVClustering<metric>::MVClustering(size_t d, size_t k, size_t s, const MVClusteringParams &params) :
+MVClustering<metric>::MVClustering(size_t d, size_t k, double s, const MVClusteringParams &params) :
     MVClusteringParams(params), d(d), k(k), s(s) {}
 
 template<bool metric>
@@ -181,11 +181,10 @@ void MVClustering<metric>::train(const seqA<seqB<seqC<float>>> &data) {
 template<bool metric>
 void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
   size_t n = points.size();
-  if (s == 0) {
-    auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
-    s = parlay::reduce(pc_sizes) / n;
-    if (verbose) std::cout << "Average number of embeddings per point: " << s << std::endl;
-  }
+  auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
+  size_t centroid_size = s * parlay::reduce(pc_sizes) / n;
+  if (verbose)
+    std::cout << "Average number of embeddings per point: " << centroid_size << std::endl;
   // if (comp_lb){
   //   auto lb = lowerbound<Range>(points, k, s);
   //   if (verbose)
@@ -225,20 +224,18 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
         n, [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = parlay::group_by_index(id_pt, k);
     parlay::sequence<parlay::sequence<parlay::sequence<float>>> new_centers(
-        k, parlay::sequence<parlay::sequence<float>>(s, parlay::sequence<float>(d)));
+        k, parlay::sequence<parlay::sequence<float>>(centroid_size, parlay::sequence<float>(d)));
     // static size_t seed = 42;
     // size_t current_seed = seed;
-    // parlay::parallel_for(0, k, [&](size_t i) {
-    // for (size_t i = 0; i < k; i++) {
     parlay::parallel_for(0, k, [&](size_t i) {
       if (grouped[i].size() > 0) {
         auto data = points.filter_flattened(grouped[i]);
-        if (s >= data.size()) {
+        if (centroid_size >= data.size()) {
           new_centers[i].resize(data.size());
           new_centers[i] = data;
         } else {
-          // new_centers[i] = faiss_kmeans(data, d, s, metric, os_rate);
-          new_centers[i] = kmeans_subsample<metric>(data, s, os_rate, verbose);
+          // new_centers[i] = faiss_kmeans(data, d, centroid_size, metric, os_rate);
+          new_centers[i] = kmeans_subsample<metric>(data, centroid_size, os_rate, verbose);
         }
       } else {  // Empty Cluster, sample from input
         if (verbose) {
@@ -248,12 +245,12 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
         // parlay::sequence<size_t> id = {parlay::hash32(current_seed+i) % n};
         parlay::sequence<size_t> id = {parlay::hash32(i) % n};
         auto data = points.filter_flattened(id);
-        if (s >= data.size()) {
+        if (centroid_size >= data.size()) {
           new_centers[i].resize(data.size());
           new_centers[i] = data;
         } else {
-          // new_centers[i] = faiss_kmeans(data, d, s, metric, os_rate);
-          new_centers[i] = kmeans_subsample<metric>(data, s, os_rate, verbose);
+          // new_centers[i] = faiss_kmeans(data, d, centroid_size, metric, os_rate);
+          new_centers[i] = kmeans_subsample<metric>(data, centroid_size, os_rate, verbose);
         }
       }
     });
