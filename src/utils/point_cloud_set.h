@@ -2,10 +2,11 @@
 
 #include <fstream>
 #include "parlay/primitives.h"
+#include "mmap.h"
 
 namespace mvivf {
 
-/* Set of Point Clouds Type */
+/* =================================Set of Point Clouds Type================================ */
 template<typename ChPoint>
 struct PointCloudSet {
  private:
@@ -20,7 +21,9 @@ struct PointCloudSet {
  public:
   PointCloudSet() noexcept {}
   // Load point clouds from file
-  PointCloudSet(const char *filename);
+  PointCloudSet(const char *filename, bool is_mmap = false);
+  // Helper to read mmap file
+  void read_mmap_file(const char *filename);
   // Input in array format (values_ has offsets_[n] elts, offsets_ has n+1 elts,
   // ids_ has n elts)
   PointCloudSet(size_t n, size_t dims, const float *values_, const size_t *offsets_,
@@ -45,9 +48,15 @@ struct PointCloudSet {
   inline uint32_t get_id(size_t i) const noexcept { return (ids.size() > 0) ? ids[i] : i; }
   // Returns pointer to embeddings of pointcloud i
   inline float *get_coords(size_t i) const noexcept { return values.get() + offsets[i]; }
+  // Returns pointer to embeddings of all point clouds
+  inline float *data() const noexcept { return values.get(); }
   // Returns ChPoint type object on the embeddings of point cloud i
   inline ChPoint operator[](size_t i) const {
     return ChPoint(get_size(i), dims, get_coords(i), get_id(i));
+  }
+  // Returns non-owning sequence of offsets
+  inline auto get_offsets() const noexcept {
+    return parlay::make_slice(offsets.begin(), offsets.end());
   }
   // Returns non-owning sequence of ChPoint type objects of the point
   // clouds whose indices are given in sequence cluster_ids
@@ -60,11 +69,8 @@ struct PointCloudSet {
   // point clouds whose indices are given in sequence cluster_ids
   template<typename seq>
   auto filter_flattened(const seq &cluster_ids) const;
-  inline float *data() const noexcept { return values.get(); }
-  inline auto get_offsets() const noexcept {
-    return parlay::make_slice(offsets.begin(), offsets.end());
-  }
   // Return list of distances from a query to all point clouds
+  // TODO: make this blocked, and thread_local
   inline std::pair<parlay::sequence<float>, size_t> distances(const ChPoint &query) {
     auto dists = parlay::sequence<float>::from_function(
         n, [&](size_t i) { return query.distance((*this)[i]); });
@@ -72,43 +78,79 @@ struct PointCloudSet {
   }
 };
 
-/* -----------------------------------------Implementation-----------------------------------------*/
+/* =======================================Implementation======================================= */
 
 // Load point clouds from file
 template<typename ChPoint>
-PointCloudSet<ChPoint>::PointCloudSet(const char *filename) {
-  std::cout << "filename = " << filename << std::endl;
-  std::ifstream file(filename, std::ios::binary | std::ios::in);
-  if (!file.is_open()) {
-    std::cerr << "Error opening file!" << std::endl;
-    exit(-1);
+PointCloudSet<ChPoint>::PointCloudSet(const char *filename, bool is_mmap) {
+  if (is_mmap) {
+    read_mmap_file(filename);
+  } else {
+    std::cout << "filename = " << filename << std::endl;
+    std::ifstream file(filename, std::ios::binary | std::ios::in);
+    if (!file.is_open()) {
+      std::cerr << "Error opening file!" << std::endl;
+      exit(-1);
+    }
+    // Step 1: Read num points and dimension [size_t, size_t]
+    file.read(reinterpret_cast<char *>(&dims), sizeof(dims));
+    file.read(reinterpret_cast<char *>(&n), sizeof(n));
+    size_t num_vectors;
+    file.read(reinterpret_cast<char *>(&num_vectors), sizeof(num_vectors));
+    std::cout << "Detected " << n << " point clouds with embedding dimension " << dims << std::endl;
+    aligned_dims = dims;
+    std::cout << "Aligned dims = " << aligned_dims << std::endl;
+    if (aligned_dims != dims) {
+      std::cerr << "Expected dims to be a multiple of cacheline size." << std::endl;
+      exit(-1);
+    }
+    // Step 2: Read values
+    size_t coordinate_size = num_vectors * dims * sizeof(float);
+    values = std::shared_ptr<float[]>(static_cast<float *>(parlay::p_malloc(coordinate_size)),
+                                      parlay::p_free);
+    // values = std::shared_ptr<float[]>(static_cast<float *>(std::aligned_alloc(64,
+    // coordinate_size)), std::free);
+    file.read(reinterpret_cast<char *>(values.get()), coordinate_size);
+    // Step 3: Read offsets
+    size_t num_offsets;
+    file.read(reinterpret_cast<char *>(&num_offsets), sizeof(num_offsets));
+    offsets.resize(num_offsets);
+    file.read(reinterpret_cast<char *>(offsets.begin()), num_offsets * sizeof(size_t));
+    // Step 4: Set ids
+    ids = parlay::sequence<size_t>::from_function(n,
+                                                  [&](size_t i) { return static_cast<size_t>(i); });
+    file.close();
   }
-  // Step 1: Read num points and dimension [size_t, size_t]
-  file.read(reinterpret_cast<char *>(&dims), sizeof(dims));
-  file.read(reinterpret_cast<char *>(&n), sizeof(n));
+}
+
+// Helper to read mmap file
+template<typename ChPoint>
+void PointCloudSet<ChPoint>::read_mmap_file(const char *filename) {
+  auto [fileptr, length] = mmap_file(filename);
+  char *p = fileptr;
+  std::memcpy(&dims, p, sizeof(size_t));
+  p += sizeof(size_t);
+  std::memcpy(&n, p, sizeof(size_t));
+  p += sizeof(size_t);
+
   size_t num_vectors;
-  file.read(reinterpret_cast<char *>(&num_vectors), sizeof(num_vectors));
-  std::cout << "Detected " << n << " point clouds with embedding dimension " << dims << std::endl;
+  std::memcpy(&num_vectors, p, sizeof(size_t));
+  p += sizeof(size_t);
+
   aligned_dims = dims;
-  std::cout << "Aligned dims = " << aligned_dims << std::endl;
-  if (aligned_dims != dims) {
-    std::cerr << "Expected dims to be a multiple of cacheline size." << std::endl;
-    exit(-1);
-  }
-  // Step 2: Read values
+
   size_t coordinate_size = num_vectors * dims * sizeof(float);
-  values = std::shared_ptr<float[]>(static_cast<float *>(parlay::p_malloc(coordinate_size)),
-                                    parlay::p_free);
-  file.read(reinterpret_cast<char *>(values.get()), coordinate_size);
-  // Step 3: Read offsets
+  values = std::shared_ptr<float[]>(reinterpret_cast<float *>(p), [](float *) {});
+  p += coordinate_size;
+
   size_t num_offsets;
-  file.read(reinterpret_cast<char *>(&num_offsets), sizeof(num_offsets));
-  offsets.resize(num_offsets);
-  file.read(reinterpret_cast<char *>(offsets.begin()), num_offsets * sizeof(size_t));
-  // Step 4: Set ids
-  ids =
-      parlay::sequence<size_t>::from_function(n, [&](size_t i) { return static_cast<size_t>(i); });
-  file.close();
+  std::memcpy(&num_offsets, p, sizeof(size_t));
+  p += sizeof(size_t);
+  offsets = parlay::sequence<size_t>(num_offsets);
+  std::memcpy(offsets.begin(), p, num_offsets * sizeof(size_t));
+  p += num_offsets * sizeof(size_t);
+
+  ids = parlay::sequence<size_t>::from_function(n, [&](size_t i) { return i; });
 }
 
 // Input in array format (values_ has offsets_[n] elts, offsets_ has n+1 elts,
@@ -123,6 +165,8 @@ PointCloudSet<ChPoint>::PointCloudSet(size_t n, size_t dims, const float *values
   }
   values = std::shared_ptr<float[]>(
       static_cast<float *>(parlay::p_malloc(offsets[n] * sizeof(float))), parlay::p_free);
+  // values = std::shared_ptr<float[]>(
+  //     static_cast<float *>(std::aligned_alloc(64, offsets[n] * sizeof(float))), std::free);
   std::memcpy(values.get(), values_, offsets[n] * sizeof(float));
 }
 
@@ -137,6 +181,8 @@ PointCloudSet<ChPoint>::PointCloudSet(const seq<ChPoint, x...> &data, size_t d) 
   size_t total_coords = offsets[n];
   values = std::shared_ptr<float[]>(
       static_cast<float *>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
+  // values = std::shared_ptr<float[]>(
+  //     static_cast<float *>(std::aligned_alloc(64, total_coords * sizeof(float))), std::free);
   parlay::parallel_for(0, n, [&](size_t i) {
     size_t offset = offsets[i];
     parlay::parallel_for(0, data[i].size(), [&](size_t j) {
@@ -161,6 +207,8 @@ PointCloudSet<ChPoint>::PointCloudSet(const seqA<seqB<seqC<float>>> &data, size_
   size_t total_coords = offsets[n];
   values = std::shared_ptr<float[]>(
       static_cast<float *>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
+  // values = std::shared_ptr<float[]>(
+  //     static_cast<float *>(std::aligned_alloc(64, total_coords * sizeof(float))), std::free);
   parlay::parallel_for(0, n, [&](size_t i) {
     size_t offset = offsets[i];
     parlay::parallel_for(0, data[i].size(), [&](size_t j) {

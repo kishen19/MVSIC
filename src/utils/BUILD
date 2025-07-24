@@ -71,6 +71,12 @@ cc_library(
 )
 
 cc_library(
+    name = "mmap",
+    hdrs = ["mmap.h"],
+    deps = [],
+)
+
+cc_library(
     name = "NSGDist",
     hdrs = ["NSGDist.h"],
     deps = [
@@ -88,6 +94,7 @@ cc_library(
     name = "point_cloud_set",
     hdrs = ["point_cloud_set.h"],
     deps = [
+        ":mmap",
         "@parlaylib//parlay:primitives",
     ],
 )
@@ -117,6 +124,7 @@ cc_library(
     hdrs = ["top_neighbors.h"],
     deps = [
         ":point_cloud_set",
+        ":vqsort_utils",
         "@parlaylib//parlay:primitives",
     ],
 )

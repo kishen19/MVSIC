@@ -32,9 +32,10 @@ void bench(mvivf::commandLine &P) {
   double s = P.getOptionDoubleValue("-s", 1.0);
   size_t os_rate = P.getOptionLongValue("-osr", 20);
   size_t iters = P.getOptionLongValue("-iters", 5);
+  bool is_mmap = P.getOption("-mm");
   bool verbose = P.getOption("-v");
 
-  auto points = PC(inFile);
+  auto points = PC(inFile, is_mmap);
   IndexParams index_params = IndexParams::mvivf_flat(maxsize, s, iters, os_rate, verbose);
   SearchParams search_params = SearchParams::mvivf_flat(k, nprobes);
   IndexMVIVFFlat<metric> index(points.get_dims(), index_params);
