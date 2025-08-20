@@ -5,22 +5,33 @@
 #include "src/common/index.h"
 #include "src/mvc/mvkmeans.h"
 #include "src/utils/top_neighbors.h"
-#include "src/utils/vqsort_utils.h"
+#include "src/utils/sort_utils.h"
 
 namespace mvivf {
 
-/* ===================================Multi-Vector IVF Class=================================== */
+/* Multi-Vector IVF Index: Flat version
+  Indexing:
+  - Runs the MV-Lloyd's algorithm to cluster the input point clouds into `num_clusters` clusters.
+    Each cluster is now represented by a "center" point cloud.
+  Search:
+  - For a given query point cloud, it computes distances to all centers point clouds,
+   and then probes the top `nprobes` clusters.
+*/
+
+/* =================================Multi-Vector IVF Flat Class=============================== */
 template<bool metric>
 class IndexMVIVFFlat : Index<metric> {
  public:
   using ChPoint = Index<metric>::ChPoint;  // Chamfer Point Type
   using Index<metric>::d;                  // Embedding dimension
 
-  size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
-  double s = 1.0;        // s * (average # vectors)/num_docs
-  size_t iters = 5;      // Number of Outer Lloyd's Iterations
-  size_t os_rate = 20;   // Oversampling factor for Inner Kmeans
-  bool verbose = false;  // Print debug statements
+  size_t num_clusters = 300;  // Number of clusters
+  bool verbose = false;       // Print debug statements
+
+  // MV-Lloyd's parameters
+  double s = 1.0;       // s * (average # vectors)/num_docs
+  size_t iters = 5;     // Number of Outer Lloyd's Iterations
+  size_t os_rate = 20;  // Oversampling factor for Inner Kmeans
 
   PointCloudSet<ChPoint> centers;                     // Centers of clusters
   std::vector<PointCloudSet<ChPoint>> clusters = {};  // Clusters of points
@@ -28,7 +39,7 @@ class IndexMVIVFFlat : Index<metric> {
   IndexMVIVFFlat(size_t d_) noexcept { d = d_; }
   IndexMVIVFFlat(size_t d_, const IndexParams &params) noexcept {
     d = d_;
-    maxsize = params.maxsize;
+    num_clusters = params.num_clusters;
     s = params.s;
     iters = params.iters;
     os_rate = params.os_rate;
@@ -41,6 +52,11 @@ class IndexMVIVFFlat : Index<metric> {
       const SearchParams &params) override;
   void save(const std::string &filename) override;
   void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override;
+  /* ------------------------------Helper Functions------------------------------ */
+  std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search_with_stats(
+      const ChPoint &query, const PointCloudSet<ChPoint> &points, const SearchParams &params) {}
+  size_t mean_cluster_size() const noexcept;
+  size_t max_cluster_size() const noexcept;
 };
 
 /* =======================================Implementation======================================= */
@@ -48,11 +64,9 @@ class IndexMVIVFFlat : Index<metric> {
 template<bool metric>
 void IndexMVIVFFlat<metric>::build(const PointCloudSet<ChPoint> &points) {
   size_t n = points.size();
-  size_t mp = 2;
-  size_t num_clusters = mp * ((n + maxsize - 1) / maxsize);
   if (verbose) {
-    std::cout << "Building index with " << n << " points, maxsize: " << maxsize
-              << ", num_clusters: " << num_clusters << std::endl;
+    std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
+              << std::endl;
   }
   // Step 1: Run MV-Lloyds on points
   MVClusteringParams clus_params(iters, "Random", os_rate, verbose);
@@ -95,21 +109,9 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVFFlat<met
   // Step 1: Compute distances to centers
   auto [all_dists, dist_cmps_node] = centers.distances(query);
   dist_cmps += dist_cmps_node;
-  // #ifdef USE_HWY
-  //   auto dist_id_d = parlay::sequence<double>::from_function(
-  //       all_dists.size(), [&](size_t i) { return packFloatAndInt(all_dists[i], i); });
-  //   // VQSort(dist_id_d.begin(), dist_id_d.end());
-  //   VQPartialSort(dist_id_d.begin(), dist_id_d.end(), std::min(nprobes * 2, all_dists.size()));
-  //   auto dist_id = parlay::sequence<std::pair<size_t, float>>::uninitialized(all_dists.size());
-  //   parlay::parallel_for(0, dist_id_d.size(), [&](size_t i) {
-  //     auto [ext_float, ind] = unpackDouble2(dist_id_d[i]);
-  //     dist_id[i] = std::make_pair(ind, ext_float);
-  //   });
-  // #else
   auto dist_id = parlay::sequence<std::pair<size_t, float>>::from_function(
       all_dists.size(), [&](size_t i) { return std::make_pair(i, all_dists[i]); });
   parlay::sort_inplace(dist_id, [](const auto &a, const auto &b) { return a.second < b.second; });
-  // #endif
 
   // Step 2: Probe top nprobe clusters
   // Find the minimum number of probes needed to obtain k neighbors
@@ -244,6 +246,22 @@ void IndexMVIVFFlat<metric>::load(const std::string &filename,
     }
   });
   infile.close();
+}
+
+// Returns the mean cluster size
+template<bool metric>
+size_t IndexMVIVFFlat<metric>::mean_cluster_size() const noexcept {
+  auto cluster_sizes =
+      parlay::delayed_seq<size_t>(clusters.size(), [&](size_t i) { return clusters[i].size(); });
+  return parlay::reduce(cluster_sizes) / clusters.size();
+}
+
+// Returns the mean cluster size
+template<bool metric>
+size_t IndexMVIVFFlat<metric>::max_cluster_size() const noexcept {
+  auto cluster_sizes =
+      parlay::delayed_seq<size_t>(clusters.size(), [&](size_t i) { return clusters[i].size(); });
+  return parlay::reduce(cluster_sizes, parlay::maxm<size_t>());
 }
 
 using IndexMVIVFFlatL2 = IndexMVIVFFlat<true>;   // L2 metric

@@ -6,8 +6,8 @@ cc_library(
     deps = [
         "//src/common:index",
         "//src/mvc:mvkmeans",
+        "//src/utils:sort_utils",
         "//src/utils:top_neighbors",
-        "//src/utils:vqsort_utils",
     ],
 )
 

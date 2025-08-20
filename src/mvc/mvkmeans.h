@@ -12,7 +12,11 @@
 
 namespace mvivf {
 
-/* Params Type */
+/* Multi-Vector Lloyd's Clustering
+
+*/
+
+/* ==============================Multi-Vector Clustering Params Type============================= */
 struct MVClusteringParams {
   int iters = 5;                   // Number of Outer Lloyd's Iterations
   std::string seeding = "Random";  // Seeding Algorithm
@@ -31,8 +35,8 @@ class MVClustering : MVClusteringParams {
   size_t k;  // Number of centroid-sets
   double s;  // Number of points per centroid-set
 
-  PointCloudSet<ChPoint> centers;
-  parlay::sequence<size_t> cluster_ids;
+  PointCloudSet<ChPoint> centers;        // Centers of clusters
+  parlay::sequence<size_t> cluster_ids;  // Cluster ids for each point cloud
   // TODO: stats type for each Lloyds iteration
 
   MVClustering(size_t d, size_t k) noexcept;
@@ -40,15 +44,7 @@ class MVClustering : MVClusteringParams {
   MVClustering(size_t d, size_t k, const MVClusteringParams &params);
   MVClustering(size_t d, size_t k, double s, const MVClusteringParams &params);
 
-  // Naive: Computes the cluster ids of each input doc, given centers
-  void compute_cluster_ids(const PointCloudSet<ChPoint> &points,
-                           parlay::sequence<size_t> &cluster_ids);
-  // Optimized (eigen): Computes the cluster ids of each input doc, given centers
-  void compute_cluster_ids_blocked(const PointCloudSet<ChPoint> &points,
-                                   parlay::sequence<size_t> &cluster_ids);
-  // Utility to compute the MV Kmeans cost
-  float sum_of_squared_cost(const PointCloudSet<ChPoint> &points,
-                            const parlay::sequence<size_t> &cluster_ids) const;
+  /* ------------------------------Main Functions-------------------------------- */
   // Raw data given
   void train(size_t n, const float *data, const size_t *offsets, const size_t *ids);
   // Data given as a range type
@@ -57,24 +53,149 @@ class MVClustering : MVClusteringParams {
   void train(const seqA<seqB<seqC<float>>> &data);
   // Data given as a PointCloudSet Object
   void train(const PointCloudSet<ChPoint> &data);
+  /* ------------------------------Helper Functions------------------------------ */
+  // Naive: Computes the cluster ids of each input doc, given centers
+  void compute_cluster_ids_naive(const PointCloudSet<ChPoint> &points,
+                                 parlay::sequence<size_t> &cluster_ids);
+  // Optimized (eigen): Computes the cluster ids of each input doc, given centers
+  void compute_cluster_ids(const PointCloudSet<ChPoint> &points,
+                           parlay::sequence<size_t> &cluster_ids);
+  // Utility to compute the MV Kmeans cost
+  float sum_of_squared_cost(const PointCloudSet<ChPoint> &points,
+                            const parlay::sequence<size_t> &cluster_ids) const;
 };
 
-/* -----------------------------------------Implementation-----------------------------------------*/
-
+/* =======================================Implementation======================================= */
 template<bool metric>
-MVClustering<metric>::MVClustering(size_t d, size_t k) noexcept : d(d), k(k), s(0.0) {}
+MVClustering<metric>::MVClustering(size_t d, size_t k) noexcept : d(d), k(k), s(1.0) {}
 template<bool metric>
 MVClustering<metric>::MVClustering(size_t d, size_t k, double s) noexcept : d(d), k(k), s(s) {}
 template<bool metric>
 MVClustering<metric>::MVClustering(size_t d, size_t k, const MVClusteringParams &params) :
-    MVClusteringParams(params), d(d), k(k), s(0.0) {}
+    MVClusteringParams(params), d(d), k(k), s(1.0) {}
 template<bool metric>
 MVClustering<metric>::MVClustering(size_t d, size_t k, double s, const MVClusteringParams &params) :
     MVClusteringParams(params), d(d), k(k), s(s) {}
 
+// Raw data given
 template<bool metric>
-void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &points,
-                                               parlay::sequence<size_t> &cluster_ids) {
+void MVClustering<metric>::train(size_t n, const float *data, const size_t *offsets,
+                                 const size_t *ids) {
+  PointCloudSet<ChPoint> points(n, d, data, offsets, ids);
+  train(points);
+}
+
+// Data given as a range type
+template<bool metric>
+template<template<typename> class seqA, template<typename> class seqB,
+         template<typename> class seqC>
+void MVClustering<metric>::train(const seqA<seqB<seqC<float>>> &data) {
+  PointCloudSet<ChPoint> points(data, d, {});
+  train(points);
+}
+
+// Data given as a PointCloudSet Object
+template<bool metric>
+void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
+  size_t n = points.size();
+  auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
+  size_t centroid_size =
+      static_cast<size_t>(std::ceil(s * static_cast<double>(parlay::reduce(pc_sizes) + n) / n));
+  if (verbose)
+    std::cout << "Average number of embeddings per point: " << centroid_size << std::endl;
+  // if (comp_lb){
+  //   auto lb = lowerbound<Range>(points, k, s);
+  //   if (verbose)
+  //     std::cout << "Naive Lower Bound: " << lb << std::endl;
+  // }
+  // Step 1: Initialization
+  parlay::internal::timer st;
+  st.start();
+  cluster_ids.resize(n);
+  if (seeding == "Random") {
+    centers = UniformlyRandomMV(points, k);
+  } else {
+    std::cout << "Error: seeding algorithm not specified correctly" << std::endl;
+    abort();
+  }
+  // compute_cluster_ids_naive(points, cluster_ids);
+  compute_cluster_ids(points, cluster_ids);
+  st.stop();
+
+  std::vector<float> lloyds_times;  // TODO: move this to a struct
+  std::vector<float> costs;
+  float seed_cost = sum_of_squared_cost(points, cluster_ids);
+  costs.push_back(seed_cost);
+  lloyds_times.push_back(st.total_time());
+  if (verbose) {
+    std::cout << "Seeding cost: " << seed_cost << std::endl;
+    std::cout << "Seeding time: " << st.total_time() << " seconds" << std::endl;
+  }
+
+  // Step 2: Lloyd's Iteration
+  float cost;
+  parlay::internal::timer it_timer;
+  for (long it = 0; it < iters; it++) {
+    it_timer.start();
+    // Step 2A: Compute new centers
+    auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(
+        n, [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
+    auto grouped = parlay::group_by_index(id_pt, k);
+    parlay::sequence<parlay::sequence<parlay::sequence<float>>> new_centers(
+        k, parlay::sequence<parlay::sequence<float>>(centroid_size, parlay::sequence<float>(d)));
+    // static size_t seed = 42;
+    // size_t current_seed = seed;
+    parlay::parallel_for(
+        0, k,
+        [&](size_t i) {
+          if (grouped[i].size() > 0) {
+            auto data = points.filter_flattened(grouped[i]);
+            if (centroid_size >= data.size()) {
+              new_centers[i].resize(data.size());
+              new_centers[i] = data;
+            } else {
+              // new_centers[i] = faiss_kmeans(data, d, centroid_size, metric, os_rate);
+              new_centers[i] = kmeans_subsample<metric>(data, centroid_size, os_rate, verbose);
+            }
+          } else {  // Empty Cluster, sample from input
+            if (verbose) {
+              std::cout << "Cluster " << i << ": empty" << std::endl;
+              std::cout << "Sampling from input" << std::endl;
+            }
+            // parlay::sequence<size_t> id = {parlay::hash32(current_seed+i) % n};
+            parlay::sequence<size_t> id = {parlay::hash32(i) % n};
+            auto data = points.filter_flattened(id);
+            if (centroid_size >= data.size()) {
+              new_centers[i].resize(data.size());
+              new_centers[i] = data;
+            } else {
+              // new_centers[i] = faiss_kmeans(data, d, centroid_size, metric, os_rate);
+              new_centers[i] = kmeans_subsample<metric>(data, centroid_size, os_rate, verbose);
+            }
+          }
+        },
+        1);
+    // seed += k;
+    centers = PointCloudSet<ChPoint>(new_centers, d, {});
+    // Step 2B: Reassign points
+    // compute_cluster_ids_naive(points, cluster_ids);
+    compute_cluster_ids(points, cluster_ids);
+    it_timer.stop();
+    double round_time = it_timer.total_time();
+    lloyds_times.push_back(round_time);
+    it_timer.reset();
+    if (verbose) {
+      cost = sum_of_squared_cost(points, cluster_ids);
+      costs.push_back(cost);
+      std::cout << "Lloyd's iteration " << it << ": cost = " << cost << ", time = " << round_time
+                << " seconds" << std::endl;
+    }
+  }
+}
+
+template<bool metric>
+void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint> &points,
+                                                     parlay::sequence<size_t> &cluster_ids) {
   size_t n = points.size();
   parlay::parallel_for(0, n, [&](size_t i) {
     auto dist =
@@ -84,8 +205,8 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &poi
 }
 
 template<bool metric>
-void MVClustering<metric>::compute_cluster_ids_blocked(const PointCloudSet<ChPoint> &points,
-                                                       parlay::sequence<size_t> &cluster_ids) {
+void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &points,
+                                               parlay::sequence<size_t> &cluster_ids) {
   const size_t n = points.size();
   auto points_offsets = points.get_offsets();
   auto centers_offsets = centers.get_offsets();
@@ -161,115 +282,6 @@ float MVClustering<metric>::sum_of_squared_cost(const PointCloudSet<ChPoint> &po
   auto distances = parlay::delayed_tabulate(
       points.size(), [&](size_t i) { return points[i].distance(centers[cluster_ids[i]]); });
   return parlay::reduce(distances);
-}
-
-template<bool metric>
-void MVClustering<metric>::train(size_t n, const float *data, const size_t *offsets,
-                                 const size_t *ids) {
-  PointCloudSet<ChPoint> points(n, d, data, offsets, ids);
-  train(points);
-}
-
-template<bool metric>
-template<template<typename> class seqA, template<typename> class seqB,
-         template<typename> class seqC>
-void MVClustering<metric>::train(const seqA<seqB<seqC<float>>> &data) {
-  PointCloudSet<ChPoint> points(data, d, {});
-  train(points);
-}
-
-template<bool metric>
-void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
-  size_t n = points.size();
-  auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
-  size_t centroid_size = s * parlay::reduce(pc_sizes) / n;
-  if (verbose)
-    std::cout << "Average number of embeddings per point: " << centroid_size << std::endl;
-  // if (comp_lb){
-  //   auto lb = lowerbound<Range>(points, k, s);
-  //   if (verbose)
-  //     std::cout << "Naive Lower Bound: " << lb << std::endl;
-  // }
-  // Step 1: Initialization
-  parlay::internal::timer st;
-  st.start();
-  cluster_ids.resize(n);
-  if (seeding == "Random") {
-    centers = UniformlyRandomMV(points, k);
-  } else {
-    std::cout << "Error: seeding algorithm not specified correctly" << std::endl;
-    abort();
-  }
-  // compute_cluster_ids(points, cluster_ids);
-  compute_cluster_ids_blocked(points, cluster_ids);
-  st.stop();
-
-  std::vector<float> lloyds_times;  // TODO: move this to a struct
-  std::vector<float> costs;
-  float seed_cost = sum_of_squared_cost(points, cluster_ids);
-  costs.push_back(seed_cost);
-  lloyds_times.push_back(st.total_time());
-  if (verbose) {
-    std::cout << "Seeding cost: " << seed_cost << std::endl;
-    std::cout << "Seeding time: " << st.total_time() << " seconds" << std::endl;
-  }
-
-  // Step 2: Lloyd's Iteration
-  float cost;
-  parlay::internal::timer it_timer;
-  for (long it = 0; it < iters; it++) {
-    it_timer.start();
-    // Step 2A: Compute new centers
-    auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(
-        n, [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
-    auto grouped = parlay::group_by_index(id_pt, k);
-    parlay::sequence<parlay::sequence<parlay::sequence<float>>> new_centers(
-        k, parlay::sequence<parlay::sequence<float>>(centroid_size, parlay::sequence<float>(d)));
-    // static size_t seed = 42;
-    // size_t current_seed = seed;
-    parlay::parallel_for(0, k, [&](size_t i) {
-      if (grouped[i].size() > 0) {
-        auto data = points.filter_flattened(grouped[i]);
-        if (centroid_size >= data.size()) {
-          new_centers[i].resize(data.size());
-          new_centers[i] = data;
-        } else {
-          // new_centers[i] = faiss_kmeans(data, d, centroid_size, metric, os_rate);
-          new_centers[i] = kmeans_subsample<metric>(data, centroid_size, os_rate, verbose);
-        }
-      } else {  // Empty Cluster, sample from input
-        if (verbose) {
-          std::cout << "Cluster " << i << ": empty" << std::endl;
-          std::cout << "Sampling from input" << std::endl;
-        }
-        // parlay::sequence<size_t> id = {parlay::hash32(current_seed+i) % n};
-        parlay::sequence<size_t> id = {parlay::hash32(i) % n};
-        auto data = points.filter_flattened(id);
-        if (centroid_size >= data.size()) {
-          new_centers[i].resize(data.size());
-          new_centers[i] = data;
-        } else {
-          // new_centers[i] = faiss_kmeans(data, d, centroid_size, metric, os_rate);
-          new_centers[i] = kmeans_subsample<metric>(data, centroid_size, os_rate, verbose);
-        }
-      }
-    });
-    // seed += k;
-    centers = PointCloudSet<ChPoint>(new_centers, d, {});
-    // Step 2B: Reassign points
-    // compute_cluster_ids(points, cluster_ids);
-    compute_cluster_ids_blocked(points, cluster_ids);
-    it_timer.stop();
-    double round_time = it_timer.total_time();
-    lloyds_times.push_back(round_time);
-    it_timer.reset();
-    if (verbose) {
-      cost = sum_of_squared_cost(points, cluster_ids);
-      costs.push_back(cost);
-      std::cout << "Lloyd's iteration " << it << ": cost = " << cost << ", time = " << round_time
-                << " seconds" << std::endl;
-    }
-  }
 }
 
 template struct MVClustering<true>;   // Instantiates for L2 metric (metric = true)

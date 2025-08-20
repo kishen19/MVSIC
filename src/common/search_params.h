@@ -30,7 +30,7 @@ struct SearchParams {
     params.k = k;
     params.nprobes = nprobes;
     if (beam_length == 0) {
-      params.beam_length = nprobes;
+      params.beam_length = 2 * nprobes;
     } else {
       params.beam_length = beam_length;
     }

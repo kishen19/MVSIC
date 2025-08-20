@@ -26,21 +26,22 @@ void bench(mvivf::commandLine &P) {
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
 
-  size_t minsize = P.getOptionLongValue("-minsize", 100);
-  size_t maxsize = P.getOptionLongValue("-maxsize", 500);
-  size_t nprobes = P.getOptionLongValue("-nprobes", 1);
-  size_t beamsize = P.getOptionLongValue("-beamsize", 0);
+  size_t num_clusters = P.getOptionLongValue("-num_clusters", 300);
+  size_t maxsize = P.getOptionLongValue("-maxsize", 100);
+  size_t nprobes = P.getOptionLongValue("-nprobes", 2);
+  size_t beamsize = P.getOptionLongValue("-beamsize", 2 * nprobes);
   size_t k = P.getOptionLongValue("-k", 10);
-  size_t s = P.getOptionLongValue("-s", 0);
+  double s = P.getOptionDoubleValue("-s", 1.0);
   size_t os_rate = P.getOptionLongValue("-osr", 20);
-  auto seeding = P.getOptionValue("-seed", "Random");
   auto iters = P.getOptionLongValue("-iters", 5);
+  bool is_mmap = P.getOption("-mm");
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, os_rate, verbose);
-  SearchParams search_params(k, nprobes, beamsize);
+  IndexParams index_params = IndexParams::mvivf(num_clusters, maxsize, s, iters, os_rate, verbose);
+  SearchParams search_params = SearchParams::mvivf(k, nprobes, beamsize);
   IndexMVIVF<metric> index(points.get_dims(), index_params);
+
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;
     index.load(indexFile, points);

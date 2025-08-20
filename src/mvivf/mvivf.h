@@ -8,16 +8,18 @@
 
 namespace mvivf {
 
-/* =========================================Params Type======================================== */
-struct IndexMVIVFParams {
-  size_t minsize = 100;  // (Expected) Minsize of leaf clusters (not enforced)
-  size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
-  size_t s = 0;          // Number of vectors in a center. Default 0 - average # vectors/doc
-  size_t iters = 5;      // Number of Outer Lloyd's Iterations
-  std::string seeding = "Random";  // Seeding Algorithm
-  size_t os_rate = 20;             // Oversampling rate for Inner Kmeans
-  bool verbose = false;            // Print debug statements
-};
+/* Multi-Vector IVF Index
+  Indexing:
+  - Builds a kmeans Tree by recursively running MV-Lloyd's algorithm on the input point clouds.
+  - At each level, if the cluster size is larger than `maxsize`, it runs the MV-Lloyd's algorithm on
+    that cluster with `num_clusters` clusters. Each cluster is represented by a "center" point
+  cloud. Search:
+  - For a given query point cloud, it runs a greedy search and determines `nprobes` top candidate
+  leaf-level clusters to probe.
+  - For each candidate probe cluster, it computes the top-k point clouds from that cluster.
+  - Finally, it re-ranks the results based on distances to return the top-k point clouds.
+*/
+
 /* =============================Multi-Vector IVF Internal Node Type============================ */
 template<typename ChPoint>
 struct IndexMVIVFNode {
@@ -27,25 +29,35 @@ struct IndexMVIVFNode {
   PointCloudSet<ChPoint> data;
   IndexMVIVFNode() noexcept :
       children(parlay::sequence<IndexMVIVFNode *>(0)), data(PointCloudSet<ChPoint>()) {}
-  inline void set_children(const parlay::sequence<IndexMVIVFNode *> &children_) noexcept {
-    children = std::move(children_);
-  }
   inline void set_data(const PointCloudSet<ChPoint> &data_) noexcept { data = std::move(data_); }
 };
 /* ===================================Multi-Vector IVF Class=================================== */
 template<bool metric>
-class IndexMVIVF : Index<metric>, IndexMVIVFParams {
+class IndexMVIVF : Index<metric> {
  public:
   using ChPoint = Index<metric>::ChPoint;
   using node_t = IndexMVIVFNode<ChPoint>;
   using Index<metric>::d;  // Embedding dimension
+
+  size_t num_clusters = 300;  // Number of clusters at each large node
+  size_t maxsize = 250;       // Maxsize of leaf clusters (enforced)
+  double s = 1.0;             // s * (average # vectors)/num_docs
+  size_t iters = 5;           // Number of Outer Lloyd's Iterations
+  size_t os_rate = 20;        // Oversampling rate for Inner Kmeans
+  bool verbose = false;       // Print debug statements
+
   node_t *root = nullptr;  // Root of the k-means tree
 
   IndexMVIVF(size_t d_) noexcept { d = d_; }
-  IndexMVIVF(size_t d_, const IndexMVIVFParams &params) noexcept : IndexMVIVFParams(params) {
+  IndexMVIVF(size_t d_, const IndexParams &params) noexcept {
     d = d_;
+    num_clusters = params.num_clusters;
+    maxsize = params.maxsize;
+    s = params.s;
+    iters = params.iters;
+    os_rate = params.os_rate;
+    verbose = params.verbose;
   }
-  ~IndexMVIVF();
   /* ----------------------------Overridden Functions---------------------------- */
   void build(const PointCloudSet<ChPoint> &points) override;
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
@@ -56,7 +68,8 @@ class IndexMVIVF : Index<metric>, IndexMVIVFParams {
 
   /* ------------------------------Helper Functions------------------------------ */
   // Recursively builds the kmeans tree
-  void build_helper(node_t *node, const PointCloudSet<ChPoint> &points);
+  void build_helper(node_t *node, const PointCloudSet<ChPoint> &points,
+                    MVClusteringParams &clus_params);
   // Traversing the k-means tree: returns the height of the tree
   // TODO: get more stats about the tree
   size_t traverse_tree(node_t *node, parlay::sequence<node_t *> &ind_to_node,
@@ -73,41 +86,53 @@ class IndexMVIVF : Index<metric>, IndexMVIVFParams {
 template<bool metric>
 void IndexMVIVF<metric>::build(const PointCloudSet<ChPoint> &points) {
   root = new node_t();
-  build_helper(root, points);
+  MVClusteringParams clus_params(iters, "Random", os_rate, verbose);
+  build_helper(root, points, clus_params);
 }
 
 // Recursively builds the kmeans tree
 template<bool metric>
-void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint> &points) {
+void IndexMVIVF<metric>::build_helper(node_t *node, const PointCloudSet<ChPoint> &points,
+                                      MVClusteringParams &clus_params) {
   size_t n = points.size();
-  size_t mp = std::max((size_t)4, maxsize / minsize);
-  size_t num_clusters = std::min(mp * std::ceil(n / maxsize), std::ceil(std::sqrt(n)));
   if (verbose) {
     std::cout << "Building index with " << n << " points, maxsize: " << maxsize
               << ", num_clusters: " << num_clusters << std::endl;
   }
-  // Step 1: Run MV-Lloyds on points and collect clusters
-  MVClusteringParams params(iters, seeding, os_rate, false, verbose);
-  MVClustering<metric> clus(d, num_clusters, s, params);
-  clus.train(points);
-  PointCloudSet<ChPoint> centers = clus.centers;
-  parlay::sequence<size_t> cluster_ids = clus.cluster_ids;
-  auto id_pt = parlay::delayed_seq<std::pair<size_t, size_t>>(
+  // Step 1: Run MV-Lloyds on points
+  MVClustering<metric> Clus(d, num_clusters, s, clus_params);
+  Clus.train(points);
+  PointCloudSet<ChPoint> &centers = Clus.centers;
+  parlay::sequence<size_t> &cluster_ids = Clus.cluster_ids;
+  // Step 2: Collect Clusters
+  // TODO: conver to a helper function
+  auto id_pt_del = parlay::delayed_seq<std::pair<size_t, size_t>>(
       n, [&](size_t i) { return std::make_pair(cluster_ids[i], i); });
-  auto grouped = parlay::group_by_index(id_pt, num_clusters);
-  // Step 2: Update children nodes and recurse for large nodes
-  parlay::sequence<node_t *> children = parlay::sequence<node_t *>(num_clusters);
-  parlay::parallel_for(0, num_clusters, [&](size_t i) {
-    node_t *child = new node_t();
-    PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(points.filter(grouped[i]), d);
-    if (child_points.size() > maxsize) {  // Recurse
-      build_helper(child, child_points);
-    } else {  // Leaf Node
-      child->set_data(child_points);
-    }
-    children[i] = child;
-  });
-  node->set_children(children);
+  auto id_pt =
+      parlay::sort(id_pt_del, [](const auto &a, const auto &b) { return a.first < b.first; });
+  auto cutoff_indices = parlay::delayed_seq<size_t>(
+      n + 1, [&](size_t i) { return i == 0 || i == n || id_pt[i].first != id_pt[i - 1].first; });
+  auto cluster_offsets = parlay::pack_index(cutoff_indices);
+  // Step 3: Update children nodes and recurse for large nodes
+  node->children.resize(cluster_offsets.size() - 1);
+  parlay::parallel_for(
+      0, cluster_offsets.size() - 1,
+      [&](size_t i) {
+        size_t start_index = cluster_offsets[i];
+        size_t end_index = cluster_offsets[i + 1];
+        auto group_i = parlay::delayed_seq<size_t>(
+            end_index - start_index, [&](size_t j) { return id_pt[start_index + j].second; });
+        node_t *child = new node_t();
+        // TODO: avoid creating this, pass in a delayed version
+        auto child_points = PointCloudSet<ChPoint>(points.filter(group_i), d);
+        if (child_points.size() > maxsize) {  // Recurse
+          build_helper(child, child_points, clus_params);
+        } else {  // Leaf Node
+          child->set_data(child_points);
+        }
+        node->children[i] = child;
+      },
+      1);
   node->set_data(centers);
 }
 
@@ -143,8 +168,8 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMVIVF<metric>
     beam.erase(beam.begin());
     node_t *current_node = best.second;
     // Compute distances from query to children
-    auto children = current_node->children;
-    auto centers = current_node->data;
+    auto &children = current_node->children;
+    auto &centers = current_node->data;
     // Note: children.size() == centers.size()
     auto [all_dists, dist_cmps_node] = centers.distances(query);
     dist_cmps += dist_cmps_node;
@@ -394,13 +419,6 @@ void IndexMVIVF<metric>::traverse_and_delete(node_t *node) {
     traverse_and_delete(child);
     delete child;
   }
-}
-
-template<bool metric>
-IndexMVIVF<metric>::~IndexMVIVF() {
-  // traverse_and_delete(root);
-  // delete root;
-  // root = nullptr;
 }
 
 template struct IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)

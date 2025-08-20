@@ -124,14 +124,14 @@ cc_library(
     hdrs = ["top_neighbors.h"],
     deps = [
         ":point_cloud_set",
-        ":vqsort_utils",
+        ":sort_utils",
         "@parlaylib//parlay:primitives",
     ],
 )
 
 cc_library(
-    name = "vqsort_utils",
-    hdrs = ["vqsort_utils.h"],
+    name = "sort_utils",
+    hdrs = ["sort_utils.h"],
     deps = [
         "@highway//hwy/contrib/sort:vqsort",
     ],

@@ -8,21 +8,19 @@ struct IndexParams {
   std::string method;    // Index name
   bool verbose = false;  // Print debug statements
 
-  // mvivf_flat params
-  size_t maxsize = 500;  // Maxsize of leaf clusters (enforced)
-  double s = 1.0;        // s * (average # vectors)/num_docs
-  size_t iters = 5;      // Number of Outer Lloyd's Iterations
-  size_t os_rate = 20;   // Oversampling factor for Inner Kmeans
-
-  // mvivf params
-  size_t minsize = 100;      // (Expected) Minsize of leaf clusters (not enforced)
-  size_t k_per_level = 500;  // Number of clusters per level
+  // mvivf_flat and mvivf params
+  size_t num_clusters = 300;  // Number of clusters
+  size_t maxsize = 500;       // Maxsize of leaf clusters (enforced)
+  double s = 1.0;             // s * (average # vectors)/num_docs
+  size_t iters = 5;           // Number of Outer Lloyd's Iterations
+  size_t os_rate = 20;        // Oversampling factor for Inner Kmeans
 
   // mvivf search params
-  static IndexParams mvivf(size_t maxsize, size_t k_per_level, double s = 1.0, size_t iters = 5,
-                           size_t os_rate = 20, size_t minsize = 100, bool verbose = false) {
+  static IndexParams mvivf(size_t num_clusters, size_t maxsize, double s = 1.0, size_t iters = 5,
+                           size_t os_rate = 20, bool verbose = false) {
     IndexParams params;
     params.method = "mvivf";
+    params.num_clusters = num_clusters;
     params.maxsize = maxsize;
     params.s = s;
     params.iters = iters;
@@ -32,11 +30,11 @@ struct IndexParams {
   }
 
   // mvivf_flat search params
-  static IndexParams mvivf_flat(size_t maxsize, double s = 1.0, size_t iters = 5,
+  static IndexParams mvivf_flat(size_t num_clusters, double s = 1.0, size_t iters = 5,
                                 size_t os_rate = 20, bool verbose = false) {
     IndexParams params;
     params.method = "mvivf_flat";
-    params.maxsize = maxsize;
+    params.num_clusters = num_clusters;
     params.s = s;
     params.iters = iters;
     params.os_rate = os_rate;
