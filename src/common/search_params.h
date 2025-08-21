@@ -85,6 +85,18 @@ struct SearchParams {
     return params;
   }
 
+  // mean_pooling
+  static SearchParams mpv(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) {
+    SearchParams params;
+    params.method = "mpv";
+    params.k = k;
+    params.beamSize = L;
+    params.cut = cut;
+    params.limit = limit;
+    params.degree_limit = degree_limit;
+    return params;
+  }
+
  private:
   SearchParams() = default;
 };

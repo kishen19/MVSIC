@@ -15,7 +15,13 @@ struct IndexParams {
   size_t iters = 5;           // Number of Outer Lloyd's Iterations
   size_t os_rate = 20;        // Oversampling factor for Inner Kmeans
 
-  // mvivf search params
+  // MPV and MUVERA params
+  size_t R = 32;
+  size_t L = 64;
+  double alpha = 1.0;
+  bool two_pass = false;  // Two-pass graph construction
+
+  // mvivf index params
   static IndexParams mvivf(size_t num_clusters, size_t maxsize, double s = 1.0, size_t iters = 5,
                            size_t os_rate = 20, bool verbose = false) {
     IndexParams params;
@@ -29,7 +35,7 @@ struct IndexParams {
     return params;
   }
 
-  // mvivf_flat search params
+  // mvivf_flat index params
   static IndexParams mvivf_flat(size_t num_clusters, double s = 1.0, size_t iters = 5,
                                 size_t os_rate = 20, bool verbose = false) {
     IndexParams params;
@@ -38,6 +44,19 @@ struct IndexParams {
     params.s = s;
     params.iters = iters;
     params.os_rate = os_rate;
+    params.verbose = verbose;
+    return params;
+  }
+
+  // mpv index params
+  static IndexParams mpv(size_t R, size_t L, double alpha = 1.2, bool two_pass = false,
+                         bool verbose = false) {
+    IndexParams params;
+    params.method = "mpv";
+    params.R = R;
+    params.L = L;
+    params.alpha = alpha;
+    params.two_pass = two_pass;
     params.verbose = verbose;
     return params;
   }
