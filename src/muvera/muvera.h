@@ -2,59 +2,72 @@
 
 #include <queue>
 #include <set>
+#include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
+#include "algorithms/utils/mips_point.h"
 #include "algorithms/utils/stats.h"
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
-#include "algorithms/utils/euclidian_point.h"
-#include "algorithms/utils/mips_point.h"
+#include "fde/fixed_dimensional_encoding.h"
 #include "src/common/index.h"
 #include "src/utils/point_range.h"
-#include "fde/fixed_dimensional_encoding.h"
 
 namespace mvivf {
 
-/* =========================================Params Type======================================== */
-struct IndexMUVERAParams {
-  int num_repetitions = 40;         // Number of independent repetitions for FDE generation
-  int num_simhash_projections = 6;  // Number of SimHash projections used to partition space
-  int seed = 1;                     // Seed for the FDE generation process
-  int projection_dimension = 128;   // Dimension to which points are reduced via random projections
-  bool fill_empty_partitions = false;  // Fill empty partitions with nearest point coordinates
-  int final_projection_dimension = 0;  // Dimension to which the final FDE is projected
-  size_t R = 200;                      // Max Outdegree of the routing graph
-  size_t L = 600;                      // Beam length
-  double alpha = 1.2;                  // Robust pruning parameter
-  bool two_pass = false;               // Two-pass graph construction
-  bool verbose = false;                // Print debug statements
-};
+/* MUVERA
+
+*/
+
 /* ===================================MUVERA Index Class=================================== */
 template<bool metric>
-class IndexMUVERA : Index<metric>, IndexMUVERAParams {
+class IndexMUVERA : public Index<metric> {
  public:
   using ChPoint = Index<metric>::ChPoint;
   using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
   using Range = PointRange<float, Point>;
   using pid = std::pair<size_t, float>;
   using Index<metric>::d;  // Embedding dimension
-  size_t d_fde;            // FDE dimension
 
-  Range points_fdes;  // FDEs
-  Graph<size_t> G;    // Vamana graph
-  BuildParams BP;
+  // FDE parameters
+  int num_repetitions = 40;         // Number of independent repetitions for FDE generation
+  int num_simhash_projections = 6;  // Number of SimHash projections used to partition space
+  int seed = 1;                     // Seed for the FDE generation process
+  int projection_dimension = 128;   // Dimension to which points are reduced via random projections
+  bool fill_empty_partitions = false;  // Fill empty partitions with nearest point coordinates
+  int final_projection_dimension = 0;  // Dimension to which the final FDE is projected
+  // Vamana parameters
+  size_t R = 200;         // Max Outdegree of the routing graph
+  size_t L = 600;         // Beam length
+  double alpha = 1.2;     // Robust pruning parameter
+  bool two_pass = false;  // Two-pass graph construction
+  bool verbose = false;   // Print debug statements
+
+  size_t d_fde;                       // FDE dimension
+  Range points_fdes;                  // FDEs
+  Graph<size_t> G;                    // Vamana graph
+  BuildParams BP;                     // Vamana build parameters
   knn_index<Point, Range, size_t> I;  // Vamana index
 
   IndexMUVERA(size_t d_) noexcept :
       BP(BuildParams(R, L, alpha, two_pass)), I(knn_index<Point, Range, size_t>(BP)) {
     d = d_;
   }
-  IndexMUVERA(size_t d_, const IndexMUVERAParams &params) noexcept :
-      IndexMUVERAParams(params),
+  IndexMUVERA(size_t d_, const IndexParams &params) noexcept :
+      R(params.R),
+      L(params.L),
+      alpha(params.alpha),
+      two_pass(params.two_pass),
       BP(BuildParams(R, L, alpha, two_pass)),
       I(knn_index<Point, Range, size_t>(BP)) {
     d = d_;
+    num_repetitions = params.num_repetitions;
+    num_simhash_projections = params.num_simhash_projections;
+    seed = params.seed;
+    projection_dimension = params.projection_dimension;
+    fill_empty_partitions = params.fill_empty_partitions;
+    final_projection_dimension = params.final_projection_dimension;
+    verbose = params.verbose;
   }
-  ~IndexMUVERA();
   /* ----------------------------Overridden Functions---------------------------- */
   void build(const PointCloudSet<ChPoint> &points) override;
   std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> search(
@@ -68,8 +81,8 @@ class IndexMUVERA : Index<metric>, IndexMUVERAParams {
 // Builds the index given a point cloud set.
 template<bool metric>
 void IndexMUVERA<metric>::build(const PointCloudSet<ChPoint> &points) {
-  std::cout << "Building index..." << std::endl;
   // Step 1: Compute FDEs of data point clouds
+  if (verbose) std::cout << "Computing FDEs..." << std::endl;
   auto fdes = parlay::sequence<std::vector<float>>::uninitialized(points.size());
   graph_mining::FixedDimensionalEncodingConfig fde_config(
       d, num_repetitions, num_simhash_projections, seed,
@@ -86,6 +99,7 @@ void IndexMUVERA<metric>::build(const PointCloudSet<ChPoint> &points) {
   d_fde = fdes[0].size();
   points_fdes = Range(fdes, d_fde);
   // Step 2: Build Vamana index on the FDEs
+  if (verbose) std::cout << "Building Vamana Index..." << std::endl;
   G = Graph<size_t>(BP.R, points.size());
   stats<size_t> BuildStats(G.size());
   I.build_index(G, points_fdes, BuildStats);
@@ -139,10 +153,10 @@ void IndexMUVERA<metric>::save(const std::string &filename) {
   std::string graph_filename = filename;
   size_t pos = graph_filename.rfind(".");
   if (pos != std::string::npos) {
-    graph_filename.insert(pos, "_graph");
+    graph_filename.insert(pos, "_graph.muvera");
   } else {
-    // If . not found, append _graph.bin
-    graph_filename += "_graph.bin";
+    // If . not found, append _graph.muvera.bin
+    graph_filename += "_graph.muvera.bin";
   }
 
   char *graph_filename_c = (char *)graph_filename.c_str();
@@ -151,10 +165,10 @@ void IndexMUVERA<metric>::save(const std::string &filename) {
   std::string fdes_filename = filename;
   pos = fdes_filename.rfind(".");
   if (pos != std::string::npos) {
-    fdes_filename.insert(pos, "_fdes");
+    fdes_filename.insert(pos, "_fdes.muvera");
   } else {
-    // If . not found, append _fdes.bin
-    fdes_filename += "_fdes.bin";
+    // If . not found, append _fdes.muvera.bin
+    fdes_filename += "_fdes.muvera.bin";
   }
 
   char *fdes_filename_c = (char *)fdes_filename.c_str();
@@ -167,9 +181,9 @@ void IndexMUVERA<metric>::load(const std::string &filename, const PointCloudSet<
   std::string graph_filename = filename;
   size_t pos = graph_filename.rfind(".");
   if (pos != std::string::npos) {
-    graph_filename.insert(pos, "_graph");
+    graph_filename.insert(pos, "_graph.muvera");
   } else {
-    graph_filename += "_graph.bin";
+    graph_filename += "_graph.muvera.bin";
   }
   char *graph_filename_c = (char *)graph_filename.c_str();
   G = Graph<size_t>(graph_filename_c);
@@ -179,23 +193,16 @@ void IndexMUVERA<metric>::load(const std::string &filename, const PointCloudSet<
   std::string fdes_filename = filename;
   pos = fdes_filename.rfind(".");
   if (pos != std::string::npos) {
-    fdes_filename.insert(pos, "_fdes");
+    fdes_filename.insert(pos, "_fdes.muvera");
   } else {
-    fdes_filename += "_fdes.bin";
+    fdes_filename += "_fdes.muvera.bin";
   }
   char *fdes_filename_c = (char *)fdes_filename.c_str();
   points_fdes = Range(fdes_filename_c);
   d_fde = points_fdes.get_dims();
 }
 
-template<bool metric>
-IndexMUVERA<metric>::~IndexMUVERA() {
-  // traverse_and_delete(root);
-  // delete root;
-  // root = nullptr;
-}
-
-template struct IndexMUVERA<true>;   // Instantiates for L2 metric (metric = true)
-template struct IndexMUVERA<false>;  // Instantiates for MIPS      (metric = false)
+using IndexMUVERAL2 = IndexMUVERA<true>;   // L2 metric
+using IndexMUVERAIP = IndexMUVERA<false>;  // MIPS
 
 }  // namespace mvivf

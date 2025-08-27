@@ -93,4 +93,33 @@ auto kmeans_subsample_assign(const parlay::sequence<parlay::sequence<float>>& da
   return std::make_tuple(centers, cluster_ids, active_indices);
 }
 
+// Runs kmeans on a subsample of size os_rate*k
+// Returns centers and cluster_ids
+template<bool metric>
+auto kmeans_subsample_assign_only(const parlay::sequence<parlay::sequence<float>>& data, size_t k,
+                                  size_t os_rate, bool verbose = false) {
+  using PointTy = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
+  using Range = PointRange<float, PointTy>;
+  size_t n = data.size();
+  size_t dims = data[0].size();
+  Range data_range = Range(data, dims);
+  Range centers;
+  if (os_rate * k >= n) {
+    centers = kmeans<float, PointTy>(data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+  } else {
+    auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
+      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+      return data[id];
+    });
+    Range sampled_data_range = Range(sampled_points, dims);
+    centers =
+        kmeans<float, PointTy>(sampled_data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+  }
+  parlay::sequence<uint32_t> cluster_ids_ =
+      compute_cluster_ids_pairwise_blocked<PointTy>(data_range, centers);
+  auto cluster_ids = parlay::sequence<size_t>::from_function(
+      n, [&](size_t i) { return static_cast<size_t>(cluster_ids_[i]); });
+  return std::make_tuple(centers, cluster_ids);
+}
+
 }  // namespace mvivf

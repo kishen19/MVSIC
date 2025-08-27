@@ -20,7 +20,7 @@ namespace mvivf {
 
 /* =================================Multi-Vector IVF Flat Class=============================== */
 template<bool metric>
-class IndexMVIVFFlat : Index<metric> {
+class IndexMVIVFFlat : public Index<metric> {
  public:
   using ChPoint = Index<metric>::ChPoint;  // Chamfer Point Type
   using Index<metric>::d;                  // Embedding dimension

@@ -49,4 +49,10 @@ elif [ "$index" == "muvera" ]; then
       -rounds ${rounds} -d_fde ${dfde} -v > logs/${index}_${dataset}_fde${dfde}.log
     echo ${index} ${dataset} ${dfde} done
   done
+elif [ "$index" == "mpv" ]; then
+  bazel-bin/experiments/${index}_benchmark \
+    -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
+    -o ${RESULTSPATH}/${dataset}/indices/${index}.bin \
+    -rounds ${rounds} -v > logs/${index}_${dataset}.log
+  echo ${index} ${dataset} done
 fi

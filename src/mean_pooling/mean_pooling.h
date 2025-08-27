@@ -2,12 +2,12 @@
 
 #include <queue>
 #include <set>
+#include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
+#include "algorithms/utils/mips_point.h"
 #include "algorithms/utils/stats.h"
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
-#include "algorithms/utils/euclidian_point.h"
-#include "algorithms/utils/mips_point.h"
 #include "src/common/index.h"
 #include "src/utils/point_range.h"
 
@@ -15,7 +15,7 @@ namespace mvivf {
 
 /* =============================Mean-Pooling + Vamana Index Class============================ */
 template<bool metric>
-class IndexMPV : Index<metric> {
+class IndexMPV : public Index<metric> {
  public:
   using ChPoint = Index<metric>::ChPoint;
   using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
@@ -43,10 +43,10 @@ class IndexMPV : Index<metric> {
       L(params.L),
       alpha(params.alpha),
       two_pass(params.two_pass),
-      verbose(params.verbose),
       BP(BuildParams(R, L, alpha, two_pass)),
       I(knn_index<Point, Range, size_t>(BP)) {
     d = d_;
+    verbose = params.verbose;
   }
   /* ----------------------------Overridden Functions---------------------------- */
   void build(const PointCloudSet<ChPoint> &points) override;

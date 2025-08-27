@@ -15,11 +15,22 @@ struct IndexParams {
   size_t iters = 5;           // Number of Outer Lloyd's Iterations
   size_t os_rate = 20;        // Oversampling factor for Inner Kmeans
 
-  // MPV and MUVERA params
-  size_t R = 32;
-  size_t L = 64;
-  double alpha = 1.0;
-  bool two_pass = false;  // Two-pass graph construction
+  // MVQ params
+  size_t num_leaf_centroids = 16;  // Number of centroids per leaf cluster
+
+  // MUVERA: FDE params
+  int num_repetitions = 20;         // Number of independent repetitions for FDE generation
+  int num_simhash_projections = 4;  // Number of SimHash projections used
+  int seed = 1;                     // Seed for the FDE generation process
+  int projection_dimension = 8;     // Dimension to which points are reduced via random projections
+  bool fill_empty_partitions = false;  // Fill empty partitions with nearest point coordinates
+  int final_projection_dimension = 0;  // Dimension to which the final FDE is projected
+
+  // MPV and MUVERA: Vamana params
+  size_t R = 200;
+  size_t L = 600;
+  double alpha = 1.2;
+  bool two_pass = false;
 
   // mvivf index params
   static IndexParams mvivf(size_t num_clusters, size_t maxsize, double s = 1.0, size_t iters = 5,
@@ -44,6 +55,42 @@ struct IndexParams {
     params.s = s;
     params.iters = iters;
     params.os_rate = os_rate;
+    params.verbose = verbose;
+    return params;
+  }
+
+  // mvivf_flat index params
+  static IndexParams mvivf_flat_mvq(size_t num_clusters, size_t num_leaf_centroids = 16,
+                                    double s = 1.0, size_t iters = 5, size_t os_rate = 20,
+                                    bool verbose = false) {
+    IndexParams params;
+    params.method = "mvivf_flat";
+    params.num_clusters = num_clusters;
+    params.num_leaf_centroids = num_leaf_centroids;
+    params.s = s;
+    params.iters = iters;
+    params.os_rate = os_rate;
+    params.verbose = verbose;
+    return params;
+  }
+
+  // muvera index params
+  static IndexParams muvera(int num_repetitions = 20, int num_simhash_projections = 4, int seed = 1,
+                            int projection_dimension = 8, bool fill_empty_partitions = false,
+                            int final_projection_dimension = 0, size_t R = 200, size_t L = 600,
+                            double alpha = 1.2, bool two_pass = false, bool verbose = false) {
+    IndexParams params;
+    params.method = "muvera";
+    params.num_repetitions = num_repetitions;
+    params.num_simhash_projections = num_simhash_projections;
+    params.seed = seed;
+    params.projection_dimension = projection_dimension;
+    params.fill_empty_partitions = fill_empty_partitions;
+    params.final_projection_dimension = final_projection_dimension;
+    params.R = R;
+    params.L = L;
+    params.alpha = alpha;
+    params.two_pass = two_pass;
     params.verbose = verbose;
     return params;
   }
@@ -88,19 +135,7 @@ struct IndexParams {
   //   return params;
   // }
 
-  // // muvera
-  // static IndexParams muvera(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) {
-  //   IndexParams params;
-  //   params.method = "muvera";
-  //   params.k = k;
-  //   params.beamSize = L;
-  //   params.cut = cut;
-  //   params.limit = limit;
-  //   params.degree_limit = degree_limit;
-  //   return params;
-  // }
-
- private:
+  //  private:
   IndexParams() = default;
 };
 

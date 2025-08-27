@@ -15,13 +15,11 @@ struct SearchParams {
   // Single Vector Heuristic Specific Params
   size_t cands;
 
-  // Vamana Params
+  // Vamana (MUVERA, MPV) Params
   size_t beamSize;
   double cut;
   size_t limit;
   size_t degree_limit;
-
-  // Muvera Params
 
   // mvivf search params
   static SearchParams mvivf(size_t k, size_t nprobes, size_t beam_length = 0) {
@@ -43,6 +41,16 @@ struct SearchParams {
     params.method = "mvivf_flat";
     params.k = k;
     params.nprobes = nprobes;
+    return params;
+  }
+
+  // mvivf_flat with MVQ search params
+  static SearchParams mvivf_flat_mvq(size_t k, size_t nprobes, size_t cands) {
+    SearchParams params;
+    params.method = "mvivf_flat_mvq";
+    params.k = k;
+    params.nprobes = nprobes;
+    params.cands = cands;
     return params;
   }
 
@@ -97,7 +105,7 @@ struct SearchParams {
     return params;
   }
 
- private:
+  //  private:
   SearchParams() = default;
 };
 

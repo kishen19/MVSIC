@@ -20,7 +20,7 @@ struct IndexVamanaParams {
 };
 /* ==================================Multi-Vector Vamana Class================================= */
 template<bool metric>
-class IndexVamana : Index<metric>, IndexVamanaParams {
+class IndexVamana : public Index<metric>, public IndexVamanaParams {
  public:
   using ChPoint = Index<metric>::ChPoint;
   using indexType = size_t;

@@ -79,4 +79,16 @@ elif [ "$index" == "muvera" ]; then
       echo ${dataset} ${dfde} ${k} done
     done
   done
+elif [ "$index" == "mpv" ]; then
+  for k in ${ks[@]}; do
+    bazel-bin/experiments/${index}_benchmark \
+      -i  ${DATAPATH}/${dataset}/${dataset}_points.pcs  \
+      -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
+      -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
+      -index ${RESULTSPATH}/${dataset}/indices/${index}.bin \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -k ${k} \
+      -Ll 64 -Lr 2048 -Lmp 2
+    echo ${dataset} ${k} done
+  done
 fi

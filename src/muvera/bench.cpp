@@ -41,10 +41,10 @@ void bench(mvivf::commandLine &P) {
   bool verbose = P.getOption("-v");
 
   auto points = PC(inFile);
-  IndexMUVERAParams index_params(num_repetitions, num_simhash_projections, seed,
-                                 projection_dimension, fill_empty_partitions,
-                                 final_projection_dimension, R, L_build, alpha, two_pass, verbose);
-  SearchParams search_params(k, L, 1.35, points.size(), R, "muvera");
+  IndexParams index_params = IndexParams::muvera(
+      num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
+      final_projection_dimension, R, L_build, alpha, two_pass, verbose);
+  SearchParams search_params = SearchParams::muvera(k, L, 1.35, points.size(), R);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

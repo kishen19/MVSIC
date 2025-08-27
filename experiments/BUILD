@@ -14,10 +14,49 @@ cc_binary(
 )
 
 cc_binary(
+    name = "mpv_benchmark",
+    srcs = ["mpv_benchmark.cpp"],
+    deps = [
+        "//src/mean_pooling",
+        "//src/utils:chamfer_ip_point",
+        "//src/utils:chamfer_l2_point",
+        "//src/utils:parse_command_line",
+        "//src/utils:point_cloud_set",
+        "//src/utils:stats",
+    ],
+)
+
+cc_binary(
     name = "mvivf_benchmark",
     srcs = ["mvivf_benchmark.cpp"],
     deps = [
         "//src/mvivf",
+        "//src/utils:chamfer_ip_point",
+        "//src/utils:chamfer_l2_point",
+        "//src/utils:parse_command_line",
+        "//src/utils:point_cloud_set",
+        "//src/utils:stats",
+    ],
+)
+
+cc_binary(
+    name = "num_cluster_tuning",
+    srcs = ["num_cluster_tuning.cpp"],
+    deps = [
+        "//src/mvivf_flat",
+        "//src/utils:chamfer_ip_point",
+        "//src/utils:chamfer_l2_point",
+        "//src/utils:parse_command_line",
+        "//src/utils:point_cloud_set",
+        "//src/utils:stats",
+    ],
+)
+
+cc_binary(
+    name = "tuning_s",
+    srcs = ["tuning_s.cpp"],
+    deps = [
+        "//src/mvivf_flat",
         "//src/utils:chamfer_ip_point",
         "//src/utils:chamfer_l2_point",
         "//src/utils:parse_command_line",

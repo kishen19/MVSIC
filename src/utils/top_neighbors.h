@@ -43,6 +43,38 @@ size_t get_knn_into_uninitialized(const ChPoint& q, const PointCloudSet<ChPoint>
   return dist_cmps;
 }
 
+// Cluster:
+// - .centroids, .point_ids, .LUT
+template<typename ChPoint, typename Cluster>
+size_t get_knn_via_centroids_into_uninitialized(const ChPoint& q, const Cluster& cluster, size_t k,
+                                                std::pair<size_t, float>* knn) {
+  // Compute dot product matrix
+  size_t dim = q.get_dims();
+  auto& centroids = cluster.centroids;
+  Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+      M_centroids(centroids.data(), centroids.size(), dim);
+  Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> M_q(
+      q.data(), q.size(), dim);
+  Eigen::MatrixXf inner_product_matrix = -1.0f * M_q * M_centroids.transpose();
+  size_t dist_cmps = q.size() + centroids.size();
+  // Compute Chamfer distance estimates
+  auto& LUT = cluster.LUT;
+  auto& point_ids = cluster.point_ids;
+  auto estimates = parlay::tabulate(point_ids.size(), [&](size_t i) {
+    auto qdists = parlay::sequence<float>::from_function(q.size(), [&](size_t j) {
+      auto dots = parlay::delayed_seq<float>(
+          LUT[i].size(), [&](size_t c) { return inner_product_matrix(j, LUT[i][c]); });
+      return parlay::reduce(dots, parlay::minm<float>());
+    });
+    return std::pair(point_ids[i], parlay::reduce(qdists) / q.size());
+  });
+  parlay::sort_inplace(estimates, [](const auto& a, const auto& b) {
+    return a.second < b.second;  // Sort by distance
+  });
+  parlay::parallel_for(0, std::min(k, estimates.size()), [&](size_t i) { knn[i] = estimates[i]; });
+  return dist_cmps;
+}
+
 template<typename Point, typename Range>
 std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn_ids(
     const Point& q, const Range& points, const parlay::sequence<std::pair<size_t, size_t>>& ids,
