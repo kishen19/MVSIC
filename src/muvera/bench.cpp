@@ -32,9 +32,11 @@ void bench(mvivf::commandLine &P) {
   int projection_dimension = P.getOptionIntValue("-projd", 8);
   bool fill_empty_partitions = P.getOption("-fill_empty_partitions");
   int final_projection_dimension = P.getOptionIntValue("-final_projd", 0);
+  bool normalize = P.getOption("-norm");
   size_t R = 200;
   size_t L_build = 600;
   size_t k = P.getOptionLongValue("-k", 10);
+  bool norerank = P.getOption("-no_rerank");
   size_t L = P.getOptionLongValue("-L", 16);
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   bool two_pass = P.getOption("-tp");
@@ -43,8 +45,8 @@ void bench(mvivf::commandLine &P) {
   auto points = PC(inFile);
   IndexParams index_params = IndexParams::muvera(
       num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
-      final_projection_dimension, R, L_build, alpha, two_pass, verbose);
-  SearchParams search_params = SearchParams::muvera(k, L, 1.35, points.size(), R);
+      final_projection_dimension, normalize, R, L_build, alpha, two_pass, verbose);
+  SearchParams search_params = SearchParams::muvera(k, L, 1.35, points.size(), R, rerank);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

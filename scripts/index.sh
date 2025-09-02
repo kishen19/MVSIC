@@ -43,16 +43,30 @@ elif [ "$index" == "vamana" ]; then
   done
 elif [ "$index" == "muvera" ]; then
   for dfde in ${dfdes[@]}; do
-    bazel-bin/experiments/${index}_benchmark \
+    bazel-bin/experiments/muvera_benchmark \
       -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
       -o ${RESULTSPATH}/${dataset}/indices/${index}_fde${dfde}.bin \
       -rounds ${rounds} -d_fde ${dfde} -v > logs/${index}_${dataset}_fde${dfde}.log
     echo ${index} ${dataset} ${dfde} done
   done
+elif [ "$index" == "muvera_norm" ]; then
+  for dfde in ${dfdes[@]}; do
+    bazel-bin/experiments/muvera_benchmark \
+      -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
+      -o ${RESULTSPATH}/${dataset}/indices/${index}_fde${dfde}.bin \
+      -rounds ${rounds} -d_fde ${dfde} -norm -v > logs/${index}_${dataset}_fde${dfde}.log
+    echo ${index} ${dataset} ${dfde} done
+  done
 elif [ "$index" == "mpv" ]; then
-  bazel-bin/experiments/${index}_benchmark \
+  bazel-bin/experiments/mpv_benchmark \
     -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
     -o ${RESULTSPATH}/${dataset}/indices/${index}.bin \
     -rounds ${rounds} -v > logs/${index}_${dataset}.log
+  echo ${index} ${dataset} done
+elif [ "$index" == "mpv_norm" ]; then
+  bazel-bin/experiments/mpv_benchmark \
+    -i ${DATAPATH}/${dataset}/${dataset}_points.pcs \
+    -o ${RESULTSPATH}/${dataset}/indices/${index}.bin \
+    -rounds ${rounds} -norm  -v> logs/${index}_${dataset}.log
   echo ${index} ${dataset} done
 fi

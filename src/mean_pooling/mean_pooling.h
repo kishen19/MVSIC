@@ -23,11 +23,13 @@ class IndexMPV : public Index<metric> {
   using pid = std::pair<size_t, float>;
   using Index<metric>::d;  // Embedding dimension
 
+  bool normalize = true;  // Are the mean-pooled vectors normalized?
+  bool verbose = false;   // Print debug statements
+  // Vamana parameters
   size_t R = 200;         // Max Outdegree of the routing graph
   size_t L = 600;         // Beam length
   double alpha = 1.2;     // Robust pruning parameter
   bool two_pass = false;  // Two-pass graph construction
-  bool verbose = false;   // Print debug statements
 
   Range points_mp;  // Mean-Pooled points
   Graph<size_t> G;  // Vamana graph
@@ -46,6 +48,7 @@ class IndexMPV : public Index<metric> {
       BP(BuildParams(R, L, alpha, two_pass)),
       I(knn_index<Point, Range, size_t>(BP)) {
     d = d_;
+    normalize = params.normalize;
     verbose = params.verbose;
   }
   /* ----------------------------Overridden Functions---------------------------- */
@@ -58,21 +61,37 @@ class IndexMPV : public Index<metric> {
 };
 
 /* =======================================Implementation======================================= */
+// Compute the mean-pooled vector, given a point cloud
+template<typename ChPoint>
+std::vector<float> mean_pooling(const ChPoint &point, bool normalize_ = true) {
+  std::vector<float> mpv(point.get_dims());
+  size_t point_size = point.size();
+  float *coords = point.data();
+  size_t d = point.get_dims();
+  for (size_t j = 0; j < d; j++) {
+    auto ent_j =
+        parlay::delayed_seq<float>(point_size, [&](size_t k) { return coords[k * d + j]; });
+    mpv[j] = parlay::reduce(ent_j) / point_size;
+  }
+  if (normalize_) {
+    auto sqrs = parlay::delayed_seq<float>(mpv.size(), [&](size_t j) { return mpv[j] * mpv[j]; });
+    float norm = std::sqrt(parlay::reduce(sqrs));
+    if (norm > 1e-7) {  // Avoid division by zero
+      parlay::parallel_for(0, mpv.size(), [&](size_t j) { mpv[j] /= norm; });
+    }
+  }
+  return mpv;
+}
+
 // Builds the index given a point cloud set.
 template<bool metric>
 void IndexMPV<metric>::build(const PointCloudSet<ChPoint> &points) {
   std::cout << "Building index..." << std::endl;
-  // Step 1: Compute Mean-Pooled points of the data point clouds
+  // Step 1: Compute Mean-Pooled vectors of the data point clouds
   auto mpvs = parlay::sequence<std::vector<float>>::uninitialized(points.size());
   parlay::parallel_for(0, points.size(), [&](size_t i) {
-    size_t point_size = points.get_size(i);
-    float *coords = points.get_coords(i);
     mpvs[i].resize(d);
-    for (size_t j = 0; j < d; j++) {
-      auto ent_i =
-          parlay::delayed_seq<float>(point_size, [&](size_t k) { return coords[k * d + j]; });
-      mpvs[i][j] = parlay::reduce(ent_i) / point_size;  // Mean pooling
-    }
+    mpvs[i] = mean_pooling(points[i], normalize);
   });
   points_mp = Range(mpvs, d);
   // Step 2: Build Vamana index on the mean-pooled points
@@ -88,16 +107,10 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMPV<metric>::
     const ChPoint &query, const PointCloudSet<ChPoint> &points, const SearchParams &params) {
   size_t k = params.k;
   // Step 1: Compute mean-pooling of the query point cloud
-  std::vector<float> query_mpv(d);
-  float *q_coords = query.data();
-  for (size_t j = 0; j < d; j++) {
-    auto ent_i =
-        parlay::delayed_seq<float>(query.size(), [&](size_t k) { return q_coords[k * d + j]; });
-    query_mpv[j] = parlay::reduce(ent_i) / query.size();  // Mean pooling
-  }
+  std::vector<float> query_mpv = mean_pooling(query, params.normalize);
   auto query_point = Point(query_mpv.data(), d, d, -1);
 
-  // Step 2: Run beam search and collect top cand neighbors
+  // Step 2: Run beam search
   size_t start_point = I.get_start();
   auto QP = QueryParams(k, params.beamSize, params.cut, params.limit, params.degree_limit);
   auto [result, dist_cmps] =
@@ -105,19 +118,27 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMPV<metric>::
   parlay::sequence<pid> visited = result.second;
   dist_cmps = (dist_cmps * 2 * d) / d;  // TODO: fix this
   // Step 3: Re-rank the candidates and return top k
-  auto cmp_rerank = parlay::sequence<size_t>::uninitialized(visited.size());
-  auto results_rerank =
-      parlay::sequence<std::pair<float, size_t>>::from_function(visited.size(), [&](size_t i) {
-        size_t id = visited[i].first;
-        auto [dist, d_c] = query.distance_w_cmps(points[id]);
-        cmp_rerank[i] = d_c;
-        return std::make_pair(dist, id);
-      });
-  dist_cmps += parlay::reduce(cmp_rerank);
-  parlay::sort_inplace(results_rerank);
-  auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min(k, results_rerank.size()),
-      [&](size_t i) { return std::make_pair(results_rerank[i].second, results_rerank[i].first); });
+  // Step 3: Re-rank the candidates and return top k
+  auto final_results =
+      parlay::sequence<std::pair<size_t, float>>::uninitialized(std::min(k, visited.size()));
+  if (params.rerank) {
+    auto cmp_rerank = parlay::sequence<size_t>::uninitialized(visited.size());
+    auto results_rerank =
+        parlay::sequence<std::pair<size_t, float>>::from_function(visited.size(), [&](size_t i) {
+          size_t id = visited[i].first;
+          auto [dist, d_c] = query.distance_w_cmps(points[id]);
+          cmp_rerank[i] = d_c;
+          return std::make_pair(id, dist);
+        });
+    dist_cmps += parlay::reduce(cmp_rerank);
+    parlay::sort_inplace(results_rerank, [](const auto &a, const auto &b) {
+      return a.second < b.second;  // Sort by distance
+    });
+    parlay::parallel_for(0, final_results.size(),
+                         [&](size_t i) { final_results[i] = results_rerank[i]; });
+  } else {
+    parlay::parallel_for(0, final_results.size(), [&](size_t i) { final_results[i] = visited[i]; });
+  }
   return std::make_pair(final_results, dist_cmps);
 }
 
@@ -126,10 +147,10 @@ void IndexMPV<metric>::save(const std::string &filename) {
   std::string graph_filename = filename;
   size_t pos = graph_filename.rfind(".");
   if (pos != std::string::npos) {
-    graph_filename.insert(pos, "_graph");
+    graph_filename.insert(pos, "_graph.mpv");
   } else {
-    // If . not found, append _graph.bin
-    graph_filename += "_graph.bin";
+    // If . not found, append _graph.mpv.bin
+    graph_filename += "_graph.mpv.bin";
   }
 
   char *graph_filename_c = (char *)graph_filename.c_str();
@@ -138,10 +159,10 @@ void IndexMPV<metric>::save(const std::string &filename) {
   std::string mpvs_filename = filename;
   pos = mpvs_filename.rfind(".");
   if (pos != std::string::npos) {
-    mpvs_filename.insert(pos, "_mpvs");
+    mpvs_filename.insert(pos, "_mpvs.mpv");
   } else {
-    // If . not found, append _fdes.bin
-    mpvs_filename += "_mpvs.bin";
+    // If . not found, append _mpvs.mpv.bin
+    mpvs_filename += "_mpvs.mpv.bin";
   }
 
   char *mpvs_filename_c = (char *)mpvs_filename.c_str();
@@ -154,9 +175,9 @@ void IndexMPV<metric>::load(const std::string &filename, const PointCloudSet<ChP
   std::string graph_filename = filename;
   size_t pos = graph_filename.rfind(".");
   if (pos != std::string::npos) {
-    graph_filename.insert(pos, "_graph");
+    graph_filename.insert(pos, "_graph.mpv");
   } else {
-    graph_filename += "_graph.bin";
+    graph_filename += "_graph.mpv.bin";
   }
   char *graph_filename_c = (char *)graph_filename.c_str();
   G = Graph<size_t>(graph_filename_c);
@@ -166,9 +187,9 @@ void IndexMPV<metric>::load(const std::string &filename, const PointCloudSet<ChP
   std::string mpvs_filename = filename;
   pos = mpvs_filename.rfind(".");
   if (pos != std::string::npos) {
-    mpvs_filename.insert(pos, "_mpvs");
+    mpvs_filename.insert(pos, "_mpvs.mpv");
   } else {
-    mpvs_filename += "_mpvs.bin";
+    mpvs_filename += "_mpvs.mpv.bin";
   }
   char *mpvs_filename_c = (char *)mpvs_filename.c_str();
   points_mp = Range(mpvs_filename_c);

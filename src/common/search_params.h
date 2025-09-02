@@ -21,12 +21,30 @@ struct SearchParams {
   size_t limit;
   size_t degree_limit;
 
+  bool rerank = true;
+  bool normalize = true;
+
   // mvivf search params
   static SearchParams mvivf(size_t k, size_t nprobes, size_t beam_length = 0) {
     SearchParams params;
     params.method = "mvivf";
     params.k = k;
     params.nprobes = nprobes;
+    if (beam_length == 0) {
+      params.beam_length = 2 * nprobes;
+    } else {
+      params.beam_length = beam_length;
+    }
+    return params;
+  }
+
+  // mvivf with MVQ search params
+  static SearchParams mvivf_mvq(size_t k, size_t nprobes, size_t cands, size_t beam_length = 0) {
+    SearchParams params;
+    params.method = "mvivf_mvq";
+    params.k = k;
+    params.nprobes = nprobes;
+    params.cands = cands;
     if (beam_length == 0) {
       params.beam_length = 2 * nprobes;
     } else {
@@ -82,7 +100,8 @@ struct SearchParams {
   }
 
   // muvera
-  static SearchParams muvera(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) {
+  static SearchParams muvera(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
+                             bool rerank = true, bool normalize = true) {
     SearchParams params;
     params.method = "muvera";
     params.k = k;
@@ -90,11 +109,14 @@ struct SearchParams {
     params.cut = cut;
     params.limit = limit;
     params.degree_limit = degree_limit;
+    params.rerank = rerank;
+    params.normalize = normalize;
     return params;
   }
 
   // mean_pooling
-  static SearchParams mpv(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) {
+  static SearchParams mpv(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
+                          bool rerank = true, bool normalize = true) {
     SearchParams params;
     params.method = "mpv";
     params.k = k;
@@ -102,6 +124,8 @@ struct SearchParams {
     params.cut = cut;
     params.limit = limit;
     params.degree_limit = degree_limit;
+    params.rerank = rerank;
+    params.normalize = normalize;
     return params;
   }
 

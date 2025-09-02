@@ -28,15 +28,19 @@ void bench(mvivf::commandLine &P) {
 
   size_t R = P.getOptionLongValue("-R", 32);
   size_t L_build = P.getOptionLongValue("-L_build", 64);
+  bool normalize = P.getOption("-norm");
   size_t k = P.getOptionLongValue("-k", 10);
   size_t L = P.getOptionLongValue("-L", 16);
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   bool two_pass = P.getOption("-tp");
   bool verbose = P.getOption("-v");
+  bool norerank = P.getOption("-no_rerank");
+  bool normalize_query = P.getOption("-normq");
 
   auto points = PC(inFile);
-  IndexParams index_params = IndexParams::mpv(R, L_build, alpha, two_pass, verbose);
-  SearchParams search_params = SearchParams::mpv(k, L, 1.35, points.size(), R);
+  IndexParams index_params = IndexParams::mpv(R, L_build, alpha, two_pass, normalize, verbose);
+  SearchParams search_params =
+      SearchParams::mpv(k, L, 1.35, points.size(), R, !norerank, normalize_query);
   IndexMPV<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

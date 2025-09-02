@@ -154,7 +154,8 @@ inline void write_to_csv(const std::string csv_filename,
   csv << "k";
   if (params[0].method == "mvivf" || params[0].method == "svh") {
     csv << "nprobes";
-  } else if (params[0].method == "vamana" || params[0].method == "muvera") {
+  } else if (params[0].method == "vamana" || params[0].method == "muvera" ||
+             params[0].method == "mpv") {
     csv << "L";
   }
   csv << "QPS_seq"

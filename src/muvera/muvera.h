@@ -35,6 +35,7 @@ class IndexMUVERA : public Index<metric> {
   int projection_dimension = 128;   // Dimension to which points are reduced via random projections
   bool fill_empty_partitions = false;  // Fill empty partitions with nearest point coordinates
   int final_projection_dimension = 0;  // Dimension to which the final FDE is projected
+  bool normalize = false;
   // Vamana parameters
   size_t R = 200;         // Max Outdegree of the routing graph
   size_t L = 600;         // Beam length
@@ -66,6 +67,7 @@ class IndexMUVERA : public Index<metric> {
     projection_dimension = params.projection_dimension;
     fill_empty_partitions = params.fill_empty_partitions;
     final_projection_dimension = params.final_projection_dimension;
+    normalize = params.normalize;
     verbose = params.verbose;
   }
   /* ----------------------------Overridden Functions---------------------------- */
@@ -95,6 +97,14 @@ void IndexMUVERA<metric>::build(const PointCloudSet<ChPoint> &points) {
     float *coords = points.get_coords(i);
     std::vector<float> point_data(coords, coords + point_size * d);
     fdes[i] = graph_mining::GenerateDocumentFixedDimensionalEncoding(point_data, fde_config);
+    if (normalize) {
+      auto sqrs = parlay::delayed_seq<float>(fdes[i].size(),
+                                             [&](size_t j) { return fdes[i][j] * fdes[i][j]; });
+      float norm = std::sqrt(parlay::reduce(sqrs));
+      if (norm > 1e-7) {  // Avoid division by zero
+        parlay::parallel_for(0, fdes[i].size(), [&](size_t j) { fdes[i][j] /= norm; });
+      }
+    }
   });
   d_fde = fdes[0].size();
   points_fdes = Range(fdes, d_fde);
@@ -123,7 +133,15 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMUVERA<metric
   std::vector<float> query_fde =
       graph_mining::GenerateQueryFixedDimensionalEncoding(query_vec, fde_config);
   assert(query_fde.size() == d_fde);
-  // Step 2: Run beam search and collect top cand neighbors
+  if (params.normalize) {
+    auto sqrs = parlay::delayed_seq<float>(query_fde.size(),
+                                           [&](size_t j) { return query_fde[j] * query_fde[j]; });
+    float norm = std::sqrt(parlay::reduce(sqrs));
+    if (norm > 1e-7) {  // Avoid division by zero
+      parlay::parallel_for(0, query_fde.size(), [&](size_t j) { query_fde[j] /= norm; });
+    }
+  }
+  // Step 2: Run beam search
   size_t start_point = I.get_start();
   auto QP = QueryParams(k, params.beamSize, params.cut, params.limit, params.degree_limit);
   auto query_point = Point(query_fde.data(), d_fde, d_fde, -1);
@@ -132,19 +150,26 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> IndexMUVERA<metric
   parlay::sequence<pid> visited = result.second;
   dist_cmps = (dist_cmps * 2 * d_fde) / d;  // TODO: fix this
   // Step 3: Re-rank the candidates and return top k
-  auto cmp_rerank = parlay::sequence<size_t>::uninitialized(visited.size());
-  auto results_rerank =
-      parlay::sequence<std::pair<float, size_t>>::from_function(visited.size(), [&](size_t i) {
-        size_t id = visited[i].first;
-        auto [dist, d_c] = query.distance_w_cmps(points[id]);
-        cmp_rerank[i] = d_c;
-        return std::make_pair(dist, id);
-      });
-  dist_cmps += parlay::reduce(cmp_rerank);
-  parlay::sort_inplace(results_rerank);
-  auto final_results = parlay::sequence<std::pair<size_t, float>>::from_function(
-      std::min(k, results_rerank.size()),
-      [&](size_t i) { return std::make_pair(results_rerank[i].second, results_rerank[i].first); });
+  auto final_results =
+      parlay::sequence<std::pair<size_t, float>>::uninitialized(std::min(k, visited.size()));
+  if (params.rerank) {
+    auto cmp_rerank = parlay::sequence<size_t>::uninitialized(visited.size());
+    auto results_rerank =
+        parlay::sequence<std::pair<size_t, float>>::from_function(visited.size(), [&](size_t i) {
+          size_t id = visited[i].first;
+          auto [dist, d_c] = query.distance_w_cmps(points[id]);
+          cmp_rerank[i] = d_c;
+          return std::make_pair(id, dist);
+        });
+    dist_cmps += parlay::reduce(cmp_rerank);
+    parlay::sort_inplace(results_rerank, [](const auto &a, const auto &b) {
+      return a.second < b.second;  // Sort by distance
+    });
+    parlay::parallel_for(0, final_results.size(),
+                         [&](size_t i) { final_results[i] = results_rerank[i]; });
+  } else {
+    parlay::parallel_for(0, final_results.size(), [&](size_t i) { final_results[i] = visited[i]; });
+  }
   return std::make_pair(final_results, dist_cmps);
 }
 

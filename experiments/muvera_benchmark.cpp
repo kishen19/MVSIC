@@ -50,19 +50,23 @@ void bench(mvivf::commandLine& P) {
     std::cout << "Invalid FDE dimension: " << d_fde << std::endl;
     abort();
   }
+  bool normalize = P.getOption("-norm");
+
   size_t k = P.getOptionLongValue("-k", 10);
   double cut = P.getOptionDoubleValue("-cut", 1.35);
   size_t beamsizel = P.getOptionLongValue("-Ll", 16);
   size_t beamsizer = P.getOptionLongValue("-Lr", 1024);
   size_t mp = P.getOptionLongValue("-Lmp", 2);
+  bool norerank = P.getOption("-no_rerank");
+  bool normalize_query = P.getOption("-normq");
   int rounds = P.getOptionLongValue("-rounds", 1);
   bool verbose = P.getOption("-v");
   bool is_gold = P.getOption("-gold");
 
   auto points = PC(inFile);
-  IndexMUVERAParams index_params(num_repetitions, num_simhash_projections, seed,
-                                 projection_dimension, fill_empty_partitions,
-                                 final_projection_dimension, R, L_build, alpha, two_pass, verbose);
+  IndexParams index_params = IndexParams::muvera(
+      num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
+      final_projection_dimension, normalize, R, L_build, alpha, two_pass, verbose);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {  // Stats Benchmark
     index.load(indexFile, points);
@@ -77,7 +81,8 @@ void bench(mvivf::commandLine& P) {
     parlay::sequence<SearchParams> search_params_list;
     size_t L = beamsizel;
     while (L <= beamsizer) {
-      search_params_list.push_back(SearchParams(k, L, cut, points.size(), R, "muvera"));
+      search_params_list.push_back(
+          SearchParams::muvera(k, L, cut, points.size(), R, !norerank, normalize_query));
       L *= mp;
     }
     // Compute Stats
