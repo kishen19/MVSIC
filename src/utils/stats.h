@@ -167,7 +167,8 @@ inline void write_to_csv(const std::string csv_filename,
     csv << params[i].k;
     if (params[i].method == "mvivf" || params[i].method == "svh") {
       csv << params[i].nprobes;
-    } else if (params[i].method == "vamana" || params[i].method == "muvera") {
+    } else if (params[i].method == "vamana" || params[i].method == "muvera" ||
+               params[i].method == "mpv") {
       csv << params[i].beamSize;
     }
     csv << results[i].QPS_seq << results[i].QPS_par << results[i].avg_cmps << results[i].recall_1_k

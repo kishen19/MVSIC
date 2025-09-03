@@ -184,7 +184,7 @@ elif [ "$index" == "mpv" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -196,7 +196,7 @@ elif [ "$index" == "mpv_norm" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv_norm.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -norm \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -208,7 +208,7 @@ elif [ "$index" == "mpv_norm_norerank" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv_norm.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -norm -no_rerank \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -220,7 +220,7 @@ elif [ "$index" == "mpv_norerank" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -no_rerank \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -232,7 +232,7 @@ elif [ "$index" == "mpv_normq" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -normq \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -244,7 +244,7 @@ elif [ "$index" == "mpv_norm_normq" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv_norm.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -norm -normq \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -256,7 +256,7 @@ elif [ "$index" == "mpv_norm_norerank_normq" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv_norm.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -norm -no_rerank -normq \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
@@ -268,7 +268,7 @@ elif [ "$index" == "mpv_norerank_normq" ]; then
       -q  ${DATAPATH}/${dataset}/${dataset}${reduced}_queries.pcs \
       -gt ${DATAPATH}/${dataset}/${dataset}${reduced}_chamfer_neighbors.gt  \
       -index ${RESULTSPATH}/${dataset}/indices/mpv.bin \
-      -r ${RESULTSPATH}/${dataset}/stats/${index}_fde${dfde}_k=${k}.csv \
+      -r ${RESULTSPATH}/${dataset}/stats/${index}_k=${k}.csv \
       -k ${k} -no_rerank -normq \
       -Ll 64 -Lr 2048 -Lmp 2
     echo ${index} ${dataset} ${k} done
