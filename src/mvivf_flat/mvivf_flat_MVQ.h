@@ -31,7 +31,7 @@ class IndexMVIVFFlatMVQ : public Index<metric> {
   using Range = PointRange<float, Point>;
   using Index<metric>::d;  // Embedding dimension
 
-  struct Cluster {
+  struct LeafCluster {
     parlay::sequence<size_t> point_ids;
     Range centroids;
     parlay::sequence<parlay::sequence<uint8_t>> LUT;
@@ -48,14 +48,14 @@ class IndexMVIVFFlatMVQ : public Index<metric> {
   size_t iters = 5;     // Number of Outer Lloyd's Iterations
   size_t os_rate = 20;  // Oversampling factor for Inner Kmeans
 
-  PointCloudSet<ChPoint> centers;      // Centers of clusters
-  std::vector<Cluster> clusters = {};  //
+  PointCloudSet<ChPoint> centers;          // Centers of clusters
+  std::vector<LeafCluster> clusters = {};  //
 
   IndexMVIVFFlatMVQ(size_t d_) noexcept { d = d_; }
   IndexMVIVFFlatMVQ(size_t d_, const IndexParams &params) noexcept {
     d = d_;
     num_clusters = params.num_clusters;
-    assert(num_leaf_centroids < 256);
+    assert(params.num_leaf_centroids < 256);
     num_leaf_centroids = params.num_leaf_centroids;
     s = params.s;
     iters = params.iters;
@@ -110,8 +110,34 @@ void IndexMVIVFFlatMVQ<metric>::build(const PointCloudSet<ChPoint> &points) {
         auto group = parlay::sequence<size_t>::from_function(
             end_index - start_index, [&](size_t j) { return id_pt[start_index + j].second; });
         auto group_data = points.filter_flattened(group);
-        auto [centroids, assignment] = kmeans_subsample_assign_only<metric>(
-            group_data, num_leaf_centroids, 10 * os_rate, verbose);
+#ifdef USE_TOP_N_ASSIGN
+        const size_t TOP_N_ASSIGNMENTS = 4;
+        auto [centroids, top_n_assignments] = kmeans_subsample_top_n_assign<metric>(
+            group_data, num_leaf_centroids, TOP_N_ASSIGNMENTS, os_rate, verbose);
+        // Build LUT
+        auto num_embs = parlay::delayed_seq<size_t>(
+            group.size(), [&](size_t j) { return points.get_size(group[j]); });
+        auto [offsets, _total_group_size] = parlay::scan(num_embs);
+        offsets.push_back(_total_group_size);
+        auto LUT = parlay::sequence<parlay::sequence<uint8_t>>(group.size());
+        parlay::parallel_for(0, group.size(), [&](size_t j) {
+          size_t start_offset_index = offsets[j];
+          size_t end_offset_index = offsets[j + 1];
+
+          auto point_cloud_top_n_assignments =
+              top_n_assignments.cut(start_offset_index, end_offset_index);
+          auto flattened_assignments = parlay::flatten(point_cloud_top_n_assignments);
+
+          auto unique_assignments = parlay::unique(flattened_assignments);
+          LUT[j] = parlay::map(unique_assignments,
+                               [](size_t asgn) { return static_cast<uint8_t>(asgn); });
+        });
+        clusters[cluster_id].point_ids = std::move(group);
+        clusters[cluster_id].centroids = Range(centroids, d);
+        clusters[cluster_id].LUT = std::move(LUT);
+#else
+        auto [centroids, assignment] =
+            kmeans_subsample_assign_only<metric>(group_data, num_leaf_centroids, os_rate, verbose);
         // Build LUT
         auto num_embs = parlay::delayed_seq<size_t>(
             group.size(), [&](size_t j) { return points.get_size(group[j]); });
@@ -130,6 +156,7 @@ void IndexMVIVFFlatMVQ<metric>::build(const PointCloudSet<ChPoint> &points) {
         clusters[cluster_id].point_ids = std::move(group);
         clusters[cluster_id].centroids = Range(centroids, d);
         clusters[cluster_id].LUT = std::move(LUT);
+#endif
       },
       1);
 }
@@ -270,15 +297,21 @@ void IndexMVIVFFlatMVQ<metric>::save(const std::string &filename) {
   outfile.write(reinterpret_cast<const char *>(all_lut_data.begin()),
                 total_lut_size * sizeof(uint8_t));
 
-  // Write LUT entry offsets
-  parlay::sequence<size_t> lut_entry_offsets(clusters.size());
+  // Write LUT entry counts per cluster
+  parlay::sequence<size_t> lut_entry_counts(clusters.size());
   for (size_t i = 0; i < clusters.size(); ++i) {
-    lut_entry_offsets[i] = clusters[i].LUT.size();
+    lut_entry_counts[i] = clusters[i].LUT.size();
   }
-  size_t total_lut_entries = parlay::scan_inplace(lut_entry_offsets);
-  lut_entry_offsets.push_back(total_lut_entries);
-  outfile.write(reinterpret_cast<const char *>(lut_entry_offsets.begin()),
-                lut_entry_offsets.size() * sizeof(size_t));
+  outfile.write(reinterpret_cast<const char *>(lut_entry_counts.begin()),
+                lut_entry_counts.size() * sizeof(size_t));
+
+  // Write the size of each LUT entry
+  auto all_lut_entries =
+      parlay::flatten(parlay::map(clusters, [](const auto &c) { return c.LUT; }));
+  parlay::sequence<size_t> all_lut_entry_sizes =
+      parlay::map(all_lut_entries, [](const auto &entry) { return entry.size(); });
+  outfile.write(reinterpret_cast<const char *>(all_lut_entry_sizes.begin()),
+                all_lut_entry_sizes.size() * sizeof(size_t));
 
   outfile.close();
 }
@@ -334,20 +367,25 @@ void IndexMVIVFFlatMVQ<metric>::load(const std::string &filename,
   infile.read(reinterpret_cast<char *>(all_lut_data.begin()),
               all_lut_data.size() * sizeof(uint8_t));
 
-  // Read LUT entry offsets
-  size_t num_lut_entry_offsets = num + 1;
-  parlay::sequence<size_t> lut_entry_offsets(num_lut_entry_offsets);
-  infile.read(reinterpret_cast<char *>(lut_entry_offsets.begin()),
-              lut_entry_offsets.size() * sizeof(size_t));
+  // Read LUT entry counts per cluster
+  parlay::sequence<size_t> lut_entry_counts(num);
+  infile.read(reinterpret_cast<char *>(lut_entry_counts.begin()), num * sizeof(size_t));
+  size_t total_lut_entries = parlay::reduce(lut_entry_counts);
+
+  // Read all LUT entry sizes
+  parlay::sequence<size_t> all_lut_entry_sizes(total_lut_entries);
+  infile.read(reinterpret_cast<char *>(all_lut_entry_sizes.begin()),
+              total_lut_entries * sizeof(size_t));
 
   // Reconstruct the clusters
   clusters.resize(num);
+  auto [lut_entry_counts_scan, total_entries_check] = parlay::scan(lut_entry_counts);
+
   parlay::parallel_for(0, num, [&](size_t i) {
     auto point_id_slice = all_point_ids.cut(point_id_offsets[i], point_id_offsets[i + 1]);
     clusters[i].point_ids = parlay::sequence<size_t>(point_id_slice.begin(), point_id_slice.end());
 
-    // Reconstruct leaf centroids, creating a new sequence for each cluster
-    size_t leaf_centroid_size_flat = leaf_centroid_offsets[i + 1] - leaf_centroid_offsets[i];
+    // Reconstruct leaf centroids
     auto leaf_centroids_data_slice =
         all_leaf_centroids.cut(leaf_centroid_offsets[i] * d, leaf_centroid_offsets[i + 1] * d);
     parlay::sequence<parlay::sequence<float>> temp_centroids_seq(leaf_centroids_data_slice.size() /
@@ -359,13 +397,14 @@ void IndexMVIVFFlatMVQ<metric>::load(const std::string &filename,
     clusters[i].centroids = Range(temp_centroids_seq, d);
 
     // Reconstruct LUTs
-    size_t total_lut_size = lut_offsets[i + 1] - lut_offsets[i];
-    size_t num_lut_entries = lut_entry_offsets[i + 1] - lut_entry_offsets[i];
+    size_t num_entries_in_cluster = lut_entry_counts[i];
+    clusters[i].LUT.resize(num_entries_in_cluster);
 
-    clusters[i].LUT.resize(num_lut_entries);
+    size_t start_entry_idx = lut_entry_counts_scan[i];
     size_t current_data_offset = lut_offsets[i];
-    for (size_t j = 0; j < num_lut_entries; ++j) {
-      size_t entry_size = lut_entry_offsets[i + j + 1] - lut_entry_offsets[i + j];
+
+    for (size_t j = 0; j < num_entries_in_cluster; ++j) {
+      size_t entry_size = all_lut_entry_sizes[start_entry_idx + j];
       auto entry_data_slice =
           all_lut_data.cut(current_data_offset, current_data_offset + entry_size);
       clusters[i].LUT[j] =

@@ -20,24 +20,21 @@ namespace mvivf {
   - Finally, it re-ranks the results based on distances to return the top-k point clouds.
 */
 
-/* =============================Multi-Vector IVF Internal Node Type============================ */
-template<typename ChPoint>
-struct IndexMVIVFNode {
-  parlay::sequence<IndexMVIVFNode *> children;
-  // For internal nodes: data = centers of children
-  // For leaves:         data = points in the cluster
-  PointCloudSet<ChPoint> data;
-  IndexMVIVFNode() noexcept :
-      children(parlay::sequence<IndexMVIVFNode *>(0)), data(PointCloudSet<ChPoint>()) {}
-  inline void set_data(const PointCloudSet<ChPoint> &data_) noexcept { data = std::move(data_); }
-};
 /* ===================================Multi-Vector IVF Class=================================== */
 template<bool metric>
 class IndexMVIVF : Index<metric> {
  public:
   using ChPoint = Index<metric>::ChPoint;
-  using node_t = IndexMVIVFNode<ChPoint>;
   using Index<metric>::d;  // Embedding dimension
+
+  struct node_t {
+    parlay::sequence<node_t *> children;
+    // For internal nodes: data = centers of children
+    // For leaves:         data = points in the cluster
+    PointCloudSet<ChPoint> data;
+    node_t() noexcept : children(parlay::sequence<node_t *>(0)), data(PointCloudSet<ChPoint>()) {}
+    inline void set_data(const PointCloudSet<ChPoint> &data_) noexcept { data = std::move(data_); }
+  };
 
   size_t num_clusters = 300;  // Number of clusters at each large node
   size_t maxsize = 250;       // Maxsize of leaf clusters (enforced)

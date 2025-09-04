@@ -122,4 +122,50 @@ auto kmeans_subsample_assign_only(const parlay::sequence<parlay::sequence<float>
   return std::make_tuple(centers, cluster_ids);
 }
 
+// Runs kmeans on a subsample and returns the top N assignments for each point.
+template<bool metric>
+auto kmeans_subsample_top_n_assign(const parlay::sequence<parlay::sequence<float>>& data, size_t k,
+                                   size_t N, size_t os_rate, bool verbose = false) {
+  using PointTy = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
+  using Range = PointRange<float, PointTy>;
+  size_t n = data.size();
+  size_t dims = data[0].size();
+  Range data_range = Range(data, dims);
+  Range centers;
+
+  if (os_rate * k >= n) {
+    centers = kmeans<float, PointTy>(data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+  } else {
+    auto sampled_points = parlay::delayed_tabulate(os_rate * k, [&](size_t i) {
+      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+      return data[id];
+    });
+    Range sampled_data_range = Range(sampled_points, dims);
+    centers =
+        kmeans<float, PointTy>(sampled_data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+  }
+
+  // For each point, find the top N closest centers
+  auto top_n_assignments = parlay::tabulate(n, [&](size_t i) {
+    auto dists = parlay::tabulate(k, [&](size_t j) {
+      return std::make_pair(j, data_range[i].distance(centers[j]));
+    });
+    parlay::sort_inplace(dists, [](const auto& a, const auto& b) { return a.second < b.second; });
+    return parlay::tabulate(std::min(N, k), [&](size_t rank) {
+        return dists[rank].first;
+    });
+  });
+
+  parlay::sequence<parlay::sequence<float>> final_centers(k);
+  parlay::parallel_for(0, k, [&](size_t i) {
+    parlay::sequence<float> center(dims);
+    for (size_t j = 0; j < dims; j++) {
+      center[j] = centers[i][j];
+    }
+    final_centers[i] = std::move(center);
+  });
+
+  return std::make_tuple(final_centers, top_n_assignments);
+}
+
 }  // namespace mvivf
