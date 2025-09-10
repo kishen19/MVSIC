@@ -93,3 +93,35 @@ cc_binary(
         "//src/vamana",
     ],
 )
+
+cc_binary(
+    name = "muvera_grid_search",
+    srcs = ["muvera_grid_search.cpp"],
+    # copts = [
+    #     "-O3",
+    #     "-ffast-math",
+    #     "-mavx2",
+    #     "-mfma",
+    # ],
+    deps = [
+        "//mvsic/core:stats",
+        "//mvsic/core/utils:chamfer_ip_point",
+        "//mvsic/core/utils:chamfer_l2_point",
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/core/utils:point_cloud_set",
+        "//mvsic/muvera",
+    ],
+)
+
+cc_binary(
+    name = "mpool_grid_search",
+    srcs = ["mpool_grid_search.cpp"],
+    deps = [
+        "//mvsic/core:stats",
+        "//mvsic/core/utils:chamfer_ip_point",
+        "//mvsic/core/utils:chamfer_l2_point",
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/core/utils:point_cloud_set",
+        "//mvsic/mpool",
+    ],
+)

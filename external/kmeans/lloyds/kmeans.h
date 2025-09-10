@@ -1,6 +1,5 @@
 #pragma once
 
-// #include "algorithms/utils/point_range.h"
 #include "algorithms/utils/types.h"
 #include "anns.h"
 #include "multi-swap.h"
@@ -12,8 +11,6 @@
 #include "seeding/ksetcover.h"
 #include "seeding/prefixdoubling.h"
 #include "seeding/uniformlyrandom.h"
-// #include "seeding/wards.h"
-// #include "utils/evals.h"
 
 template<typename PointTy, typename T = typename PointTy::distanceType, typename Range>
 T SumOfSquaredCost(const Range& points, const parlay::sequence<uint32_t>& center_ids) {
@@ -42,11 +39,9 @@ T SumOfSquaredCost(Range& points, Range& centers) {
 }
 
 template<typename DistTy, typename PointTy, typename Range>
-auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPlus",
-            std::string dist_algo = "Pairwise", size_t lloyds_iterations = 5, bool verbose = false,
-            long R = 16, long L = 32, double alpha = 1.2, bool two_pass = false, long Rw = 16,
-            long Lw = 12, double alphaw = 1.2, bool two_passw = false, double epsw = 0.8,
-            double deltaw = 1.0, double samw = 20, bool wghw = true) {
+auto kmeans(Range& points, uint32_t k, std::string seed_algo = "UniformlyRandom",
+            std::string dist_algo = "Pairwise", size_t lloyds_iterations = 10, bool verbose = false,
+            long R = 16, long L = 32, double alpha = 1.2, bool two_pass = false) {
   parlay::sequence<uint32_t> center_ids;
   parlay::sequence<uint32_t> cluster_ids;
   Range centers;
@@ -62,19 +57,13 @@ auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPl
     center_ids = UniformlyRandom<DistTy>(points, k);
     centers = copyPoints<PointTy>(points, center_ids);
   } else if (seed_algo == "ParallelPlusPlus") {
-    BuildParams BPw(Rw, Lw, alphaw, two_passw);
     center_ids = ParallelPlusPlus<DistTy>(points, k);
     centers = copyPoints<PointTy>(points, center_ids);
-    // } else if (seed_algo == "Wards") {
-    // 	centers = Wards<DistTy, PointTy>(points, k, BPw, epsw, deltaw, samw,
-    // wghw);
   } else if (seed_algo == "KSetCover") {
     center_ids = KSetCover<DistTy, PointTy>(points, k, BP);
     centers = copyPoints<PointTy>(points, center_ids);
   } else {
-    std::cout << "Error: seeding algorithm "
-                 "not specified correctly"
-              << std::endl;
+    std::cout << "[kmeans] Error: seeding algorithm not specified correctly" << std::endl;
     abort();
   }
 
@@ -83,14 +72,12 @@ auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPl
   } else if (dist_algo == "ANNS") {
     cluster_ids = compute_cluster_ids_anns<PointTy>(points, centers, BP);
   } else {
-    std::cout << "Error: distance oracle not "
-                 "specified correctly"
-              << std::endl;
+    std::cout << "[kmeans] Error: distance oracle not specified correctly" << std::endl;
     abort();
   }
 
   if (verbose) {
-    std::cout << "Inner kmeans cost (Seeding): " << SumOfSquaredCost<PointTy>(points, centers)
+    std::cout << "[kmeans] cost (Seeding): " << SumOfSquaredCost<PointTy>(points, centers)
               << std::endl;
   }
 
@@ -104,14 +91,12 @@ auto kmeans(Range& points, uint32_t k, std::string seed_algo = "SequentialPlusPl
       centers = std::move(new_centers);
       cluster_ids = std::move(new_cluster_ids);
     } else {
-      std::cout << "Error: distance oracle "
-                   "not specified correctly"
-                << std::endl;
+      std::cout << "[kmeans] Error: distance oracle not specified correctly" << std::endl;
       abort();
     }
     if (verbose) {
-      std::cout << "Inner kmeans cost (" << j + 1
-                << "): " << SumOfSquaredCost<PointTy>(points, centers) << std::endl;
+      std::cout << "[kmeans] cost (" << j + 1 << "): " << SumOfSquaredCost<PointTy>(points, centers)
+                << std::endl;
     }
   }
   return centers;

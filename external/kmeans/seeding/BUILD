@@ -1,6 +1,3 @@
-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
-
-# package(default_visibility = ["//:__subpackages__"])
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -74,19 +71,6 @@ cc_library(
         "kmeansplusplus",
         "//seeding:kmeans_utils",
         "//seeding:utils",
-        "@parlaylib//parlay:delayed_sequence",
-        "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:primitives",
-        "@parlaylib//parlay:sequence",
-    ],
-)
-
-cc_library(
-    name = "wards",
-    hdrs = ["wards.h"],
-    deps = [
-        "//seeding/wards:dyn_point_range",
-        "//seeding/wards:wards_hac",
         "@parlaylib//parlay:delayed_sequence",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",
