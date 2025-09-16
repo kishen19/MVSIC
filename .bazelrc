@@ -51,8 +51,3 @@ build:asan --cxxopt=-g
 build:asan --cxxopt=-fno-omit-frame-pointer
 build:asan --cxxopt=-Wno-macro-redefined
 build:asan --linkopt=-fsanitize=address
-
-# Disable Bzlmod for every Bazel command
-# Turn it on after we migrate to use bzlmod
-common --enable_bzlmod=False
-common --enable_workspace=True
