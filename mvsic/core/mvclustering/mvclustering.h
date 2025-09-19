@@ -8,45 +8,34 @@
 #include "mvsic/core/utils/kmeans_util.h"
 #include "mvsic/core/utils/point_cloud_set.h"
 #include "mvsic/core/utils/util.h"
+
 #include "seeding/uniformlyrandom.h"
+#include "mvclustering_config.h"
 
 namespace mvsic {
 
-/* Multi-Vector Lloyd's Clustering
-
+/* Multi-Vector Clustering Algorithm
+ - Given a set of point clouds, cluster them into k clusters, where each cluster
+   is represented by a centroid point cloud with s points each.
+ - The clustering is done via a Lloyd's style algorithm, with an inner k-means
+   algorithm to compute the centroid point clouds.
+ - The distance function used is the Chamfer distance (L2 or IP).
 */
-
-struct MVClusteringConfig {
-  uint32_t niters = 5;  // Number of Outer Lloyd's Iterations
-  // to limit size of dataset, otherwise the training set is subsampled
-  uint32_t max_points_per_centroid_inner_kmeans = 20;
-  uint32_t verbose = 0;   // Print debug statements: 0-nothing, 1-basic verbose, 2-computes cost,
-                          //                         3-inner kmeans verbose
-  char *init = "Random";  // Seeding Algorithm
-  uint32_t seed = 1234;   // Seed for randomized methods
-  bool use_weighted_inner_kmeans = false;  // Weight the points for inner kmeans calls
-
-  MVClusteringConfig(uint32_t niters = 5, uint32_t max_points_per_centroid_inner_kmeans = 20,
-                     uint32_t verbose = 0, char *init = "Random", uint32_t seed = 1234,
-                     bool use_weighted_inner_kmeans = false) noexcept :
-      niters(niters),
-      max_points_per_centroid_inner_kmeans(max_points_per_centroid_inner_kmeans),
-      verbose(verbose),
-      init(init),
-      seed(seed),
-      use_weighted_inner_kmeans(use_weighted_inner_kmeans) {}
-};
 
 template<bool metric>
 class MVClustering {
  public:
   using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
 
-  uint32_t d;      // Dimension of vectors
-  uint32_t k;      // Number of centroid-point_clouds
-  uint32_t s = 0;  // Number of points clouds per centroid-point_cloud
-                   //   - Default 0: Avg number of points per point cloud in input
+  uint32_t d;  // Dimension of vectors
+  uint32_t k;  // Number of centroid-point_clouds
+  // Number of points clouds per centroid-point_cloud
+  // Default 0: Computes the average number of points per point cloud in the input
+  uint32_t s = 0;
   MVClusteringConfig params;
+  PointCloudSet<ChPoint> centers;          // Centers of clusters
+  parlay::sequence<uint32_t> cluster_ids;  // Cluster ids for each data point cloud
+
   struct IterationStats {
     float centroid_update_time = 0.0;
     float assignment_time = 0.0;
@@ -55,14 +44,14 @@ class MVClustering {
     float total_time() const { return centroid_update_time + assignment_time; }
   };
   std::vector<IterationStats> _iteration_stats;
-  PointCloudSet<ChPoint> centers;          // Centers of clusters
-  parlay::sequence<uint32_t> cluster_ids;  // Cluster ids for each data point cloud
 
+  MVClustering(uint32_t d, uint32_t k, MVClusteringConfig params) noexcept :
+      d(d), k(k), s(0), params(params) {}
   MVClustering(uint32_t d, uint32_t k, uint32_t s, MVClusteringConfig params) noexcept :
       d(d), k(k), s(s), params(params) {}
   MVClustering(uint32_t d, uint32_t k, uint32_t s = 0, uint32_t niters = 5,
                uint32_t max_points_per_centroid_inner_kmeans = 20, uint32_t verbose = 0,
-               char *init = "Random", uint32_t random_seed = 1234,
+               char *init = "Random", uint32_t random_seed = 0,
                bool use_weighted_inner_kmeans = false) noexcept :
       d(d),
       k(k),
@@ -102,20 +91,18 @@ class MVClustering {
 template<bool metric>
 void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
   uint32_t n = points.size();
-  if (s == 0) {
+  if (s == 0) {  // Default
     auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
     s = static_cast<uint32_t>((parlay::reduce(pc_sizes) + n) / n);
   }
   if (params.verbose >= 1)
     std::cout << "[MVClustering] Centroid-Point Cloud Size: " << s << std::endl;
   _iteration_stats.resize(params.niters + 1);
-
   cluster_ids.resize(n);
 
   // Step 1: Initialization
   parlay::internal::timer _st;
   _st.start();
-  // - Compute initial centroid-point clouds
   if (params.init == "Random") {
     centers = UniformlyRandomMV(points, k, params.seed);
   } else {
@@ -141,6 +128,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
     if (params.verbose >= 1) std::cout << "[MVClustering] Completed: 0 iterations";
     return;
   }
+  // Reset to uninitialized fixed size point clouds
   centers = PointCloudSet<ChPoint>(k, s, d);
 
   // Step 2: Lloyd's Iterations
@@ -150,19 +138,18 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
     _it_timer.start();
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
-    parlay::parallel_for(
-        0, grouped.size(),
-        [&](size_t i) {
-          auto data = points.filter_flattened(grouped[i]);
-          if (s >= data.size()) {
-            centers.set_point_cloud(i, data);
-          } else {
-            auto new_centers = kmeans_subsample<metric>(
-                data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
-            centers.set_point_cloud(i, new_centers);
-          }
-        },
-        1);
+    parlay::parallel_for(0, grouped.size(), [&](size_t i) {
+      auto del_group = parlay::delayed_tabulate(grouped[i].size(),
+                                                [&](size_t j) { return grouped[i][j].second; });
+      auto data = points.filter_flattened(del_group);
+      if (s >= data.size()) {
+        centers.set_point_cloud(i, data);
+      } else {
+        auto new_centers = kmeans_subsample<metric>(
+            data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+        centers.set_point_cloud(i, new_centers);
+      }
+    });
     // Sample from input for empty clusters
     if (k - grouped.size() > 0) {
       if (params.verbose >= 2) {
@@ -207,8 +194,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
 }
 
 // Computes cluster ids for each doc point cloud given centroid-point clouds
-// TODO: Need to auto optimize this. Useful function to have for nxm, 1xm
-// Naive Approach: Independently run chamfer distance computation, and find best for each doc.
+// Naive Approach: Independently run one-to-one chamfer computation, and find best for each doc.
 template<bool metric>
 void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint> &points,
                                                      parlay::sequence<uint32_t> &cluster_ids) {
@@ -221,6 +207,8 @@ void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint
 }
 
 // Optimized (eigen)
+// TODO: Need to auto optimize this. Useful function to have for many-to-one and many-to-many
+// chamfer computation.
 template<bool metric>
 void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &points,
                                                parlay::sequence<uint32_t> &cluster_ids) {
@@ -294,6 +282,8 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &poi
   });
 }
 
+// Computes the k-median cost with chamfer distances, given cluster ids
+// Not optimized with many-to-many computations, since not necessary for optimized runs.
 template<bool metric>
 float MVClustering<metric>::compute_cost(const PointCloudSet<ChPoint> &points,
                                          const parlay::sequence<uint32_t> &cluster_ids) const {
@@ -302,7 +292,7 @@ float MVClustering<metric>::compute_cost(const PointCloudSet<ChPoint> &points,
   return parlay::reduce(distances);
 }
 
-template struct MVClustering<true>;   // Instantiates for L2 metric (metric = true)
-template struct MVClustering<false>;  // Instantiates for MIPS      (metric = false)
+using MVClusteringL2 = MVClustering<true>;   // Instantiates for L2 metric (metric = true)
+using MVClusteringIP = MVClustering<false>;  // Instantiates for MIPS      (metric = false)
 
 }  // namespace mvsic

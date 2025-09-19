@@ -63,12 +63,15 @@ struct PointCloudSet {
 
   // Return list of distances from a query to all point clouds
   // TODO: make this blocked, and thread_local
-  inline std::pair<parlay::sequence<float>, size_t> distances(const ChPoint &query) {
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
+      const ChPoint &query) {
     auto cmps = parlay::sequence<size_t>::uninitialized(n);
-    auto dists = parlay::sequence<float>::from_function(n, [&](size_t i) {
-      auto [dist, cmp] = query.distance((*this)[i]);
+    auto dists = parlay::sequence<std::pair<uint32_t, float>>::from_function(n, [&](uint32_t i) {
+      float dist;
+      size_t cmp;
+      std::tie(dist, cmp) = query.distance_w_cmps((*this)[i]);
       cmps[i] = cmp;
-      return dist;
+      return std::make_pair(i, dist);
     });
     return std::make_pair(dists, parlay::reduce(cmps));
   }
@@ -83,7 +86,7 @@ struct PointCloudSet {
   // Returns sequence of individual embeddings (as sequences) of the point
   // point clouds whose indices are given in sequence cluster_ids
   template<typename Seq>
-  auto filter_flattened(const Seq &cluster_ids) const;
+  parlay::sequence<parlay::sequence<float>> filter_flattened(const Seq &cluster_ids) const;
 
   // Mutating Functions
   template<typename Seq>
@@ -253,15 +256,18 @@ PointCloudSet<ChPoint>::PointCloudSet(uint32_t n, uint32_t k, uint32_t d) :
 
 template<typename ChPoint>
 template<typename Seq>
-auto PointCloudSet<ChPoint>::filter_flattened(const Seq &cluster_ids) const {
+parlay::sequence<parlay::sequence<float>> PointCloudSet<ChPoint>::filter_flattened(
+    const Seq &cluster_ids) const {
   size_t num = cluster_ids.size();
-  auto sizes = parlay::delayed_tabulate(num, [&](size_t i) { return get_size(cluster_ids[i]); });
-  auto [csizes, total_size] = parlay::scan(sizes);
+  auto sizes = parlay::delayed_seq<size_t>(num, [&](size_t i) { return get_size(cluster_ids[i]); });
+  size_t total_size;
+  parlay::sequence<size_t> csizes;
+  std::tie(csizes, total_size) = parlay::scan(sizes);
   auto result = parlay::sequence<parlay::sequence<float>>(
       total_size, parlay::sequence<float>::uninitialized(dims));
   parlay::parallel_for(0, num, [&](size_t i) {
     auto ind = cluster_ids[i];
-    auto offset = csizes[i];
+    size_t offset = csizes[i];
     auto coords = data(ind);
     parlay::parallel_for(0, get_size(ind), [&](size_t j) {
       std::memcpy(result[offset + j].begin(), coords + j * dims, dims * sizeof(float));

@@ -2,12 +2,12 @@
 
 #include "parlay/primitives.h"
 #include "point_cloud_set.h"
-#include "sort_utils.h"
+#include "util.h"
 
 namespace mvsic {
 
 template<typename ChPoint>
-std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(
+std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> get_knn(
     const ChPoint& q, const PointCloudSet<ChPoint>& points, size_t k) {
   size_t dist_cmps = 0;
   parlay::sequence<size_t> cmps(points.size());
@@ -19,15 +19,15 @@ std::pair<parlay::sequence<std::pair<size_t, float>>, size_t> get_knn(
   parlay::sort_inplace(dists, [](const auto& a, const auto& b) {
     return a.second < b.second;  // Sort by distance
   });
-  auto knn = parlay::sequence<std::pair<size_t, float>>::from_function(
+  auto knn = parlay::sequence<std::pair<uint32_t, float>>::from_function(
       std::min(k, dists.size()), [&](size_t i) { return dists[i]; });
   dist_cmps += parlay::reduce(cmps);
   return std::make_pair(knn, dist_cmps);
 }
 
 template<typename ChPoint>
-size_t get_knn_into_uninitialized(const ChPoint& q, const PointCloudSet<ChPoint>& points, size_t k,
-                                  std::pair<size_t, float>* knn) {
+size_t get_knn_into_uninitialized(const ChPoint& q, const PointCloudSet<ChPoint>& points,
+                                  std::pair<uint32_t, float>* knn) {
   size_t dist_cmps = 0;
   parlay::sequence<size_t> cmps(points.size());
   auto dists = parlay::tabulate(points.size(), [&](size_t i) {
@@ -35,10 +35,7 @@ size_t get_knn_into_uninitialized(const ChPoint& q, const PointCloudSet<ChPoint>
     cmps[i] = d_c;
     return std::pair(points.get_id(i), dist);
   });
-  parlay::sort_inplace(dists, [](const auto& a, const auto& b) {
-    return a.second < b.second;  // Sort by distance
-  });
-  parlay::parallel_for(0, std::min(k, dists.size()), [&](size_t i) { knn[i] = dists[i]; });
+  parlay::parallel_for(0, dists.size(), [&](size_t i) { knn[i] = dists[i]; });
   dist_cmps += parlay::reduce(cmps);
   return dist_cmps;
 }

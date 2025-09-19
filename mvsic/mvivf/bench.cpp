@@ -1,17 +1,17 @@
 #include <Eigen/Dense>
 #include <iostream>
-#include "src/utils/chamfer_ip_point.h"
-#include "src/utils/chamfer_l2_point.h"
-#include "src/utils/parse_command_line.h"
-#include "src/utils/point_cloud_set.h"
-#include "src/utils/stats.h"
+#include "mvsic/core/utils/chamfer_ip_point.h"
+#include "mvsic/core/utils/chamfer_l2_point.h"
+#include "mvsic/core/utils/parse_command_line.h"
+#include "mvsic/core/utils/point_cloud_set.h"
+#include "mvsic/core/stats.h"
 #include "mvivf.h"
-#include "mvivf_MVQ.h"
+#include "mvivf_flat.h"
 
-using namespace mvivf;
+using namespace mvsic;
 
 template<typename ChPoint, bool metric>
-void bench(mvivf::commandLine &P) {
+void bench(mvsic::commandLine &P) {
   Eigen::setNbThreads(1);
   using PC = PointCloudSet<ChPoint>;
 
@@ -26,33 +26,32 @@ void bench(mvivf::commandLine &P) {
   std::string gtFile = P.getOptionValue("-gt", "");
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
-
-  size_t num_clusters = P.getOptionLongValue("-num_clusters", 300);
-  size_t maxsize = P.getOptionLongValue("-maxsize", 100);
-  size_t nprobes = P.getOptionLongValue("-nprobes", 2);
-  size_t beamsize = P.getOptionLongValue("-beamsize", 2 * nprobes);
-  size_t k = P.getOptionLongValue("-k", 10);
-  double s = P.getOptionDoubleValue("-s", 1.0);
-  size_t os_rate = P.getOptionLongValue("-osr", 20);
-  auto iters = P.getOptionLongValue("-iters", 5);
   bool is_mmap = P.getOption("-mm");
-  bool verbose = P.getOption("-v");
 
-  // MVQ
-  bool use_MVQ = P.getOption("-mvq");
-  size_t num_leaf_centroids = P.getOptionLongValue("-nlc", 32);
-  size_t cands = P.getOptionLongValue("-cands", 2 * k);
+  // MVIVF params
+  uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
+  uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 200);
+  uint32_t verbose = P.getOptionIntValue("-v", 0);
+  bool compress_input = P.getOption("-compress_input");
+  bool use_PQ = P.getOption("-pq");
+
+  // Search Params
+  size_t k = P.getOptionLongValue("-k", 10);
+  size_t nprobes = P.getOptionLongValue("-nprobes", 2);
+  size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
+
+  // Flat params
+  bool is_flat = P.getOption("-flat");
 
   auto points = PC(inFile);
   IndexParams index_params;
   SearchParams search_params;
-  if (use_MVQ) {
-    index_params = IndexParams::mvivf_mvq(num_clusters, maxsize, num_leaf_centroids, s, iters,
-                                          os_rate, verbose);
-    search_params = SearchParams::mvivf_mvq(k, nprobes, cands, beamsize);
+  if (is_flat) {
+    index_params = IndexParams::mvivf_flat(k_per_level, compress_input, use_PQ, verbose);
+    search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else {
-    index_params = IndexParams::mvivf(num_clusters, maxsize, s, iters, os_rate, verbose);
-    search_params = SearchParams::mvivf(k, nprobes, beamsize);
+    index_params = IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, use_PQ, verbose);
+    search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 
   auto run_bench = [&](auto &index) {
@@ -100,7 +99,7 @@ void bench(mvivf::commandLine &P) {
         }
 
         // Run Brute-force search
-        auto [bf_results, dist_cmps] = mvivf::get_knn(queries[i], points, 2 * k);
+        auto [bf_results, dist_cmps] = mvsic::get_knn(queries[i], points, 2 * k);
 
         // Calculate recall
         size_t correct = 0;
@@ -154,8 +153,8 @@ void bench(mvivf::commandLine &P) {
     }
   };
 
-  if (use_MVQ) {
-    IndexMVIVFMVQ<metric> index(points.get_dims(), index_params);
+  if (is_flat) {
+    IndexMVIVFFlat<metric> index(points.get_dims(), index_params);
     run_bench(index);
   } else {
     IndexMVIVF<metric> index(points.get_dims(), index_params);
@@ -164,12 +163,10 @@ void bench(mvivf::commandLine &P) {
 }
 
 int main(int argc, char *argv[]) {
-  mvivf::commandLine P(argc, argv,
+  mvsic::commandLine P(argc, argv,
                        "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                        "[-data_type <tp>] [-dist_func <dist_func>]"
-                       "[-seed <algorithm>] [-iters <num_iters>]"
-                       // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
-  );
+                       "[-seed <algorithm>] [-iters <num_iters>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {

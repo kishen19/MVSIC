@@ -3,7 +3,7 @@
 #include "mvsic/core/utils/chamfer_l2_point.h"
 #include "mvsic/core/utils/point_cloud_set.h"
 
-#include "mvclustering.h"
+#include "mvsic/core/mvclustering/mvclustering.h"
 
 using namespace mvsic;
 

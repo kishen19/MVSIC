@@ -112,7 +112,7 @@ cc_library(
     hdrs = ["top_neighbors.h"],
     deps = [
         ":point_cloud_set",
-        ":sort_utils",
+        ":util",
         "@parlaylib//parlay:primitives",
     ],
 )
@@ -122,5 +122,14 @@ cc_library(
     hdrs = ["util.h"],
     deps = [
         "@highway//hwy/contrib/sort:vqsort",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
+    name = "test_scann",
+    srcs = ["test_scann.cpp"],
+    deps = [
+        "@scann//scann/hashes/internal:asymmetric_hashing_impl",
     ],
 )

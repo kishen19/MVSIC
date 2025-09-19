@@ -1,8 +1,24 @@
 #pragma once
 
+#include "parlay/primitives.h"
 #include "hwy/contrib/sort/vqsort.h"
 
 namespace mvsic {
+
+template<typename K, typename V>
+auto group_by_key_delayed(parlay::sequence<std::pair<K, V>>& seq) {
+  seq = parlay::sort(seq);
+  auto starts = parlay::delayed_tabulate(seq.size(), [&](size_t i) {
+    if (i == 0 || seq[i].first != seq[i - 1].first) return true;
+    return false;
+  });
+  auto offsets = parlay::pack_index(starts);
+  return parlay::tabulate(offsets.size(), [&](size_t i) {
+    size_t start = offsets[i];
+    size_t end = i == offsets.size() - 1 ? seq.size() : offsets[i + 1];
+    return parlay::delayed_tabulate(end - start, [&](size_t j) { return seq[start + j].second; });
+  });
+}
 
 template<typename K, typename V>
 auto group_by_key_inplace(parlay::sequence<std::pair<K, V>>& seq) {
@@ -15,8 +31,7 @@ auto group_by_key_inplace(parlay::sequence<std::pair<K, V>>& seq) {
   return parlay::tabulate(offsets.size(), [&](size_t i) {
     size_t start = offsets[i];
     size_t end = i == offsets.size() - 1 ? seq.size() : offsets[i + 1];
-    // return parlay::make_slice(seq.begin() + start, seq.begin() + end);
-    return parlay::delayed_tabulate(end - start, [&](size_t j) { return seq[start + j].second; });
+    return parlay::make_slice(seq.begin() + start, seq.begin() + end);
   });
 }
 
