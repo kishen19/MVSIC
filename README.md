@@ -1,5 +1,8 @@
-# MVC
-A library for multi-vector clustering algorithms
+# MVSIC
+MVSIC (pronounced "music") stands for Multi-Vector Search, Indexing and Clustering, a library and benchmarking tool for multi-vector clustering and retrieval.
+
+
+<hr>
 
 ### Build
 `bazel build ...`

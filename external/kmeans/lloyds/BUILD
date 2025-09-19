@@ -18,20 +18,18 @@ cc_library(
     name = "kmeans",
     hdrs = ["kmeans.h"],
     deps = [
-        ":pairwise",
         ":anns",
         ":multi-swap",
+        ":pairwise",
+        "//seeding:kmeansparallel",
         "//seeding:kmeansplusplus",
+        "//seeding:ksetcover",
         "//seeding:prefixdoubling",
         "//seeding:uniformlyrandom",
-        "//seeding:kmeansparallel",
-        "//seeding:ksetcover",
-        # "//seeding:wards",
-        #"//utils:evals",
-        "@parlaylib//parlay:io",
-        "@parlaylib//parlay:sequence",
         "@parlayann//algorithms/utils:point_range",
         "@parlayann//algorithms/utils:types",
+        "@parlaylib//parlay:io",
+        "@parlaylib//parlay:sequence",
     ],
 )
 
@@ -56,5 +54,18 @@ cc_library(
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",
         "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_binary(
+    name = "bench",
+    srcs = ["bench.cpp"],
+    deps = [
+        ":kmeans",
+        "@parlayann//algorithms/bench:parse_command_line",
+        "@parlayann//algorithms/utils:euclidian_point",
+        "@parlayann//algorithms/utils:mips_point",
+        "@parlayann//algorithms/utils:point_range",
+        "@parlaylib//parlay/internal:get_time",
     ],
 )
