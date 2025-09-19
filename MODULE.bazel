@@ -32,32 +32,32 @@ git_repository(
     remote = "https://github.com/cmuparlay/parlayann.git",
 )
 
-git_repository(
-    name = "faiss",
-    build_file_content = """
-cc_library(
-    name = "faiss_core",
-    srcs = glob([
-        "faiss/**/*.cpp",
-    ], exclude = [
-        "faiss/gpu/**/*.cpp",
-        "faiss/python/**/*.cpp",
-    ]),
-    hdrs = glob([
-        "faiss/**/*.h",
-    ], exclude = [
-        "faiss/gpu/**/*.h",
-        "faiss/python/**/*.h",
-    ]),
-    includes = ["."],
-    copts = ["-fopenmp"],
-    linkopts = ["-fopenmp", "-lopenblas"],
-    visibility = ["//visibility:public"],
-)
-""",
-    remote = "https://github.com/facebookresearch/faiss.git",
-    tag = "v1.11.0",
-)
+# git_repository(
+#     name = "faiss",
+#     build_file_content = """
+# cc_library(
+#     name = "faiss_core",
+#     srcs = glob([
+#         "faiss/**/*.cpp",
+#     ], exclude = [
+#         "faiss/gpu/**/*.cpp",
+#         "faiss/python/**/*.cpp",
+#     ]),
+#     hdrs = glob([
+#         "faiss/**/*.h",
+#     ], exclude = [
+#         "faiss/gpu/**/*.h",
+#         "faiss/python/**/*.h",
+#     ]),
+#     includes = ["."],
+#     copts = ["-fopenmp"],
+#     linkopts = ["-fopenmp", "-lopenblas"],
+#     visibility = ["//visibility:public"],
+# )
+# """,
+#     remote = "https://github.com/facebookresearch/faiss.git",
+#     tag = "v1.11.0",
+# )
 
 local_path_override(
     module_name = "kmeans",

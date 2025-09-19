@@ -16,6 +16,9 @@ cc_library(
 cc_library(
     name = "index_params",
     hdrs = ["index_params.h"],
+    deps = [
+        "//mvsic/core/mvclustering:mvclustering_config",
+    ],
 )
 
 cc_library(

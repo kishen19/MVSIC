@@ -25,15 +25,21 @@ void bench(mvsic::commandLine &P) {
   std::string gtFile = P.getOptionValue("-gt", "");
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
+  bool is_mmap = P.getOption("-mm");
+
+  bool compress_input = P.getOption("-compress_input");
+  bool use_PQ = P.getOption("-pq");
+  uint32_t verbose = P.getOptionIntValue("-v", 0);
 
   // FDE params
-  uint32_t num_repetitions = P.getOptionIntValue("-num_reps", 20);
-  uint32_t num_simhash_projections = P.getOptionIntValue("-num_simhash", 4);
-  uint32_t seed = 1;
-  uint32_t projection_dimension = P.getOptionIntValue("-projd", 8);
+  int32_t num_repetitions = P.getOptionIntValue("-num_reps", 20);
+  int32_t num_simhash_projections = P.getOptionIntValue("-num_simhash", 4);
+  int32_t seed = 1;
+  int32_t projection_dimension = P.getOptionIntValue("-projd", 8);
   bool fill_empty_partitions = P.getOption("-fill_empty_partitions");
-  uint32_t final_projection_dimension = P.getOptionIntValue("-final_projd", 0);
+  int32_t final_projection_dimension = P.getOptionIntValue("-final_projd", 0);
   bool not_normalized = P.getOption("-no_norm");
+
   // Vamana params
   uint32_t R = 200;
   uint32_t L_build = 600;
@@ -41,19 +47,19 @@ void bench(mvsic::commandLine &P) {
   bool two_pass = P.getOption("-tp");
 
   // Search Params
-  uint32_t k = P.getOptionIntValue("-k", 10);
-  uint32_t L = P.getOptionIntValue("-L", 16);
+  size_t k = P.getOptionLongValue("-k", 10);
+  size_t L = P.getOptionLongValue("-L", 16);
   double cut = 1.35;
-  bool norerank = P.getOption("-no_rerank");
-  uint32_t num_candidates_to_rerank = P.getOptionIntValue("-num_cands", k);
-  uint32_t verbose = P.getOptionIntValue("-v", 0);
+  size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
+  bool norerank = P.getOption("-norerank");
 
-  auto points = PC(inFile);
-  IndexParams index_params = IndexParams::muvera(
-      num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
-      final_projection_dimension, !not_normalized, R, L_build, alpha, two_pass, verbose);
+  auto points = PC(inFile, is_mmap);
+  IndexParams index_params =
+      IndexParams::muvera(num_repetitions, num_simhash_projections, seed, projection_dimension,
+                          fill_empty_partitions, final_projection_dimension, !not_normalized, R,
+                          L_build, alpha, two_pass, compress_input, use_PQ, verbose);
   SearchParams search_params =
-      SearchParams::muvera(k, L, cut, points.size(), R, !norerank, num_candidates_to_rerank);
+      SearchParams::muvera(k, L, cut, points.size(), R, num_rerank, norerank);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

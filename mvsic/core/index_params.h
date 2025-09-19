@@ -22,12 +22,12 @@ struct IndexParams {
 
   // muvera: FDE params
   struct fde_config {
-    uint32_t num_repetitions = 20;         // Number of independent repetitions for FDE generation
-    uint32_t num_simhash_projections = 4;  // Number of SimHash projections used
-    uint32_t seed = 1;                     // Seed for the FDE generation process
-    uint32_t projection_dimension = 8;     // Projected Dimension (via random projections)
-    bool fill_empty_partitions = false;    // Fill empty partitions with nearest point coordinates
-    uint32_t final_projection_dimension = 0;  // Dimension to which the final FDE is projected
+    int32_t num_repetitions = 20;            // Number of independent repetitions for FDE generation
+    int32_t num_simhash_projections = 4;     // Number of SimHash projections used
+    int32_t seed = 1;                        // Seed for the FDE generation process
+    int32_t projection_dimension = 8;        // Projected Dimension (via random projections)
+    bool fill_empty_partitions = false;      // Fill empty partitions with nearest point coordinates
+    int32_t final_projection_dimension = 0;  // Dimension to which the final FDE is projected
     bool normalize = true;
   };
   fde_config fde;
@@ -81,14 +81,17 @@ struct IndexParams {
     return params;
   }
 
-  static IndexParams muvera(uint32_t num_repetitions = 20, uint32_t num_simhash_projections = 4,
-                            uint32_t seed = 1, uint32_t projection_dimension = 8,
+  static IndexParams muvera(int32_t num_repetitions = 20, int32_t num_simhash_projections = 4,
+                            int32_t seed = 1, int32_t projection_dimension = 8,
                             bool fill_empty_partitions = false,
-                            uint32_t final_projection_dimension = 0, bool normalize = false,
+                            int32_t final_projection_dimension = 0, bool normalize = false,
                             uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                            bool two_pass = false, uint32_t verbose = 0) {
+                            bool two_pass = false, bool compress_input = false, bool use_PQ = false,
+                            uint32_t verbose = 0) {
     IndexParams params;
     params.method = "muvera";
+    params.compress_input = compress_input;
+    params.use_PQ = use_PQ;
     params.fde = fde_config{
         num_repetitions,       num_simhash_projections,    seed,     projection_dimension,
         fill_empty_partitions, final_projection_dimension, normalize};
@@ -98,9 +101,12 @@ struct IndexParams {
   }
 
   static IndexParams mpool(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                           bool two_pass = false, bool normalize = true, uint32_t verbose = 0) {
+                           bool two_pass = false, bool normalize = true,
+                           bool compress_input = false, bool use_PQ = false, uint32_t verbose = 0) {
     IndexParams params;
     params.method = "mpool";
+    params.compress_input = compress_input;
+    params.use_PQ = use_PQ;
     params.vamana = vamana_config{R, L, alpha, two_pass};
     params.normalize = normalize;
     params.verbose = verbose;
@@ -108,9 +114,12 @@ struct IndexParams {
   }
 
   static IndexParams mvvamana(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                              bool two_pass = false, uint32_t verbose = 0) {
+                              bool two_pass = false, bool compress_input = false,
+                              bool use_PQ = false, uint32_t verbose = 0) {
     IndexParams params;
     params.method = "mvvamana";
+    params.compress_input = compress_input;
+    params.use_PQ = use_PQ;
     params.vamana = vamana_config{R, L, alpha, two_pass};
     params.verbose = verbose;
     return params;

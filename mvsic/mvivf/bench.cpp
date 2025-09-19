@@ -43,7 +43,7 @@ void bench(mvsic::commandLine &P) {
   // Flat params
   bool is_flat = P.getOption("-flat");
 
-  auto points = PC(inFile);
+  auto points = PC(inFile, is_mmap);
   IndexParams index_params;
   SearchParams search_params;
   if (is_flat) {

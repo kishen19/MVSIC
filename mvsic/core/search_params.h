@@ -18,6 +18,9 @@ struct SearchParams {
   size_t limit;
   size_t degree_limit;
 
+  // muvera, mpool, mvvamana
+  bool norerank = false;
+
   // mvivf search params
   static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank) {
     SearchParams params;
@@ -59,50 +62,50 @@ struct SearchParams {
   //   return params;
   // }
 
-  // // vamana
-  // static SearchParams mvvamana(size_t k, size_t L, double cut, size_t limit, size_t degree_limit)
-  // {
-  //   SearchParams params;
-  //   params.method = "mvvamana";
-  //   params.k = k;
-  //   params.L = L;
-  //   params.cut = cut;
-  //   params.limit = limit;
-  //   params.degree_limit = degree_limit;
-  //   return params;
-  // }
+  // vamana
+  static SearchParams mvvamana(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) {
+    SearchParams params;
+    params.method = "mvvamana";
+    params.k = k;
+    params.L = L;
+    params.cut = cut;
+    params.limit = limit;
+    params.degree_limit = degree_limit;
+    return params;
+  }
 
-  // // muvera
-  // static SearchParams muvera(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
-  //                            bool rerank, size_t num_candidates_to_rerank) {
-  //   SearchParams params;
-  //   params.method = "muvera";
-  //   params.k = k;
-  //   params.L = L;
-  //   params.cut = cut;
-  //   params.limit = limit;
-  //   params.degree_limit = degree_limit;
-  //   params.rerank = rerank;
-  //   params.num_candidates_to_rerank = num_candidates_to_rerank;
-  //   return params;
-  // }
+  // muvera
+  static SearchParams muvera(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
+                             size_t num_rerank, bool norerank = false) {
+    SearchParams params;
+    params.method = "muvera";
+    params.k = k;
+    params.L = L;
+    params.cut = cut;
+    params.limit = limit;
+    params.degree_limit = degree_limit;
+    params.norerank = norerank;
+    params.num_rerank = num_rerank;
+    assert(num_rerank >= k);
+    return params;
+  }
 
-  // // mean_pooling
-  // static SearchParams mpool(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
-  //                           bool rerank, size_t num_candidates_to_rerank) {
-  //   SearchParams params;
-  //   params.method = "mpool";
-  //   params.k = k;
-  //   params.L = L;
-  //   params.cut = cut;
-  //   params.limit = limit;
-  //   params.degree_limit = degree_limit;
-  //   params.rerank = rerank;
-  //   params.num_candidates_to_rerank = num_candidates_to_rerank;
-  //   return params;
-  // }
+  // mean_pooling
+  static SearchParams mpool(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
+                            size_t num_rerank, bool norerank = false) {
+    SearchParams params;
+    params.method = "mpool";
+    params.k = k;
+    params.L = L;
+    params.cut = cut;
+    params.limit = limit;
+    params.degree_limit = degree_limit;
+    params.norerank = norerank;
+    params.num_rerank = num_rerank;
+    assert(num_rerank >= k);
+    return params;
+  }
 
-  //  private:
   SearchParams() = default;
 };
 

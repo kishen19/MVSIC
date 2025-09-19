@@ -25,6 +25,11 @@ void bench(mvsic::commandLine& P) {
   std::string gtFile = P.getOptionValue("-gt", "");
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
+  bool is_mmap = P.getOption("-mm");
+
+  bool compress_input = P.getOption("-compress_input");
+  bool use_PQ = P.getOption("-pq");
+  uint32_t verbose = P.getOptionIntValue("-v", 0);
 
   // Vamana params
   uint32_t R = 200;
@@ -33,13 +38,13 @@ void bench(mvsic::commandLine& P) {
   bool two_pass = P.getOption("-tp");
 
   // Search Params
-  uint32_t k = P.getOptionIntValue("-k", 10);
-  uint32_t L = P.getOptionIntValue("-L", 16);
+  size_t k = P.getOptionIntValue("-k", 10);
+  size_t L = P.getOptionIntValue("-L", 16);
   double cut = 1.35;
-  uint32_t verbose = P.getOptionIntValue("-v", 0);
 
-  auto points = PC(inFile);
-  IndexParams index_params = IndexParams::mvvamana(R, L_build, alpha, two_pass, verbose);
+  auto points = PC(inFile, is_mmap);
+  IndexParams index_params =
+      IndexParams::mvvamana(R, L_build, alpha, two_pass, compress_input, use_PQ, verbose);
   SearchParams search_params = SearchParams::mvvamana(k, L, 1.35, points.size(), R);
   IndexVamana<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {

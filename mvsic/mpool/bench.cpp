@@ -25,6 +25,12 @@ void bench(mvsic::commandLine &P) {
   std::string gtFile = P.getOptionValue("-gt", "");
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
+  bool is_mmap = P.getOption("-mm");
+
+  bool compress_input = P.getOption("-compress_input");
+  bool use_PQ = P.getOption("-pq");
+  bool normalize = P.getOption("-norm");
+  uint32_t verbose = P.getOptionIntValue("-v", 0);
 
   // Vamana params
   uint32_t R = 200;
@@ -32,20 +38,18 @@ void bench(mvsic::commandLine &P) {
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   bool two_pass = P.getOption("-tp");
 
-  bool normalize = P.getOption("-norm");
-
   // Search Params
-  uint32_t k = P.getOptionIntValue("-k", 10);
-  uint32_t L = P.getOptionIntValue("-L", 16);
+  size_t k = P.getOptionLongValue("-k", 10);
+  size_t L = P.getOptionLongValue("-L", 16);
   double cut = 1.35;
-  bool norerank = P.getOption("-no_rerank");
-  uint32_t num_candidates_to_rerank = P.getOptionIntValue("-num_cands", k);
-  uint32_t verbose = P.getOptionIntValue("-v", 0);
+  size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
+  bool norerank = P.getOption("-norerank");
 
-  auto points = PC(inFile);
-  IndexParams index_params = IndexParams::mpool(R, L_build, alpha, two_pass, normalize, verbose);
+  auto points = PC(inFile, is_mmap);
+  IndexParams index_params =
+      IndexParams::mpool(R, L_build, alpha, two_pass, normalize, compress_input, use_PQ, verbose);
   SearchParams search_params =
-      SearchParams::mpool(k, L, cut, points.size(), R, !norerank, num_candidates_to_rerank);
+      SearchParams::mpool(k, L, cut, points.size(), R, num_rerank, norerank);
   IndexMPool<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

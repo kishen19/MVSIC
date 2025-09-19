@@ -96,7 +96,7 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
   };
 
   // counters
-  size_t dist_cmps = starting_points.size();
+  size_t dist_cmps = 0;
   int remain = 1;
   int num_visited = 0;
   double total;
