@@ -33,7 +33,6 @@ void bench(mvsic::commandLine &P) {
   uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 200);
   uint32_t verbose = P.getOptionIntValue("-v", 0);
   bool compress_input = P.getOption("-compress_input");
-  bool use_PQ = P.getOption("-pq");
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
@@ -43,14 +42,22 @@ void bench(mvsic::commandLine &P) {
   // Flat params
   bool is_flat = P.getOption("-flat");
 
+  // PQ params
+  bool enable_PQ = P.getOption("-pq");
+  uint32_t num_blocks = P.getOptionIntValue("-pq_num_blocks", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-pq_num_clusters_per_block", 256);
+  uint32_t sample_size = P.getOptionIntValue("-pq_sample_size", 100000);
+
   auto points = PC(inFile, is_mmap);
   IndexParams index_params;
   SearchParams search_params;
   if (is_flat) {
-    index_params = IndexParams::mvivf_flat(k_per_level, compress_input, use_PQ, verbose);
+    index_params = IndexParams::mvivf_flat(k_per_level, compress_input, verbose);
+    index_params.pq = {enable_PQ, num_blocks, num_clusters_per_block, sample_size};
     search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else {
-    index_params = IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, use_PQ, verbose);
+    index_params = IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose);
+    index_params.pq = {enable_PQ, num_blocks, num_clusters_per_block, sample_size};
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 

@@ -105,6 +105,7 @@ struct IP_Point {
   inline unsigned int get_dims() const { return d; }
   bool same_as(const IP_Point<T> &q) { return values == q.values; }
   inline auto get_slice() const { return parlay::make_slice(values, values + d); }
+  inline T* data() const noexcept { return values; }
 };
 
 template<typename T>

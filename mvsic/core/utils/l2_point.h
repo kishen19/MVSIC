@@ -102,5 +102,6 @@ struct L2_Point {
   inline unsigned int get_dims() const { return d; }
   bool same_as(const L2_Point<T> &q) { return values == q.values; }
   inline auto get_slice() const { return parlay::make_slice(values, values + d); }
+  inline T* data() const noexcept { return values; }
 };
 }  // namespace mvsic

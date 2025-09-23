@@ -14,6 +14,7 @@ using namespace mvsic;
 
 template<typename ChPoint, bool metric>
 void grid_search_bench(mvsic::commandLine& P) {
+  Eigen::setNbThreads(1);
   char* inFile = P.getOptionValue("-i");
   char* qFile = P.getOptionValue("-q");
   std::string QFile;
@@ -23,11 +24,12 @@ void grid_search_bench(mvsic::commandLine& P) {
     QFile = "";
   }
   std::string gtFile = P.getOptionValue("-gt", "");
+  std::string index_dir = P.getOptionValue("-index_dir", "mpool_indices");
   std::string results_dir = P.getOptionValue("-results_dir", "mpool_results");
 
   // Grid search parameters
   const std::vector<uint32_t> num_cands = {1, 5, 10, 20, 50, 100, 200};
-  const std::vector<uint32_t> L_values = {64, 128, 256, 512, 1024, 2048};
+  const std::vector<uint32_t> L_values = {64, 128, 256, 512, 1024, 2048, 4096};
   const uint32_t k = P.getOptionIntValue("-k", 10);
 
   using PC = PointCloudSet<ChPoint>;
@@ -42,13 +44,18 @@ void grid_search_bench(mvsic::commandLine& P) {
   uint32_t R = 200;
   uint32_t L_build = 600;
   double alpha = 1.2;
-  bool two_pass = false;  // Default from bench.cpp, not specified by user to be on
+  bool two_pass = false;
   uint32_t verbose = 0;
   IndexParams index_params =
       IndexParams::mpool(R, L_build, alpha, two_pass, true, verbose);  // normalize = true
   IndexMPool<metric> index(points.get_dims(), index_params);
   index.build(points);
   std::cout << "Index built." << std::endl;
+  std::string index_path = index_dir + "/mpool.index";
+  index.save(index_path);
+  // index.load(index_path, points);
+  std::cout << "Index saved to " << index_path << std::endl;
+  // std::cout << "Index loaded from " << index_path << std::endl;
 
   std::string results_path = results_dir + "/results.csv";
   std::ofstream results_file(results_path);
@@ -78,7 +85,7 @@ int main(int argc, char* argv[]) {
                        "[-i <inFile>] [-q <qFile>] [-gt <gtFile>] [-k <k>]"
                        "[-results_dir <dir>] [-dist_func <IP|L2>]");
 
-  std::string df = P.getOptionValue("-dist_func", "L2");
+  std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {
     using ChPoint = ChamferL2_Point;

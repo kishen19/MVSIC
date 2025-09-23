@@ -43,7 +43,8 @@ struct ChamferIP_Point {
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }
 
   // Returns False: since IP is not a metric
-  constexpr inline bool is_metric() const noexcept { return false; }
+  // constexpr inline bool is_metric() const noexcept { return false; }
+  static constexpr inline bool is_metric() noexcept { return false; }
   // Computes the (asymmetric) distance from the current point cloud
   // to the given point cloud
   float distance(const ChamferIP_Point &x) const {

@@ -15,8 +15,6 @@ data/
 *.txt
 *.py
 perf*
-MODULE.bazel
-MODULE.bazel.lock
 
 # Prerequisites
 *.d

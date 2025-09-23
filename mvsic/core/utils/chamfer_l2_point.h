@@ -43,7 +43,8 @@ struct ChamferL2_Point {
   inline auto get_slice() const noexcept { return parlay::make_slice(values, values + n * dims); }
 
   // Returns True since L2 is a metric
-  constexpr inline bool is_metric() const noexcept { return true; }
+  // constexpr inline bool is_metric() const noexcept { return true; }
+  static constexpr inline bool is_metric() noexcept { return true; }
   // Computes the (asymmetric) distance from the current point cloud
   // to the given point cloud
   float distance(const ChamferL2_Point &x) const {

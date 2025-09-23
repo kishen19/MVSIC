@@ -6,7 +6,7 @@
 
 namespace mvsic {
 
-/* =================================Set of Point Clouds Type================================ */
+/* =================================Set of Point Clouds================================ */
 template<typename ChPoint>
 struct PointCloudSet {
  private:
@@ -60,20 +60,28 @@ struct PointCloudSet {
   inline ChPoint operator[](size_t i) const {
     return ChPoint(get_size(i), dims, data(i), get_id(i));
   }
+  // constexpr bool is_metric() const noexcept { return ChPoint::is_metric(); }
+  static constexpr bool is_metric() noexcept { return ChPoint::is_metric(); }
 
   // Return list of distances from a query to all point clouds
   // TODO: make this blocked, and thread_local
-  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
-      const ChPoint &query) {
+  inline size_t distances(const ChPoint &query, std::pair<uint32_t, float> *results) const {
     auto cmps = parlay::sequence<size_t>::uninitialized(n);
-    auto dists = parlay::sequence<std::pair<uint32_t, float>>::from_function(n, [&](uint32_t i) {
+    parlay::parallel_for(0, n, [&](uint32_t i) {
       float dist;
       size_t cmp;
       std::tie(dist, cmp) = query.distance_w_cmps((*this)[i]);
       cmps[i] = cmp;
-      return std::make_pair(i, dist);
+      results[i] = std::make_pair(get_id(i), dist);
     });
-    return std::make_pair(dists, parlay::reduce(cmps));
+    return parlay::reduce(cmps);
+  }
+
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
+      const ChPoint &query) const {
+    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n);
+    auto cmps = distances(query, results.data());
+    return std::make_pair(results, cmps);
   }
 
   // Returns non-owning sequence of ChPoint type objects of the point
@@ -138,6 +146,12 @@ PointCloudSet<ChPoint>::PointCloudSet(const char *filename, bool is_mmap) {
     // values = std::shared_ptr<float[]>(static_cast<float *>(std::aligned_alloc(64,
     // coordinate_size)), std::free);
     file.read(reinterpret_cast<char *>(values.get()), coordinate_size);
+    for (size_t i = 0; i < num_vectors * dims; ++i) {
+      if (!std::isfinite(values.get()[i])) {
+        std::cerr << "Error: Non-finite value found in input data at index " << i << std::endl;
+        exit(1);
+      }
+    }
     // Step 3: Read offsets
     size_t num_offsets;
     file.read(reinterpret_cast<char *>(&num_offsets), sizeof(num_offsets));

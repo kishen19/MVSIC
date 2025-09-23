@@ -105,7 +105,7 @@ int main(int argc, char* argv[]) {
                        "[-i <inFile>] [-q <qFile>] [-gt <gtFile>] [-k <k>] [-index_dir <dir>] "
                        "[-results_dir <dir>] [-dist_func <IP|L2>]");
 
-  std::string df = P.getOptionValue("-dist_func", "L2");
+  std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {
     using ChPoint = ChamferL2_Point;

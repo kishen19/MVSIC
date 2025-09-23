@@ -183,7 +183,7 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
     // if a k is given (i.e. k != 0) then trim off entries that have a
     // distance greater than cut * current-kth-smallest-distance.
     // Only used during query and not during build.
-    if (params.k > 0 && new_frontier_size > params.k && Points[0].is_metric())
+    if (params.k > 0 && new_frontier_size > params.k && ChPoint::is_metric())
       new_frontier_size =
           (std::upper_bound(new_frontier.begin(), new_frontier.begin() + new_frontier_size,
                             std::pair{0, params.cut * new_frontier[params.k].second}, less) -

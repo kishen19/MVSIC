@@ -126,10 +126,38 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "pq_helper",
+    hdrs = ["pq_helper.h"],
+    deps = [
+        ":point_cloud_set",
+        "@scann//scann/data_format:dataset",
+        "@scann//scann/hashes/asymmetric_hashing2:indexing",
+        "@scann//scann/hashes/asymmetric_hashing2:querying",
+        "@scann//scann/hashes/asymmetric_hashing2:training",
+        "@scann//scann/proto:scann_cc_proto",
+        "@scann//scann/utils:types",
+    ],
+)
+
+cc_library(
+    name = "quantized_point_cloud_set",
+    hdrs = ["quantized_point_cloud_set.h"],
+    deps = [
+        ":mmap",
+        ":point_cloud_set",
+        ":pq_helper",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
 cc_binary(
     name = "test_scann",
     srcs = ["test_scann.cpp"],
     deps = [
-        "@scann//scann/hashes/internal:asymmetric_hashing_impl",
+        ":chamfer_ip_point",
+        ":parse_command_line",
+        ":quantized_point_cloud_set",
+        "@scann//scann/proto:scann_cc_proto",
     ],
 )

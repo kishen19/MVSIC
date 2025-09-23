@@ -34,6 +34,7 @@ class IndexMVIVF : Index<metric> {
     // For internal nodes: data = centers of children
     // For leaves:         data = points in the cluster
     PointCloudSet<ChPoint> data;
+    QuantizedPointCloudSet<ChPoint> pq_data;  // Only for leaves if PQ is enabled
     node_t() noexcept : children(parlay::sequence<node_t *>(0)), data(PointCloudSet<ChPoint>()) {}
     ~node_t() noexcept {}
   };

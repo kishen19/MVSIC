@@ -5,6 +5,7 @@
 #include "mvsic/core/utils/chamfer_ip_point.h"
 #include "mvsic/core/utils/chamfer_l2_point.h"
 #include "mvsic/core/utils/point_cloud_set.h"
+#include "mvsic/core/utils/quantized_point_cloud_set.h"
 #include "search_params.h"
 #include "index_params.h"
 
