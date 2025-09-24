@@ -2,12 +2,13 @@
 
 #include <fstream>
 #include <iostream>
+#include <string>
+
 #include "parlay/primitives.h"
+#include "scann/proto/centers.pb.h"
 #include "mmap.h"
 #include "mvsic/core/utils/point_cloud_set.h"
 #include "mvsic/core/utils/pq_helper.h"
-#include "scann/proto/centers.pb.h"
-#include <string>
 
 namespace mvsic {
 
@@ -37,12 +38,12 @@ class QuantizedPointCloudSet {
   explicit QuantizedPointCloudSet(std::istream &in);
 
   // Copy constructor
-  QuantizedPointCloudSet(const QuantizedPointCloudSet &other)
-      : n_(other.n_),
-        dims_(other.dims_),
-        offsets_(other.offsets_),
-        ids_(other.ids_),
-        config_(other.config_) {
+  QuantizedPointCloudSet(const QuantizedPointCloudSet &other) :
+      n_(other.n_),
+      dims_(other.dims_),
+      offsets_(other.offsets_),
+      ids_(other.ids_),
+      config_(other.config_) {
     pq_result_.model = other.pq_result_.model;
     if (other.pq_result_.hashed_dataset.size() > 0) {
       pq_result_.hashed_dataset = other.pq_result_.hashed_dataset.Copy();
@@ -82,8 +83,30 @@ class QuantizedPointCloudSet {
   }
   // Returns id of pointcloud i
   inline uint32_t get_id(size_t i) const noexcept { return (ids_.size() > 0) ? ids_[i] : i; }
+  // Get the PQ config
+  inline const scann_pq::ScannPQConfig &get_config() const { return config_; }
+  // Returns the PQResult Object
+  inline const scann_pq::PQResult &get_pq_result() const { return pq_result_; }
+  // Returns non-owning sequence of offsets
+  inline auto get_offsets() const noexcept {
+    return parlay::make_slice(offsets_.begin(), offsets_.end());
+  }
+  // Returns ChPoint type object on the embeddings of point cloud i
+  // inline ChPoint operator[](size_t i) const {
+  //   return ChPoint(get_size(i), dims, data(i), get_id(i));
+  // }
   // inline constexpr bool is_metric() const noexcept { return ChPoint::is_metric(); }
   static inline constexpr bool is_metric() noexcept { return ChPoint::is_metric(); }
+
+  // Returns approximated distances from a query point cloud to all point clouds in the set
+  inline size_t distances_old(const ChPoint &query, std::pair<uint32_t, float> *results) const;
+
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances_old(
+      const ChPoint &query) const {
+    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n_);
+    auto cmps = distances_old(query, results.data());
+    return std::make_pair(results, cmps);
+  }
 
   // Returns approximated distances from a query point cloud to all point clouds in the set
   inline size_t distances(const ChPoint &query, std::pair<uint32_t, float> *results) const;
@@ -134,11 +157,11 @@ QuantizedPointCloudSet<ChPoint>::QuantizedPointCloudSet(const PointCloudSet<ChPo
 
 template<typename ChPoint>
 QuantizedPointCloudSet<ChPoint>::QuantizedPointCloudSet(const std::string &filename) {
-    std::ifstream in(filename, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Failed to open file for loading: " + filename);
-    }
-    *this = QuantizedPointCloudSet<ChPoint>(in);
+  std::ifstream in(filename, std::ios::binary);
+  if (!in) {
+    throw std::runtime_error("Failed to open file for loading: " + filename);
+  }
+  *this = QuantizedPointCloudSet<ChPoint>(in);
 }
 
 template<typename ChPoint>
@@ -238,7 +261,7 @@ void QuantizedPointCloudSet<ChPoint>::save(std::ostream &out) const {
 
 // Returns approximated distances from a query point cloud to all point clouds in the set
 template<typename ChPoint>
-inline size_t QuantizedPointCloudSet<ChPoint>::distances(
+inline size_t QuantizedPointCloudSet<ChPoint>::distances_old(
     const ChPoint &query, std::pair<uint32_t, float> *results) const {
   // 1. Create the Scann queryer from the trained model
   auto projector_or = pq_result_.model->GetProjection(config_.projection());
@@ -300,6 +323,64 @@ inline size_t QuantizedPointCloudSet<ChPoint>::distances(
     float avg_dist = total_dist / query.size();
     results[i] = std::make_pair(this->ids_[i], avg_dist);
   });
+  return cmps;
+}
+
+template<typename ChPoint>
+inline size_t QuantizedPointCloudSet<ChPoint>::distances(
+    const ChPoint &query, std::pair<uint32_t, float> *results) const {
+  // 1. Get projector from the trained model
+  auto projector_or = pq_result_.model->GetProjection(config_.projection());
+  if (!projector_or.ok()) {
+    throw std::runtime_error("Failed to get projector from model.");
+  }
+  auto projector = projector_or.value();
+
+  // 2. Compute Lookup tables for all query points in a batched fashion
+  auto lookup_tables =
+      scann_pq::create_lookup_tables_batched_eigen(query, projector, pq_result_.model->centers());
+
+  size_t cmps = query.size() * dims_;                          // Size of query
+  cmps += pq_result_.model->num_clusters_per_block() * dims_;  // Size of lookup tables
+
+  // 3. For each point cloud in the set, compute the approximate Chamfer distance
+  const uint8_t *encoded_data = pq_result_.hashed_dataset.data().data();
+  const size_t num_blocks = pq_result_.model->num_blocks();
+  const size_t num_clusters_per_block = pq_result_.model->num_clusters_per_block();
+
+  parlay::parallel_for(
+      0, n_,
+      [&](uint32_t i) {
+        // Get the slice of encoded vectors for point cloud `i`
+        size_t start_offset = offsets_[i] / dims_;
+        size_t end_offset = offsets_[i + 1] / dims_;
+        auto num_vectors_in_pc = end_offset - start_offset;
+
+        float total_dist = 0.0f;
+
+        // For each point in the query cloud...
+        // for (size_t j = 0; j < query.size(); ++j) {
+        auto dists_query = parlay::sequence<float>::uninitialized(query.size());
+        parlay::parallel_for(0, query.size(), [&](size_t j) {
+          const auto &lut = lookup_tables[j];  // this is a sequence of floats
+          // 4. Find the min distance from this query point to the encoded db point cloud
+          float min_dist_for_query_point = std::numeric_limits<float>::max();
+          for (size_t k = 0; k < num_vectors_in_pc; ++k) {
+            const uint8_t *vec_start = encoded_data + (start_offset + k) * num_blocks;
+            float dist = 0.0f;
+            const float *lookup_table_ptr = lut.data();
+            for (size_t block_idx = 0; block_idx < num_blocks; ++block_idx) {
+              const uint8_t code = vec_start[block_idx];
+              dist += lookup_table_ptr[block_idx * num_clusters_per_block + code];
+            }
+            min_dist_for_query_point = std::min(min_dist_for_query_point, dist);
+          }
+          dists_query[j] = min_dist_for_query_point;
+        });
+        float avg_dist = parlay::reduce(dists_query) / query.size();
+        results[i] = std::make_pair(this->ids_[i], avg_dist);
+      },
+      1);
   return cmps;
 }
 

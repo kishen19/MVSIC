@@ -44,9 +44,9 @@ void bench(mvsic::commandLine &P) {
 
   // PQ params
   bool enable_PQ = P.getOption("-pq");
-  uint32_t num_blocks = P.getOptionIntValue("-pq_num_blocks", 8);
-  uint32_t num_clusters_per_block = P.getOptionIntValue("-pq_num_clusters_per_block", 256);
-  uint32_t sample_size = P.getOptionIntValue("-pq_sample_size", 100000);
+  uint32_t num_blocks = P.getOptionIntValue("-pq_nb", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-pq_nc", 256);
+  uint32_t sample_size = P.getOptionIntValue("-pq_ss", 100000);
 
   auto points = PC(inFile, is_mmap);
   IndexParams index_params;

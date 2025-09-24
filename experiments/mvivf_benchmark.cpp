@@ -1,107 +1,103 @@
+#include <Eigen/Dense>
+#include <fstream>
 #include <iostream>
-#include "src/utils/chamfer_ip_point.h"
-#include "src/utils/chamfer_l2_point.h"
-#include "src/utils/parse_command_line.h"
-#include "src/utils/point_cloud_set.h"
-#include "src/utils/stats.h"
-#include "src/mvivf/mvivf.h"
+#include <string>
+#include <vector>
+#include <stdlib.h>
 
-using namespace mvivf;
+#include "mvsic/core/stats.h"
+#include "mvsic/core/utils/chamfer_ip_point.h"
+#include "mvsic/core/utils/chamfer_l2_point.h"
+#include "mvsic/core/utils/parse_command_line.h"
+#include "mvsic/core/utils/point_cloud_set.h"
+#include "mvsic/mvivf/mvivf.h"
+
+using namespace mvsic;
 
 template<typename ChPoint, bool metric>
-void bench(mvivf::commandLine& P) {
-  using PC = PointCloudSet<ChPoint>;
-
-  // Files
-  char* inFile = P.getOptionValue("-i");                   // Base Points
-  std::string qFile = P.getOptionValue("-q", "");          // Query Points
-  std::string gtFile = P.getOptionValue("-gt", "");        // Ground Truth
-  std::string outFile = P.getOptionValue("-o", "");        // File to store index
-  std::string indexFile = P.getOptionValue("-index", "");  // File containing index
-  char* resFile = P.getOptionValue("-r");                  // CSV file to store stats
-  // Params
-  size_t minsize = P.getOptionLongValue("-minsize", 100);
-  size_t maxsize = P.getOptionLongValue("-maxsize", 500);
-  size_t nprobesl = P.getOptionLongValue("-npl", 1);
-  size_t nprobesr = P.getOptionLongValue("-npr", 8);
-  size_t nprobesmp = P.getOptionLongValue("-npmp", 2);
-  size_t nprobesad = P.getOptionLongValue("-npad", 0);
-  size_t k = P.getOptionLongValue("-k", 10);
-  size_t s = P.getOptionLongValue("-s", 0);
-  size_t os_rate = P.getOptionLongValue("-osr", 20);
-  auto seeding = P.getOptionValue("-seed", "Random");
-  auto iters = P.getOptionLongValue("-iters", 5);
-  int rounds = P.getOptionLongValue("-rounds", 1);
-  bool verbose = P.getOption("-v");
-  bool is_gold = P.getOption("-gold");
-
-  auto points = PC(inFile);
-  IndexMVIVFParams index_params(minsize, maxsize, s, iters, seeding, os_rate, verbose);
-  IndexMVIVF<metric> index(points.get_dims(), index_params);
-  if (indexFile != "") {  // Stats Benchmark
-    index.load(indexFile, points);
-    std::cout << "Index loaded" << std::endl;
-    auto queries = PC(P.getOptionValue("-q"));
-    parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> gt;
-    if (is_gold) {
-      gt = ReadGoldGT(gtFile, queries.size());
-    } else {
-      gt = ReadGT(gtFile, queries.size());
-    }
-    parlay::sequence<SearchParams> search_params_list;
-    size_t nprobes = nprobesl;
-    while (nprobes <= nprobesr) {
-      search_params_list.push_back(SearchParams(k, nprobes, 0));
-      nprobes = nprobesmp * nprobes + nprobesad;
-    }
-    // Compute Stats
-    std::cout << "Computing stats..." << std::endl;
-    if (is_gold) {
-      search_all_gold(index, points, queries, gt, resFile, search_params_list);
-    } else {
-      search_all(index, points, queries, gt, resFile, search_params_list);
-    }
-    std::cout << "Stats computed and saved to " << resFile << std::endl;
-  } else {  // Indexing Benchmark
-    std::cout << "Starting Indexing Benchmark..." << std::endl;
-    parlay::internal::timer t;
-    double index_time = 0.0;
-    for (long it = 0; it <= rounds; it++) {
-      t.start();
-      IndexMVIVF<metric> index(points.get_dims(), index_params);
-      index.build(points);
-      t.stop();
-      if (it != 0) {
-        index_time += t.total_time();
-      } else {
-        if (outFile != "") {
-          std::cout << "Saving index to " << outFile << std::endl;
-          index.save(P.getOptionValue("-o"));
-          std::cout << "Index saved." << std::endl;
-        }
-        std::cout << "Warm up Time: " << t.total_time() << " seconds." << std::endl;
-      }
-      t.reset();
-    }
-    std::cout << "Average Indexing Time: " << index_time / rounds << " seconds." << std::endl;
+void grid_search_bench(mvsic::commandLine& P) {
+  Eigen::setNbThreads(1);
+  char* inFile = P.getOptionValue("-i");
+  char* qFile = P.getOptionValue("-q");
+  std::string QFile;
+  if (qFile != nullptr) {
+    QFile = P.getOptionValue("-q");
+  } else {
+    QFile = "";
   }
+  std::string gtFile = P.getOptionValue("-gt", "");
+  std::string index_dir = P.getOptionValue("-index_dir", "mvivf_indices");
+  std::string results_dir = P.getOptionValue("-results_dir", "mvivf_results");
+
+  std::vector<std::pair<uint32_t, uint32_t>> params;
+#ifdef grid_search
+  const std::vector<uint32_t> max_leaf_sizes = {200, 500, 1000, 2000};
+  const std::vector<uint32_t> k_per_levels = {16, 32, 64};
+  for (uint32_t mls : max_leaf_sizes) {
+    for (uint32_t kpl : k_per_levels) {
+      params.push_back({mls, kpl});
+    }
+  }
+#else
+  params.push_back({500, 32});
+  params.push_back({1000, 32});
+  params.push_back({500, 64});
+  params.push_back({1000, 64});
+#endif
+  const std::vector<uint32_t> nprobes_values = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+  const uint32_t k = P.getOptionIntValue("-k", 10);
+
+  using PC = PointCloudSet<ChPoint>;
+  auto points = PC(inFile);
+  auto queries = PC(qFile);
+  auto gt = ReadGT(gtFile, queries.size());
+
+  system(("mkdir -p " + index_dir).c_str());
+  system(("mkdir -p " + results_dir).c_str());
+
+  for (auto [max_leaf_size, k_per_level] : params) {
+    std::cout << "Building index for max_leaf_size=" << max_leaf_size << ", k_per_level=" << k_per_level << std::endl;
+    IndexParams index_params = IndexParams::mvivf(max_leaf_size, k_per_level);
+    IndexMVIVF<metric> index(points.get_dims(), index_params);
+    index.build(points);
+
+    std::string index_path = index_dir + "/mvivf_mls" + std::to_string(max_leaf_size) + "_kpl" +
+                             std::to_string(k_per_level) + ".index";
+    index.save(index_path);
+    std::cout << "Index saved to " << index_path << std::endl;
+
+    std::string results_path = results_dir + "/results_mls" + std::to_string(max_leaf_size) + "_kpl" +
+                               std::to_string(k_per_level) + ".csv";
+    std::ofstream results_file(results_path);
+    results_file << "nprobes,recall 1@" << k << ",recall " << k << "@" << k
+                 << ",QPS,QPS_par,Avg_cmps" << std::endl;
+    std::cout << "Writing results to " << results_path << std::endl;
+
+    for (uint32_t nprobes : nprobes_values) {
+        SearchParams search_params = SearchParams::mvivf(k, nprobes, 0);
+        Stats result = compute_stats(index, points, queries, gt, search_params);
+        results_file << nprobes << "," << result.recall_1_k << "," << result.recall_k_k
+                     << "," << result.QPS_seq << "," << result.QPS_par << "," << result.avg_cmps
+                     << std::endl;
+    }
+    results_file.close();
+  }
+  std::cout << "Grid search complete." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
-  mvivf::commandLine P(argc, argv,
-                       "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
-                       "[-data_type <tp>] [-dist_func <dist_func>]"
-                       "[-seed <algorithm>] [-iters <num_iters>]"
-                       "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]");
+  mvsic::commandLine P(argc, argv,
+                       "[-i <inFile>] [-q <qFile>] [-gt <gtFile>] [-k <k>] [-index_dir <dir>] "
+                       "[-results_dir <dir>] [-dist_func <IP|L2>]");
 
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {
     using ChPoint = ChamferL2_Point;
-    bench<ChPoint, true>(P);
+    grid_search_bench<ChPoint, true>(P);
   } else if (df == "IP") {
     using ChPoint = ChamferIP_Point;
-    bench<ChPoint, false>(P);
+    grid_search_bench<ChPoint, false>(P);
   }
   return 0;
 }

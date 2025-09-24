@@ -131,6 +131,7 @@ cc_library(
     hdrs = ["pq_helper.h"],
     deps = [
         ":point_cloud_set",
+        "@eigen",
         "@scann//scann/data_format:dataset",
         "@scann//scann/hashes/asymmetric_hashing2:indexing",
         "@scann//scann/hashes/asymmetric_hashing2:querying",
