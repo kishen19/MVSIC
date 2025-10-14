@@ -11,6 +11,7 @@ pybind_extension(
     srcs = ["bindings.cpp"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core:stats",
         "//mvsic/core:index_params",
         "//mvsic/core:search_params",
         "//mvsic/core/utils:chamfer_ip_point",

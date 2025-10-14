@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include "mvsic/core/mvclustering/mvclustering_config.h"
 
 namespace mvsic {
@@ -56,7 +57,7 @@ struct IndexParams {
   static IndexParams mvivf(uint32_t k_per_level = 0, uint32_t max_leaf_size = 200,
                            bool compress_input = false, uint32_t verbose = 0, uint32_t niters = 5,
                            uint32_t max_points_per_centroid_inner_kmeans = 20,
-                           char *init = "Random", uint32_t seed = 0,
+                           std::string init = "Random", uint32_t seed = 0,
                            bool use_weighted_inner_kmeans = false, uint32_t s = 0,
                            bool pq_enabled = false, uint32_t num_blocks = 8,
                            uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
@@ -77,7 +78,7 @@ struct IndexParams {
   static IndexParams mvivf_flat(uint32_t k_per_level = 0, bool compress_input = false,
                                 bool apply_PQ = false, uint32_t verbose = 0, uint32_t niters = 5,
                                 uint32_t max_points_per_centroid_inner_kmeans = 20,
-                                char *init = "Random", uint32_t seed = 0,
+                                std::string init = "Random", uint32_t seed = 0,
                                 bool use_weighted_inner_kmeans = false, uint32_t s = 0,
                                 bool pq_enabled = false, uint32_t num_blocks = 8,
                                 uint32_t num_clusters_per_block = 256,

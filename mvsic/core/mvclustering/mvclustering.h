@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <cstring>
 #include "parlay/primitives.h"
 
 #include "mvsic/core/utils/chamfer_ip_point.h"
@@ -51,8 +52,8 @@ class MVClustering {
       d(d), k(k), s(s), params(params) {}
   MVClustering(uint32_t d, uint32_t k, uint32_t s = 0, uint32_t niters = 5,
                uint32_t max_points_per_centroid_inner_kmeans = 20, uint32_t verbose = 0,
-               char *init = "Random", uint32_t random_seed = 0,
-               bool use_weighted_inner_kmeans = false) noexcept :
+               std::string init = "Random", uint32_t random_seed = 0,
+               bool use_weighted_inner_kmeans = false) :
       d(d),
       k(k),
       s(s),
@@ -103,6 +104,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
   // Step 1: Initialization
   parlay::internal::timer _st;
   _st.start();
+  std::cout << "[MVClustering] Seeding algorithm: " << params.init << std::endl;
   if (params.init == "Random") {
     centers = UniformlyRandomMV(points, k, params.seed);
   } else {

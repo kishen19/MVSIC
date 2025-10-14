@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 namespace mvsic {
 
@@ -8,13 +9,13 @@ struct MVClusteringConfig {
   uint32_t max_points_per_centroid_inner_kmeans = 20;
   uint32_t verbose = 0;   // Print debug statements: 0-nothing, 1-basic verbose, 2-computes cost,
                           //                         3-inner kmeans verbose
-  char *init = "Random";  // Seeding Algorithm
+  std::string init = "Random";  // Seeding Algorithm
   uint32_t seed = 0;      // Seed for randomized methods
   bool use_weighted_inner_kmeans = false;  // Weight the points for inner kmeans calls
 
   MVClusteringConfig(uint32_t niters = 5, uint32_t max_points_per_centroid_inner_kmeans = 20,
-                     uint32_t verbose = 0, char *init = "Random", uint32_t seed = 0,
-                     bool use_weighted_inner_kmeans = false) noexcept :
+                     uint32_t verbose = 0, std::string init = "Random", uint32_t seed = 0,
+                     bool use_weighted_inner_kmeans = false) :
       niters(niters),
       max_points_per_centroid_inner_kmeans(max_points_per_centroid_inner_kmeans),
       verbose(verbose),
