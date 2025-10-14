@@ -72,8 +72,6 @@ struct IP_Point {
 
  public:
   using distanceType = T;
-  template<class C>
-  friend struct Quantized_IP_Point;
 
   IP_Point() : values(nullptr), d(0), aligned_d(0), id_(-1) {}
   // Non-owning version
@@ -105,90 +103,7 @@ struct IP_Point {
   inline unsigned int get_dims() const { return d; }
   bool same_as(const IP_Point<T> &q) { return values == q.values; }
   inline auto get_slice() const { return parlay::make_slice(values, values + d); }
-  inline T* data() const noexcept { return values; }
-};
-
-template<typename T>
-float quantized_ip_distance(const float *q, const T *p, unsigned d, float max_coord,
-                            float min_coord) {
-  float result = 0;
-  uint T_bits = sizeof(T) * 8;
-  float maxval = static_cast<float>(static_cast<T>((((size_t)1) << T_bits) - 1));
-  float delta = max_coord - min_coord;
-  float mult = delta / maxval;
-  float dc;
-  for (int i = 0; i < d; i++) {
-    dc = static_cast<float>(p[i]) * mult + min_coord;
-    result += dc * q[i];
-  }
-  return result;
-}
-
-template<typename T>
-float quantized_ip_distance(const T *q, const T *p, unsigned d, float max_coord, float min_coord) {
-  float result = 0;
-  uint T_bits = sizeof(T) * 8;
-  float maxval = static_cast<float>(static_cast<T>((((size_t)1) << T_bits) - 1));
-  float delta = max_coord - min_coord;
-  float mult = delta / maxval;
-  float dc;
-  float dcq;
-  for (int i = 0; i < d; i++) {
-    dc = static_cast<float>(p[i]) * mult + min_coord;
-    dcq = static_cast<float>(q[i]) * mult + min_coord;
-    result += dc * dcq;
-  }
-  return result;
-}
-
-template<typename T>
-struct Quantized_IP_Point {
-  using distanceType = T;
-
-  static distanceType d_min() { return -std::numeric_limits<float>::max(); }
-  static bool is_metric() { return false; }
-
-  T operator[](long j) const { return *(values + j); }
-  T &operator[](long j) { return *(values + j); }
-
-  float distance(const IP_Point<float> &x) const {
-    return quantized_ip_distance(x.values, this->values, d, max_coord, min_coord);
-  }
-
-  float distance(const Quantized_IP_Point &x) const {
-    return quantized_ip_distance(x.values, this->values, d, max_coord, min_coord);
-  }
-
-  void prefetch() const {
-    int l = (aligned_d * sizeof(T)) / 64;
-    for (int i = 0; i < l; i++)
-      __builtin_prefetch((char *)values + i * 64);
-  }
-
-  long id() const { return id_; }
-
-  Quantized_IP_Point(T *values, unsigned int d, unsigned int ad, long id, float max_coord,
-                     float min_coord) :
-      values(values), d(d), aligned_d(ad), id_(id), max_coord(max_coord), min_coord(min_coord) {
-    ;
-  }
-
-  bool operator==(const Quantized_IP_Point &q) const {
-    for (int i = 0; i < d; i++) {
-      if (values[i] != q.values[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-
- private:
-  T *values;
-  unsigned int d;
-  unsigned int aligned_d;
-  long id_;
-  float min_coord;
-  float max_coord;
+  inline T *data() const noexcept { return values; }
 };
 
 }  // namespace mvsic

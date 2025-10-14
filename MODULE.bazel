@@ -14,6 +14,10 @@ bazel_dep(name = "abseil-cpp", version = "20250127.1", repo_name = "com_google_a
 bazel_dep(name = "eigen", version = "4.0.0-20241125.bcr.2")
 bazel_dep(name = "kmeans", version = "0.0.1")
 bazel_dep(name = "scann", version = "0.0.1")
+# bazel_dep(name = "parlayann", version = "0.0.1")
+
+bazel_dep(name = "pybind11_bazel", version = "2.13.6")
+bazel_dep(name = "rules_python", version = "0.31.0")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -23,6 +27,13 @@ http_archive(
     strip_prefix = "parlaylib-bazel/include/",
     urls = ["https://github.com/ParAlg/parlaylib/archive/refs/tags/bazel.tar.gz"],
 )
+
+# git_override(
+#     module_name = "parlayann",
+#     remote = "https://github.com/cmuparlay/ParlayANN.git",
+#     commit = "8db984232a37cfdd7b26bd0ee158f47c513cebc9",
+#     build_file = "//external/parlayann:BUILD.bazel",
+# )
 
 git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
@@ -67,4 +78,11 @@ local_path_override(
 local_path_override(
     module_name = "scann",
     path = "./external/scann/",
+)
+
+# python bindings relevant
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    python_version = "3.13",
+    is_default = True,
 )

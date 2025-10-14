@@ -79,7 +79,7 @@ struct PointCloudSet {
 
   inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
       const ChPoint &query) const {
-    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n);
+    auto results = parlay::sequence<std::pair<uint32_t, float>>(n);
     auto cmps = distances(query, results.data());
     return std::make_pair(results, cmps);
   }

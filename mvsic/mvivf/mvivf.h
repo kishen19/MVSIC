@@ -65,13 +65,20 @@ class IndexMVIVF : public Index<metric> {
     // Step 1: Run MV-Lloyds on points
     MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
     Clus.train(points);
-    node->data = std::move(Clus.centers);
+    PointCloudSet<ChPoint> &centers = Clus.centers;
     parlay::sequence<uint32_t> &cluster_ids = Clus.cluster_ids;
     // Step 2: Collect Clusters
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
     // Step 3: Update children nodes and recurse for large nodes
-    node->children.resize(num_clusters);
+    node->children.resize(grouped.size());
+    if (grouped.size() < centers.size()) {
+      auto active_centers_ind = parlay::delayed_seq<uint32_t>(
+          grouped.size(), [&](size_t i) { return grouped[i][0].first; });
+      node->data = PointCloudSet<ChPoint>(centers.filter(active_centers_ind), d);
+    } else {
+      node->data = std::move(centers);
+    }
     parlay::parallel_for(
         0, grouped.size(),
         [&](size_t i) {

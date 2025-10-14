@@ -26,3 +26,5 @@ bazel-*
 *.csv
 
 plots/
+data/
+results/

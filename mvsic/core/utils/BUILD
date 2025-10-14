@@ -152,13 +152,13 @@ cc_library(
     ],
 )
 
-cc_binary(
-    name = "test_scann",
-    srcs = ["test_scann.cpp"],
-    deps = [
-        ":chamfer_ip_point",
-        ":parse_command_line",
-        ":quantized_point_cloud_set",
-        "@scann//scann/proto:scann_cc_proto",
-    ],
-)
+# cc_binary(
+#     name = "test_scann",
+#     srcs = ["test_scann.cpp"],
+#     deps = [
+#         ":chamfer_ip_point",
+#         ":parse_command_line",
+#         ":quantized_point_cloud_set",
+#         "@scann//scann/proto:scann_cc_proto",
+#     ],
+# )

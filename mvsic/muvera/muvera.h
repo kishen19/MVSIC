@@ -6,11 +6,11 @@
 #include "mvsic/muvera/fde/fixed_dimensional_encoding.h"
 #include "mvsic/core/index.h"
 #include "mvsic/core/utils/point_range.h"
+#include "mvsic/core/utils/l2_point.h"
+#include "mvsic/core/utils/ip_point.h"
 
 // ParlayANN (Vamana) includes
-#include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
-#include "algorithms/utils/mips_point.h"
 #include "algorithms/utils/stats.h"
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
@@ -28,7 +28,8 @@ template<bool metric>
 class IndexMUVERA : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
+  // using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
+  using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
   using Range = PointRange<float, Point>;
   using Index<metric>::d;  // Embedding dimension
 

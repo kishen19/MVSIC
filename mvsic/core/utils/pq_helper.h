@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mvsic/core/utils/point_cloud_set.h"
+#include <Eigen/Dense>
 #include "scann/data_format/dataset.h"
 #include "scann/hashes/asymmetric_hashing2/indexing.h"
 #include "scann/hashes/asymmetric_hashing2/querying.h"
@@ -8,10 +8,8 @@
 #include "scann/distance_measures/distance_measure_factory.h"
 #include "scann/proto/scann.pb.h"
 #include "scann/utils/types.h"
+#include "mvsic/core/utils/point_cloud_set.h"
 #include <iostream>
-
-// Eigen is a 3rd party library. Make sure to include it in your build system.
-#include <Eigen/Dense>
 
 namespace mvsic {
 namespace scann_pq {
