@@ -412,59 +412,73 @@ PYBIND11_MODULE(mvsic, m) {
 
   m.def("ReadGT", &ReadGT, "Read ground truth file", py::arg("file_path"), py::arg("num_points"));
 
-  m.def("compute_recall", &compute_recall, "Compute recall", py::arg("pred"), py::arg("gt"), py::arg("k"), py::arg("k_gt"));
+  m.def("compute_recall", &compute_recall, "Compute recall", py::arg("pred"), py::arg("gt"),
+        py::arg("k"), py::arg("k_gt"));
 
-  m.def("compute_stats",
-      [](mvsic::IndexMVIVFIP &index,
-         const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &points,
+  m.def(
+      "compute_stats",
+      [](const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
+         size_t k) { return compute_stats(pred, gt, k); },
+      "Compute stats given predictions");
+
+  m.def(
+      "compute_stats",
+      [](mvsic::IndexMVIVFIP &index, const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &points,
          const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &query_points,
-         const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
          const mvsic::SearchParams &params) {
         return compute_stats(index, points, query_points, gt, params);
-      }, "Compute stats for MVIVFIP index");
+      },
+      "Compute stats for MVIVFIP index");
 
-  m.def("compute_stats",
-      [](mvsic::IndexMVIVFL2 &index,
-         const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &points,
+  m.def(
+      "compute_stats",
+      [](mvsic::IndexMVIVFL2 &index, const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &points,
          const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &query_points,
-         const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
          const mvsic::SearchParams &params) {
         return compute_stats(index, points, query_points, gt, params);
-      }, "Compute stats for MVIVFL2 index");
+      },
+      "Compute stats for MVIVFL2 index");
 
-  m.def("compute_stats",
-      [](mvsic::IndexMUVERAIP &index,
-         const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &points,
+  m.def(
+      "compute_stats",
+      [](mvsic::IndexMUVERAIP &index, const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &points,
          const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &query_points,
-         const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
          const mvsic::SearchParams &params) {
         return compute_stats(index, points, query_points, gt, params);
-      }, "Compute stats for MUVERAIP index");
+      },
+      "Compute stats for MUVERAIP index");
 
-  m.def("compute_stats",
-      [](mvsic::IndexMUVERAL2 &index,
-         const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &points,
+  m.def(
+      "compute_stats",
+      [](mvsic::IndexMUVERAL2 &index, const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &points,
          const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &query_points,
-         const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
          const mvsic::SearchParams &params) {
         return compute_stats(index, points, query_points, gt, params);
-      }, "Compute stats for MUVERAL2 index");
+      },
+      "Compute stats for MUVERAL2 index");
 
-  m.def("compute_stats",
-      [](mvsic::IndexVamanaIP &index,
-         const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &points,
+  m.def(
+      "compute_stats",
+      [](mvsic::IndexVamanaIP &index, const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &points,
          const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &query_points,
-         const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
          const mvsic::SearchParams &params) {
         return compute_stats(index, points, query_points, gt, params);
-      }, "Compute stats for VamanaIP index");
+      },
+      "Compute stats for VamanaIP index");
 
-  m.def("compute_stats",
-      [](mvsic::IndexVamanaL2 &index,
-         const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &points,
+  m.def(
+      "compute_stats",
+      [](mvsic::IndexVamanaL2 &index, const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &points,
          const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &query_points,
-         const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
          const mvsic::SearchParams &params) {
         return compute_stats(index, points, query_points, gt, params);
-      }, "Compute stats for VamanaL2 index");
+      },
+      "Compute stats for VamanaL2 index");
 }

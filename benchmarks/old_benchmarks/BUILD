@@ -126,42 +126,42 @@ package(default_visibility = ["//visibility:public"])
 #     ],
 # )
 
-cc_binary(
-    name = "mvivf_benchmark",
-    srcs = ["mvivf_benchmark.cpp"],
-    copts = [
-        "-O3",
-        "-ffast-math",
-        "-mavx2",
-        "-mfma",
-        "-Dgrid_search",
-    ],
-    deps = [
-        "//mvsic/core:stats",
-        "//mvsic/core/utils:chamfer_ip_point",
-        "//mvsic/core/utils:chamfer_l2_point",
-        "//mvsic/core/utils:parse_command_line",
-        "//mvsic/core/utils:point_cloud_set",
-        "//mvsic/mvivf",
-    ],
-)
+# cc_binary(
+#     name = "mvivf_benchmark",
+#     srcs = ["mvivf_benchmark.cpp"],
+#     copts = [
+#         "-O3",
+#         "-ffast-math",
+#         "-mavx2",
+#         "-mfma",
+#         "-Dgrid_search",
+#     ],
+#     deps = [
+#         "//mvsic/core:stats",
+#         "//mvsic/core/utils:chamfer_ip_point",
+#         "//mvsic/core/utils:chamfer_l2_point",
+#         "//mvsic/core/utils:parse_command_line",
+#         "//mvsic/core/utils:point_cloud_set",
+#         "//mvsic/mvivf",
+#     ],
+# )
 
-cc_binary(
-    name = "mvivf_pq_benchmark",
-    srcs = ["mvivf_pq_benchmark.cpp"],
-    copts = [
-        "-O3",
-        "-ffast-math",
-        "-mavx2",
-        "-mfma",
-        "-Dgrid_search",
-    ],
-    deps = [
-        "//mvsic/core:stats",
-        "//mvsic/core/utils:chamfer_ip_point",
-        "//mvsic/core/utils:chamfer_l2_point",
-        "//mvsic/core/utils:parse_command_line",
-        "//mvsic/core/utils:point_cloud_set",
-        "//mvsic/mvivf",
-    ],
-)
+# cc_binary(
+#     name = "mvivf_pq_benchmark",
+#     srcs = ["mvivf_pq_benchmark.cpp"],
+#     copts = [
+#         "-O3",
+#         "-ffast-math",
+#         "-mavx2",
+#         "-mfma",
+#         "-Dgrid_search",
+#     ],
+#     deps = [
+#         "//mvsic/core:stats",
+#         "//mvsic/core/utils:chamfer_ip_point",
+#         "//mvsic/core/utils:chamfer_l2_point",
+#         "//mvsic/core/utils:parse_command_line",
+#         "//mvsic/core/utils:point_cloud_set",
+#         "//mvsic/mvivf",
+#     ],
+# )

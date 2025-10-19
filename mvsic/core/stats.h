@@ -24,7 +24,7 @@ struct Stats {
 }  // namespace mvsic
 
 double compute_recall(const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
-                      const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+                      const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                       size_t k, size_t k_gt) {
   if (k_gt > gt[0].size()) {
     std::cerr << "Not enough gt values" << std::endl;
@@ -41,16 +41,16 @@ double compute_recall(const parlay::sequence<parlay::sequence<std::pair<uint32_t
     }
     size_t correct = 0;
     for (size_t j = 0; j < k_gt; j++) {
-      auto [dist, id] = gt[i][j];
+      auto [id, dist] = gt[i][j];
       if (out_set.find(id) != out_set.end()) {
         correct++;
       }
     }
     // Dealing with duplicates and near duplicates: fine to return
     // any of the (near) duplicates of the last point
-    float last_dist = gt[i][k_gt - 1].first;
+    float last_dist = gt[i][k_gt - 1].second;
     for (size_t j = k_gt; j < gt[i].size(); j++) {
-      auto [dist, id] = gt[i][j];
+      auto [id, dist] = gt[i][j];
       if (std::abs(dist - last_dist) < 1e-6) {
         if (out_set.find(id) != out_set.end()) {
           correct++;
@@ -67,7 +67,7 @@ double compute_recall(const parlay::sequence<parlay::sequence<std::pair<uint32_t
 
 template<typename Index, typename PC>
 mvsic::Stats compute_stats(Index &index, const PC &points, const PC &query_points,
-                           const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+                           const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                            const mvsic::SearchParams &params) {
   parlay::internal::timer t;
   size_t k = params.k;
@@ -101,10 +101,18 @@ mvsic::Stats compute_stats(Index &index, const PC &points, const PC &query_point
   return mvsic::Stats(QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k);
 }
 
+std::pair<double, double> compute_stats(
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt, size_t k) {
+  double recall_1_k = compute_recall(pred, gt, k, 1);
+  double recall_k_k = compute_recall(pred, gt, k, k);
+  return std::make_pair(recall_1_k, recall_k_k);
+}
+
 template<typename Index, typename PC>
 mvsic::Stats compute_stats_gold(
     Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
     const mvsic::SearchParams &params) {
   parlay::internal::timer t;
   size_t k = params.k;
@@ -114,7 +122,7 @@ mvsic::Stats compute_stats_gold(
   std::cout << "At least 1: " << ind_atleast_1.size() << std::endl;
   auto pred_1 =
       parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(ind_atleast_1.size());
-  auto gt_1 = parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>>::from_function(
+  auto gt_1 = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>::from_function(
       ind_atleast_1.size(), [&](size_t id) {
         uint32_t i = ind_atleast_1[id];
         return gt[i];
@@ -184,7 +192,7 @@ inline void write_to_csv(const std::string csv_filename,
 
 template<typename Index, typename PC>
 void search_all(Index &index, const PC &base_points, const PC &query_points,
-                const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+                const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                 const char *res_file, const parlay::sequence<mvsic::SearchParams> &params) {
   parlay::sequence<mvsic::Stats> results;
   std::cout << "[" << params.size() << "] : ";
@@ -199,14 +207,14 @@ void search_all(Index &index, const PC &base_points, const PC &query_points,
 
 template<typename Index, typename PC>
 void search_all(Index &index, const PC &base_points, const PC &query_points,
-                const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+                const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                 const char *res_file, const mvsic::SearchParams &params) {
   search_all(index, base_points, query_points, gt, res_file, {params});
 }
 
 template<typename Index, typename PC>
 void search_all_gold(Index &index, const PC &base_points, const PC &query_points,
-                     const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+                     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                      const char *res_file, const parlay::sequence<mvsic::SearchParams> &params) {
   parlay::sequence<mvsic::Stats> results;
   std::cout << "[" << params.size() << "] : ";
@@ -221,12 +229,12 @@ void search_all_gold(Index &index, const PC &base_points, const PC &query_points
 
 template<typename Index, typename PC>
 void search_all_gold(Index &index, const PC &base_points, const PC &query_points,
-                     const parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> &gt,
+                     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                      const char *res_file, const mvsic::SearchParams &params) {
   search_all_gold(index, base_points, query_points, gt, res_file, {params});
 }
 
-parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> ReadGT(std::string &file_path,
+parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGT(std::string &file_path,
                                                                       size_t num_points) {
   std::ifstream file(file_path, std::ios::binary | std::ios::in);
   if (!file.is_open()) {
@@ -236,18 +244,21 @@ parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> ReadGT(std::strin
   int num_neighbors = 0;
   file.read(reinterpret_cast<char *>(&num_neighbors), sizeof(num_neighbors));
 
-  parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> result(num_points);
+  parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> result(num_points);
   for (int i = 0; i < num_points; ++i) {
     parlay::sequence<std::pair<float, uint32_t>> neighbors(num_neighbors);
     file.read(reinterpret_cast<char *>(neighbors.data()),
               num_neighbors * sizeof(std::pair<float, uint32_t>));
-    result[i] = std::move(neighbors);
+    auto neighbors_flipped = parlay::sequence<std::pair<uint32_t, float>>::from_function(
+        num_neighbors,
+        [&](size_t j) { return std::make_pair(neighbors[j].second, neighbors[j].first); });
+    result[i] = std::move(neighbors_flipped);
   }
   file.close();
   return result;
 }
 
-parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> ReadGoldGT(std::string &file_path,
+parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGoldGT(std::string &file_path,
                                                                           size_t num_points) {
   std::ifstream file(file_path, std::ios::binary | std::ios::in);
   if (!file.is_open()) {
@@ -264,12 +275,12 @@ parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> ReadGoldGT(std::s
   file.read(reinterpret_cast<char *>(offsets.data()), num_offsets * sizeof(size_t));
   file.read(reinterpret_cast<char *>(ground_truth.data()), num_gt_entries * sizeof(uint32_t));
   file.close();
-  parlay::sequence<parlay::sequence<std::pair<float, uint32_t>>> result(num_points);
+  parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> result(num_points);
   parlay::parallel_for(0, num_points, [&](size_t i) {
     size_t start_index = offsets[i];
     size_t end_index = offsets[i + 1];
     auto neighbors = parlay::tabulate(end_index - start_index, [&](size_t j) {
-      return std::make_pair(static_cast<float>(j), ground_truth[start_index + j]);
+      return std::make_pair(ground_truth[start_index + j], static_cast<float>(j));
     });
     result[i] = std::move(neighbors);
   });
