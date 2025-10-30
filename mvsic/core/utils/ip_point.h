@@ -35,32 +35,9 @@
 #include "parlay/primitives.h"
 
 #include "NSGDist.h"
+#include "mvsic/core/distance_measures/one_to_one.h"
 
 namespace mvsic {
-
-float ip_distance(const uint8_t *p, const uint8_t *q, unsigned d) {
-  int result = 0;
-  for (int i = 0; i < d; i++) {
-    result += ((int32_t)q[i]) * ((int32_t)p[i]);
-  }
-  return -((float)result);
-}
-
-float ip_distance(const int8_t *p, const int8_t *q, unsigned d) {
-  int result = 0;
-  for (int i = 0; i < d; i++) {
-    result += ((int32_t)q[i]) * ((int32_t)p[i]);
-  }
-  return -((float)result);
-}
-
-float ip_distance(const float *p, const float *q, unsigned d) {
-  float result = 0;
-  for (int i = 0; i < d; i++) {
-    result += (q[i]) * (p[i]);
-  }
-  return -result;
-}
 
 template<typename T>
 struct IP_Point {

@@ -2,6 +2,8 @@
 
 #include <Eigen/Core>
 #include "parlay/primitives.h"
+#include "mvsic/core/distance_measures/one_to_one.h"
+
 #include "l2_point.h"
 
 namespace mvsic {
@@ -55,34 +57,5 @@ struct ChamferL2_Point {
     return std::make_pair(chamfer_l2_distance(values, n, x.values, x.n, dims), (n + x.n) * dims);
   }
 };
-
-/* -----------------------------------------Implementation-----------------------------------------*/
-
-// Computes the Chamfer L2 distance, given two point clouds
-float chamfer_l2_distance(const float *a, uint32_t n_a, const float *b, uint32_t n_b,
-                          uint32_t dim) {
-  if (n_a == 0 || n_b == 0) {
-    std::cout << "Invalid input to Chamfer L2 distance, na = " << n_a << ", nb = " << n_b
-              << std::endl;
-    abort();
-  }
-  Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> mat_a(
-      a, n_a, dim);
-  Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> mat_b(
-      b, n_b, dim);
-  // n_a x 1
-  Eigen::Matrix<float, Eigen::Dynamic, 1> sq_norms_a =
-      mat_a.rowwise().squaredNorm();  // Column vector,
-  // 1 x n_b
-  Eigen::Matrix<float, 1, Eigen::Dynamic> sq_norms_b = mat_b.rowwise().squaredNorm().transpose();
-  Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> sq_dist_matrix =
-      sq_norms_a.replicate(1, n_b)       // n_a x n_b
-      - 2 * (mat_a * mat_b.transpose())  // n_a x n_b
-      + sq_norms_b.replicate(n_a, 1);    // n_a x n_b
-
-  sq_dist_matrix = sq_dist_matrix.cwiseMax(0.0);
-  float dist = sq_dist_matrix.rowwise().minCoeff().mean();
-  return dist;
-}
 
 }  // namespace mvsic

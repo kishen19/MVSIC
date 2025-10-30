@@ -25,7 +25,6 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
 #include <algorithm>
 #include <iostream>
@@ -34,32 +33,9 @@
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
 
-#include "NSGDist.h"
+#include "mvsic/core/distance_measures/one_to_one.h"
 
 namespace mvsic {
-
-float l2_distance(const uint8_t *p, const uint8_t *q, unsigned d) {
-  int result = 0;
-  for (int i = 0; i < d; i++) {
-    result +=
-        ((int32_t)((int16_t)q[i] - (int16_t)p[i])) * ((int32_t)((int16_t)q[i] - (int16_t)p[i]));
-  }
-  return (float)result;
-}
-
-float l2_distance(const int8_t *p, const int8_t *q, unsigned d) {
-  int result = 0;
-  for (int i = 0; i < d; i++) {
-    result +=
-        ((int32_t)((int16_t)q[i] - (int16_t)p[i])) * ((int32_t)((int16_t)q[i] - (int16_t)p[i]));
-  }
-  return (float)result;
-}
-
-float l2_distance(const float *p, const float *q, unsigned d) {
-  efanna2e::DistanceL2 distfunc;
-  return distfunc.compare(p, q, d);
-}
 
 template<typename T>
 struct L2_Point {
@@ -102,6 +78,6 @@ struct L2_Point {
   inline unsigned int get_dims() const { return d; }
   bool same_as(const L2_Point<T> &q) { return values == q.values; }
   inline auto get_slice() const { return parlay::make_slice(values, values + d); }
-  inline T* data() const noexcept { return values; }
+  inline T *data() const noexcept { return values; }
 };
 }  // namespace mvsic
