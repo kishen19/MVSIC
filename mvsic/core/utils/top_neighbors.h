@@ -3,6 +3,7 @@
 #include "parlay/primitives.h"
 #include "point_cloud_set.h"
 #include "util.h"
+#include <Eigen/Core>
 
 namespace mvsic {
 

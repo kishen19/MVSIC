@@ -113,6 +113,7 @@ cc_library(
     deps = [
         ":point_cloud_set",
         ":util",
+        "@eigen",
         "@parlaylib//parlay:primitives",
     ],
 )

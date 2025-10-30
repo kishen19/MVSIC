@@ -42,13 +42,13 @@ def write_embeddings_to_binary(embeddings_list: list, output_file: str):
     )
     total_num_vectors = all_vectors_flat.shape[0]
 
-    # Calculate offsets
-    # offsets[i] is the starting index of vectors for document i
+    # Calculate offsets: offsets[i] is the starting index of the float data for document i.
+    # The C++ format expects offsets in terms of the number of floats, not the number of vectors.
     offsets = [0] * (num_docs + 1)
     current_offset = 0
     for i, tensor in enumerate(embeddings_list):
         offsets[i] = current_offset
-        current_offset += tensor.shape[0]
+        current_offset += tensor.numel()  # numel() gives the total number of floats (vectors * dims)
     offsets[num_docs] = current_offset
 
     # --- 2. Write to binary file ---
@@ -108,6 +108,11 @@ def main(args):
     """
     Main function to load data, generate embeddings, and save them.
     """
+    # --- 0. Set number of threads ---
+    if args.num_threads:
+        logging.info(f"--- Setting number of threads to {args.num_threads} ---")
+        torch.set_num_threads(args.num_threads)
+
     # --- 1. Load BEIR Dataset ---
     logging.info(f"--- Loading BEIR dataset from: {args.dataset_path} ---")
     corpus, queries, _ = GenericDataLoader(data_folder=args.dataset_path).load(split="test")
@@ -187,6 +192,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Run on a small subset of N documents/queries for debugging purposes.",
+    )
+    parser.add_argument(
+        '--num_threads',
+        type=int,
+        default=None,
+        help="Number of threads to use for Torch. Defaults to all available.",
     )
 
     args = parser.parse_args()
