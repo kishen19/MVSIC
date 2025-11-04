@@ -20,11 +20,12 @@ cc_library(
     hdrs = ["mvclustering.h"],
     deps = [
         ":mvclustering_config",
+        "//mvsic/core/distance_measures:many_to_many",
         "//mvsic/core/mvclustering/seeding:uniformlyrandom",
-        "//mvsic/core/utils:chamfer_ip_point",
-        "//mvsic/core/utils:chamfer_l2_point",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/utils:kmeans_util",
-        "//mvsic/core/utils:point_cloud_set",
         "//mvsic/core/utils:util",
         "@parlaylib//parlay:primitives",
     ],
@@ -35,9 +36,6 @@ cc_binary(
     srcs = ["bench.cpp"],
     deps = [
         "//mvsic/core/mvclustering",
-        "//mvsic/core/utils:chamfer_ip_point",
-        "//mvsic/core/utils:chamfer_l2_point",
         "//mvsic/core/utils:parse_command_line",
-        "//mvsic/core/utils:point_cloud_set",
     ],
 )

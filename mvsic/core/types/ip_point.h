@@ -34,7 +34,6 @@
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
 
-#include "NSGDist.h"
 #include "mvsic/core/distance_measures/one_to_one.h"
 
 namespace mvsic {
@@ -42,7 +41,7 @@ namespace mvsic {
 template<typename T>
 struct IP_Point {
  private:
-  T *values;
+  T* values;
   unsigned int d;
   unsigned int aligned_d;
   long id_;
@@ -52,24 +51,24 @@ struct IP_Point {
 
   IP_Point() : values(nullptr), d(0), aligned_d(0), id_(-1) {}
   // Non-owning version
-  IP_Point(T *values, unsigned int d, unsigned int ad, long id = -1) :
+  IP_Point(T* values, unsigned int d, unsigned int ad, long id = -1) :
       values(values), d(d), aligned_d(ad), id_(id) {}
 
   static distanceType d_min() { return -std::numeric_limits<float>::max(); }
   static bool is_metric() { return false; }
   T operator[](long i) const { return *(values + i); }
-  T &operator[](long i) { return *(values + i); }
-  float distance(const IP_Point<T> &x) const { return ip_distance(values, x.values, d); }
-  std::pair<float, size_t> distance_w_cmps(const IP_Point<T> &x) const {
+  T& operator[](long i) { return *(values + i); }
+  float distance(const IP_Point<T>& x) const { return ip_distance(values, x.values, d); }
+  std::pair<float, size_t> distance_w_cmps(const IP_Point<T>& x) const {
     return std::make_pair(ip_distance(values, x.values, d), 2 * d);
   }
   void prefetch() const {
     int l = (aligned_d * sizeof(T)) / 64;
     for (int i = 0; i < l; i++)
-      __builtin_prefetch((char *)values + i * 64);
+      __builtin_prefetch((char*)values + i * 64);
   }
   long id() const { return id_; }
-  bool operator==(const IP_Point<T> &q) const {
+  bool operator==(const IP_Point<T>& q) const {
     for (int i = 0; i < d; i++) {
       if (values[i] != q.values[i]) {
         return false;
@@ -78,9 +77,9 @@ struct IP_Point {
     return true;
   }
   inline unsigned int get_dims() const { return d; }
-  bool same_as(const IP_Point<T> &q) { return values == q.values; }
+  bool same_as(const IP_Point<T>& q) { return values == q.values; }
   inline auto get_slice() const { return parlay::make_slice(values, values + d); }
-  inline T *data() const noexcept { return values; }
+  inline T* data() const noexcept { return values; }
 };
 
 }  // namespace mvsic

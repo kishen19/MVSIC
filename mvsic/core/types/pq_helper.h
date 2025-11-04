@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iostream>
+
 #include <Eigen/Dense>
 #include "scann/data_format/dataset.h"
 #include "scann/hashes/asymmetric_hashing2/indexing.h"
@@ -8,8 +10,8 @@
 #include "scann/distance_measures/distance_measure_factory.h"
 #include "scann/proto/scann.pb.h"
 #include "scann/utils/types.h"
-#include "mvsic/core/utils/point_cloud_set.h"
-#include <iostream>
+
+#include "point_cloud_set.h"
 
 namespace mvsic {
 namespace scann_pq {

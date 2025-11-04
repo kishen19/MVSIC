@@ -22,13 +22,13 @@ namespace efanna2e {
 enum Metric { L2 = 0, INNER_PRODUCT = 1, FAST_L2 = 2, PQ = 3 };
 class Distance {
  public:
-  virtual float compare(const float *a, const float *b, unsigned length) const = 0;
+  virtual float compare(const float* a, const float* b, unsigned length) const = 0;
   virtual ~Distance() {}
 };
 
 class DistanceL2 : public Distance {
  public:
-  float compare(const float *a, const float *b, unsigned size) const {
+  float compare(const float* a, const float* b, unsigned size) const {
     float result = 0;
 
 #ifdef __GNUC__
@@ -46,8 +46,8 @@ class DistanceL2 : public Distance {
     __m256 r0, r1;
     size_t qty16 = size >> 4;
     size_t aligned_size = qty16 << 4;
-    const float *l = a;
-    const float *r = b;
+    const float* l = a;
+    const float* r = b;
 
     float unpack[8] __attribute__((aligned(32))) = {0, 0, 0, 0, 0, 0, 0, 0};
     sum = _mm256_loadu_ps(unpack);
@@ -110,8 +110,8 @@ result += unpack[0] + unpack[1] + unpack[2] + unpack[3];
 #else
 
     float diff0, diff1, diff2, diff3;
-    const float *last = a + size;
-    const float *unroll_group = last - 3;
+    const float* last = a + size;
+    const float* unroll_group = last - 3;
 
     /* Process 4 items with each loop for efficiency. */
     while (a < unroll_group) {
@@ -138,7 +138,7 @@ result += unpack[0] + unpack[1] + unpack[2] + unpack[3];
 
 class DistanceInnerProduct : public Distance {
  public:
-  float compare(const float *a, const float *b, unsigned size) const {
+  float compare(const float* a, const float* b, unsigned size) const {
     float result = 0;
 #ifdef __GNUC__
 #ifdef __AVX__
@@ -154,10 +154,10 @@ class DistanceInnerProduct : public Distance {
     unsigned D = (size + 7) & ~7U;
     unsigned DR = D % 16;
     unsigned DD = D - DR;
-    const float *l = a;
-    const float *r = b;
-    const float *e_l = l + DD;
-    const float *e_r = r + DD;
+    const float* l = a;
+    const float* r = b;
+    const float* e_l = l + DD;
+    const float* e_r = r + DD;
     float unpack[8] __attribute__((aligned(32))) = {0, 0, 0, 0, 0, 0, 0, 0};
 
     sum = _mm256_loadu_ps(unpack);
@@ -215,8 +215,8 @@ class DistanceInnerProduct : public Distance {
 #else
 
     float dot0, dot1, dot2, dot3;
-    const float *last = a + size;
-    const float *unroll_group = last - 3;
+    const float* last = a + size;
+    const float* unroll_group = last - 3;
 
     /* Process 4 items with each loop for efficiency. */
     while (a < unroll_group) {
@@ -240,7 +240,7 @@ class DistanceInnerProduct : public Distance {
 };
 class DistanceFastL2 : public DistanceInnerProduct {
  public:
-  float norm(const float *a, unsigned size) const {
+  float norm(const float* a, unsigned size) const {
     float result = 0;
 #ifdef __GNUC__
 #ifdef __AVX__
@@ -254,8 +254,8 @@ class DistanceFastL2 : public DistanceInnerProduct {
     unsigned D = (size + 7) & ~7U;
     unsigned DR = D % 16;
     unsigned DD = D - DR;
-    const float *l = a;
-    const float *e_l = l + DD;
+    const float* l = a;
+    const float* e_l = l + DD;
     float unpack[8] __attribute__((aligned(32))) = {0, 0, 0, 0, 0, 0, 0, 0};
 
     sum = _mm256_loadu_ps(unpack);
@@ -308,8 +308,8 @@ class DistanceFastL2 : public DistanceInnerProduct {
 */
 #else
     float dot0, dot1, dot2, dot3;
-    const float *last = a + size;
-    const float *unroll_group = last - 3;
+    const float* last = a + size;
+    const float* unroll_group = last - 3;
 
     /* Process 4 items with each loop for efficiency. */
     while (a < unroll_group) {
@@ -331,7 +331,7 @@ class DistanceFastL2 : public DistanceInnerProduct {
     return result;
   }
   using DistanceInnerProduct::compare;
-  float compare(const float *a, const float *b, float norm,
+  float compare(const float* a, const float* b, float norm,
                 unsigned size) const {  // not implement
     float result = -2 * DistanceInnerProduct::compare(a, b, size);
     result += norm;
