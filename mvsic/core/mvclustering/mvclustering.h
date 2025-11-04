@@ -119,6 +119,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   _st.reset();
   _st.start();
   compute_cluster_ids_new(points, cluster_ids);
+  // compute_cluster_ids(points, cluster_ids);
   _st.stop();
   _iteration_stats[0].assignment_time = _st.total_time();
   if (params.verbose >= 1) {
@@ -180,6 +181,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
     // Step 2B: Reassign points
     _it_timer.start();
     compute_cluster_ids_new(points, cluster_ids);
+    // compute_cluster_ids(points, cluster_ids);
     _it_timer.stop();
     _iteration_stats[it].assignment_time = _it_timer.total_time();
     if (params.verbose >= 1) {

@@ -26,3 +26,12 @@ cc_library(
         "@parlaylib//parlay:primitives",
     ],
 )
+
+cc_library(
+    name = "one_to_many",
+    hdrs = ["one_to_many.h"],
+    deps = [
+        "@eigen",
+        "@parlaylib//parlay:primitives",
+    ],
+)
