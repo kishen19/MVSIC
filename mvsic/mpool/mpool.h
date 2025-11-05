@@ -9,7 +9,7 @@
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
 #include "mvsic/core/index.h"
-#include "mvsic/core/utils/point_range.h"
+#include "mvsic/core/types/point_range.h"
 
 namespace mvsic {
 

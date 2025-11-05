@@ -111,12 +111,20 @@ class QuantizedPointCloudSet {
 
   // Returns approximated distances from a query point cloud to all point clouds in the set
   inline size_t distances(const ChPoint& query, std::pair<uint32_t, float>* results) const;
+  inline size_t distances_new(const ChPoint& query, std::pair<uint32_t, float>* results) const {
+    return distances(query, results);
+  }
 
   inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
       const ChPoint& query) const {
     auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n_);
     auto cmps = distances(query, results.data());
     return std::make_pair(results, cmps);
+  }
+
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances_new(
+      const ChPoint& query) const {
+    return distances(query);
   }
 };
 

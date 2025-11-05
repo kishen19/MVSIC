@@ -3,7 +3,6 @@
 #include <queue>
 #include <Eigen/Dense>
 #include "parlay/primitives.h"
-#include "mvsic/core/types/point_cloud_set.h"
 
 namespace mvsic {
 

@@ -6,10 +6,10 @@ cc_library(
     deps = [
         ":index_params",
         ":search_params",
-        "//mvsic/core/utils:chamfer_ip_point",
-        "//mvsic/core/utils:chamfer_l2_point",
-        "//mvsic/core/utils:point_cloud_set",
-        "//mvsic/core/utils:quantized_point_cloud_set",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/types:quantized_point_cloud_set",
         "@parlaylib//parlay:primitives",
     ],
 )

@@ -3,6 +3,7 @@
 #include <fstream>
 #include "parlay/primitives.h"
 #include "mvsic/core/utils/mmap.h"
+#include "mvsic/core/distance_measures/one_to_many.h"
 
 namespace mvsic {
 
@@ -67,7 +68,7 @@ struct PointCloudSet {
 
   // Return list of distances from a query to all point clouds
   // TODO: make this blocked, and thread_local
-  inline size_t distances(const ChPoint& query, std::pair<uint32_t, float>* results) const {
+  inline size_t distances_naive(const ChPoint& query, std::pair<uint32_t, float>* results) const {
     auto cmps = parlay::sequence<size_t>::uninitialized(n);
     parlay::parallel_for(0, n, [&](uint32_t i) {
       float dist;
@@ -77,6 +78,21 @@ struct PointCloudSet {
       results[i] = std::make_pair(get_id(i), dist);
     });
     return parlay::reduce(cmps);
+  }
+
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances_naive(
+      const ChPoint& query) const {
+    auto results = parlay::sequence<std::pair<uint32_t, float>>(n);
+    auto cmps = distances_naive(query, results.data());
+    return std::make_pair(results, cmps);
+  }
+
+  inline size_t distances(const ChPoint& query, std::pair<uint32_t, float>* results) const {
+    auto cmps = query.size() * dims + offsets[n];
+    auto dists = OneToMany<ChPoint, PointCloudSet<ChPoint>>::AllDistances(query, *this);
+    parlay::parallel_for(0, n,
+                         [&](uint32_t i) { results[i] = std::make_pair(get_id(i), dists[i]); });
+    return cmps;
   }
 
   inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(

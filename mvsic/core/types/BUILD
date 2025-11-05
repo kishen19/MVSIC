@@ -48,6 +48,7 @@ cc_library(
     name = "point_cloud_set",
     hdrs = ["point_cloud_set.h"],
     deps = [
+        "//mvsic/core/distance_measures:one_to_many",
         "//mvsic/core/utils:mmap",
         "@parlaylib//parlay:primitives",
     ],

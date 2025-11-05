@@ -82,7 +82,7 @@ class MVClustering {
                            parlay::sequence<uint32_t>& cluster_ids);
   void compute_cluster_ids_naive(const PointCloudSet<ChPoint>& points,
                                  parlay::sequence<uint32_t>& cluster_ids);
-  void compute_cluster_ids_new(const PointCloudSet<ChPoint>& points,
+  void compute_cluster_ids_old(const PointCloudSet<ChPoint>& points,
                                parlay::sequence<uint32_t>& cluster_ids);
   // Compute the MV Kmedian cost
   float compute_cost(const PointCloudSet<ChPoint>& points,
@@ -118,8 +118,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   _iteration_stats[0].centroid_update_time = _st.total_time();
   _st.reset();
   _st.start();
-  compute_cluster_ids_new(points, cluster_ids);
-  // compute_cluster_ids(points, cluster_ids);
+  compute_cluster_ids(points, cluster_ids);
   _st.stop();
   _iteration_stats[0].assignment_time = _st.total_time();
   if (params.verbose >= 1) {
@@ -180,8 +179,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
     _it_timer.reset();
     // Step 2B: Reassign points
     _it_timer.start();
-    compute_cluster_ids_new(points, cluster_ids);
-    // compute_cluster_ids(points, cluster_ids);
+    compute_cluster_ids(points, cluster_ids);
     _it_timer.stop();
     _iteration_stats[it].assignment_time = _it_timer.total_time();
     if (params.verbose >= 1) {
@@ -217,8 +215,8 @@ void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint
 // TODO: Need to auto optimize this. Useful function to have for many-to-one and many-to-many
 // chamfer computation.
 template<bool metric>
-void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& points,
-                                               parlay::sequence<uint32_t>& cluster_ids) {
+void MVClustering<metric>::compute_cluster_ids_old(const PointCloudSet<ChPoint>& points,
+                                                   parlay::sequence<uint32_t>& cluster_ids) {
   const size_t n = points.size();
   auto points_offsets = points.get_offsets();
   auto centers_offsets = centers.get_offsets();
@@ -290,8 +288,8 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& poi
 }
 
 template<bool metric>
-void MVClustering<metric>::compute_cluster_ids_new(const PointCloudSet<ChPoint>& points,
-                                                   parlay::sequence<uint32_t>& cluster_ids) {
+void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& points,
+                                               parlay::sequence<uint32_t>& cluster_ids) {
   auto results = ManyToMany<PointCloudSet<ChPoint>>::Top(points, centers);
   parlay::parallel_for(0, points.size(), [&](size_t i) { cluster_ids[i] = results[i].first; });
 }

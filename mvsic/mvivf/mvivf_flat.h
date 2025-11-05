@@ -5,7 +5,6 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
-#include "mvsic/core/utils/top_neighbors.h"
 #include "mvsic/core/utils/util.h"
 
 namespace mvsic {

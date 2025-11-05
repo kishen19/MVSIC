@@ -1,10 +1,10 @@
 #include <iostream>
 #include <chrono>
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/core/utils/point_cloud_set.h"
-#include "mvsic/core/utils/quantized_point_cloud_set.h"
-#include "mvsic/core/utils/chamfer_ip_point.h"
-#include "mvsic/core/utils/pq_helper.h"
+#include "mvsic/core/types/point_cloud_set.h"
+#include "mvsic/core/types/quantized_point_cloud_set.h"
+#include "mvsic/core/types/chamfer_ip_point.h"
+#include "mvsic/core/types/pq_helper.h"
 #include "scann/proto/scann.pb.h"
 
 using namespace mvsic;

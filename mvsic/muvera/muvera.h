@@ -5,9 +5,9 @@
 
 #include "mvsic/muvera/fde/fixed_dimensional_encoding.h"
 #include "mvsic/core/index.h"
-#include "mvsic/core/utils/point_range.h"
-#include "mvsic/core/utils/l2_point.h"
-#include "mvsic/core/utils/ip_point.h"
+#include "mvsic/core/types/point_range.h"
+#include "mvsic/core/types/l2_point.h"
+#include "mvsic/core/types/ip_point.h"
 
 // ParlayANN (Vamana) includes
 #include "algorithms/utils/graph.h"
