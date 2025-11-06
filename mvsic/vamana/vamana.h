@@ -20,8 +20,8 @@ class IndexVamana : public Index<metric> {
   using Index<metric>::d;  // Embedding dimension
 
   IndexParams params;
-  Graph<uint32_t> G;     // Vamana Graph
-  uint32_t start_point;  // Starting Point of the graph
+  vamana::Graph<uint32_t> G;  // Vamana Graph
+  uint32_t start_point;       // Starting Point of the graph
 
   IndexVamana(uint32_t d_) noexcept : params(IndexParams::mvvamana()) { d = d_; }
   IndexVamana(uint32_t d_, const IndexParams& params) noexcept : params(params) { d = d_; }
@@ -173,7 +173,7 @@ class IndexVamana : public Index<metric> {
         SearchParams search_params = SearchParams::mvvamana(
             (long)0, params.vamana.L, (double)0.0, (long)points.size(), (long)G.max_degree());
         parlay::sequence<pid> visited =
-            (beam_search<uint32_t>(points[index], G, points, start_point, search_params))
+            (vamana::beam_search<uint32_t>(points[index], G, points, start_point, search_params))
                 .first.second;
         new_out_[i - floor] = robustPrune(index, visited, points, alpha).first;
       });
@@ -226,7 +226,7 @@ class IndexVamana : public Index<metric> {
   void build(const PointCloudSet<ChPoint>& points) override {
     if (params.verbose >= 1) std::cout << "Building graph..." << std::endl;
     set_start();
-    G = Graph<uint32_t>(params.vamana.R, points.size());
+    G = vamana::Graph<uint32_t>(params.vamana.R, points.size());
     auto inserts = parlay::tabulate(points.size(), [&](uint32_t i) { return i; });
     if (params.vamana.two_pass) batch_insert(inserts, points, 1.0, true, 2, .02);
     batch_insert(inserts, points, params.vamana.alpha, true, 2, .02);
@@ -245,7 +245,8 @@ class IndexVamana : public Index<metric> {
       const ChPoint& query, const PointCloudSet<ChPoint>& points,
       const SearchParams& search_params) override {
     size_t k = search_params.k;
-    auto [result, dist_cmps] = beam_search<uint32_t>(query, G, points, start_point, search_params);
+    auto [result, dist_cmps] =
+        vamana::beam_search<uint32_t>(query, G, points, start_point, search_params);
     parlay::sequence<pid> visited = result.second;
     auto final_results = parlay::sequence<std::pair<uint32_t, float>>::from_function(
         std::min(k, visited.size()), [&](size_t i) { return visited[i]; });
@@ -261,7 +262,7 @@ class IndexVamana : public Index<metric> {
   // Read the index from a file in disk
   void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
     char* filename_c = (char*)filename.c_str();
-    G = Graph<uint32_t>(filename_c);
+    G = vamana::Graph<uint32_t>(filename_c);
     set_start();
   }
 };

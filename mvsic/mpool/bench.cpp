@@ -36,7 +36,7 @@ void bench(mvsic::commandLine &P) {
   uint32_t R = 200;
   uint32_t L_build = 600;
   double alpha = P.getOptionDoubleValue("-a", 1.2);
-  bool two_pass = P.getOption("-tp");
+  int num_pass = P.getOptionIntValue("-np", 1);
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
@@ -47,7 +47,7 @@ void bench(mvsic::commandLine &P) {
 
   auto points = PC(inFile, is_mmap);
   IndexParams index_params =
-      IndexParams::mpool(R, L_build, alpha, two_pass, normalize, compress_input, use_PQ, verbose);
+      IndexParams::mpool(R, L_build, alpha, num_pass, normalize, compress_input, use_PQ, verbose);
   SearchParams search_params =
       SearchParams::mpool(k, L, cut, points.size(), R, num_rerank, norerank);
   IndexMPool<metric> index(points.get_dims(), index_params);

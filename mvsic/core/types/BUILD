@@ -23,6 +23,15 @@ cc_library(
 )
 
 cc_library(
+    name = "io",
+    hdrs = ["io.h"],
+    deps = [
+        "@parlayann//algorithms/utils:graph",
+        "@parlayann//algorithms/utils:point_range",
+    ],
+)
+
+cc_library(
     name = "ip_point",
     hdrs = ["ip_point.h"],
     deps = [

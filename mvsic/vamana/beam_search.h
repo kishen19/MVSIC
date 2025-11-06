@@ -37,6 +37,7 @@
 // #include "graph.h"
 
 namespace mvsic {
+namespace vamana {
 
 // main beam search
 template<typename indexType, typename ChPoint, typename PC, class GT>
@@ -282,4 +283,5 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
 //   return all_neighbors;
 // }
 
+}  // namespace vamana
 }  // namespace mvsic

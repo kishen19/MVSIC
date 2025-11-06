@@ -5,12 +5,13 @@
 
 #include "mvsic/muvera/fde/fixed_dimensional_encoding.h"
 #include "mvsic/core/index.h"
-#include "mvsic/core/types/point_range.h"
-#include "mvsic/core/types/l2_point.h"
-#include "mvsic/core/types/ip_point.h"
+#include "mvsic/core/types/io.h"
 
 // ParlayANN (Vamana) includes
+#include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
+#include "algorithms/utils/mips_point.h"
+#include "algorithms/utils/point_range.h"
 #include "algorithms/utils/stats.h"
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
@@ -28,30 +29,32 @@ template<bool metric>
 class IndexMUVERA : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  // using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
-  using Range = PointRange<float, Point>;
+  using Point =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  // using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
+  using Range = parlayANN::PointRange<Point>;
+  // using Range = PointRange<float, Point>;
   using Index<metric>::d;  // Embedding dimension
 
   IndexParams params;
-  uint32_t d_fde;                       // FDE dimension
-  Range points_fdes;                    // FDEs
-  Graph<uint32_t> G;                    // Vamana graph
-  BuildParams BP;                       // Vamana build parameters
-  knn_index<Point, Range, uint32_t> I;  // Vamana index
+  uint32_t d_fde;                                  // FDE dimension
+  Range points_fdes;                               // FDEs
+  parlayANN::Graph<uint32_t> G;                    // Vamana graph
+  parlayANN::BuildParams BP;                       // Vamana build parameters
+  parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
 
   IndexMUVERA(uint32_t d_) noexcept :
       params(IndexParams::muvera()),
-      BP(BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                     params.vamana.two_pass)),
-      I(knn_index<Point, Range, uint32_t>(BP)) {
+      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
+                                params.vamana.num_pass)),
+      I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
   IndexMUVERA(uint32_t d_, const IndexParams &params) noexcept :
       params(params),
-      BP(BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                     params.vamana.two_pass)),
-      I(knn_index<Point, Range, uint32_t>(BP)) {
+      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
+                                params.vamana.num_pass)),
+      I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
 
@@ -89,9 +92,10 @@ class IndexMUVERA : public Index<metric> {
     }
     // Step 2: Build Vamana index on the FDEs
     if (params.verbose >= 1) std::cout << "Building Vamana Index..." << std::endl;
-    G = Graph<uint32_t>(BP.R, points.size());
-    stats<uint32_t> BuildStats(G.size());
-    I.build_index(G, points_fdes, BuildStats);
+    G = parlayANN::Graph<uint32_t>(BP.R, points.size());
+    parlayANN::stats<uint32_t> BuildStats(G.size());
+    std::cout << BP.R << " " << points.size() << std::endl;
+    I.build_index(G, points_fdes, points_fdes, BuildStats);
     if (params.verbose >= 1) std::cout << "FDE Dimension: " << points_fdes.get_dims() << std::endl;
   }
 
@@ -121,15 +125,18 @@ class IndexMUVERA : public Index<metric> {
     std::vector<float> query_fde =
         graph_mining::GenerateFixedDimensionalEncoding(query_vec, fde_config);
     assert(query_fde.size() == d_fde);
+    typename Point::parameters vamana_params(d_fde);
+    Point query_point(reinterpret_cast<typename Point::byte *>(query_fde.data()), -1,
+                      vamana_params);
 
     // Step 2: Run beam search
     uint32_t start_point = I.get_start();
-    auto QP = QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
-                          search_params.limit, search_params.degree_limit);
-    auto query_point = Point(query_fde.data(), d_fde, d_fde, -1);
-    auto [result, dist_cmps] =
-        beam_search<Point, Range, uint32_t>(query_point, G, points_fdes, start_point, QP);
+    auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
+                                     search_params.limit, search_params.degree_limit);
+    auto [result, dist_cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
+        query_point, G, points_fdes, start_point, QP);
     parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
+    // std::cout << visited.size() << " " << result.first.size() << std::endl;
     dist_cmps = dist_cmps * 2 * d_fde;
 
     // Step 3: Re-ranking
@@ -160,56 +167,29 @@ class IndexMUVERA : public Index<metric> {
 
   // Write the index to a file in disk
   void save(const std::string &filename) override {
-    std::string graph_filename = filename;
-    size_t pos = graph_filename.rfind(".");
-    if (pos != std::string::npos) {
-      graph_filename.insert(pos, "_graph.muvera");
-    } else {
-      // If . not found, append _graph.muvera.bin
-      graph_filename += "_graph.muvera.bin";
-    }
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) throw std::runtime_error("save: cannot open file: " + filename);
 
-    char *graph_filename_c = (char *)graph_filename.c_str();
-    G.save(graph_filename_c);
+    // Save graph
+    parlayANN::io::save_graph(G, out);
 
-    std::string fdes_filename = filename;
-    pos = fdes_filename.rfind(".");
-    if (pos != std::string::npos) {
-      fdes_filename.insert(pos, "_fdes.muvera");
-    } else {
-      // If . not found, append _fdes.muvera.bin
-      fdes_filename += "_fdes.muvera.bin";
-    }
-
-    char *fdes_filename_c = (char *)fdes_filename.c_str();
-    points_fdes.save(fdes_filename_c);
+    // Save FDEs (point_range)
+    parlayANN::io::save_point_range(points_fdes, out);
   }
 
   // Read the index from a file in disk
   void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override {
-    // Construct graph filename
-    std::string graph_filename = filename;
-    size_t pos = graph_filename.rfind(".");
-    if (pos != std::string::npos) {
-      graph_filename.insert(pos, "_graph.muvera");
-    } else {
-      graph_filename += "_graph.muvera.bin";
-    }
-    char *graph_filename_c = (char *)graph_filename.c_str();
-    G = Graph<uint32_t>(graph_filename_c);
-    I.set_start();
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load: cannot open file: " + filename);
 
-    // Construct fdes filename
-    std::string fdes_filename = filename;
-    pos = fdes_filename.rfind(".");
-    if (pos != std::string::npos) {
-      fdes_filename.insert(pos, "_fdes.muvera");
-    } else {
-      fdes_filename += "_fdes.muvera.bin";
-    }
-    char *fdes_filename_c = (char *)fdes_filename.c_str();
-    points_fdes = Range(fdes_filename_c);
-    d_fde = points_fdes.get_dims();
+    // Load graph
+    G = parlayANN::io::load_graph<uint32_t>(in);
+    I.set_start();  // Assuming I needs to be re-initialized after G is loaded
+
+    // Load FDEs (point_range)
+    auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
+    d_fde = loaded_d_fde;
+    points_fdes = Range(fdes_data, d_fde);
   }
 };
 

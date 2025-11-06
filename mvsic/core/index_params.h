@@ -38,6 +38,7 @@ struct IndexParams {
     uint32_t R = 200;
     uint32_t L = 600;
     double alpha = 1.2;
+    int num_pass = 1;
     bool two_pass = false;
   };
   vamana_config vamana = vamana_config();
@@ -100,11 +101,10 @@ struct IndexParams {
                             int32_t seed = 1, int32_t projection_dimension = 8,
                             bool fill_empty_partitions = false,
                             int32_t final_projection_dimension = 0, bool normalize = false,
-                            uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                            bool two_pass = false, bool compress_input = false,
-                            bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false,
-                            uint32_t num_blocks = 8, uint32_t num_clusters_per_block = 256,
-                            uint32_t sample_size = 100000) {
+                            uint32_t R = 200, uint32_t L = 600, double alpha = 1.1,
+                            int num_pass = 1, bool compress_input = false, bool apply_PQ = false,
+                            uint32_t verbose = 0, bool pq_enabled = false, uint32_t num_blocks = 8,
+                            uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
     IndexParams params;
     params.method = "muvera";
     params.compress_input = compress_input;
@@ -112,21 +112,21 @@ struct IndexParams {
     params.fde = fde_config{
         num_repetitions,       num_simhash_projections,    seed,     projection_dimension,
         fill_empty_partitions, final_projection_dimension, normalize};
-    params.vamana = vamana_config{R, L, alpha, two_pass};
+    params.vamana = vamana_config{R, L, alpha, num_pass};
     params.verbose = verbose;
     return params;
   }
 
-  static IndexParams mpool(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                           bool two_pass = false, bool normalize = true,
-                           bool compress_input = false, bool apply_PQ = false, uint32_t verbose = 0,
-                           bool pq_enabled = false, uint32_t num_blocks = 8,
-                           uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
+  static IndexParams mpool(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2, int num_pass = 1,
+                           bool normalize = true, bool compress_input = false,
+                           bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false,
+                           uint32_t num_blocks = 8, uint32_t num_clusters_per_block = 256,
+                           uint32_t sample_size = 100000) {
     IndexParams params;
     params.method = "mpool";
     params.compress_input = compress_input;
     params.pq = {pq_enabled, num_blocks, num_clusters_per_block, sample_size};
-    params.vamana = vamana_config{R, L, alpha, two_pass};
+    params.vamana = vamana_config{R, L, alpha, num_pass};
     params.normalize = normalize;
     params.verbose = verbose;
     return params;
@@ -141,7 +141,7 @@ struct IndexParams {
     params.method = "mvvamana";
     params.compress_input = compress_input;
     params.pq = {pq_enabled, num_blocks, num_clusters_per_block, sample_size};
-    params.vamana = vamana_config{R, L, alpha, two_pass};
+    params.vamana = vamana_config{R, L, alpha, 1, two_pass};
     params.verbose = verbose;
     return params;
   }

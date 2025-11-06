@@ -5,6 +5,7 @@ cc_library(
     hdrs = ["mpool.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core/types:io",
         "//mvsic/core/types:point_range",
         "@parlayann//algorithms/utils:euclidian_point",
         "@parlayann//algorithms/utils:graph",

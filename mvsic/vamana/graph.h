@@ -35,6 +35,7 @@
 #include "parlay/internal/file_map.h"
 
 namespace mvsic {
+namespace vamana {
 
 template<typename indexType>
 struct edgeRange {
@@ -237,4 +238,5 @@ struct Graph {
   std::shared_ptr<indexType[]> graph;
 };
 
+}  // namespace vamana
 }  // namespace mvsic

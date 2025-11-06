@@ -2,14 +2,18 @@
 
 #include <queue>
 #include <set>
+
+#include "mvsic/core/index.h"
+#include "mvsic/core/types/io.h"
+
+// ParlayANN (Vamana) includes
 #include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
 #include "algorithms/utils/mips_point.h"
+#include "algorithms/utils/point_range.h"
 #include "algorithms/utils/stats.h"
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
-#include "mvsic/core/index.h"
-#include "mvsic/core/types/point_range.h"
 
 namespace mvsic {
 
@@ -28,28 +32,29 @@ template<bool metric>
 class IndexMPool : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Range = PointRange<float, Point>;
+  using Point =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<Point>;
   using Index<metric>::d;  // Embedding dimension
 
   IndexParams params;
-  Range points_mp;                      // Mean-Pooled vectors
-  Graph<uint32_t> G;                    // Vamana graph
-  BuildParams BP;                       // Vamana build parameters
-  knn_index<Point, Range, uint32_t> I;  // Vamana index
+  Range points_mp;                                 // Mean-Pooled vectors
+  parlayANN::Graph<uint32_t> G;                    // Vamana graph
+  parlayANN::BuildParams BP;                       // Vamana build parameters
+  parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
 
   IndexMPool(uint32_t d_) noexcept :
       params(IndexParams::mpool()),
-      BP(BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                     params.vamana.two_pass)),
-      I(knn_index<Point, Range, uint32_t>(BP)) {
+      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
+                                params.vamana.num_pass)),
+      I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
   IndexMPool(uint32_t d_, const IndexParams &params) noexcept :
       params(params),
-      BP(BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                     params.vamana.two_pass)),
-      I(knn_index<Point, Range, uint32_t>(BP)) {
+      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
+                                params.vamana.num_pass)),
+      I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
 
@@ -63,9 +68,9 @@ class IndexMPool : public Index<metric> {
                          [&](size_t i) { mpvs[i] = mean_pooling(points[i], params.normalize); });
     points_mp = Range(mpvs, d);
     // Step 2: Build Vamana index on the mean-pooled points
-    G = Graph<uint32_t>(BP.R, points_mp.size());
-    stats<uint32_t> BuildStats(G.size());
-    I.build_index(G, points_mp, BuildStats);
+    G = parlayANN::Graph<uint32_t>(BP.R, points_mp.size());
+    parlayANN::stats<uint32_t> BuildStats(G.size());
+    I.build_index(G, points_mp, points_mp, BuildStats);
   }
 
   // Returns the top-k point clouds for the query point cloud
@@ -76,12 +81,14 @@ class IndexMPool : public Index<metric> {
     size_t k = search_params.k;
     // Step 1: Compute mean-pooling of the query point cloud
     std::vector<float> query_mpv = mean_pooling(query, false);
-    auto query_point = Point(query_mpv.data(), d, d, -1);
+    typename Point::parameters vamana_params(d);
+    Point query_point(reinterpret_cast<typename Point::byte *>(query_mpv.data()), -1,
+                      vamana_params);
 
     // Step 2: Run beam search
     uint32_t start_point = I.get_start();
-    auto QP = QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
-                          search_params.limit, search_params.degree_limit);
+    auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
+                                     search_params.limit, search_params.degree_limit);
     auto [result, dist_cmps] =
         beam_search<Point, Range, uint32_t>(query_point, G, points_mp, start_point, QP);
     parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
@@ -115,55 +122,28 @@ class IndexMPool : public Index<metric> {
 
   // Write the index to a file in disk
   void save(const std::string &filename) override {
-    std::string graph_filename = filename;
-    size_t pos = graph_filename.rfind(".");
-    if (pos != std::string::npos) {
-      graph_filename.insert(pos, "_graph.mpv");
-    } else {
-      // If . not found, append _graph.mpv.bin
-      graph_filename += "_graph.mpv.bin";
-    }
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) throw std::runtime_error("save: cannot open file: " + filename);
 
-    char *graph_filename_c = (char *)graph_filename.c_str();
-    G.save(graph_filename_c);
+    // Save graph
+    parlayANN::io::save_graph(G, out);
 
-    std::string mpvs_filename = filename;
-    pos = mpvs_filename.rfind(".");
-    if (pos != std::string::npos) {
-      mpvs_filename.insert(pos, "_mpvs.mpv");
-    } else {
-      // If . not found, append _mpvs.mpv.bin
-      mpvs_filename += "_mpvs.mpv.bin";
-    }
-
-    char *mpvs_filename_c = (char *)mpvs_filename.c_str();
-    points_mp.save(mpvs_filename_c);
+    // Save Mean-Pooled vectors (point_range)
+    parlayANN::io::save_point_range(points_mp, out);
   }
 
   // Read the index from a file in disk
-  void load(const std::string &filename,
-            const PointCloudSet<ChPoint> &points) override {  // Construct graph filename
-    std::string graph_filename = filename;
-    size_t pos = graph_filename.rfind(".");
-    if (pos != std::string::npos) {
-      graph_filename.insert(pos, "_graph.mpv");
-    } else {
-      graph_filename += "_graph.mpv.bin";
-    }
-    char *graph_filename_c = (char *)graph_filename.c_str();
-    G = Graph<uint32_t>(graph_filename_c);
+  void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load: cannot open file: " + filename);
+
+    // Load graph
+    G = parlayANN::io::load_graph<uint32_t>(in);
     I.set_start();
 
-    // Construct mpvs filename
-    std::string mpvs_filename = filename;
-    pos = mpvs_filename.rfind(".");
-    if (pos != std::string::npos) {
-      mpvs_filename.insert(pos, "_mpvs.mpv");
-    } else {
-      mpvs_filename += "_mpvs.mpv.bin";
-    }
-    char *mpvs_filename_c = (char *)mpvs_filename.c_str();
-    points_mp = Range(mpvs_filename_c);
+    // Load Mean-Pooled vectors (point_range)
+    auto [mpvs_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
+    points_mp = Range(mpvs_data, d);
   }
 };
 

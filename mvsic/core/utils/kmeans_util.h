@@ -12,8 +12,9 @@ namespace mvsic {
 template<bool metric>
 auto kmeans_subsample(const parlay::sequence<parlay::sequence<float>>& data, uint32_t k,
                       uint32_t max_points_per_centroid, bool verbose = false) {
-  using PointTy = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Range = PointRange<float, PointTy>;
+  using PointTy =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
   Range centers;
@@ -48,8 +49,9 @@ auto kmeans_subsample(const parlay::sequence<parlay::sequence<float>>& data, uin
 template<bool metric>
 auto kmeans_subsample_assign(const parlay::sequence<parlay::sequence<float>>& data, size_t k,
                              size_t max_points_per_centroid, size_t maxsize, bool verbose = false) {
-  using PointTy = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Range = PointRange<float, PointTy>;
+  using PointTy =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
   Range data_range = Range(data, dims);
@@ -99,8 +101,9 @@ auto kmeans_subsample_assign(const parlay::sequence<parlay::sequence<float>>& da
 template<bool metric>
 auto kmeans_subsample_assign_only(const parlay::sequence<parlay::sequence<float>>& data, size_t k,
                                   size_t max_points_per_centroid, bool verbose = false) {
-  using PointTy = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Range = PointRange<float, PointTy>;
+  using PointTy =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
   Range data_range = Range(data, dims);
@@ -127,8 +130,9 @@ auto kmeans_subsample_assign_only(const parlay::sequence<parlay::sequence<float>
 template<bool metric>
 auto kmeans_subsample_top_n_assign(const parlay::sequence<parlay::sequence<float>>& data, size_t k,
                                    size_t N, size_t max_points_per_centroid, bool verbose = false) {
-  using PointTy = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Range = PointRange<float, PointTy>;
+  using PointTy =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
   Range data_range = Range(data, dims);
