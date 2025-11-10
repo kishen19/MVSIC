@@ -23,7 +23,7 @@ class IndexVamana : public Index<metric> {
   vamana::Graph<uint32_t> G;  // Vamana Graph
   uint32_t start_point;       // Starting Point of the graph
 
-  IndexVamana(uint32_t d_) noexcept : params(IndexParams::mvvamana()) { d = d_; }
+  IndexVamana(uint32_t d_) noexcept : params(IndexParams::vamana()) { d = d_; }
   IndexVamana(uint32_t d_, const IndexParams& params) noexcept : params(params) { d = d_; }
 
   inline void set_start() noexcept { start_point = 0; }
@@ -62,11 +62,11 @@ class IndexVamana : public Index<metric> {
     candidates = std::vector(candidates.begin(), new_end);
 
     std::vector<uint32_t> new_nbhs;
-    new_nbhs.reserve(params.vamana.R);
+    new_nbhs.reserve(params.R);
 
     size_t candidate_idx = 0;
 
-    while (new_nbhs.size() < params.vamana.R && candidate_idx < candidates.size()) {
+    while (new_nbhs.size() < params.R && candidate_idx < candidates.size()) {
       // Don't need to do modifications.
       int p_star = candidates[candidate_idx].first;
       candidate_idx++;
@@ -170,8 +170,7 @@ class IndexVamana : public Index<metric> {
       t_beam.start();
       parlay::parallel_for(floor, ceiling, [&](size_t i) {
         size_t index = shuffled_inserts[i];
-        SearchParams search_params = SearchParams::mvvamana(
-            (long)0, params.vamana.L, (double)0.0, (long)points.size(), (long)G.max_degree());
+        SearchParams search_params = SearchParams::vamana((long)0, params.L, (double)0.0);
         parlay::sequence<pid> visited =
             (vamana::beam_search<uint32_t>(points[index], G, points, start_point, search_params))
                 .first.second;
@@ -199,7 +198,7 @@ class IndexVamana : public Index<metric> {
       parlay::parallel_for(0, grouped_by.size(), [&](size_t j) {
         auto& [index, candidates] = grouped_by[j];
         size_t newsize = candidates.size() + G[index].size();
-        if (newsize <= params.vamana.R) {
+        if (newsize <= params.R) {
           add_neighbors_without_repeats(G[index], candidates);
           G[index].update_neighbors(candidates);
         } else {
@@ -226,10 +225,10 @@ class IndexVamana : public Index<metric> {
   void build(const PointCloudSet<ChPoint>& points) override {
     if (params.verbose >= 1) std::cout << "Building graph..." << std::endl;
     set_start();
-    G = vamana::Graph<uint32_t>(params.vamana.R, points.size());
+    G = vamana::Graph<uint32_t>(params.R, points.size());
     auto inserts = parlay::tabulate(points.size(), [&](uint32_t i) { return i; });
-    if (params.vamana.two_pass) batch_insert(inserts, points, 1.0, true, 2, .02);
-    batch_insert(inserts, points, params.vamana.alpha, true, 2, .02);
+    if (params.two_pass) batch_insert(inserts, points, 1.0, true, 2, .02);
+    batch_insert(inserts, points, params.alpha, true, 2, .02);
     parlay::parallel_for(0, G.size(), [&](long i) {
       auto less = [&](uint32_t j, uint32_t k) {
         return points[i].distance(points[j]) < points[i].distance(points[k]);
@@ -241,16 +240,49 @@ class IndexVamana : public Index<metric> {
 
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
-      const ChPoint& query, const PointCloudSet<ChPoint>& points,
-      const SearchParams& search_params) override {
+  std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                    const SearchParams& search_params) override {
+    parlay::internal::timer t;
+    std::vector<double> timings;
+
     size_t k = search_params.k;
+    // Step 1: Run beam search
+    t.start();
     auto [result, dist_cmps] =
         vamana::beam_search<uint32_t>(query, G, points, start_point, search_params);
     parlay::sequence<pid> visited = result.second;
-    auto final_results = parlay::sequence<std::pair<uint32_t, float>>::from_function(
-        std::min(k, visited.size()), [&](size_t i) { return visited[i]; });
-    return std::make_pair(final_results, dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
+    // Step 2: Re-ranking
+    t.start();
+    auto final_results =
+        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
+    if (search_params.num_rerank > 0) {
+      size_t num_rerank = std::min(search_params.num_rerank, visited.size());
+      auto cmp_rerank = parlay::sequence<size_t>::uninitialized(num_rerank);
+      auto results_rerank =
+          parlay::sequence<std::pair<uint32_t, float>>::from_function(num_rerank, [&](size_t i) {
+            uint32_t id = visited[i].first;
+            auto [dist, d_c] = query.distance_w_cmps(points[id]);
+            cmp_rerank[i] = d_c;
+            return std::make_pair(id, dist);
+          });
+      dist_cmps += parlay::reduce(cmp_rerank);
+      parlay::sort_inplace(results_rerank, [](const auto& a, const auto& b) {
+        return a.second < b.second;  // Sort by distance
+      });
+      parlay::parallel_for(0, final_results.size(),
+                           [&](size_t i) { final_results[i] = results_rerank[i]; });
+    } else {
+      parlay::parallel_for(0, final_results.size(),
+                           [&](size_t i) { final_results[i] = visited[i]; });
+    }
+    timings.push_back(t.stop());
+    t.reset();
+
+    return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   // Write the index to a file in disk

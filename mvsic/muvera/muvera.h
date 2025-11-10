@@ -45,15 +45,13 @@ class IndexMUVERA : public Index<metric> {
 
   IndexMUVERA(uint32_t d_) noexcept :
       params(IndexParams::muvera()),
-      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                                params.vamana.num_pass)),
+      BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
   IndexMUVERA(uint32_t d_, const IndexParams &params) noexcept :
       params(params),
-      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                                params.vamana.num_pass)),
+      BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
@@ -90,23 +88,24 @@ class IndexMUVERA : public Index<metric> {
     if (params.use_PQ) {
       // TODO: PQ
     }
-    // Step 2: Build Vamana index on the FDEs
-    if (params.verbose >= 1) std::cout << "Building Vamana Index..." << std::endl;
+    // Step 2: Build ANN index on the FDEs
+    if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
     G = parlayANN::Graph<uint32_t>(BP.R, points.size());
     parlayANN::stats<uint32_t> BuildStats(G.size());
-    std::cout << BP.R << " " << points.size() << std::endl;
     I.build_index(G, points_fdes, points_fdes, BuildStats);
     if (params.verbose >= 1) std::cout << "FDE Dimension: " << points_fdes.get_dims() << std::endl;
   }
 
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
-      const ChPoint &query, const PointCloudSet<ChPoint> &points,
-      const SearchParams &search_params) override {
+  std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
+                    const SearchParams &search_params) override {
+    parlay::internal::timer t;
+    std::vector<double> timings;
+
     size_t k = search_params.k;
     // Step 1: Compute FDE of the query point cloud
     // FDE config
+    t.start();
     graph_mining::FixedDimensionalEncodingConfig fde_config{
         static_cast<int32_t>(d),
         params.fde.num_repetitions,
@@ -125,21 +124,26 @@ class IndexMUVERA : public Index<metric> {
     std::vector<float> query_fde =
         graph_mining::GenerateFixedDimensionalEncoding(query_vec, fde_config);
     assert(query_fde.size() == d_fde);
-    typename Point::parameters vamana_params(d_fde);
+    typename Point::parameters parlayann_pr_params(d_fde);
     Point query_point(reinterpret_cast<typename Point::byte *>(query_fde.data()), -1,
-                      vamana_params);
+                      parlayann_pr_params);
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 2: Run beam search
+    t.start();
     uint32_t start_point = I.get_start();
     auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
-                                     search_params.limit, search_params.degree_limit);
+                                     points.size(), params.ann.R);
     auto [result, dist_cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
         query_point, G, points_fdes, start_point, QP);
     parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
-    // std::cout << visited.size() << " " << result.first.size() << std::endl;
     dist_cmps = dist_cmps * 2 * d_fde;
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 3: Re-ranking
+    t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (!search_params.norerank) {
@@ -162,7 +166,10 @@ class IndexMUVERA : public Index<metric> {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    return std::make_pair(final_results, dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
+    return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   // Write the index to a file in disk

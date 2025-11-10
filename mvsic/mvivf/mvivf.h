@@ -5,7 +5,6 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
-// #include "mvsic/core/utils/top_neighbors.h"
 #include "mvsic/core/utils/util.h"
 
 namespace mvsic {
@@ -114,11 +113,12 @@ class IndexMVIVF : public Index<metric> {
     recursive_build(root, points);
   }
 
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
-      const ChPoint &query, const PointCloudSet<ChPoint> &points,
-      const SearchParams &search_params) override {
+  std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
+                    const SearchParams &search_params) override {
+    parlay::internal::timer t;
+    std::vector<double> timings;
+
     size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
     size_t beam_length = 2 * search_params.nprobes;
@@ -137,8 +137,9 @@ class IndexMVIVF : public Index<metric> {
       }
       return false;
     };
+
     // Step 1: Greedy search to find candidate probe clusters
-    // Add root to beam
+    t.start();
     add_to_beam({std::numeric_limits<float>::max(), root});
     while (beam.size() > 0) {
       // Pop the best node from the beam
@@ -174,8 +175,11 @@ class IndexMVIVF : public Index<metric> {
       }
     }
     parlay::sort_inplace(probe_list);
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 2: Probe clusters in probe_list
+    t.start();
     // Find the minimum number of probes needed to obtain k neighbors
     size_t nprobes_minimal = 0, cur = 0;
     while (nprobes_minimal < probe_list.size() && cur <= k) {
@@ -202,7 +206,11 @@ class IndexMVIVF : public Index<metric> {
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
       return a.second < b.second;  // Sort by distance
     });
+    timings.push_back(t.stop());
+    t.reset();
+
     // Step 3: Re-ranking
+    t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
@@ -225,7 +233,10 @@ class IndexMVIVF : public Index<metric> {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    return std::make_pair(final_results, dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
+    return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   // Traversing the k-means tree: returns the height of the tree

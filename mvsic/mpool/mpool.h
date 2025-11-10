@@ -45,15 +45,13 @@ class IndexMPool : public Index<metric> {
 
   IndexMPool(uint32_t d_) noexcept :
       params(IndexParams::mpool()),
-      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                                params.vamana.num_pass)),
+      BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
   IndexMPool(uint32_t d_, const IndexParams &params) noexcept :
       params(params),
-      BP(parlayANN::BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                                params.vamana.num_pass)),
+      BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
@@ -68,6 +66,7 @@ class IndexMPool : public Index<metric> {
                          [&](size_t i) { mpvs[i] = mean_pooling(points[i], params.normalize); });
     points_mp = Range(mpvs, d);
     // Step 2: Build Vamana index on the mean-pooled points
+    if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
     G = parlayANN::Graph<uint32_t>(BP.R, points_mp.size());
     parlayANN::stats<uint32_t> BuildStats(G.size());
     I.build_index(G, points_mp, points_mp, BuildStats);
@@ -75,26 +74,36 @@ class IndexMPool : public Index<metric> {
 
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
-      const ChPoint &query, const PointCloudSet<ChPoint> &points,
-      const SearchParams &search_params) override {
+  std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
+                    const SearchParams &search_params) override {
+    parlay::internal::timer t;
+    std::vector<double> timings;
+
     size_t k = search_params.k;
     // Step 1: Compute mean-pooling of the query point cloud
+    t.start();
     std::vector<float> query_mpv = mean_pooling(query, false);
-    typename Point::parameters vamana_params(d);
+    typename Point::parameters parlayann_pr_params(d);
     Point query_point(reinterpret_cast<typename Point::byte *>(query_mpv.data()), -1,
-                      vamana_params);
+                      parlayann_pr_params);
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 2: Run beam search
+    t.start();
     uint32_t start_point = I.get_start();
     auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
-                                     search_params.limit, search_params.degree_limit);
+                                     points.size(), params.ann.R);
     auto [result, dist_cmps] =
         beam_search<Point, Range, uint32_t>(query_point, G, points_mp, start_point, QP);
     parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
     dist_cmps = (dist_cmps * 2 * d);
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 3: Re-ranking
+    t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (!search_params.norerank) {
@@ -117,7 +126,10 @@ class IndexMPool : public Index<metric> {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    return std::make_pair(final_results, dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
+    return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   // Write the index to a file in disk

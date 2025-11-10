@@ -12,7 +12,8 @@ bazel_dep(name = "highway", version = "1.3.0")
 
 bazel_dep(name = "abseil-cpp", version = "20250127.1", repo_name = "com_google_absl")
 bazel_dep(name = "eigen", version = "4.0.0-20241125.bcr.2")
-bazel_dep(name = "kmeans", version = "0.0.1")
+
+# bazel_dep(name = "kmeans", version = "0.0.1")
 bazel_dep(name = "scann", version = "0.0.1")
 # bazel_dep(name = "parlayann", version = "0.0.1")
 
@@ -39,8 +40,16 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 
 git_repository(
     name = "parlayann",
-    branch = "bazel",
-    remote = "https://github.com/cmuparlay/parlayann.git",
+    # commit = "ca36f78ec62db893c3592a38584916578d2f2914",
+    branch = "main",
+    # remote = "https://github.com/cmuparlay/parlayann.git",
+    remote = "https://github.com/Akatsukis/ParlayANN.git",
+)
+
+git_repository(
+    name = "kmeans",
+    branch = "mvsic",
+    remote = "git@github.com:ParAlg/Parallel-KMeans.git",
 )
 
 # git_repository(
@@ -70,10 +79,10 @@ git_repository(
 #     tag = "v1.11.0",
 # )
 
-local_path_override(
-    module_name = "kmeans",
-    path = "./external/kmeans/",
-)
+# local_path_override(
+#     module_name = "kmeans",
+#     path = "./external/kmeans/",
+# )
 
 local_path_override(
     module_name = "scann",

@@ -48,8 +48,7 @@ void bench(mvsic::commandLine &P) {
   auto points = PC(inFile, is_mmap);
   IndexParams index_params =
       IndexParams::mpool(R, L_build, alpha, num_pass, normalize, compress_input, use_PQ, verbose);
-  SearchParams search_params =
-      SearchParams::mpool(k, L, cut, points.size(), R, num_rerank, norerank);
+  SearchParams search_params = SearchParams::mpool(k, L, num_rerank, cut, norerank);
   IndexMPool<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

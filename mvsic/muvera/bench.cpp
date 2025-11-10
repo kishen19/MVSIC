@@ -54,12 +54,11 @@ void bench(mvsic::commandLine &P) {
   bool norerank = P.getOption("-norerank");
 
   auto points = PC(inFile, is_mmap);
-  IndexParams index_params =
-      IndexParams::muvera(num_repetitions, num_simhash_projections, seed, projection_dimension,
-                          fill_empty_partitions, final_projection_dimension, !not_normalized, R,
-                          L_build, alpha, num_pass, compress_input, use_PQ, verbose);
-  SearchParams search_params =
-      SearchParams::muvera(k, L, cut, points.size(), R, num_rerank, norerank);
+  IndexParams index_params = IndexParams::muvera_custom(
+      num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
+      final_projection_dimension, !not_normalized, R, L_build, alpha, num_pass, compress_input,
+      use_PQ, verbose);
+  SearchParams search_params = SearchParams::muvera(k, L, num_rerank, cut, norerank);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

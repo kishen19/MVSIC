@@ -44,8 +44,8 @@ void bench(mvsic::commandLine& P) {
 
   auto points = PC(inFile, is_mmap);
   IndexParams index_params =
-      IndexParams::mvvamana(R, L_build, alpha, two_pass, compress_input, use_PQ, verbose);
-  SearchParams search_params = SearchParams::mvvamana(k, L, 1.35, points.size(), R);
+      IndexParams::vamana(R, L_build, alpha, two_pass, compress_input, use_PQ, verbose);
+  SearchParams search_params = SearchParams::vamana(k, L, cut);
   IndexVamana<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

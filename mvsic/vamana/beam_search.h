@@ -133,7 +133,7 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
 
   // The main loop.  Terminate beam search when the entire frontier
   // has been visited or have reached max_visit.
-  while (remain > 0 && num_visited < params.limit) {
+  while (remain > 0 && num_visited < Points.size()) {
     // the next node to visit is the unvisited frontier node that is closest to
     // p
     std::pair<indexType, distanceType> current = unvisited_frontier[0];
@@ -148,7 +148,7 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
     // not bump anyone else.
     candidates.clear();
     keep.clear();
-    long num_elts = std::min<long>(G[current.first].size(), params.degree_limit);
+    long num_elts = std::min<long>(G[current.first].size(), G.max_degree());
     for (indexType i = 0; i < num_elts; i++) {
       auto a = G[current.first][i];
       if (has_been_seen(a) /*|| Points[a].same_as(p)*/) continue;  // skip if already seen

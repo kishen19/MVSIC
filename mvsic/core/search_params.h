@@ -12,17 +12,15 @@ struct SearchParams {
   // mvivf
   size_t nprobes;  // Number of leaf-level nodes probed
 
-  // Vamana (muvera, mpool, mvvamana) Params
+  // ANN (muvera, mpool, vamana) Params
   size_t L;
   double cut;
-  size_t limit;
-  size_t degree_limit;
 
-  // muvera, mpool, mvvamana
+  // muvera, mpool, vamana
   bool norerank = false;
 
   // mvivf search params
-  static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank) {
+  static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0) {
     SearchParams params;
     params.method = "mvivf";
     params.k = k;
@@ -35,7 +33,7 @@ struct SearchParams {
   }
 
   // mvivf_flat search params
-  static SearchParams mvivf_flat(size_t k, size_t nprobes, size_t num_rerank) {
+  static SearchParams mvivf_flat(size_t k, size_t nprobes, size_t num_rerank = 0) {
     SearchParams params;
     params.method = "mvivf_flat";
     params.k = k;
@@ -63,27 +61,24 @@ struct SearchParams {
   // }
 
   // vamana
-  static SearchParams mvvamana(size_t k, size_t L, double cut, size_t limit, size_t degree_limit) {
+  static SearchParams vamana(size_t k, size_t L, double cut = 1.35, size_t num_rerank = 0) {
     SearchParams params;
-    params.method = "mvvamana";
+    params.method = "vamana";
     params.k = k;
     params.L = L;
     params.cut = cut;
-    params.limit = limit;
-    params.degree_limit = degree_limit;
+    params.num_rerank = num_rerank;
     return params;
   }
 
   // muvera
-  static SearchParams muvera(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
-                             size_t num_rerank, bool norerank = false) {
+  static SearchParams muvera(size_t k, size_t L, size_t num_rerank, double cut = 1.35,
+                             bool norerank = false) {
     SearchParams params;
     params.method = "muvera";
     params.k = k;
     params.L = L;
     params.cut = cut;
-    params.limit = limit;
-    params.degree_limit = degree_limit;
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);
@@ -91,15 +86,13 @@ struct SearchParams {
   }
 
   // mean_pooling
-  static SearchParams mpool(size_t k, size_t L, double cut, size_t limit, size_t degree_limit,
-                            size_t num_rerank, bool norerank = false) {
+  static SearchParams mpool(size_t k, size_t L, size_t num_rerank, double cut = 1.35,
+                            bool norerank = false) {
     SearchParams params;
     params.method = "mpool";
     params.k = k;
     params.L = L;
     params.cut = cut;
-    params.limit = limit;
-    params.degree_limit = degree_limit;
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);

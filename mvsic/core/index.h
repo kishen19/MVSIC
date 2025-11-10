@@ -1,5 +1,8 @@
 #pragma once
 
+#include <vector>
+#include <tuple>
+
 #include "parlay/primitives.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -30,7 +33,10 @@ class Index {
   // Output format: < [<id, distance>, ...], # distance comparisons>
   virtual std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
       const ChPoint& query, const PointCloudSet<ChPoint>& points,
-      const SearchParams& search_params) {}
+      const SearchParams& search_params) {
+    auto [results, dist_cmps, timings] = search_with_stats(query, points, search_params);
+    return std::make_pair(results, dist_cmps);
+  }
   // Returns the top-k point clouds for each of the query point clouds
   // Default: runs search in parallel for each query
   virtual std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t>
@@ -46,8 +52,13 @@ class Index {
     return std::make_pair(pred, parlay::reduce(cmps));
   }
   // Returns some running time stats, specific to the index type
-  virtual std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search_with_stats(
-      const ChPoint& query, const PointCloudSet<ChPoint>& points, const SearchParams& params) {}
+  // NOTE: Has to be defined by every index.
+  virtual std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                    const SearchParams& params) {
+    return std::make_tuple(parlay::sequence<std::pair<uint32_t, float>>(), 0,
+                           std::vector<double>{});
+  }
   /* -----------------------------Load/Save Functions-------------------------- */
   // Write the index to a file in disk
   virtual void save(const std::string& filename) {}

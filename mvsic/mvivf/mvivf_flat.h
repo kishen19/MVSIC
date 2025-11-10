@@ -95,18 +95,25 @@ class IndexMVIVFFlat : public Index<metric> {
 
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
-      const ChPoint &query, const PointCloudSet<ChPoint> &points,
-      const SearchParams &search_params) override {
+  std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
+                    const SearchParams &search_params) override {
+    parlay::internal::timer t;
+    std::vector<double> timings;
+
     size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
     size_t dist_cmps = 0;
     // Step 1: Compute distances to centers
+    t.start();
     parlay::sequence<std::pair<uint32_t, float>> id_dist;
     std::tie(id_dist, dist_cmps) = centers.distances(query);
     parlay::sort_inplace(id_dist, [](const auto &a, const auto &b) { return a.second < b.second; });
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 2: Probe top nprobe clusters
+    t.start();
     // Find the minimum number of probes needed to obtain k neighbors
     size_t nprobes_minimal = 0, cur = 0;
     while (nprobes_minimal < id_dist.size() && cur < k) {
@@ -134,7 +141,11 @@ class IndexMVIVFFlat : public Index<metric> {
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
       return a.second < b.second;  // Sort by distance
     });
+    timings.push_back(t.stop());
+    t.reset();
+
     // Step 3: Re-ranking
+    t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
@@ -157,7 +168,10 @@ class IndexMVIVFFlat : public Index<metric> {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    return std::make_pair(final_results, dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
+    return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   // Write the index to a file in disk

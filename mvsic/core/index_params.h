@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <iostream>
 #include "mvsic/core/mvclustering/mvclustering_config.h"
 
 namespace mvsic {
@@ -33,18 +34,23 @@ struct IndexParams {
   };
   fde_config fde = fde_config();
 
-  // Vamana params
-  struct vamana_config {
+  // ANN params (Using ParlayANN's Vamana)
+  struct ann_config {
     uint32_t R = 200;
     uint32_t L = 600;
     double alpha = 1.2;
     int num_pass = 1;
-    bool two_pass = false;
   };
-  vamana_config vamana = vamana_config();
+  ann_config ann = ann_config();
 
   // mpool and muvera
   bool normalize = true;
+
+  // vamana params
+  uint32_t R = 200;
+  uint32_t L = 600;
+  double alpha = 1.2;
+  bool two_pass = false;
 
   // PQ params
   struct pq_config {
@@ -97,8 +103,26 @@ struct IndexParams {
     return params;
   }
 
-  static IndexParams muvera(int32_t num_repetitions = 20, int32_t num_simhash_projections = 4,
-                            int32_t seed = 1, int32_t projection_dimension = 8,
+  static IndexParams muvera_custom(
+      int32_t num_repetitions = 20, int32_t num_simhash_projections = 4, int32_t seed = 1,
+      int32_t projection_dimension = 8, bool fill_empty_partitions = false,
+      int32_t final_projection_dimension = 0, bool normalize = false, uint32_t R = 200,
+      uint32_t L = 600, double alpha = 1.1, int num_pass = 1, bool compress_input = false,
+      bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false, uint32_t num_blocks = 8,
+      uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
+    IndexParams params;
+    params.method = "muvera";
+    params.compress_input = compress_input;
+    params.pq = {pq_enabled, num_blocks, num_clusters_per_block, sample_size};
+    params.fde = fde_config{
+        num_repetitions,       num_simhash_projections,    seed,     projection_dimension,
+        fill_empty_partitions, final_projection_dimension, normalize};
+    params.ann = ann_config{R, L, alpha, num_pass};
+    params.verbose = verbose;
+    return params;
+  }
+
+  static IndexParams muvera(int32_t d_fde = 2560, int32_t seed = 1,
                             bool fill_empty_partitions = false,
                             int32_t final_projection_dimension = 0, bool normalize = false,
                             uint32_t R = 200, uint32_t L = 600, double alpha = 1.1,
@@ -109,10 +133,41 @@ struct IndexParams {
     params.method = "muvera";
     params.compress_input = compress_input;
     params.pq = {pq_enabled, num_blocks, num_clusters_per_block, sample_size};
+    int32_t num_repetitions, num_simhash_projections, projection_dimension;
+    if (d_fde == 640) {
+      num_repetitions = 10;
+      num_simhash_projections = 3;
+      projection_dimension = 8;
+    } else if (d_fde == 1280) {
+      num_repetitions = 20;
+      num_simhash_projections = 3;
+      projection_dimension = 8;
+    } else if (d_fde == 1920) {
+      num_repetitions = 15;
+      num_simhash_projections = 4;
+      projection_dimension = 8;
+    } else if (d_fde == 2560) {
+      num_repetitions = 20;
+      num_simhash_projections = 4;
+      projection_dimension = 8;
+    } else if (d_fde == 5120) {
+      num_repetitions = 20;
+      num_simhash_projections = 5;
+      projection_dimension = 8;
+    } else if (d_fde == 10240) {
+      num_repetitions = 20;
+      num_simhash_projections = 5;
+      projection_dimension = 16;
+    } else {
+      std::cout
+          << "Invalid value for d_fde: allowed values are {640, 1280, 1920, 2560, 5120, 10240}"
+          << std::endl;
+      abort();
+    }
     params.fde = fde_config{
         num_repetitions,       num_simhash_projections,    seed,     projection_dimension,
         fill_empty_partitions, final_projection_dimension, normalize};
-    params.vamana = vamana_config{R, L, alpha, num_pass};
+    params.ann = ann_config{R, L, alpha, num_pass};
     params.verbose = verbose;
     return params;
   }
@@ -126,22 +181,25 @@ struct IndexParams {
     params.method = "mpool";
     params.compress_input = compress_input;
     params.pq = {pq_enabled, num_blocks, num_clusters_per_block, sample_size};
-    params.vamana = vamana_config{R, L, alpha, num_pass};
+    params.ann = ann_config{R, L, alpha, num_pass};
     params.normalize = normalize;
     params.verbose = verbose;
     return params;
   }
 
-  static IndexParams mvvamana(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                              bool two_pass = false, bool compress_input = false,
-                              bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false,
-                              uint32_t num_blocks = 8, uint32_t num_clusters_per_block = 256,
-                              uint32_t sample_size = 100000) {
+  static IndexParams vamana(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
+                            bool two_pass = false, bool compress_input = false,
+                            bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false,
+                            uint32_t num_blocks = 8, uint32_t num_clusters_per_block = 256,
+                            uint32_t sample_size = 100000) {
     IndexParams params;
-    params.method = "mvvamana";
+    params.method = "vamana";
+    params.R = R;
+    params.L = L;
+    params.alpha = alpha;
+    params.two_pass = two_pass;
     params.compress_input = compress_input;
     params.pq = {pq_enabled, num_blocks, num_clusters_per_block, sample_size};
-    params.vamana = vamana_config{R, L, alpha, 1, two_pass};
     params.verbose = verbose;
     return params;
   }
