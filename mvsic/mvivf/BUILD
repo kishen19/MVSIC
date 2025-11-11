@@ -5,8 +5,8 @@ cc_library(
     hdrs = ["mvivf.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core/distance_measures:many_to_many",
         "//mvsic/core/mvclustering",
-        # "//mvsic/core/utils:top_neighbors",
         "//mvsic/core/utils:util",
     ],
 )
@@ -17,7 +17,6 @@ cc_library(
     deps = [
         "//mvsic/core:index",
         "//mvsic/core/mvclustering",
-        # "//mvsic/core/utils:top_neighbors",
         "//mvsic/core/utils:util",
     ],
 )

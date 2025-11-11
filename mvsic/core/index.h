@@ -8,6 +8,7 @@
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
+#include "mvsic/core/types/quantized_chamfer_point.h"
 #include "mvsic/core/types/quantized_point_cloud_set.h"
 #include "mvsic/core/distance_measures/one_to_many.h"
 #include "search_params.h"

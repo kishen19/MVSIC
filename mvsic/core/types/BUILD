@@ -89,6 +89,17 @@ cc_library(
 )
 
 cc_library(
+    name = "quantized_chamfer_point",
+    hdrs = ["quantized_chamfer_point.h"],
+    deps = [
+        ":chamfer_ip_point",
+        ":chamfer_l2_point",
+        ":quantized_point_cloud_set",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
     name = "quantized_point_cloud_set",
     hdrs = ["quantized_point_cloud_set.h"],
     deps = [

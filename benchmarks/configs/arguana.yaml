@@ -6,14 +6,12 @@ dataset:
 indices:
   - name: mvivf
     build_configs:
-      # Each item here is a unique index that will be built.
       - name: mvivf_500  # A unique, human-readable name for this build
         rebuild: false # True/False
         build_only: false # True/False
         params:
           k_per_level: 0 # Default 0: Avg num embs
           max_leaf_size: 500
-        # Search configurations to run *only* on the 'mvivf_500' index.
         search_configs:
           - name: k=10 # Name for this specific search experiment
             # The script will generate the Cartesian product of all parameter lists here.
@@ -23,6 +21,24 @@ indices:
               k: [10]
               config: 
                 - {name: "", num_rerank: 0}
+
+      - name: mvivf_pq_500  # A unique, human-readable name for this build
+        rebuild: false # True/False
+        build_only: false # True/False
+        params:
+          k_per_level: 0 # Default 0: Avg num embs
+          max_leaf_size: 500
+          pq_enabled: true
+        # Search configurations to run *only* on the 'mvivf_500' index.
+        search_configs:
+          - name: k=10 # Name for this specific search experiment
+            # The script will generate the Cartesian product of all parameter lists here.
+            append: false
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+              k: [10]
+              config: 
+                - {name: "", num_rerank: 100}
 
   - name: muvera
     build_configs:

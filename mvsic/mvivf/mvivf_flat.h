@@ -15,7 +15,7 @@ namespace mvsic {
     Each cluster is now represented by a "center" point cloud.
   Search:
   - For a given query point cloud, it computes distances to all centers point clouds,
-   and then probes the top `nprobes` clusters.
+    and then probes the top `nprobes` clusters.
   Params:
   - k_per_level: Number of clusters (num_clusters)
 */
@@ -28,19 +28,13 @@ class IndexMVIVFFlat : public Index<metric> {
 
   IndexParams params;
   PointCloudSet<ChPoint> centers;  // Centers of clusters
-  // Only one of the following two will be used
-  parlay::sequence<PointCloudSet<ChPoint>> clusters = {};              // Clusters of points
-  parlay::sequence<QuantizedPointCloudSet<ChPoint>> pq_clusters = {};  // PQ Clusters
+  parlay::sequence<PointCloudSet<ChPoint>> clusters = {};
+  QuantizedPointCloudSet<ChPoint> pq_points;
 
   IndexMVIVFFlat(uint32_t d_) noexcept : params(IndexParams::mvivf_flat()) { d = d_; }
   IndexMVIVFFlat(uint32_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
 
-  inline uint32_t get_size(size_t i) const noexcept {
-    if (params.pq.enabled)
-      return pq_clusters[i].size();
-    else
-      return clusters[i].size();
-  }
+  inline uint32_t get_size(size_t i) const noexcept { return clusters[i].size(); }
 
   inline size_t num_leaves() const noexcept { return centers.size(); }
 
@@ -63,12 +57,9 @@ class IndexMVIVFFlat : public Index<metric> {
     // Step 2: Collect Clusters
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
-    // Step 3: Collect point clouds by clusters (and apply PQ if enabled)
-    if (params.pq.enabled) {
-      pq_clusters.resize(num_clusters);
-    } else {
-      clusters.resize(num_clusters);
-    }
+
+    // Step 3: Collect point clouds by clusters
+    clusters.resize(num_clusters);
     parlay::parallel_for(
         0, grouped.size(),
         [&](size_t i) {
@@ -76,17 +67,15 @@ class IndexMVIVFFlat : public Index<metric> {
           auto group = parlay::delayed_seq<uint32_t>(
               grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
           PointCloudSet<ChPoint> cluster_points = PointCloudSet<ChPoint>(points.filter(group), d);
-          if (params.pq.enabled) {
-            pq_clusters[cluster_id] = QuantizedPointCloudSet<ChPoint>(
-                cluster_points, params.pq.num_blocks,
-                std::min(static_cast<size_t>(params.pq.num_clusters_per_block),
-                         cluster_points.total_size()),
-                params.pq.sample_size);
-          } else {
-            clusters[cluster_id] = std::move(cluster_points);
-          }
+          clusters[cluster_id] = std::move(cluster_points);
         },
         1);
+
+    if (params.pq.enabled) {
+      this->pq_points = QuantizedPointCloudSet<ChPoint>(
+          points, params.pq.num_blocks, params.pq.num_clusters_per_block, params.pq.sample_size);
+    }
+
     if (params.verbose >= 1) {
       std::cout << "Index built. Mean cluster size: " << mean_cluster_size()
                 << ", Max cluster size: " << max_cluster_size() << std::endl;
@@ -128,16 +117,31 @@ class IndexMVIVFFlat : public Index<metric> {
     auto &offsets = scan_result.first;
     size_t total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
-    auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
+
     // Probe chosen leaf clusters in parallel
-    parlay::parallel_for(0, nprobes, [&](size_t i) {
-      uint32_t cluster_id = id_dist[i].first;
-      if (params.pq.enabled)
-        leaf_dist_cmps[i] = pq_clusters[cluster_id].distances(query, &visited[offsets[i]]);
-      else
+    if (params.pq.enabled) {
+      // Create one quantized query point
+      auto q_point = QuantizedChamferPoint<metric>(query, pq_points);
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        uint32_t cluster_id = id_dist[i].first;
+        auto &leaf_points = clusters[cluster_id];  // Get the set of point IDs
+        // Calculate distance for each point in the leaf
+        parlay::parallel_for(0, leaf_points.size(), [&](size_t j) {
+          uint32_t point_id = leaf_points.get_id(j);
+          float dist = q_point.distance(pq_points[point_id]);  // Use global PQ
+          visited[offsets[i] + j] = std::make_pair(point_id, dist);
+        });
+      });
+      dist_cmps += q_point.get_dist_cmps();  // Add total PQ distance comparisons
+    } else {
+      auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        uint32_t cluster_id = id_dist[i].first;
         leaf_dist_cmps[i] = clusters[cluster_id].distances(query, &visited[offsets[i]]);
-    });
-    dist_cmps += parlay::reduce(leaf_dist_cmps);
+      });
+      dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
+    }
+
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
       return a.second < b.second;  // Sort by distance
     });
@@ -189,30 +193,27 @@ class IndexMVIVFFlat : public Index<metric> {
     size_t num_entries = (centers.total_size()) * (centers.get_dims());
     outfile.write(reinterpret_cast<const char *>(coords), num_entries * sizeof(float));
 
-    if (params.pq.enabled) {
-      size_t num_pq_clusters = pq_clusters.size();
-      outfile.write(reinterpret_cast<const char *>(&num_pq_clusters), sizeof(size_t));
-      for (const auto &pq_cluster : pq_clusters) {
-        pq_cluster.save(outfile);
-      }
-    } else {
-      parlay::sequence<size_t> clusters_offsets = parlay::sequence<size_t>::from_function(
-          clusters.size(), [&](size_t i) { return clusters[i].size(); });
-      size_t total_clusters_size = parlay::scan_inplace(clusters_offsets);
-      clusters_offsets.push_back(total_clusters_size);
-      // Write clusters offsets
-      outfile.write(reinterpret_cast<const char *>(clusters_offsets.begin()),
-                    clusters_offsets.size() * sizeof(size_t));
-      // Write clusters values
-      for (size_t i = 0; i < num; ++i) {
-        if (clusters[i].size() > 0) {
-          for (size_t j = 0; j < clusters[i].size(); ++j) {
-            uint32_t point_id = clusters[i].get_id(j);
-            outfile.write(reinterpret_cast<const char *>(&point_id), sizeof(uint32_t));
-          }
+    parlay::sequence<size_t> clusters_offsets = parlay::sequence<size_t>::from_function(
+        clusters.size(), [&](size_t i) { return clusters[i].size(); });
+    size_t total_clusters_size = parlay::scan_inplace(clusters_offsets);
+    clusters_offsets.push_back(total_clusters_size);
+    // Write clusters offsets
+    outfile.write(reinterpret_cast<const char *>(clusters_offsets.begin()),
+                  clusters_offsets.size() * sizeof(size_t));
+    // Write clusters values
+    for (size_t i = 0; i < num; ++i) {
+      if (clusters[i].size() > 0) {
+        for (size_t j = 0; j < clusters[i].size(); ++j) {
+          uint32_t point_id = clusters[i].get_id(j);
+          outfile.write(reinterpret_cast<const char *>(&point_id), sizeof(uint32_t));
         }
       }
     }
+
+    if (params.pq.enabled) {
+      this->pq_points.save(outfile);
+    }
+
     outfile.close();
   }
 
@@ -245,39 +246,34 @@ class IndexMVIVFFlat : public Index<metric> {
         PointCloudSet<ChPoint>(num, dim, center_values.data(), center_offsets.data(), nullptr);
 
     if (params.pq.enabled) {
-      size_t num_pq_clusters;
-      infile.read(reinterpret_cast<char *>(&num_pq_clusters), sizeof(num_pq_clusters));
-      pq_clusters.resize(num_pq_clusters);
-      for (size_t i = 0; i < num_pq_clusters; ++i) {
-        pq_clusters[i] = QuantizedPointCloudSet<ChPoint>(infile);
-      }
-    } else {
-      // Read clusters offsets
-      parlay::sequence<size_t> clusters_offsets(num + 1);
-      infile.read(reinterpret_cast<char *>(clusters_offsets.begin()),
-                  clusters_offsets.size() * sizeof(size_t));
-      // Read clusters values
-      parlay::sequence<uint32_t> clusters_values(clusters_offsets[clusters_offsets.size() - 1]);
-      infile.read(reinterpret_cast<char *>(clusters_values.begin()),
-                  clusters_values.size() * sizeof(uint32_t));
-
-      // Build the index
-      auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
-      parlay::parallel_for(0, points.size(),
-                           [&](uint32_t i) { point_id_to_data_id[points.get_id(i)] = i; });
-      parlay::sequence<size_t> clusters_sizes = parlay::sequence<size_t>::from_function(
-          num, [&](size_t i) { return clusters_offsets[i + 1] - clusters_offsets[i]; });
-      clusters.resize(num);
-      parlay::parallel_for(0, num, [&](size_t i) {
-        if (clusters_sizes[i] > 0) {
-          auto cluster_group = parlay::delayed_seq<uint32_t>(clusters_sizes[i], [&](size_t j) {
-            uint32_t point_id = clusters_values[clusters_offsets[i] + j];
-            return point_id_to_data_id[point_id];
-          });
-          clusters[i] = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
-        }
-      });
+      this->pq_points = QuantizedPointCloudSet<ChPoint>(infile);
     }
+
+    // Read clusters offsets
+    parlay::sequence<size_t> clusters_offsets(num + 1);
+    infile.read(reinterpret_cast<char *>(clusters_offsets.begin()),
+                clusters_offsets.size() * sizeof(size_t));
+    // Read clusters values
+    parlay::sequence<uint32_t> clusters_values(clusters_offsets[clusters_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char *>(clusters_values.begin()),
+                clusters_values.size() * sizeof(uint32_t));
+
+    // Build the index
+    auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
+    parlay::parallel_for(0, points.size(),
+                         [&](uint32_t i) { point_id_to_data_id[points.get_id(i)] = i; });
+    parlay::sequence<size_t> clusters_sizes = parlay::sequence<size_t>::from_function(
+        num, [&](size_t i) { return clusters_offsets[i + 1] - clusters_offsets[i]; });
+    clusters.resize(num);
+    parlay::parallel_for(0, num, [&](size_t i) {
+      if (clusters_sizes[i] > 0) {
+        auto cluster_group = parlay::delayed_seq<uint32_t>(clusters_sizes[i], [&](size_t j) {
+          uint32_t point_id = clusters_values[clusters_offsets[i] + j];
+          return point_id_to_data_id[point_id];
+        });
+        clusters[i] = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
+      }
+    });
     infile.close();
   }
 

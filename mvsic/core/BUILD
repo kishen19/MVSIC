@@ -10,6 +10,7 @@ cc_library(
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/types:quantized_chamfer_point",
         "//mvsic/core/types:quantized_point_cloud_set",
         "@parlaylib//parlay:primitives",
     ],
