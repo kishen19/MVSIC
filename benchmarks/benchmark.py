@@ -100,37 +100,6 @@ def generate_search_params(search_config, method_info):
 
 
 from framework_utils import FastPlaidWrapper
-
-
-# def compute_recall(gt, result_neighbors):
-#     """
-#     Computes recall for a single run's results against the ground truth.
-#     - gt: An iterable MVSIC ground truth object.
-#     - result_neighbors: A list (one item per query) of lists of (id, score) tuples.
-#     """
-#     total_recall = 0
-#     num_queries = len(result_neighbors)
-#     if num_queries == 0:
-#         return 0.0
-
-#     for i, true_neighbor_tuples in enumerate(gt):
-#         true_neighbor_ids = {n[1] for n in true_neighbor_tuples}
-
-#         # Handle cases where a query might have no ground truth neighbors
-#         if not true_neighbor_ids:
-#             num_queries -= 1
-#             continue
-
-#         predicted_neighbor_ids = {n[0] for n in result_neighbors[i]}
-
-#         recall = len(true_neighbor_ids.intersection(predicted_neighbor_ids)) / len(
-#             true_neighbor_ids
-#         )
-#         total_recall += recall
-
-#     return total_recall / num_queries if num_queries > 0 else 0.0
-
-
 from utils import load_point_clouds
 import time
 
@@ -178,14 +147,10 @@ def run(config, methods, experiment_name, tasks):
                     print(f"  Building index...", flush=True)
                     if points is None:
                         if index_name == 'fastplaid':
-                            points_path = os.path.join(
-                                dataset_config['path'], f"{dataset_config['name']}_points.pcs"
-                            )
+                            points_path = os.path.join(dataset_config['path'], f"{dataset_config['name']}_points.pcs")
                             points = load_point_clouds(points_path)
                         else:
-                            points, _, _ = load_dataset(
-                                dataset_config['path'], dataset_config['name']
-                            )
+                            points, _, _ = load_dataset(dataset_config['path'], dataset_config['name'])
 
                     dim = points[0].shape[1] if index_name == 'fastplaid' else points[0].get_dims()
 
@@ -206,9 +171,7 @@ def run(config, methods, experiment_name, tasks):
                     try:
                         if os.path.isdir(index_path):
                             index_size_bytes = sum(
-                                os.path.getsize(os.path.join(dirpath, f))
-                                for dirpath, _, filenames in os.walk(index_path)
-                                for f in filenames
+                                os.path.getsize(os.path.join(dirpath, f)) for dirpath, _, filenames in os.walk(index_path) for f in filenames
                             )
                         else:
                             index_size_bytes = os.path.getsize(index_path)
@@ -241,15 +204,9 @@ def run(config, methods, experiment_name, tasks):
                 # Ensure all data is loaded for search task if not already present
                 if points is None or queries is None or gt is None:
                     if index_name == 'fastplaid':
-                        points_path = os.path.join(
-                            dataset_config['path'], f"{dataset_config['name']}_points.pcs"
-                        )
-                        queries_path = os.path.join(
-                            dataset_config['path'], f"{dataset_config['name']}_queries.pcs"
-                        )
-                        gt_path = os.path.join(
-                            dataset_config['path'], f"{dataset_config['name']}_chamfer_neighbors.gt"
-                        )
+                        points_path = os.path.join(dataset_config['path'], f"{dataset_config['name']}_points.pcs")
+                        queries_path = os.path.join(dataset_config['path'], f"{dataset_config['name']}_queries.pcs")
+                        gt_path = os.path.join(dataset_config['path'], f"{dataset_config['name']}_chamfer_neighbors.gt")
                         if points is None:
                             points = load_point_clouds(points_path)
                         if queries is None:
@@ -257,9 +214,7 @@ def run(config, methods, experiment_name, tasks):
                         if gt is None:
                             gt = mvsic.ReadGT(gt_path, len(queries))
                     else:
-                        points, queries, gt = load_dataset(
-                            dataset_config['path'], dataset_config['name']
-                        )
+                        points, queries, gt = load_dataset(dataset_config['path'], dataset_config['name'])
 
                 dim = queries[0].shape[1] if index_name == 'fastplaid' else queries[0].get_dims()
 
@@ -293,9 +248,7 @@ def run(config, methods, experiment_name, tasks):
 
                         results_dir = os.path.join(index_dir, search_name)
                         os.makedirs(results_dir, exist_ok=True)
-                        results_filename = (
-                            f"{variant_name}_results.csv" if variant_name else "results.csv"
-                        )
+                        results_filename = f"{variant_name}_results.csv" if variant_name else "results.csv"
                         results_path = os.path.join(results_dir, results_filename)
 
                         append_results = search_config.get('append', True)
@@ -324,25 +277,32 @@ def run(config, methods, experiment_name, tasks):
                                 search_params_func = getattr(mvsic.SearchParams, index_name)
                                 search_params_obj = search_params_func(**params)
                                 with suppress_stdout_stderr():
-                                    result = mvsic.compute_stats_extended(
-                                        index, points, queries, gt, [search_params_obj]
-                                    )
+                                    result = mvsic.compute_stats_extended(index, points, queries, gt, [search_params_obj])
                                 all_results_for_variant.extend(result)
                                 all_params_for_variant.append(params)
 
                             # Check for early exit
-                            if (
-                                all_results_for_variant
-                                and all_results_for_variant[-1].recall_k_k >= 1.0
-                            ):
+                            if all_results_for_variant and all_results_for_variant[-1].recall_k_k >= 1.0:
                                 print(
                                     f"      Recall@k reached 1.0. Stopping sweep for this variant.",
+                                    flush=True,
+                                )
+                                break
+                            elif (
+                                all_results_for_variant
+                                and len(all_results_for_variant) > 2
+                                and all_results_for_variant[-1].recall_k_k == all_results_for_variant[-2].recall_k_k
+                            ):
+                                print(
+                                    f"      Recall@k did not improve. Stopping sweep for this variant.",
                                     flush=True,
                                 )
                                 break
                             print(
                                 "QPS:",
                                 all_results_for_variant[-1].QPS_seq,
+                                "QPS_par:",
+                                all_results_for_variant[-1].QPS_par,
                                 "Recall 1@10:",
                                 all_results_for_variant[-1].recall_1_k,
                                 "Recall 10@10",
@@ -528,9 +488,7 @@ def plot(input_dirs, output_dir):
 
             latency_ms = 1000 / pareto_df['QPS_seq']
 
-            ax1.plot(
-                pareto_df[f'recall_{k}_k'], latency_ms, marker='o', linestyle='-', label=method
-            )
+            ax1.plot(pareto_df[f'recall_{k}_k'], latency_ms, marker='o', linestyle='-', label=method)
 
             ax2.plot(
                 pareto_df[f'recall_{k}_k'],
@@ -564,9 +522,7 @@ def plot(input_dirs, output_dir):
 
     for (dataset, index), group in master_df.groupby(['dataset', 'index']):
 
-        best_run = (
-            group.loc[group['recall_10_k'].idxmax()] if 'recall_10_k' in group else group.iloc[0]
-        )
+        best_run = group.loc[group['recall_10_k'].idxmax()] if 'recall_10_k' in group else group.iloc[0]
 
         summary_data.append(
             {
@@ -607,9 +563,7 @@ def main():
     )
 
     # Args for build/search
-    parser.add_argument(
-        "--config", type=str, help="Path to the experiment config file (for build/search)."
-    )
+    parser.add_argument("--config", type=str, help="Path to the experiment config file (for build/search).")
     parser.add_argument(
         "--methods",
         type=str,

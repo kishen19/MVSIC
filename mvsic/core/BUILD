@@ -6,6 +6,7 @@ cc_library(
     deps = [
         ":index_params",
         ":search_params",
+        "//mvsic/core/distance_measures:one_to_many",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",

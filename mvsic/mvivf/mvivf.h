@@ -6,6 +6,7 @@
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
 #include "mvsic/core/utils/util.h"
+#include "mvsic/core/distance_measures/many_to_many.h"
 
 namespace mvsic {
 
@@ -215,20 +216,7 @@ class IndexMVIVF : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      auto cmp_rerank = parlay::sequence<size_t>::uninitialized(num_rerank);
-      auto results_rerank =
-          parlay::sequence<std::pair<uint32_t, float>>::from_function(num_rerank, [&](size_t i) {
-            uint32_t id = visited[i].first;
-            auto [dist, d_c] = query.distance_w_cmps(points[id]);
-            cmp_rerank[i] = d_c;
-            return std::make_pair(id, dist);
-          });
-      dist_cmps += parlay::reduce(cmp_rerank);
-      parlay::sort_inplace(results_rerank, [](const auto &a, const auto &b) {
-        return a.second < b.second;  // Sort by distance
-      });
-      parlay::parallel_for(0, final_results.size(),
-                           [&](size_t i) { final_results[i] = results_rerank[i]; });
+      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -487,6 +475,166 @@ class IndexMVIVF : public Index<metric> {
       delete root;
     }
   }
+
+  // std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t>
+  // search_all(const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
+  //            const SearchParams& search_params) override {
+  //   size_t num_queries = query_points.size();
+  //   auto all_probes = parlay::sequence<parlay::sequence<std::pair<float, node_t
+  //   *>>>(num_queries); auto greedy_cmps = parlay::sequence<size_t>(num_queries, 0);
+
+  //   parlay::parallel_for(0, num_queries, [&](size_t i) {
+  //       const auto& query = query_points[i];
+  //       size_t beam_length = 2 * search_params.nprobes;
+  //       std::set<std::pair<float, node_t *>> beam;
+  //       auto add_to_beam = [&](std::pair<float, node_t *> p) -> bool {
+  //           if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
+  //               beam.insert(p);
+  //               if (beam.size() > beam_length) {
+  //                   beam.erase(std::prev(beam.end()));
+  //               }
+  //               return true;
+  //           }
+  //           return false;
+  //       };
+
+  //       add_to_beam({std::numeric_limits<float>::max(), root});
+  //       while (beam.size() > 0) {
+  //           std::pair<float, node_t *> best = *beam.begin();
+  //           beam.erase(beam.begin());
+  //           node_t *current_node = best.second;
+
+  //           auto &children = current_node->children;
+  //           auto &centers = current_node->data;
+
+  //           parlay::sequence<std::pair<uint32_t, float>> id_dist;
+  //           size_t dist_cmps_node;
+  //           std::tie(id_dist, dist_cmps_node) = centers.distances(query);
+  //           greedy_cmps[i] += dist_cmps_node;
+
+  //           auto res = parlay::sequence<std::pair<float, node_t *>>::from_function(
+  //               id_dist.size(), [&](size_t j) { return std::make_pair(id_dist[j].second,
+  //               children[j]); });
+
+  //           auto new_nodes_to_beam = parlay::filter(res, [](const auto &p) { return
+  //           p.second->children.size() != 0; }); auto new_nodes_to_probe = parlay::filter(res,
+  //           [](const auto &p) { return p.second->children.size() == 0; });
+
+  //           parlay::sort_inplace(new_nodes_to_beam);
+
+  //           for (size_t j = 0; j < std::min(beam_length, new_nodes_to_beam.size()); j++) {
+  //               if (!add_to_beam(new_nodes_to_beam[j])) break;
+  //           }
+  //           for (size_t j = 0; j < new_nodes_to_probe.size(); j++) {
+  //               all_probes[i].push_back(new_nodes_to_probe[j]);
+  //           }
+  //       }
+  //       parlay::sort_inplace(all_probes[i]);
+  //   });
+
+  //   auto num_probes_per_query = parlay::sequence<size_t>(num_queries);
+  //   auto total_candidates_per_query = parlay::sequence<size_t>(num_queries, 0);
+  //   for(size_t i=0; i<num_queries; ++i) {
+  //       size_t nprobes_minimal = 0, cur = 0;
+  //       while (nprobes_minimal < all_probes[i].size() && cur < search_params.k) {
+  //           cur += all_probes[i][nprobes_minimal].second->get_size();
+  //           nprobes_minimal++;
+  //       }
+  //       num_probes_per_query[i] = std::min(all_probes[i].size(), std::max(search_params.nprobes,
+  //       nprobes_minimal)); for(size_t j=0; j<num_probes_per_query[i]; ++j) {
+  //           total_candidates_per_query[i] += all_probes[i][j].second->get_size();
+  //       }
+  //   }
+
+  //   auto all_candidates = parlay::sequence<parlay::sequence<std::pair<uint32_t,
+  //   float>>>(num_queries); auto write_offsets =
+  //   parlay::sequence<std::atomic<size_t>>(num_queries); parlay::parallel_for(0, num_queries,
+  //   [&](size_t i) {
+  //       write_offsets[i] = 0;
+  //       all_candidates[i] = parlay::sequence<std::pair<uint32_t,
+  //       float>>::uninitialized(total_candidates_per_query[i]);
+  //   });
+
+  //   auto probe_scan = parlay::scan(num_probes_per_query);
+  //   auto flat_probes = parlay::sequence<std::pair<node_t*, uint32_t>>(probe_scan.second);
+  //   parlay::parallel_for(0, num_queries, [&](size_t i) {
+  //       for(size_t j=0; j<num_probes_per_query[i]; ++j) {
+  //           flat_probes[probe_scan.first[i] + j] = {all_probes[i][j].second, (uint32_t)i};
+  //       }
+  //   });
+
+  //   parlay::sort_inplace(flat_probes, [](const auto& a, const auto& b) { return a.first <
+  //   b.first; });
+
+  //   auto starts = parlay::delayed_tabulate(flat_probes.size(), [&](size_t i) {
+  //       return (i == 0) || (flat_probes[i].first != flat_probes[i-1].first);
+  //   });
+  //   auto group_offsets = parlay::pack_index(starts);
+
+  //   auto leaf_cmps = parlay::sequence<std::atomic<size_t>>(num_queries);
+  //   for(size_t i=0; i<num_queries; ++i) leaf_cmps[i] = 0;
+
+  //   parlay::parallel_for(0, group_offsets.size(), [&](size_t i) {
+  //       size_t start = group_offsets[i];
+  //       size_t end = (i == group_offsets.size() - 1) ? flat_probes.size() : group_offsets[i+1];
+  //       auto group_slice = flat_probes.cut(start, end);
+
+  //       node_t* leaf_node = group_slice[0].first;
+  //       auto query_indices = parlay::map(group_slice, [](const auto& p){ return p.second; });
+
+  //       auto& points_in_leaf = leaf_node->data;
+  //       if (points_in_leaf.size() == 0) return;
+
+  //       if (params.pq.enabled) {
+  //           parlay::parallel_for(0, query_indices.size(), [&](size_t qi) {
+  //               auto q_idx = query_indices[qi];
+  //               size_t current_offset = write_offsets[q_idx].fetch_add(points_in_leaf.size());
+  //               leaf_cmps[q_idx] += leaf_node->pq_data.distances(query_points[q_idx],
+  //               &all_candidates[q_idx][current_offset]);
+  //           });
+  //       } else {
+  //           auto queries_for_leaf = PointCloudSet<ChPoint>(query_points.filter(query_indices),
+  //           d); auto distances = ManyToMany<PointCloudSet<ChPoint>>::AllPairs(queries_for_leaf,
+  //           points_in_leaf);
+
+  //           parlay::parallel_for(0, queries_for_leaf.size(), [&](size_t qi) {
+  //               auto q_idx = query_indices[qi];
+  //               size_t current_offset = write_offsets[q_idx].fetch_add(points_in_leaf.size());
+  //               for(size_t j=0; j<points_in_leaf.size(); ++j) {
+  //                   all_candidates[q_idx][current_offset + j] = {points_in_leaf.get_id(j),
+  //                   distances[qi * points_in_leaf.size() + j]};
+  //               }
+  //               leaf_cmps[q_idx] += queries_for_leaf.get_size(qi) * points_in_leaf.total_size();
+  //           });
+  //       }
+  //   });
+
+  //   auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t,
+  //   float>>>(num_queries); auto rerank_cmps = parlay::sequence<size_t>(num_queries, 0);
+
+  //   parlay::parallel_for(0, num_queries, [&](size_t i) {
+  //       parlay::sort_inplace(all_candidates[i]);
+
+  //       size_t k = search_params.k;
+  //       size_t num_results = std::min(k, all_candidates[i].size());
+  //       final_results[i] = parlay::sequence<std::pair<uint32_t,
+  //       float>>::uninitialized(num_results);
+
+  //       if (search_params.num_rerank > 0) {
+  //           size_t num_rerank = std::min(search_params.num_rerank, all_candidates[i].size());
+  //           rerank_cmps[i] = this->rerank(query_points[i], points, all_candidates[i], num_rerank,
+  //           final_results[i]);
+  //       } else {
+  //           for (size_t j = 0; j < num_results; j++) {
+  //               final_results[i][j] = all_candidates[i][j];
+  //           }
+  //       }
+  //   });
+
+  //   size_t total_cmps = parlay::reduce(greedy_cmps) + parlay::reduce(parlay::map(leaf_cmps,
+  //   [](const auto& a){ return a.load(); })) + parlay::reduce(rerank_cmps); return
+  //   std::make_pair(final_results, total_cmps);
+  // }
 
   // size_t mean_cluster_size() const noexcept override {
   //   auto cluster_sizes =

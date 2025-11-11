@@ -9,6 +9,7 @@
 #include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/types/quantized_point_cloud_set.h"
+#include "mvsic/core/distance_measures/one_to_many.h"
 #include "search_params.h"
 #include "index_params.h"
 
@@ -59,6 +60,49 @@ class Index {
     return std::make_tuple(parlay::sequence<std::pair<uint32_t, float>>(), 0,
                            std::vector<double>{});
   }
+
+  // Reranks the given candidates and returns the top-k point clouds
+  virtual size_t rerank(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                        const parlay::sequence<std::pair<uint32_t, float>>& candidates,
+                        size_t num_rerank,
+                        parlay::sequence<std::pair<uint32_t, float>>& out_results) {
+    auto cmp_rerank = parlay::sequence<size_t>::uninitialized(num_rerank);
+    auto results_rerank =
+        parlay::sequence<std::pair<uint32_t, float>>::from_function(num_rerank, [&](size_t i) {
+          uint32_t id = candidates[i].first;
+          auto [dist, d_c] = query.distance_w_cmps(points[id]);
+          cmp_rerank[i] = d_c;
+          return std::make_pair(id, dist);
+        });
+    size_t num_cmps = parlay::reduce(cmp_rerank);
+    parlay::sort_inplace(results_rerank,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+    parlay::parallel_for(0, out_results.size(),
+                         [&](size_t i) { out_results[i] = results_rerank[i]; });
+    return num_cmps;
+  }
+
+  virtual size_t rerank_opt(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                            const parlay::sequence<std::pair<uint32_t, float>>& candidates,
+                            size_t num_rerank,
+                            parlay::sequence<std::pair<uint32_t, float>>& out_results) {
+    // 1. Get the indices of the candidates to rerank.
+    auto candidate_indices =
+        parlay::delayed_tabulate(num_rerank, [&](size_t i) { return candidates[i].first; });
+
+    // 2. Create a new PointCloudSet from the candidates using filter and the constructor.
+    PointCloudSet<ChPoint> candidates_pcs(points.filter(candidate_indices), points.get_dims());
+
+    // 3. Use OneToMany::TopK to get the top k results from the candidates.
+    size_t k = out_results.size();
+    OneToMany<ChPoint, PointCloudSet<ChPoint>>::TopKIntoUninitialized(query, candidates_pcs, k,
+                                                                      out_results.data());
+
+    // 4. Estimate the number of comparisons.
+    size_t num_cmps = (query.size() + candidates_pcs.total_size()) * points.get_dims();
+    return num_cmps;
+  }
+
   /* -----------------------------Load/Save Functions-------------------------- */
   // Write the index to a file in disk
   virtual void save(const std::string& filename) {}

@@ -150,20 +150,7 @@ class IndexMVIVFFlat : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      auto cmp_rerank = parlay::sequence<size_t>::uninitialized(num_rerank);
-      auto results_rerank =
-          parlay::sequence<std::pair<uint32_t, float>>::from_function(num_rerank, [&](size_t i) {
-            uint32_t id = visited[i].first;
-            auto [dist, d_c] = query.distance_w_cmps(points[id]);
-            cmp_rerank[i] = d_c;
-            return std::make_pair(id, dist);
-          });
-      dist_cmps += parlay::reduce(cmp_rerank);
-      parlay::sort_inplace(results_rerank, [](const auto &a, const auto &b) {
-        return a.second < b.second;  // Sort by distance
-      });
-      parlay::parallel_for(0, final_results.size(),
-                           [&](size_t i) { final_results[i] = results_rerank[i]; });
+      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
