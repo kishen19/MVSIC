@@ -21,9 +21,9 @@ def main():
     args = parser.parse_args()
 
     # Construct paths
-    dataset_path = f"./data/{args.dataset}/{args.dataset}_points.pcs"
-    query_path = f"./data/{args.dataset}/{args.dataset}_queries.pcs"
-    gt_path = f"./data/{args.dataset}/{args.dataset}_chamfer_neighbors.gt"
+    dataset_path = f"./data/beir/{args.dataset}/{args.dataset}_points.pcs"
+    query_path = f"./data/beir/{args.dataset}/{args.dataset}_queries.pcs"
+    gt_path = f"./data/beir/{args.dataset}/{args.dataset}_chamfer_neighbors.gt"
     index_path = f"./results1/{args.dataset}/indices/fastplaid_nbits{args.nbits}"
     results_path = f"./results1/{args.dataset}/stats/fastplaid_nbits{args.nbits}.csv"
 
@@ -67,9 +67,9 @@ def main():
         # The index is loaded automatically by the constructor if it exists
         print(f"Index at {index_path} is ready.")
 
-    ks = [10, 100]
-    n_ivf_probes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    n_full_scores_multipliers = [1, 2, 4, 8]
+    ks = [10]
+    n_ivf_probes = [1, 2, 4, 8, 16, 32, 64, 128]
+    n_full_scores_multipliers = [4096]
 
     with open(results_path, 'w', newline='') as csvfile:
         csv_writer = csv.writer(csvfile)
@@ -80,7 +80,7 @@ def main():
         for k in ks:
             for n_ivf_probe in n_ivf_probes:
                 for multiplier in n_full_scores_multipliers:
-                    n_full_scores = multiplier * k
+                    n_full_scores = multiplier
 
                     # Individual search
                     start_time = time.time()
