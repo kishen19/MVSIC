@@ -1,0 +1,17 @@
+# Core AI, Retrieval, and Clustering
+colbert-ai~=0.2.22
+faiss-cpu~=1.12.0
+fast_plaid~=1.2.4.280
+
+# Hugging Face Ecosystem
+accelerate==1.11.0
+
+# Evaluation
+beir==2.2.0
+
+# Data Handling & Plotting
+matplotlib~=3.10.6
+seaborn~=0.13.2
+
+# Local Wheel Dependency
+bazel-bin/mvsic/mvsic-0.0.1-py3-none-any.whl
