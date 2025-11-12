@@ -66,7 +66,6 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("method", &mvsic::IndexParams::method)
       .def_readwrite("verbose", &mvsic::IndexParams::verbose)
       .def_readwrite("compress_input", &mvsic::IndexParams::compress_input)
-      .def_readwrite("use_PQ", &mvsic::IndexParams::use_PQ)
       .def_readwrite("k_per_level", &mvsic::IndexParams::k_per_level)
       .def_readwrite("max_leaf_size", &mvsic::IndexParams::max_leaf_size)
       .def_readwrite("s", &mvsic::IndexParams::s)
@@ -85,32 +84,31 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
                   py::arg("s") = 0, py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("sample_size") = 100000)
-      .def_static(
-          "muvera_custom", &mvsic::IndexParams::muvera_custom, py::arg("num_repetitions") = 20,
-          py::arg("num_simhash_projections") = 4, py::arg("seed") = 1,
-          py::arg("projection_dimension") = 8, py::arg("fill_empty_partitions") = false,
-          py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
-          py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1, py::arg("num_pass") = 1,
-          py::arg("compress_input") = false, py::arg("apply_PQ") = false, py::arg("verbose") = 0,
-          py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
-          py::arg("num_clusters_per_block") = 256, py::arg("sample_size") = 100000)
+      .def_static("muvera_custom", &mvsic::IndexParams::muvera_custom,
+                  py::arg("num_repetitions") = 20, py::arg("num_simhash_projections") = 4,
+                  py::arg("seed") = 1, py::arg("projection_dimension") = 8,
+                  py::arg("fill_empty_partitions") = false,
+                  py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
+                  py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1,
+                  py::arg("num_pass") = 1, py::arg("compress_input") = false,
+                  py::arg("verbose") = 0, py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
+                  py::arg("num_clusters_per_block") = 256, py::arg("sample_size") = 100000)
       .def_static("muvera", &mvsic::IndexParams::muvera, py::arg("d_fde") = 2560,
                   py::arg("seed") = 1, py::arg("fill_empty_partitions") = false,
                   py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
                   py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1,
                   py::arg("num_pass") = 1, py::arg("compress_input") = false,
-                  py::arg("apply_PQ") = false, py::arg("verbose") = 0,
-                  py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
+                  py::arg("verbose") = 0, py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("sample_size") = 100000)
       .def_static("mpool", &mvsic::IndexParams::mpool, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("num_pass") = 1, py::arg("normalize") = true,
-                  py::arg("compress_input") = false, py::arg("apply_PQ") = false,
-                  py::arg("verbose") = 0, py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
+                  py::arg("compress_input") = false, py::arg("verbose") = 0,
+                  py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("sample_size") = 100000)
       .def_static("vamana", &mvsic::IndexParams::vamana, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("two_pass") = false,
-                  py::arg("compress_input") = false, py::arg("apply_PQ") = false,
-                  py::arg("verbose") = 0, py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
+                  py::arg("compress_input") = false, py::arg("verbose") = 0,
+                  py::arg("pq_enabled") = false, py::arg("num_blocks") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("sample_size") = 100000);
 
   py::class_<mvsic::SearchParams>(m, "SearchParams")

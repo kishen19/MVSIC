@@ -6,10 +6,12 @@ cc_library(
     deps = [
         "//mvsic/core:index",
         "//mvsic/core/types:io",
-        "//mvsic/core/types:point_range",
+        "//mvsic/core/types:quantized_point",
+        "@parlayann//algorithms/utils:beamSearch",
         "@parlayann//algorithms/utils:euclidian_point",
         "@parlayann//algorithms/utils:graph",
         "@parlayann//algorithms/utils:mips_point",
+        "@parlayann//algorithms/utils:point_range",
         "@parlayann//algorithms/utils:stats",
         "@parlayann//algorithms/utils:types",
         "@parlayann//algorithms/vamana:index",

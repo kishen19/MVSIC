@@ -10,6 +10,7 @@
 #include "scann/distance_measures/distance_measure_factory.h"
 #include "scann/proto/scann.pb.h"
 #include "scann/utils/types.h"
+#include "algorithms/utils/point_range.h"
 
 #include "point_cloud_set.h"
 
@@ -122,6 +123,50 @@ research_scann::StatusOr<PQResult> train_and_encode_pq(const PointCloudSet<ChPoi
   return PQResult{model, std::move(hashed_dataset)};
 }
 
+// Converts a PointRange to a Scann DenseDataset.
+template<typename Point>
+std::unique_ptr<ScannDenseDataset> to_dense_dataset(const parlayANN::PointRange<Point>& pr) {
+  const size_t num_points = pr.size();
+  const size_t dims = pr.dimension();
+  std::vector<float> data_vec(num_points * dims);
+  parlay::parallel_for(0, num_points, [&](size_t i) {
+    auto point = pr[i];
+    for (size_t j = 0; j < dims; ++j) {
+      data_vec[i * dims + j] = point[j];
+    }
+  });
+  auto dataset = std::make_unique<ScannDenseDataset>(std::move(data_vec), num_points);
+  dataset->set_dimensionality(dims);
+  return dataset;
+}
+
+// Wrapper function to train and encode a point_range using PQ.
+template<typename Point>
+research_scann::StatusOr<PQResult> train_and_encode_pq(const parlayANN::PointRange<Point>& pr,
+                                                       const ScannPQConfig& config) {
+  // 1. Convert PointRange to Scann's dataset format
+  std::unique_ptr<ScannDenseDataset> dataset = to_dense_dataset(pr);
+
+  // 2. Train the PQ model
+  auto model_or = train_pq(*dataset, config);
+  if (!model_or.ok()) {
+    std::cerr << "train_pq failed: " << model_or.status() << std::endl;
+    return model_or.status();
+  }
+  auto model = std::move(model_or).value();
+
+  // 3. Hash the dataset with the trained model
+  auto hashed_dataset_or = hash_dataset(*dataset, model, config);
+  if (!hashed_dataset_or.ok()) {
+    std::cerr << "hash_dataset failed: " << hashed_dataset_or.status() << std::endl;
+    return hashed_dataset_or.status();
+  }
+  auto hashed_dataset = std::move(hashed_dataset_or).value();
+
+  // 4. Return the results
+  return PQResult{model, std::move(hashed_dataset)};
+}
+
 // Creates a lookup table for a given query vector for distance calculations.
 template<typename Point>
 research_scann::StatusOr<ScannLookupTable> create_lookup_table(const Point& query,
@@ -130,6 +175,7 @@ research_scann::StatusOr<ScannLookupTable> create_lookup_table(const Point& quer
   return queryer.CreateLookupTable<float>(query_dptr);
 }
 
+// Creates lookup tables for a batch of query *point clouds* using Eigen for optimization.
 template<typename ChPoint>
 inline parlay::sequence<parlay::sequence<float>> create_lookup_tables_batched_eigen(
     const ChPoint& query,

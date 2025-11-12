@@ -79,6 +79,7 @@ cc_library(
     deps = [
         ":point_cloud_set",
         "@eigen",
+        "@parlayann//algorithms/utils:point_range",
         "@scann//scann/data_format:dataset",
         "@scann//scann/hashes/asymmetric_hashing2:indexing",
         "@scann//scann/hashes/asymmetric_hashing2:querying",
@@ -106,6 +107,28 @@ cc_library(
         ":point_cloud_set",
         ":pq_helper",
         "//mvsic/core/utils:mmap",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "quantized_point_range",
+    hdrs = ["quantized_point_range.h"],
+    deps = [
+        ":pq_helper",
+        "//mvsic/core/utils:mmap",
+        "@parlayann//algorithms/utils:point_range",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "quantized_point",
+    hdrs = ["quantized_point.h"],
+    deps = [
+        ":quantized_point_range",
+        "@parlayann//algorithms/utils:euclidian_point",
+        "@parlayann//algorithms/utils:mips_point",
         "@parlaylib//parlay:primitives",
     ],
 )

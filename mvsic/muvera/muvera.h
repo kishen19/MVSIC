@@ -6,8 +6,10 @@
 #include "mvsic/muvera/fde/fixed_dimensional_encoding.h"
 #include "mvsic/core/index.h"
 #include "mvsic/core/types/io.h"
+#include "mvsic/core/types/quantized_point.h"
 
 // ParlayANN (Vamana) includes
+#include "algorithms/utils/beamSearch.h"
 #include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
 #include "algorithms/utils/mips_point.h"
@@ -31,14 +33,15 @@ class IndexMUVERA : public Index<metric> {
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Point =
       std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
-  // using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
+  using QPoint = QuantizedPoint<Point>;
   using Range = parlayANN::PointRange<Point>;
-  // using Range = PointRange<float, Point>;
+  using QRange = QuantizedPointRange<Point>;
   using Index<metric>::d;  // Embedding dimension
 
   IndexParams params;
   uint32_t d_fde;                                  // FDE dimension
   Range points_fdes;                               // FDEs
+  QRange pq_points_fdes;                           // PQ FDEs
   parlayANN::Graph<uint32_t> G;                    // Vamana graph
   parlayANN::BuildParams BP;                       // Vamana build parameters
   parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
@@ -85,8 +88,9 @@ class IndexMUVERA : public Index<metric> {
     });
     d_fde = fdes[0].size();
     points_fdes = Range(fdes, d_fde);
-    if (params.use_PQ) {
-      // TODO: PQ
+    if (params.pq.enabled) {
+      pq_points_fdes = QRange(points_fdes, params.pq.num_blocks, params.pq.num_clusters_per_block,
+                              params.pq.sample_size);
     }
     // Step 2: Build ANN index on the FDEs
     if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
@@ -135,10 +139,21 @@ class IndexMUVERA : public Index<metric> {
     uint32_t start_point = I.get_start();
     auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
                                      points.size(), params.ann.R);
-    auto [result, dist_cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
-        query_point, G, points_fdes, start_point, QP);
-    parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
-    dist_cmps = dist_cmps * 2 * d_fde;
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    size_t dist_cmps;
+
+    if (params.pq.enabled) {
+      QPoint pq_query_point(query_point, pq_points_fdes);
+      auto [result, cmps] = parlayANN::beam_search<QPoint, QRange, uint32_t>(
+          pq_query_point, G, pq_points_fdes, start_point, QP);
+      visited = result.second;
+      dist_cmps = cmps * pq_query_point.get_dist_cmps();
+    } else {
+      auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
+          query_point, G, points_fdes, start_point, QP);
+      visited = result.second;
+      dist_cmps = cmps * 2 * d_fde;
+    }
     timings.push_back(t.stop());
     t.reset();
 
@@ -168,7 +183,11 @@ class IndexMUVERA : public Index<metric> {
     parlayANN::io::save_graph(G, out);
 
     // Save FDEs (point_range)
-    parlayANN::io::save_point_range(points_fdes, out);
+    if (params.pq.enabled) {
+      pq_points_fdes.save(out);
+    } else {
+      parlayANN::io::save_point_range(points_fdes, out);
+    }
   }
 
   // Read the index from a file in disk
@@ -181,9 +200,14 @@ class IndexMUVERA : public Index<metric> {
     I.set_start();  // Assuming I needs to be re-initialized after G is loaded
 
     // Load FDEs (point_range)
-    auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
-    d_fde = loaded_d_fde;
-    points_fdes = Range(fdes_data, d_fde);
+    if (params.pq.enabled) {
+      pq_points_fdes = QRange(in);
+      d_fde = pq_points_fdes.get_dims();
+    } else {
+      auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
+      d_fde = loaded_d_fde;
+      points_fdes = Range(fdes_data, d_fde);
+    }
   }
 };
 

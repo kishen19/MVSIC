@@ -1,6 +1,6 @@
 dataset:
   name: arguana
-  path: data/beir/arguana
+  path: data/arguana
   results: results/beir/arguana
 
 indices:
@@ -46,6 +46,19 @@ indices:
         rebuild: false
         params:
           d_fde: 2560 # FDE dim [2560, 5120]
+        search_configs:
+          - name: k=10
+            append: false
+            params:
+              L: [16, 32, 64, 128, 256, 512]
+              k: [10]
+              config: 
+                - {name: "", num_rerank: 80}
+      - name: muvera_pq_2560
+        rebuild: false
+        params:
+          d_fde: 2560 # FDE dim [2560, 5120]
+          pq_enabled: true
         search_configs:
           - name: k=10
             append: false

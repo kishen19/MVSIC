@@ -5,8 +5,10 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/types/io.h"
+#include "mvsic/core/types/quantized_point.h"
 
 // ParlayANN (Vamana) includes
+#include "algorithms/utils/beamSearch.h"
 #include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
 #include "algorithms/utils/mips_point.h"
@@ -34,11 +36,14 @@ class IndexMPool : public Index<metric> {
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Point =
       std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using QPoint = QuantizedPoint<Point>;
   using Range = parlayANN::PointRange<Point>;
+  using QRange = QuantizedPointRange<Point>;
   using Index<metric>::d;  // Embedding dimension
 
   IndexParams params;
   Range points_mp;                                 // Mean-Pooled vectors
+  QRange pq_points_mp;                             // PQ Mean-Pooled vectors
   parlayANN::Graph<uint32_t> G;                    // Vamana graph
   parlayANN::BuildParams BP;                       // Vamana build parameters
   parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
@@ -65,6 +70,10 @@ class IndexMPool : public Index<metric> {
     parlay::parallel_for(0, points.size(),
                          [&](size_t i) { mpvs[i] = mean_pooling(points[i], params.normalize); });
     points_mp = Range(mpvs, d);
+    if (params.pq.enabled) {
+      pq_points_mp = QRange(points_mp, params.pq.num_blocks, params.pq.num_clusters_per_block,
+                              params.pq.sample_size);
+    }
     // Step 2: Build Vamana index on the mean-pooled points
     if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
     G = parlayANN::Graph<uint32_t>(BP.R, points_mp.size());
@@ -95,10 +104,21 @@ class IndexMPool : public Index<metric> {
     uint32_t start_point = I.get_start();
     auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
                                      points.size(), params.ann.R);
-    auto [result, dist_cmps] =
-        beam_search<Point, Range, uint32_t>(query_point, G, points_mp, start_point, QP);
-    parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
-    dist_cmps = (dist_cmps * 2 * d);
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    size_t dist_cmps;
+
+    if (params.pq.enabled) {
+      QPoint pq_query_point(query_point, pq_points_mp);
+      auto [result, cmps] = parlayANN::beam_search<QPoint, QRange, uint32_t>(
+          pq_query_point, G, pq_points_mp, start_point, QP);
+      visited = result.second;
+      dist_cmps = cmps * pq_query_point.get_dist_cmps();
+    } else {
+      auto [result, cmps] =
+          beam_search<Point, Range, uint32_t>(query_point, G, points_mp, start_point, QP);
+      visited = result.second;
+      dist_cmps = cmps * 2 * d;
+    }
     timings.push_back(t.stop());
     t.reset();
 
@@ -128,7 +148,11 @@ class IndexMPool : public Index<metric> {
     parlayANN::io::save_graph(G, out);
 
     // Save Mean-Pooled vectors (point_range)
-    parlayANN::io::save_point_range(points_mp, out);
+    if (params.pq.enabled) {
+      pq_points_mp.save(out);
+    } else {
+      parlayANN::io::save_point_range(points_mp, out);
+    }
   }
 
   // Read the index from a file in disk
@@ -141,8 +165,12 @@ class IndexMPool : public Index<metric> {
     I.set_start();
 
     // Load Mean-Pooled vectors (point_range)
-    auto [mpvs_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
-    points_mp = Range(mpvs_data, d);
+    if (params.pq.enabled) {
+      pq_points_mp = QRange(in);
+    } else {
+      auto [mpvs_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
+      points_mp = Range(mpvs_data, d);
+    }
   }
 };
 

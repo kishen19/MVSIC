@@ -12,7 +12,6 @@ struct IndexParams {
   std::string method;           // Index name
   uint32_t verbose = 0;         // Print debug statements
   bool compress_input = false;  // Compress input points clouds using Ward's method
-  bool use_PQ = false;
 
   // mvivf
   uint32_t k_per_level = 0;      // Number of clusters at each node. [0 = 4*sqrt(n)]
@@ -83,7 +82,7 @@ struct IndexParams {
   }
 
   static IndexParams mvivf_flat(uint32_t k_per_level = 0, bool compress_input = false,
-                                bool apply_PQ = false, uint32_t verbose = 0, uint32_t niters = 5,
+                                uint32_t verbose = 0, uint32_t niters = 5,
                                 uint32_t max_points_per_centroid_inner_kmeans = 20,
                                 std::string init = "Random", uint32_t seed = 0,
                                 bool use_weighted_inner_kmeans = false, uint32_t s = 0,
@@ -108,7 +107,7 @@ struct IndexParams {
       int32_t projection_dimension = 8, bool fill_empty_partitions = false,
       int32_t final_projection_dimension = 0, bool normalize = false, uint32_t R = 200,
       uint32_t L = 600, double alpha = 1.1, int num_pass = 1, bool compress_input = false,
-      bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false, uint32_t num_blocks = 8,
+      uint32_t verbose = 0, bool pq_enabled = false, uint32_t num_blocks = 8,
       uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
     IndexParams params;
     params.method = "muvera";
@@ -126,8 +125,8 @@ struct IndexParams {
                             bool fill_empty_partitions = false,
                             int32_t final_projection_dimension = 0, bool normalize = false,
                             uint32_t R = 200, uint32_t L = 600, double alpha = 1.1,
-                            int num_pass = 1, bool compress_input = false, bool apply_PQ = false,
-                            uint32_t verbose = 0, bool pq_enabled = false, uint32_t num_blocks = 8,
+                            int num_pass = 1, bool compress_input = false, uint32_t verbose = 0,
+                            bool pq_enabled = false, uint32_t num_blocks = 8,
                             uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
     IndexParams params;
     params.method = "muvera";
@@ -173,10 +172,9 @@ struct IndexParams {
   }
 
   static IndexParams mpool(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2, int num_pass = 1,
-                           bool normalize = true, bool compress_input = false,
-                           bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false,
-                           uint32_t num_blocks = 8, uint32_t num_clusters_per_block = 256,
-                           uint32_t sample_size = 100000) {
+                           bool normalize = true, bool compress_input = false, uint32_t verbose = 0,
+                           bool pq_enabled = false, uint32_t num_blocks = 8,
+                           uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
     IndexParams params;
     params.method = "mpool";
     params.compress_input = compress_input;
@@ -189,9 +187,8 @@ struct IndexParams {
 
   static IndexParams vamana(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
                             bool two_pass = false, bool compress_input = false,
-                            bool apply_PQ = false, uint32_t verbose = 0, bool pq_enabled = false,
-                            uint32_t num_blocks = 8, uint32_t num_clusters_per_block = 256,
-                            uint32_t sample_size = 100000) {
+                            uint32_t verbose = 0, bool pq_enabled = false, uint32_t num_blocks = 8,
+                            uint32_t num_clusters_per_block = 256, uint32_t sample_size = 100000) {
     IndexParams params;
     params.method = "vamana";
     params.R = R;

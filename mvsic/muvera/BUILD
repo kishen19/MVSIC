@@ -6,7 +6,9 @@ cc_library(
     deps = [
         "//mvsic/core:index",
         "//mvsic/core/types:io",
+        "//mvsic/core/types:quantized_point",
         "//mvsic/muvera/fde:fixed_dimensional_encoding",
+        "@parlayann//algorithms/utils:beamSearch",
         "@parlayann//algorithms/utils:euclidian_point",
         "@parlayann//algorithms/utils:graph",
         "@parlayann//algorithms/utils:mips_point",
