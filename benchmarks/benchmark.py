@@ -99,7 +99,7 @@ def generate_search_params(search_config, method_info):
     return all_param_combos
 
 
-from framework_utils import FastPlaidWrapper
+from framework_utils import FastPlaidWrapper, StatsExtended
 from utils import load_point_clouds
 import time
 
@@ -278,7 +278,16 @@ def run(config, methods, experiment_name, tasks):
                                 search_params_obj = search_params_func(**params)
                                 with suppress_stdout_stderr():
                                     result = mvsic.compute_stats_extended(index, points, queries, gt, [search_params_obj])
-                                all_results_for_variant.extend(result)
+                                    result_ = StatsExtended(
+                                        k=params['k'],
+                                        recall_1_k=min(1.0, result[0].recall_1_k),
+                                        recall_k_k=min(1.0, result[0].recall_k_k),
+                                        QPS_seq=result[0].QPS_seq,
+                                        QPS_par=result[0].QPS_par,
+                                        avg_cmps=result[0].avg_cmps,
+                                        avg_timings=result[0].avg_timings,
+                                    )
+                                all_results_for_variant.append(result_)
                                 all_params_for_variant.append(params)
 
                             # Check for early exit
@@ -290,8 +299,9 @@ def run(config, methods, experiment_name, tasks):
                                 break
                             elif (
                                 all_results_for_variant
-                                and len(all_results_for_variant) > 2
+                                and len(all_results_for_variant) > 3
                                 and all_results_for_variant[-1].recall_k_k == all_results_for_variant[-2].recall_k_k
+                                and all_results_for_variant[-1].recall_k_k == all_results_for_variant[-3].recall_k_k
                             ):
                                 print(
                                     f"      Recall@k did not improve. Stopping sweep for this variant.",
@@ -303,9 +313,9 @@ def run(config, methods, experiment_name, tasks):
                                 all_results_for_variant[-1].QPS_seq,
                                 "QPS_par:",
                                 all_results_for_variant[-1].QPS_par,
-                                "Recall 1@10:",
+                                f"Recall 1@{params['k']}:",
                                 all_results_for_variant[-1].recall_1_k,
-                                "Recall 10@10",
+                                f"Recall {params['k']}@{params['k']}",
                                 all_results_for_variant[-1].recall_k_k,
                                 flush=True,
                             )

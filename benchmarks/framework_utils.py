@@ -41,9 +41,7 @@ class FastPlaidWrapper:
         print("    Building FastPlaid index...")
         self.index.create(documents_embeddings=documents, **self.build_params)
 
-    def compute_stats_extended(
-        self, queries: list, gt: list, params: dict
-    ):  # Expects list of tensors and a single param dict
+    def compute_stats_extended(self, queries: list, gt: list, params: dict):  # Expects list of tensors and a single param dict
         """
         Runs search for a single parameter combination and computes stats.
         """
@@ -70,8 +68,8 @@ class FastPlaidWrapper:
 
         return StatsExtended(
             k=k,
-            recall_1_k=recall_1_k,
-            recall_k_k=recall_k_k,
+            recall_1_k=min(1.0, recall_1_k),
+            recall_k_k=min(1.0, recall_k_k),
             QPS_seq=0.0,
             QPS_par=qps_par,
             avg_cmps=0.0,
