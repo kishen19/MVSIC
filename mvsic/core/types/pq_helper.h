@@ -10,6 +10,7 @@
 #include "scann/distance_measures/distance_measure_factory.h"
 #include "scann/proto/scann.pb.h"
 #include "scann/utils/types.h"
+#include "scann/oss_wrappers/scann_threadpool.h"
 #include "algorithms/utils/point_range.h"
 
 #include "point_cloud_set.h"
@@ -54,8 +55,10 @@ std::unique_ptr<ScannDenseDataset> point_cloud_set_to_scann_dataset(
   const size_t dims = pcs.get_dims();
   const float* all_vectors = pcs.data();
 
-  // Create a std::vector and copy the data
-  std::vector<float> data_vec(all_vectors, all_vectors + total_vectors * dims);
+  // Create a std::vector and copy the data in parallel
+  std::vector<float> data_vec(total_vectors * dims);
+  parlay::parallel_for(0, total_vectors * dims,
+                       [&](size_t i) { data_vec[i] = all_vectors[i]; });
 
   // Use the DenseDataset constructor that takes an rvalue reference to a vector
   auto dataset = std::make_unique<ScannDenseDataset>(std::move(data_vec), total_vectors);
@@ -73,9 +76,17 @@ research_scann::StatusOr<std::shared_ptr<const ScannPQModel>> train_pq(
       research_scann::GetDistanceMeasure(config.quantization_distance()));
   // Set up training options
   ScannPQTrainingOptions opts(config, quantization_distance, dataset);
+
+  // Create a thread pool for parallel training if num_cpus > 1
+  std::shared_ptr<research_scann::ThreadPool> pool = nullptr;
+  if (config.num_cpus() > 1) {
+    pool = std::make_shared<research_scann::ThreadPool>("pq-training", config.num_cpus());
+  }
+
   // Train the model
-  SCANN_ASSIGN_OR_RETURN(auto model_unique_ptr,
-                         research_scann::asymmetric_hashing2::TrainSingleMachine(dataset, opts));
+  SCANN_ASSIGN_OR_RETURN(
+      auto model_unique_ptr,
+      research_scann::asymmetric_hashing2::TrainSingleMachine(dataset, opts, pool));
   // Return as shared_ptr
   return std::shared_ptr<const ScannPQModel>(std::move(model_unique_ptr));
 }
@@ -92,8 +103,31 @@ research_scann::StatusOr<ScannHashedDataset> hash_dataset(const ScannDenseDatase
       research_scann::GetDistanceMeasure(config.quantization_distance()));
   // Create the indexer
   ScannPQIndexer indexer(projector, quantization_distance, model);
-  // Index the dataset and return
-  return indexer.HashDataset(dataset);
+
+  // Parallelize the hashing process
+  const size_t num_datapoints = dataset.size();
+  const size_t hashed_dimensionality = indexer.hashed_space_bytes();
+  parlay::sequence<uint8_t> hashed_data(num_datapoints * hashed_dimensionality);
+
+  parlay::parallel_for(
+      0, num_datapoints,
+      [&](size_t i) {
+        auto dest_span =
+            absl::MakeSpan(hashed_data.data() + i * hashed_dimensionality, hashed_dimensionality);
+        auto status = indexer.Hash(dataset[i], dest_span);
+        if (!status.ok()) {
+          // This might not be perfectly thread-safe, but it's for error reporting
+          std::cerr << "Hashing failed for datapoint " << i << ": " << status << std::endl;
+        }
+      },
+      16);
+
+  // Create the hashed dataset from the parallel-computed data
+  std::vector<uint8_t> hashed_vector(hashed_data.begin(), hashed_data.end());
+  ScannHashedDataset hashed_dataset(std::move(hashed_vector), num_datapoints);
+  hashed_dataset.set_dimensionality(hashed_dimensionality);
+
+  return hashed_dataset;
 }
 
 // Wrapper function to train and encode a point_cloud_set using PQ.

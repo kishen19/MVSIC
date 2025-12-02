@@ -139,6 +139,7 @@ QuantizedPointCloudSet<ChPoint>::QuantizedPointCloudSet(const PointCloudSet<ChPo
   config.mutable_projection()->set_input_dim(pcs.get_dims());
   config.set_num_clusters_per_block(num_clusters_per_block);
   config.set_expected_sample_size(sample_size);
+  config.set_num_cpus(parlay::num_workers());
 
   if (ChPoint::is_metric()) {
     config.mutable_quantization_distance()->set_distance_measure("SquaredL2Distance");

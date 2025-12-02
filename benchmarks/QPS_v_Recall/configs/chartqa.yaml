@@ -1,0 +1,16 @@
+dataset:
+  name: chartqa
+  path: data/vidore/chartqa
+  results: results/vidore/chartqa
+
+k: 10
+
+results:
+  # - ["mpool", "mpool", ""]
+  # - ["vamana", "vamana", ""]
+  - ["mvivf", "mvivf_500", ""]
+  - ["mvivf", "mvivf_500_pq_256_16", "nr100"]
+  - ["muvera", "muvera_2560", "nr100"]
+  - ["muvera", "muvera_5120", "nr100"]
+  - ["muvera", "muvera_2560_pq_256_16", "nr100"]
+  - ["muvera", "muvera_5120_pq_256_16", "nr100"]
