@@ -5,8 +5,10 @@ cc_library(
     hdrs = ["muvera.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core/quantization:pq",
+        "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:scann",
         "//mvsic/core/types:io",
-        "//mvsic/core/types:quantized_point",
         "//mvsic/muvera/fde:fixed_dimensional_encoding",
         "@parlayann//algorithms/utils:beamSearch",
         "@parlayann//algorithms/utils:euclidian_point",

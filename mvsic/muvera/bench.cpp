@@ -28,7 +28,6 @@ void bench(mvsic::commandLine &P) {
   bool is_mmap = P.getOption("-mm");
 
   bool compress_input = P.getOption("-compress_input");
-  bool use_PQ = P.getOption("-pq");
   uint32_t verbose = P.getOptionIntValue("-v", 0);
 
   // FDE params
@@ -46,6 +45,22 @@ void bench(mvsic::commandLine &P) {
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   int num_pass = P.getOptionIntValue("-np", 1);
 
+  // PQ params
+  std::string pq_method = P.getOptionValue("-pq_method", "None");
+  uint32_t pq_method_t = 0;
+  if (pq_method == "PQ") {
+    pq_method_t = 1;
+  } else if (pq_method == "RabitQ") {
+    pq_method_t = 2;
+  } else if (pq_method == "ScaNN") {
+    pq_method_t = 3;
+  }
+  uint32_t num_blocks = P.getOptionIntValue("-num_blocks", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
+  uint32_t num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
+  uint32_t rabitq_bits = P.getOptionIntValue("-rabitq_bits", 8);
+  float scann_threshold = P.getOptionDoubleValue("-scann_threshold", 0.2f);
+
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
   size_t L = P.getOptionLongValue("-L", 16);
@@ -57,7 +72,8 @@ void bench(mvsic::commandLine &P) {
   IndexParams index_params = IndexParams::muvera_custom(
       num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
       final_projection_dimension, !not_normalized, R, L_build, alpha, num_pass, compress_input,
-      use_PQ, verbose);
+      verbose, pq_method_t, num_blocks, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
+      scann_threshold);
   SearchParams search_params = SearchParams::muvera(k, L, num_rerank, cut, norerank);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
