@@ -2,10 +2,16 @@
 
 #include <queue>
 #include <set>
+#include <variant>
+#include <optional>
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/types/io.h"
-#include "mvsic/core/types/quantized_point.h"
+
+// Quantization Headers
+#include "mvsic/core/quantization/pq.h"
+#include "mvsic/core/quantization/rabitq.h"
+#include "mvsic/core/quantization/scann.h"
 
 // ParlayANN (Vamana) includes
 #include "algorithms/utils/beamSearch.h"
@@ -36,17 +42,29 @@ class IndexMPool : public Index<metric> {
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Point =
       std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
-  using QPoint = QuantizedPoint<Point>;
   using Range = parlayANN::PointRange<Point>;
-  using QRange = QuantizedPointRange<Point>;
   using Index<metric>::d;  // Embedding dimension
+
+  // Quantizer Types
+  using PQ_Range = pq::Quantized_Point_Range<Range, metric>;
+  using PQ_Point = pq::Quantized_Query<metric>;
+  using RaBitQ_Range = rabitq::Quantized_Point_Range<Range, metric>;
+  using RaBitQ_Point = rabitq::Quantized_Query<metric>;
+  using ScaNN_Range = pq::ScaNN_Point_Range<Range, metric>;
+  using ScaNN_Point = PQ_Point;
+  using QT = IndexParams::QuantizerType;
 
   IndexParams params;
   Range points_mp;                                 // Mean-Pooled vectors
-  QRange pq_points_mp;                             // PQ Mean-Pooled vectors
   parlayANN::Graph<uint32_t> G;                    // Vamana graph
   parlayANN::BuildParams BP;                       // Vamana build parameters
   parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
+
+  // Quantizer Storage (Only one will be active)
+  std::optional<PQ_Range> quantizer_pq;
+  std::optional<RaBitQ_Range> quantizer_rabitq;
+  std::optional<ScaNN_Range> quantizer_scann;
+  QT active_quantizer = QT::None;
 
   IndexMPool(uint32_t d_) noexcept :
       params(IndexParams::mpool()),
@@ -63,6 +81,10 @@ class IndexMPool : public Index<metric> {
 
   // Builds the index given PointCloudSet object.
   void build(const PointCloudSet<ChPoint> &points) override {
+    if (params.compress_input) {
+      // TODO: run Ward's HAC to compress input point clouds
+    }
+
     // Step 1: Compute Mean-Pooled vectors of the data point clouds
     if (params.verbose >= 1)
       std::cout << "Computing mean-pooled vectors of input point clouds..." << std::endl;
@@ -70,15 +92,31 @@ class IndexMPool : public Index<metric> {
     parlay::parallel_for(0, points.size(),
                          [&](size_t i) { mpvs[i] = mean_pooling(points[i], params.normalize); });
     points_mp = Range(mpvs, d);
-    if (params.pq.enabled) {
-      pq_points_mp = QRange(points_mp, params.pq.num_blocks, params.pq.num_clusters_per_block,
-                              params.pq.sample_size);
-    }
+
     // Step 2: Build Vamana index on the mean-pooled points
     if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
     G = parlayANN::Graph<uint32_t>(BP.R, points_mp.size());
     parlayANN::stats<uint32_t> BuildStats(G.size());
     I.build_index(G, points_mp, points_mp, BuildStats);
+
+    // Step3: Quantization
+    active_quantizer = params.pq.method;
+    switch (active_quantizer) {
+      case QT::RaBitQ:
+        if (params.verbose >= 1) std::cout << "Training RaBitQ..." << std::endl;
+        quantizer_rabitq.emplace(points_mp, params.pq.rabitq_bits);
+        break;
+      case QT::ScaNN:
+        if (params.verbose >= 1) std::cout << "Training ScaNN..." << std::endl;
+        quantizer_scann.emplace(points_mp, params.pq.num_blocks, params.pq.num_clusters_per_block,
+                                params.pq.num_points_per_cluster, params.pq.scann_threshold);
+        break;
+      case QT::PQ:
+        if (params.verbose >= 1) std::cout << "Training Standard PQ..." << std::endl;
+        quantizer_pq.emplace(points_mp, params.pq.num_blocks, params.pq.num_clusters_per_block,
+                             params.pq.num_points_per_cluster);
+        break;
+    }
   }
 
   // Returns the top-k point clouds for the query point cloud
@@ -107,17 +145,40 @@ class IndexMPool : public Index<metric> {
     parlay::sequence<std::pair<uint32_t, float>> visited;
     size_t dist_cmps;
 
-    if (params.pq.enabled) {
-      QPoint pq_query_point(query_point, pq_points_mp);
-      auto [result, cmps] = parlayANN::beam_search<QPoint, QRange, uint32_t>(
-          pq_query_point, G, pq_points_mp, start_point, QP);
-      visited = result.second;
-      dist_cmps = cmps * pq_query_point.get_dist_cmps();
-    } else {
-      auto [result, cmps] =
-          beam_search<Point, Range, uint32_t>(query_point, G, points_mp, start_point, QP);
-      visited = result.second;
-      dist_cmps = cmps * 2 * d;
+    switch (active_quantizer) {
+      case QT::RaBitQ: {
+        // Quantize Query
+        auto q_query = quantizer_rabitq->quantize_query(query_point);
+        // Search
+        auto [result, cmps] = parlayANN::beam_search<RaBitQ_Point, RaBitQ_Range, uint32_t>(
+            q_query, G, *quantizer_rabitq, start_point, QP);
+        visited = result.second;
+        dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
+        break;
+      }
+      case QT::ScaNN: {
+        auto q_query = quantizer_scann->quantize_query(query_point);
+        auto [result, cmps] = parlayANN::beam_search<ScaNN_Point, ScaNN_Range, uint32_t>(
+            q_query, G, *quantizer_scann, start_point, QP);
+        visited = result.second;
+        dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
+        break;
+      }
+      case QT::PQ: {
+        auto q_query = quantizer_pq->quantize_query(query_point);
+        auto [result, cmps] = parlayANN::beam_search<PQ_Point, PQ_Range, uint32_t>(
+            q_query, G, *quantizer_pq, start_point, QP);
+        visited = result.second;
+        dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
+        break;
+      }
+      case QT::None: {
+        auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
+            query_point, G, points_mp, start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps * 2 * d;
+        break;
+      }
     }
     timings.push_back(t.stop());
     t.reset();
@@ -144,14 +205,19 @@ class IndexMPool : public Index<metric> {
     std::ofstream out(filename, std::ios::binary);
     if (!out) throw std::runtime_error("save: cannot open file: " + filename);
 
-    // Save graph
+    // 1. Save graph
     parlayANN::io::save_graph(G, out);
 
-    // Save Mean-Pooled vectors (point_range)
-    if (params.pq.enabled) {
-      pq_points_mp.save(out);
-    } else {
-      parlayANN::io::save_point_range(points_mp, out);
+    // 2. Save Quantizer Type Header
+    int type_id = static_cast<int>(active_quantizer);
+    out.write((char *)&type_id, sizeof(int));
+
+    // 3. Save Quantizer Data OR Exact Vectors
+    switch (active_quantizer) {
+      case QT::RaBitQ: quantizer_rabitq->save(out); break;
+      case QT::ScaNN: quantizer_scann->save(out); break;
+      case QT::PQ: quantizer_pq->save(out); break;
+      case QT::None: parlayANN::io::save_point_range(points_mp, out); break;
     }
   }
 
@@ -160,16 +226,33 @@ class IndexMPool : public Index<metric> {
     std::ifstream in(filename, std::ios::binary);
     if (!in) throw std::runtime_error("load: cannot open file: " + filename);
 
-    // Load graph
+    // 1. Load Graph
     G = parlayANN::io::load_graph<uint32_t>(in);
     I.set_start();
 
-    // Load Mean-Pooled vectors (point_range)
-    if (params.pq.enabled) {
-      pq_points_mp = QRange(in);
-    } else {
-      auto [mpvs_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
-      points_mp = Range(mpvs_data, d);
+    // 2. Load Quantizer Type
+    int type_id;
+    in.read((char *)&type_id, sizeof(int));
+    active_quantizer = static_cast<QT>(type_id);
+
+    // 3. Load Data
+    switch (active_quantizer) {
+      case QT::RaBitQ:
+        quantizer_rabitq.emplace();  // Construct
+        quantizer_rabitq->load(in);
+        break;
+      case QT::ScaNN:
+        quantizer_scann.emplace();
+        quantizer_scann->load(in);
+        break;
+      case QT::PQ:
+        quantizer_pq.emplace();
+        quantizer_pq->load(in);
+        break;
+      case QT::None:
+        auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
+        points_mp = Range(mp_data, d);
+        break;
     }
   }
 };

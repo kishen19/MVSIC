@@ -28,36 +28,50 @@ void bench(mvsic::commandLine &P) {
   std::string indexFile = P.getOptionValue("-index", "");
   bool is_mmap = P.getOption("-mm");
 
+  bool compress_input = P.getOption("-compress_input");
+  uint32_t verbose = P.getOptionIntValue("-v", 0);
+
   // MVIVF params
   uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
   uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 200);
-  uint32_t verbose = P.getOptionIntValue("-v", 0);
-  bool compress_input = P.getOption("-compress_input");
+
+  // Flat params
+  bool is_flat = P.getOption("-flat");
+
+  // PQ params
+  std::string pq_method = P.getOptionValue("-pq_method", "None");
+  uint32_t pq_method_t = 0;
+  if (pq_method == "PQ") {
+    pq_method_t = 1;
+  } else if (pq_method == "RabitQ") {
+    pq_method_t = 2;
+  } else if (pq_method == "ScaNN") {
+    pq_method_t = 3;
+  }
+  uint32_t num_blocks = P.getOptionIntValue("-num_blocks", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
+  uint32_t num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
+  uint32_t rabitq_bits = P.getOptionIntValue("-rabitq_bits", 8);
+  float scann_threshold = P.getOptionDoubleValue("-scann_threshold", 0.2f);
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
   size_t nprobes = P.getOptionLongValue("-nprobes", 2);
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
-  // Flat params
-  bool is_flat = P.getOption("-flat");
-
-  // PQ params
-  bool enable_PQ = P.getOption("-pq");
-  uint32_t num_blocks = P.getOptionIntValue("-pq_nb", 8);
-  uint32_t num_clusters_per_block = P.getOptionIntValue("-pq_nc", 256);
-  uint32_t sample_size = P.getOptionIntValue("-pq_ss", 100000);
-
   auto points = PC(inFile, is_mmap);
   IndexParams index_params;
   SearchParams search_params;
   if (is_flat) {
-    index_params = IndexParams::mvivf_flat(k_per_level, compress_input, verbose);
-    index_params.pq = {enable_PQ, num_blocks, num_clusters_per_block, sample_size};
+    index_params = IndexParams::mvivf_flat(
+        k_per_level, compress_input, verbose, 5, 20, "Random", 0, false, 0, pq_method_t, num_blocks,
+        num_clusters_per_block, num_points_per_cluster, rabitq_bits, scann_threshold);
     search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else {
-    index_params = IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose);
-    index_params.pq = {enable_PQ, num_blocks, num_clusters_per_block, sample_size};
+    index_params =
+        IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose, 5, 20, "Random", 0,
+                           false, 0, pq_method_t, num_blocks, num_clusters_per_block,
+                           num_points_per_cluster, rabitq_bits, scann_threshold);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 

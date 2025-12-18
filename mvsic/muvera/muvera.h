@@ -134,6 +134,8 @@ class IndexMUVERA : public Index<metric> {
     }
   }
 
+  // Returns the top-k point clouds for the query point cloud
+  // Output format: < [<id, distance>, ...], # distance comparisons>
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
   search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
                     const SearchParams &search_params) override {
@@ -204,7 +206,6 @@ class IndexMUVERA : public Index<metric> {
         break;
       }
       case QT::None: {
-        // Fallback: Exact Search
         auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
             query_point, G, points_fdes, start_point, QP);
         visited = result.second;

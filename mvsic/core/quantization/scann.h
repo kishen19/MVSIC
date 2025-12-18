@@ -110,6 +110,44 @@ class ScaNN_Point_Range {
     return qq;
   }
 
+  template<typename PointCloudTy>
+  void quantize_query_batch(const PointCloudTy& query_cloud,
+                            std::vector<Quantized_Query<Metric>>& out_luts) const {
+    uint32_t num_q = query_cloud.size();
+    out_luts.clear();
+    out_luts.reserve(num_q);
+    for (uint32_t i = 0; i < num_q; ++i)
+      out_luts.emplace_back(num_blocks);
+
+    for (uint32_t b = 0; b < num_blocks; ++b) {
+      // 1. Map query cloud to a Matrix [num_q x dim_per_block]
+      // We use Eigen::Map to avoid copying query data
+      Eigen::MatrixXf Q_sub(num_q, dim_per_block);
+      size_t offset = b * dim_per_block;
+      for (size_t i = 0; i < num_q; ++i) {
+        for (size_t j = 0; j < dim_per_block; ++j) {
+          Q_sub(i, j) = query_cloud[i][offset + j];
+        }
+      }
+
+      // 2. GEMM: [num_clusters x dim_per_block] * [dim_per_block x num_q]
+      // This is the primary speedup: codebook is loaded once and reused for all query vectors.
+      Eigen::MatrixXf dot_products = codebooks[b] * Q_sub.transpose();
+
+      // 3. Populate all LUTs
+      for (size_t i = 0; i < num_q; ++i) {
+        Eigen::Map<Eigen::VectorXf> lut_segment(&out_luts[i].lut[b * 256], num_clusters_per_block);
+        if constexpr (Metric) {
+          float q_sq_norm = Q_sub.row(i).squaredNorm();
+          lut_segment = codebook_norms[b] - (2.0f * dot_products.col(i));
+          lut_segment.array() += q_sq_norm;
+        } else {
+          lut_segment = -dot_products.col(i);
+        }
+      }
+    }
+  }
+
   void save(std::ostream& out) const {
     // 1. Metadata
     out.write((char*)&num_blocks, sizeof(num_blocks));

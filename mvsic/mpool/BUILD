@@ -5,8 +5,10 @@ cc_library(
     hdrs = ["mpool.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core/quantization:pq",
+        "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:scann",
         "//mvsic/core/types:io",
-        "//mvsic/core/types:quantized_point",
         "@parlayann//algorithms/utils:beamSearch",
         "@parlayann//algorithms/utils:euclidian_point",
         "@parlayann//algorithms/utils:graph",

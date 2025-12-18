@@ -28,15 +28,30 @@ void bench(mvsic::commandLine &P) {
   bool is_mmap = P.getOption("-mm");
 
   bool compress_input = P.getOption("-compress_input");
-  bool use_PQ = P.getOption("-pq");
-  bool normalize = P.getOption("-norm");
   uint32_t verbose = P.getOptionIntValue("-v", 0);
+  bool not_normalized = P.getOption("-no_norm");
 
   // Vamana params
   uint32_t R = 200;
   uint32_t L_build = 600;
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   int num_pass = P.getOptionIntValue("-np", 1);
+
+  // PQ params
+  std::string pq_method = P.getOptionValue("-pq_method", "None");
+  uint32_t pq_method_t = 0;
+  if (pq_method == "PQ") {
+    pq_method_t = 1;
+  } else if (pq_method == "RabitQ") {
+    pq_method_t = 2;
+  } else if (pq_method == "ScaNN") {
+    pq_method_t = 3;
+  }
+  uint32_t num_blocks = P.getOptionIntValue("-num_blocks", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
+  uint32_t num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
+  uint32_t rabitq_bits = P.getOptionIntValue("-rabitq_bits", 8);
+  float scann_threshold = P.getOptionDoubleValue("-scann_threshold", 0.2f);
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
@@ -46,8 +61,9 @@ void bench(mvsic::commandLine &P) {
   bool norerank = P.getOption("-norerank");
 
   auto points = PC(inFile, is_mmap);
-  IndexParams index_params =
-      IndexParams::mpool(R, L_build, alpha, num_pass, normalize, compress_input, use_PQ, verbose);
+  IndexParams index_params = IndexParams::mpool(
+      R, L_build, alpha, num_pass, !not_normalized, compress_input, verbose, pq_method_t,
+      num_blocks, num_clusters_per_block, num_points_per_cluster, rabitq_bits, scann_threshold);
   SearchParams search_params = SearchParams::mpool(k, L, num_rerank, cut, norerank);
   IndexMPool<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {

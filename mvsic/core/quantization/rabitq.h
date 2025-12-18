@@ -234,6 +234,20 @@ class Quantized_Point_Range {
                                    config);
   }
 
+  template<typename PointCloudTy>
+  void quantize_query_batch(const PointCloudTy& query_cloud,
+                            std::vector<Quantized_Query<Metric>>& out_queries) const {
+    uint32_t num_q = query_cloud.size();
+    out_queries.reserve(num_q);
+
+    for (size_t i = 0; i < num_q; ++i) {
+      std::vector<float> q_rot(padded_dim);
+      // Assuming your rotator can take raw data from PointCloudTy
+      rotator->rotate(query_cloud[i].data(), q_rot.data());
+      out_queries.emplace_back(std::move(q_rot), centroid_rot.data(), padded_dim, ex_bits, config);
+    }
+  }
+
   void save(std::ofstream& out) const {
     out.write((char*)&n, sizeof(n));
     out.write((char*)&dim, sizeof(dim));
