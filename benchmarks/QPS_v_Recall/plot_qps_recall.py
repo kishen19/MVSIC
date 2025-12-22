@@ -1,12 +1,13 @@
 import argparse
-import yaml
 import os
-import pandas as pd
+
 import matplotlib.pyplot as plt
+import pandas as pd
 import seaborn as sns
+import yaml
 
 
-def plot_qps_vs_recall(config_path):
+def plot_qps_vs_recall(config_path, affix=""):
     """
     Generates QPS vs. Recall plots from benchmark results based on a specific pathing convention.
     """
@@ -31,9 +32,19 @@ def plot_qps_vs_recall(config_path):
     # Use literal column names 'recall_1_k' and 'recall_k_k' as found in the CSV
     plot_configs = [
         {'ax': axes[0, 0], 'x': 'recall_1_k', 'y': 'QPS_seq', 'title': f'QPS_seq vs. Recall 1@{k}'},
-        {'ax': axes[0, 1], 'x': 'recall_k_k', 'y': 'QPS_seq', 'title': f'QPS_seq vs. Recall {k}@{k}'},
+        {
+            'ax': axes[0, 1],
+            'x': 'recall_k_k',
+            'y': 'QPS_seq',
+            'title': f'QPS_seq vs. Recall {k}@{k}',
+        },
         {'ax': axes[1, 0], 'x': 'recall_1_k', 'y': 'QPS_par', 'title': f'QPS_par vs. Recall 1@{k}'},
-        {'ax': axes[1, 1], 'x': 'recall_k_k', 'y': 'QPS_par', 'title': f'QPS_par vs. Recall {k}@{k}'},
+        {
+            'ax': axes[1, 1],
+            'x': 'recall_k_k',
+            'y': 'QPS_par',
+            'title': f'QPS_par vs. Recall {k}@{k}',
+        },
     ]
 
     for p_config in plot_configs:
@@ -99,27 +110,36 @@ def plot_qps_vs_recall(config_path):
             if x_col in df.columns and y_col in df.columns:
                 ax.plot(df[x_col], df[y_col], marker='o', linestyle='-', label=label)
             else:
-                print(f"  Warning: Columns '{x_col}' or '{y_col}' not found for '{label}'. Skipping plot.")
+                print(
+                    f"  Warning: Columns '{x_col}' or '{y_col}' not found for '{label}'. Skipping plot."
+                )
 
     for p_config in plot_configs:
         p_config['ax'].legend()
 
     # --- Save Plot ---
-    output_filename = f"{dataset_name}_k={k}_qps_vs_recall.pdf"
-    # Save in the parent 'QPS_v_Recall' folder
-    output_path = os.path.join(os.path.dirname(config_path), '..', output_filename)
+    affix_str = "" if len(affix) == 0 else f"{affix}_"
+    output_filename = (
+        f"./results/plots/QPS_v_Recall/{affix_str}{dataset_name}_k={k}_qps_vs_recall.pdf"
+    )
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-    print(f"\nSaving plot to: {output_path}")
-    fig.savefig(output_path)
+    print(f"\nSaving plot to: {output_filename}")
+    fig.savefig(output_filename)
     plt.close(fig)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Plot QPS vs. Recall from benchmark results.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file for plotting.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the YAML configuration file for plotting.",
+    )
+    parser.add_argument("--affix", type=str, default="", help="Name of Plot.")
     args = parser.parse_args()
-    plot_qps_vs_recall(args.config)
+    plot_qps_vs_recall(args.config, args.affix)
 
 
 if __name__ == "__main__":

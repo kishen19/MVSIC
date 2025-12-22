@@ -138,6 +138,120 @@ class IndexMVIVF : public Index<metric> {
     }
   }
 
+  // Output type of Greedy Search
+  struct GreedySearchResult {
+    parlay::sequence<std::pair<float, node_t *>> probe_list;
+    size_t dist_cmps_step1 = 0;
+    double time_step1_sec = 0.0;
+  };
+
+  GreedySearchResult greedy_search(const ChPoint &query, size_t nprobes) const {
+    using score_node = std::pair<float, node_t *>;
+    auto less = [](const score_node &a, const score_node &b) {
+      return a.first < b.first || (a.first == b.first && a.second < b.second);
+    };
+    const size_t beam_length = 2 * nprobes;
+    parlay::internal::timer t;
+    t.start();
+
+    // expand_heap is a MIN-heap on distance, implemented as a MAX-heap on (-dist)
+    // store (neg_dist, node*)
+    std::vector<score_node> expand_heap;
+    expand_heap.reserve(beam_length * 2 + 1024);
+    // beam_heap is a MAX-heap on distance (worst dist at top)
+    std::vector<score_node> beam_heap;
+    beam_heap.reserve(beam_length + 8);
+    std::vector<score_node> probe_vec;
+    probe_vec.reserve(std::max<size_t>(nprobes * 4, 1024));
+    std::vector<std::pair<uint32_t, float>> child_dists;  // scratch
+    auto expand_cmp = [](const score_node &a, const score_node &b) {
+      // heap largest first; we want smallest dist => largest (-dist)
+      return a.first < b.first;
+    };
+    auto beam_cmp = [](const score_node &a, const score_node &b) {
+      // heap largest dist first
+      return a.first < b.first;
+    };
+    auto beam_threshold = [&]() -> float {
+      if (beam_heap.size() < beam_length) return std::numeric_limits<float>::infinity();
+      return beam_heap.front().first;  // worst (largest) dist
+    };
+    auto try_push_internal = [&](float dist, node_t *node) {
+      float thr = beam_threshold();
+      if (beam_heap.size() < beam_length || dist < thr) {
+        // maintain bounded max-heap (beam)
+        beam_heap.emplace_back(dist, node);
+        std::push_heap(beam_heap.begin(), beam_heap.end(), beam_cmp);
+        if (beam_heap.size() > beam_length) {
+          std::pop_heap(beam_heap.begin(), beam_heap.end(), beam_cmp);
+          beam_heap.pop_back();
+        }
+        // push to expansion heap as (-dist, node)
+        expand_heap.emplace_back(-dist, node);
+        std::push_heap(expand_heap.begin(), expand_heap.end(), expand_cmp);
+      }
+    };
+    size_t dist_cmps = 0;
+    // Seed root at distance 0
+    try_push_internal(0.0f, root);
+
+    while (!expand_heap.empty()) {
+      // pop best (min dist) => pop largest (-dist)
+      std::pop_heap(expand_heap.begin(), expand_heap.end(), expand_cmp);
+      score_node cur = expand_heap.back();
+      expand_heap.pop_back();
+
+      float cur_dist = -cur.first;
+      node_t *cur_node = cur.second;
+
+      // Skip stale entries
+      float thr = beam_threshold();
+      if (beam_heap.size() >= beam_length && cur_dist > thr) continue;
+
+      auto &centers = cur_node->data;
+      auto &children = cur_node->children;
+      if (children.empty()) continue;
+
+      // distances to children (in centers order)
+      child_dists.resize(centers.size());
+      size_t d_c = centers.distances_naive(query, child_dists.data());
+      dist_cmps += d_c;
+
+      const size_t deg = children.size();
+      for (size_t i = 0; i < deg; ++i) {
+        node_t *child = children[i];
+        float d = child_dists[i].second;
+        if (child->children.empty()) {
+          probe_vec.emplace_back(d, child);
+          // Keep leaf candidates bounded to avoid huge sorts
+          if (probe_vec.size() > nprobes * 8) {
+            size_t keep = std::min(probe_vec.size(), nprobes * 4);
+            if (keep < probe_vec.size()) {  // critical: nth must be < end()
+              std::nth_element(probe_vec.begin(), probe_vec.begin() + keep, probe_vec.end(), less);
+              probe_vec.resize(keep);
+            }
+          }
+        } else {
+          try_push_internal(d, child);
+        }
+      }
+    }
+    // Finalize probes: take best nprobes leaves
+    if (probe_vec.size() > nprobes) {
+      std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
+      probe_vec.resize(nprobes);
+    }
+    parlay::sort_inplace(probe_vec, less);
+
+    GreedySearchResult out;
+    out.dist_cmps_step1 = dist_cmps;
+    out.time_step1_sec = t.stop();
+
+    out.probe_list = parlay::sequence<score_node>::from_function(
+        probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
+    return out;
+  }
+
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
   search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
                     const SearchParams &search_params) override {
@@ -146,117 +260,119 @@ class IndexMVIVF : public Index<metric> {
 
     size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
-    size_t beam_length = 2 * search_params.nprobes;
     size_t dist_cmps = 0;
-    // probe_list: contains the final candidate leaf nodes to probe
-    parlay::sequence<std::pair<float, node_t *>> probe_list;
-    std::set<std::pair<float, node_t *>> beam;
-    auto add_to_probe_list = [&](std::pair<float, node_t *> p) { probe_list.push_back(p); };
-    auto add_to_beam = [&](std::pair<float, node_t *> p) -> bool {
-      if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
-        beam.insert(p);
-        if (beam.size() > beam_length) {
-          beam.erase(std::prev(beam.end()));  // Remove the farthest node
-        }
-        return true;
-      }
-      return false;
-    };
 
-    // Step 1: Greedy search to find candidate probe clusters
-    t.start();
-    add_to_beam({std::numeric_limits<float>::max(), root});
-    while (beam.size() > 0) {
-      // Pop the best node from the beam
-      std::pair<float, node_t *> best = *beam.begin();
-      beam.erase(beam.begin());
-      node_t *current_node = best.second;
-      // Compute distances from query to children
-      auto &children = current_node->children;
-      auto &centers = current_node->data;
-      // Note: children.size() == centers.size()
-      parlay::sequence<std::pair<uint32_t, float>> id_dist;
-      size_t dist_cmps_node;
-      std::tie(id_dist, dist_cmps_node) = centers.distances(query);
-      dist_cmps += dist_cmps_node;
-      auto res = parlay::sequence<std::pair<float, node_t *>>::from_function(
-          id_dist.size(), [&](size_t i) { return std::make_pair(id_dist[i].second, children[i]); });
-      // Collect leaf and non-leaf nodes
-      auto new_nodes_to_beam = parlay::filter(res, [](const auto &p) {
-        return p.second->children.size() != 0;  // Only keep nodes that are not leaves
-      });
-      auto new_nodes_to_probe = parlay::filter(res, [](const auto &p) {
-        return p.second->children.size() == 0;  // Only keep leaf nodes
-      });
-      parlay::sort_inplace(new_nodes_to_beam, [](const auto &a, const auto &b) {
-        return a.first < b.first;  // Sort by distance
-      });
-      // Add new nodes to beam and probe list
-      for (size_t i = 0; i < std::min(beam_length, new_nodes_to_beam.size()); i++) {
-        if (!add_to_beam(new_nodes_to_beam[i])) break;
-      }
-      for (size_t i = 0; i < new_nodes_to_probe.size(); i++) {
-        add_to_probe_list(new_nodes_to_probe[i]);
-      }
-    }
-    parlay::sort_inplace(probe_list);
-    timings.push_back(t.stop());
-    t.reset();
+    // -------------------------
+    // Step 1: Greedy search (heap-based)
+    // -------------------------
+    auto gs = greedy_search(query, nprobes);
+    auto probe_list = std::move(gs.probe_list);
+    dist_cmps += gs.dist_cmps_step1;
+    timings.push_back(gs.time_step1_sec);
 
+    // -------------------------
     // Step 2: Probe clusters in probe_list
+    // -------------------------
+    double t_quantize = 0.0;
+    double t_distances = 0.0;
+    double t_rest = 0.0;
+
+    // --- "rest" part 1: sizes/scan/allocation ---
     t.start();
-    // Find the minimum number of probes needed to obtain k neighbors
-    size_t nprobes_minimal = 0, cur = 0;
-    while (nprobes_minimal < probe_list.size() && cur <= k) {
-      cur += probe_list[nprobes_minimal].second->get_size();
-      nprobes_minimal++;
-    }
-    nprobes = std::min(probe_list.size(), std::max(nprobes, nprobes_minimal));
     auto sizes = parlay::delayed_tabulate(
         nprobes, [&](size_t i) { return probe_list[i].second->get_size(); });
     auto scan_result = parlay::scan(sizes);
     auto &offsets = scan_result.first;
     size_t total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
-    if (active_quantizer != QT::None) {
-      parlay::parallel_for(0, nprobes, [&](size_t i) {
-        node_t *leaf = probe_list[i].second;
-        parlay::sequence<uint32_t> leaf_indices =
-            parlay::tabulate(leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
-
-        switch (active_quantizer) {
-          case QT::RaBitQ:
-            quantizer_rabitq->distances(query, leaf_indices.data(), leaf_indices.size(),
-                                        &visited[offsets[i]]);
-            break;
-          case QT::ScaNN:
-            quantizer_scann->distances(query, leaf_indices.data(), leaf_indices.size(),
-                                       &visited[offsets[i]]);
-            break;
-          case QT::PQ:
-            quantizer_pq->distances(query, leaf_indices.data(), leaf_indices.size(),
-                                    &visited[offsets[i]]);
-            break;
-          default: break;
-        }
-      });
-      // TODO: get the correct values here
-      // dist_cmps += total_size;
-    } else {
-      auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
-      parlay::parallel_for(0, nprobes, [&](size_t i) {
-        node_t *leaf_node = probe_list[i].second;
-        leaf_dist_cmps[i] = leaf_node->data.distances(query, &visited[offsets[i]]);
-      });
-      dist_cmps += parlay::reduce(leaf_dist_cmps);
-    }
-    parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
-      return a.second < b.second;  // Sort by distance
-    });
-    timings.push_back(t.stop());
+    t_rest += t.stop();
     t.reset();
 
+    // --- quantize + distances ---
+    switch (active_quantizer) {
+      case QT::RaBitQ: {
+        t.start();
+        auto q_query = quantizer_rabitq->quantize_query(query);
+        t_quantize = t.stop();
+        t.reset();
+
+        t.start();
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t *leaf = probe_list[i].second;
+          auto leaf_indices = parlay::delayed_tabulate(
+              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
+          quantizer_rabitq->distances(q_query, leaf_indices, leaf_indices.size(),
+                                      &visited[offsets[i]]);
+        });
+        t_distances = t.stop();
+        t.reset();
+        break;
+      }
+      case QT::ScaNN: {
+        t.start();
+        auto q_query = quantizer_scann->quantize_query(query);
+        t_quantize = t.stop();
+        t.reset();
+
+        t.start();
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t *leaf = probe_list[i].second;
+          auto leaf_indices = parlay::delayed_tabulate(
+              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
+          quantizer_scann->distances(q_query, leaf_indices, leaf_indices.size(),
+                                     &visited[offsets[i]]);
+        });
+        t_distances = t.stop();
+        t.reset();
+        break;
+      }
+      case QT::PQ: {
+        t.start();
+        auto q_query = quantizer_pq->quantize_query(query);
+        t_quantize = t.stop();
+        t.reset();
+
+        t.start();
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t *leaf = probe_list[i].second;
+          auto leaf_indices = parlay::delayed_tabulate(
+              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
+          quantizer_pq->distances(q_query, leaf_indices, leaf_indices.size(), &visited[offsets[i]]);
+        });
+        t_distances = t.stop();
+        t.reset();
+        break;
+      }
+      case QT::None: {
+        t_quantize = 0.0;
+
+        t.start();
+        auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t *leaf_node = probe_list[i].second;
+          leaf_dist_cmps[i] = leaf_node->data.distances_naive(query, &visited[offsets[i]]);
+        });
+        dist_cmps += parlay::reduce(leaf_dist_cmps);
+        t_distances = t.stop();
+        t.reset();
+        break;
+      }
+    }
+
+    // --- "rest" part 2: sorting visited ---
+    t.start();
+    parlay::sort_inplace(visited, [](const auto &a, const auto &b) { return a.second < b.second; });
+    t_rest += t.stop();
+    t.reset();
+
+    // Push the 3 Step-2 sub-timings (instead of 1)
+    timings.push_back(t_quantize);
+    timings.push_back(t_distances);
+    timings.push_back(t_rest);
+
+    // -------------------------
     // Step 3: Re-ranking
+    // -------------------------
     t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
@@ -511,180 +627,6 @@ class IndexMVIVF : public Index<metric> {
       delete root;
     }
   }
-
-  // std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t>
-  // search_all(const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
-  //            const SearchParams& search_params) override {
-  //   size_t num_queries = query_points.size();
-  //   auto all_probes = parlay::sequence<parlay::sequence<std::pair<float, node_t
-  //   *>>>(num_queries); auto greedy_cmps = parlay::sequence<size_t>(num_queries, 0);
-
-  //   parlay::parallel_for(0, num_queries, [&](size_t i) {
-  //       const auto& query = query_points[i];
-  //       size_t beam_length = 2 * search_params.nprobes;
-  //       std::set<std::pair<float, node_t *>> beam;
-  //       auto add_to_beam = [&](std::pair<float, node_t *> p) -> bool {
-  //           if (beam.size() < beam_length || p.first < beam.rbegin()->first) {
-  //               beam.insert(p);
-  //               if (beam.size() > beam_length) {
-  //                   beam.erase(std::prev(beam.end()));
-  //               }
-  //               return true;
-  //           }
-  //           return false;
-  //       };
-
-  //       add_to_beam({std::numeric_limits<float>::max(), root});
-  //       while (beam.size() > 0) {
-  //           std::pair<float, node_t *> best = *beam.begin();
-  //           beam.erase(beam.begin());
-  //           node_t *current_node = best.second;
-
-  //           auto &children = current_node->children;
-  //           auto &centers = current_node->data;
-
-  //           parlay::sequence<std::pair<uint32_t, float>> id_dist;
-  //           size_t dist_cmps_node;
-  //           std::tie(id_dist, dist_cmps_node) = centers.distances(query);
-  //           greedy_cmps[i] += dist_cmps_node;
-
-  //           auto res = parlay::sequence<std::pair<float, node_t *>>::from_function(
-  //               id_dist.size(), [&](size_t j) { return std::make_pair(id_dist[j].second,
-  //               children[j]); });
-
-  //           auto new_nodes_to_beam = parlay::filter(res, [](const auto &p) { return
-  //           p.second->children.size() != 0; }); auto new_nodes_to_probe = parlay::filter(res,
-  //           [](const auto &p) { return p.second->children.size() == 0; });
-
-  //           parlay::sort_inplace(new_nodes_to_beam);
-
-  //           for (size_t j = 0; j < std::min(beam_length, new_nodes_to_beam.size()); j++) {
-  //               if (!add_to_beam(new_nodes_to_beam[j])) break;
-  //           }
-  //           for (size_t j = 0; j < new_nodes_to_probe.size(); j++) {
-  //               all_probes[i].push_back(new_nodes_to_probe[j]);
-  //           }
-  //       }
-  //       parlay::sort_inplace(all_probes[i]);
-  //   });
-
-  //   auto num_probes_per_query = parlay::sequence<size_t>(num_queries);
-  //   auto total_candidates_per_query = parlay::sequence<size_t>(num_queries, 0);
-  //   for(size_t i=0; i<num_queries; ++i) {
-  //       size_t nprobes_minimal = 0, cur = 0;
-  //       while (nprobes_minimal < all_probes[i].size() && cur < search_params.k) {
-  //           cur += all_probes[i][nprobes_minimal].second->get_size();
-  //           nprobes_minimal++;
-  //       }
-  //       num_probes_per_query[i] = std::min(all_probes[i].size(), std::max(search_params.nprobes,
-  //       nprobes_minimal)); for(size_t j=0; j<num_probes_per_query[i]; ++j) {
-  //           total_candidates_per_query[i] += all_probes[i][j].second->get_size();
-  //       }
-  //   }
-
-  //   auto all_candidates = parlay::sequence<parlay::sequence<std::pair<uint32_t,
-  //   float>>>(num_queries); auto write_offsets =
-  //   parlay::sequence<std::atomic<size_t>>(num_queries); parlay::parallel_for(0, num_queries,
-  //   [&](size_t i) {
-  //       write_offsets[i] = 0;
-  //       all_candidates[i] = parlay::sequence<std::pair<uint32_t,
-  //       float>>::uninitialized(total_candidates_per_query[i]);
-  //   });
-
-  //   auto probe_scan = parlay::scan(num_probes_per_query);
-  //   auto flat_probes = parlay::sequence<std::pair<node_t*, uint32_t>>(probe_scan.second);
-  //   parlay::parallel_for(0, num_queries, [&](size_t i) {
-  //       for(size_t j=0; j<num_probes_per_query[i]; ++j) {
-  //           flat_probes[probe_scan.first[i] + j] = {all_probes[i][j].second, (uint32_t)i};
-  //       }
-  //   });
-
-  //   parlay::sort_inplace(flat_probes, [](const auto& a, const auto& b) { return a.first <
-  //   b.first; });
-
-  //   auto starts = parlay::delayed_tabulate(flat_probes.size(), [&](size_t i) {
-  //       return (i == 0) || (flat_probes[i].first != flat_probes[i-1].first);
-  //   });
-  //   auto group_offsets = parlay::pack_index(starts);
-
-  //   auto leaf_cmps = parlay::sequence<std::atomic<size_t>>(num_queries);
-  //   for(size_t i=0; i<num_queries; ++i) leaf_cmps[i] = 0;
-
-  //   parlay::parallel_for(0, group_offsets.size(), [&](size_t i) {
-  //       size_t start = group_offsets[i];
-  //       size_t end = (i == group_offsets.size() - 1) ? flat_probes.size() : group_offsets[i+1];
-  //       auto group_slice = flat_probes.cut(start, end);
-
-  //       node_t* leaf_node = group_slice[0].first;
-  //       auto query_indices = parlay::map(group_slice, [](const auto& p){ return p.second; });
-
-  //       auto& points_in_leaf = leaf_node->data;
-  //       if (points_in_leaf.size() == 0) return;
-
-  //       if (params.pq.enabled) {
-  //           parlay::parallel_for(0, query_indices.size(), [&](size_t qi) {
-  //               auto q_idx = query_indices[qi];
-  //               size_t current_offset = write_offsets[q_idx].fetch_add(points_in_leaf.size());
-  //               leaf_cmps[q_idx] += leaf_node->pq_data.distances(query_points[q_idx],
-  //               &all_candidates[q_idx][current_offset]);
-  //           });
-  //       } else {
-  //           auto queries_for_leaf = PointCloudSet<ChPoint>(query_points.filter(query_indices),
-  //           d); auto distances = ManyToMany<PointCloudSet<ChPoint>>::AllPairs(queries_for_leaf,
-  //           points_in_leaf);
-
-  //           parlay::parallel_for(0, queries_for_leaf.size(), [&](size_t qi) {
-  //               auto q_idx = query_indices[qi];
-  //               size_t current_offset = write_offsets[q_idx].fetch_add(points_in_leaf.size());
-  //               for(size_t j=0; j<points_in_leaf.size(); ++j) {
-  //                   all_candidates[q_idx][current_offset + j] = {points_in_leaf.get_id(j),
-  //                   distances[qi * points_in_leaf.size() + j]};
-  //               }
-  //               leaf_cmps[q_idx] += queries_for_leaf.get_size(qi) * points_in_leaf.total_size();
-  //           });
-  //       }
-  //   });
-
-  //   auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t,
-  //   float>>>(num_queries); auto rerank_cmps = parlay::sequence<size_t>(num_queries, 0);
-
-  //   parlay::parallel_for(0, num_queries, [&](size_t i) {
-  //       parlay::sort_inplace(all_candidates[i]);
-
-  //       size_t k = search_params.k;
-  //       size_t num_results = std::min(k, all_candidates[i].size());
-  //       final_results[i] = parlay::sequence<std::pair<uint32_t,
-  //       float>>::uninitialized(num_results);
-
-  //       if (search_params.num_rerank > 0) {
-  //           size_t num_rerank = std::min(search_params.num_rerank, all_candidates[i].size());
-  //           rerank_cmps[i] = this->rerank(query_points[i], points, all_candidates[i], num_rerank,
-  //           final_results[i]);
-  //       } else {
-  //           for (size_t j = 0; j < num_results; j++) {
-  //               final_results[i][j] = all_candidates[i][j];
-  //           }
-  //       }
-  //   });
-
-  //   size_t total_cmps = parlay::reduce(greedy_cmps) + parlay::reduce(parlay::map(leaf_cmps,
-  //   [](const auto& a){ return a.load(); })) + parlay::reduce(rerank_cmps); return
-  //   std::make_pair(final_results, total_cmps);
-  // }
-
-  // size_t mean_cluster_size() const noexcept override {
-  //   auto cluster_sizes =
-  //       parlay::delayed_seq<size_t>(clusters.size(), [&](size_t i) { return clusters[i].size();
-  //       });
-  //   return parlay::reduce(cluster_sizes) / clusters.size();
-  // }
-
-  // size_t max_cluster_size() const noexcept override {
-  //   auto cluster_sizes =
-  //       parlay::delayed_seq<size_t>(clusters.size(), [&](size_t i) { return clusters[i].size();
-  //       });
-  //   return parlay::reduce(cluster_sizes, parlay::maxm<size_t>());
-  // }
 };
 
 using IndexMVIVFL2 = IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)

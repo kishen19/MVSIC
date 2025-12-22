@@ -169,29 +169,44 @@ class Quantized_Point_Range {
   Quantized_Query<Metric> quantize_query(const PointTy& query) const {
     Quantized_Query<Metric> qq(num_blocks);
 
+    Eigen::VectorXf q_sub(dim_per_block);
+    Eigen::VectorXf dot_products(num_clusters_per_block);
+
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      // Map query part to Eigen (safe copy)
-      Eigen::VectorXf q_sub(dim_per_block);
-      size_t offset = b * dim_per_block;
+      const size_t offset = static_cast<size_t>(b) * dim_per_block;
       for (size_t j = 0; j < dim_per_block; ++j) {
-        q_sub[j] = query[offset + j];
+        q_sub[static_cast<Eigen::Index>(j)] = query[offset + j];
       }
-
-      // 1. Calculate Dot Products (GEMV)
-      Eigen::VectorXf dot_products = codebooks[b] * q_sub;
-
-      // 2. Combine results into LUT
+      dot_products.noalias() = codebooks[b] * q_sub;
       Eigen::Map<Eigen::VectorXf> lut_segment(&qq.lut[b * 256], num_clusters_per_block);
+      if constexpr (Metric) {
+        const float q_sq = q_sub.squaredNorm();
+        lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products);
+        lut_segment.array() += q_sq;
+      } else {
+        lut_segment.noalias() = -dot_products;
+      }
+    }
 
-      if constexpr (Metric) {  // Euclidean
-        float q_sq_norm = q_sub.squaredNorm();
-        const auto& c_sq_norms = codebook_norms[b];
-        // LUT[c] = ||c||^2 - 2<c,q> + ||q||^2
-        lut_segment = c_sq_norms - (2.0f * dot_products);
-        lut_segment.array() += q_sq_norm;
-      } else {  // Inner Product (MIPS)
-        // LUT[c] = -<c,q> (Minimize negative dot product to maximize dot product)
-        lut_segment = -dot_products;
+    return qq;
+  }
+
+  Quantized_Query<Metric> quantize_query(const float* qptr) const {
+    Quantized_Query<Metric> qq(num_blocks);
+
+    Eigen::VectorXf dot_products(num_clusters_per_block);
+
+    for (uint32_t b = 0; b < num_blocks; ++b) {
+      const float* sub = qptr + static_cast<size_t>(b) * dim_per_block;
+      Eigen::Map<const Eigen::VectorXf> q_map(sub, dim_per_block);
+      dot_products.noalias() = codebooks[b] * q_map;
+      Eigen::Map<Eigen::VectorXf> lut_segment(&qq.lut[b * 256], num_clusters_per_block);
+      if constexpr (Metric) {
+        const float q_sq = q_map.squaredNorm();
+        lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products);
+        lut_segment.array() += q_sq;
+      } else {
+        lut_segment.noalias() = -dot_products;
       }
     }
     return qq;
@@ -200,34 +215,50 @@ class Quantized_Point_Range {
   template<typename PointCloudTy>
   void quantize_query_batch(const PointCloudTy& query_cloud,
                             std::vector<Quantized_Query<Metric>>& out_luts) const {
-    uint32_t num_q = query_cloud.size();
-    out_luts.clear();
-    out_luts.reserve(num_q);
-    for (uint32_t i = 0; i < num_q; ++i)
-      out_luts.emplace_back(num_blocks);
+    const uint32_t num_q = query_cloud.size();
+    const uint32_t dims = query_cloud.get_dims();  // or however you access dims
+    const float* base = query_cloud.data();        // contiguous [num_q * dims]
+
+    // Build/resize output LUTs (avoid realloc if size already matches)
+    if (out_luts.size() != num_q) {
+      out_luts.clear();
+      out_luts.reserve(num_q);
+      for (uint32_t i = 0; i < num_q; ++i)
+        out_luts.emplace_back(num_blocks);
+    } else {
+      // If Quantized_Query needs clearing, do it here; otherwise leave it.
+    }
+
+    // Allocate once and reuse across blocks
+    Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Q_sub(num_q,
+                                                                                dim_per_block);
+    Eigen::MatrixXf dot_products(num_clusters_per_block, num_q);  // [C x num_q]
+    Eigen::VectorXf q_sq;                                         // [num_q], Metric only
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      // 1. Map query cloud to a Matrix [num_q x dim_per_block]
-      // We use Eigen::Map to avoid copying query data
-      Eigen::MatrixXf Q_sub(num_q, dim_per_block);
-      size_t offset = b * dim_per_block;
-      for (size_t i = 0; i < num_q; ++i) {
-        for (size_t j = 0; j < dim_per_block; ++j) {
-          Q_sub(i, j) = query_cloud[i][offset + j];
-        }
+      const uint32_t offset = b * dim_per_block;
+
+      // Fill Q_sub using memcpy per row (fast)
+      for (uint32_t i = 0; i < num_q; ++i) {
+        const float* row_ptr = base + static_cast<size_t>(i) * dims + offset;
+        std::memcpy(&Q_sub(i, 0), row_ptr, sizeof(float) * dim_per_block);
       }
-      // 2. GEMM: [num_clusters x dim_per_block] * [dim_per_block x num_q]
-      // This is the primary speedup: codebook is loaded once and reused for all query vectors.
-      Eigen::MatrixXf dot_products = codebooks[b] * Q_sub.transpose();
-      // 3. Populate all LUTs
-      for (size_t i = 0; i < num_q; ++i) {
+
+      if constexpr (Metric) {
+        q_sq = Q_sub.rowwise().squaredNorm();  // compute once per vector
+      }
+
+      // GEMM: [C x d] * [d x num_q] -> [C x num_q]
+      dot_products.noalias() = codebooks[b] * Q_sub.transpose();
+
+      // Populate LUTs (serial is usually fine; parallelize if num_q large)
+      for (uint32_t i = 0; i < num_q; ++i) {
         Eigen::Map<Eigen::VectorXf> lut_segment(&out_luts[i].lut[b * 256], num_clusters_per_block);
         if constexpr (Metric) {
-          float q_sq_norm = Q_sub.row(i).squaredNorm();
-          lut_segment = codebook_norms[b] - (2.0f * dot_products.col(i));
-          lut_segment.array() += q_sq_norm;
+          lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products.col(i));
+          lut_segment.array() += q_sq[i];
         } else {
-          lut_segment = -dot_products.col(i);
+          lut_segment.noalias() = -dot_products.col(i);
         }
       }
     }
@@ -342,7 +373,6 @@ class Quantized_Point_Range {
           } else {  // IP: -<x,c> (minimize negative dot product)
             val = -dot_products[c];
           }
-
           if (val < min_val) {
             min_val = val;
             best_code = static_cast<uint8_t>(c);

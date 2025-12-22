@@ -148,40 +148,60 @@ class IndexMVIVFFlat : public Index<metric> {
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
 
     // Probe chosen leaf clusters in parallel using optimized API
-    if (active_quantizer != QT::None) {
-      parlay::parallel_for(0, nprobes, [&](size_t i) {
-        uint32_t cluster_id = id_dist[i].first;
-        auto &leaf_points = clusters[cluster_id];
-        parlay::sequence<uint32_t> leaf_indices =
-            parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
+    switch (active_quantizer) {
+      case QT::RaBitQ: {
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          uint32_t cluster_id = id_dist[i].first;
+          auto &leaf_points = clusters[cluster_id];
+          parlay::sequence<uint32_t> leaf_indices =
+              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
 
-        switch (active_quantizer) {
-          case QT::RaBitQ:
-            quantizer_rabitq->distances(query, leaf_indices.data(), leaf_indices.size(),
-                                        &visited[offsets[i]]);
-            break;
-          case QT::ScaNN:
-            quantizer_scann->distances(query, leaf_indices.data(), leaf_indices.size(),
-                                       &visited[offsets[i]]);
-            break;
-          case QT::PQ:
-            quantizer_pq->distances(query, leaf_indices.data(), leaf_indices.size(),
-                                    &visited[offsets[i]]);
-            break;
-          default: break;
-        }
-      });
-      // TODO: fix this
-      // dist_cmps += total_size;
-    } else {
-      auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
-      parlay::parallel_for(0, nprobes, [&](size_t i) {
-        uint32_t cluster_id = id_dist[i].first;
-        leaf_dist_cmps[i] = clusters[cluster_id].distances(query, &visited[offsets[i]]);
-      });
-      dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
+          auto q_query = quantizer_rabitq->quantize_query(query);
+          quantizer_rabitq->distances(q_query, leaf_indices.data(), leaf_indices.size(),
+                                      &visited[offsets[i]]);
+        });
+        // TODO: fix this
+        // dist_cmps += total_size;
+        break;
+      }
+      case QT::ScaNN: {
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          uint32_t cluster_id = id_dist[i].first;
+          auto &leaf_points = clusters[cluster_id];
+          parlay::sequence<uint32_t> leaf_indices =
+              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
+          auto q_query = quantizer_scann->quantize_query(query);
+          quantizer_scann->distances(q_query, leaf_indices.data(), leaf_indices.size(),
+                                     &visited[offsets[i]]);
+        });
+        // TODO: fix this
+        // dist_cmps += total_size;
+        break;
+      }
+      case QT::PQ: {
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          uint32_t cluster_id = id_dist[i].first;
+          auto &leaf_points = clusters[cluster_id];
+          parlay::sequence<uint32_t> leaf_indices =
+              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
+          auto q_query = quantizer_pq->quantize_query(query);
+          quantizer_pq->distances(q_query, leaf_indices.data(), leaf_indices.size(),
+                                  &visited[offsets[i]]);
+        });
+        // TODO: fix this
+        // dist_cmps += total_size;
+        break;
+      }
+      case QT::None: {
+        auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          uint32_t cluster_id = id_dist[i].first;
+          leaf_dist_cmps[i] = clusters[cluster_id].distances(query, &visited[offsets[i]]);
+        });
+        dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
+        break;
+      }
     }
-
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
       return a.second < b.second;  // Sort by distance
     });

@@ -125,6 +125,27 @@ struct PointCloudSet {
       }
     });
   }
+
+  inline void prefetch(size_t i) const noexcept {
+    if (i >= n) return;
+
+    const char* curr = reinterpret_cast<const char*>(values.get() + offsets[i]);
+    const char* end = reinterpret_cast<const char*>(values.get() + offsets[i + 1]);
+
+    // Limit the number of prefetches to avoid saturating the MSHR
+    // (Miss Status Holding Registers). Usually, 1-2KB is enough to
+    // hide the initial latency of the distance kernel.
+    const size_t max_prefetch_bytes = 2048;
+    const char* limit = std::min(end, curr + max_prefetch_bytes);
+
+    while (curr < limit) {
+      __builtin_prefetch(curr, 0, 3);
+      curr += 64;
+    }
+
+    // Also prefetch the next offset to prevent a stall on the next iteration
+    __builtin_prefetch(&offsets[i + 1], 0, 3);
+  }
 };
 
 /* =======================================Implementation======================================= */

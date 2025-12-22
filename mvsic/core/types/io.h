@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "algorithms/utils/point_range.h"
-#include "algorithms/utils/graph.h" // Added include for parlayANN::Graph
+#include "algorithms/utils/graph.h"  // Added include for parlayANN::Graph
 
 namespace parlayANN {
 namespace io {
@@ -117,7 +117,7 @@ void save_graph(const parlayANN::Graph<indexType>& G, std::ostream& out) {
   write_u32(out, n);
   write_u32(out, max_deg);
 
-  if (n == 0) return; // nothing more to write
+  if (n == 0) return;  // nothing more to write
 
   // Write degrees of each node
   parlay::sequence<indexType> sizes =
@@ -126,13 +126,13 @@ void save_graph(const parlayANN::Graph<indexType>& G, std::ostream& out) {
   if (!out) throw std::runtime_error("save_graph: failed to write sizes");
 
   // Write edge data in blocks
-  size_t BLOCK_SIZE = 1000000; // Same block size as in Graph::save
+  size_t BLOCK_SIZE = 1000000;  // Same block size as in Graph::save
   size_t index = 0;
-  while(index < n){
+  while (index < n) {
     size_t floor = index;
     size_t ceiling = index + BLOCK_SIZE <= n ? index + BLOCK_SIZE : n;
-    auto edge_data = parlay::tabulate(ceiling - floor, [&] (size_t i){
-      return parlay::tabulate(G[i + floor].size(), [&] (size_t j){ return G[i + floor][j];});
+    auto edge_data = parlay::tabulate(ceiling - floor, [&](size_t i) {
+      return parlay::tabulate(G[i + floor].size(), [&](size_t j) { return G[i + floor][j]; });
     });
     parlay::sequence<indexType> data = parlay::flatten(edge_data);
     out.write(reinterpret_cast<const char*>(data.begin()), data.size() * sizeof(indexType));
@@ -160,7 +160,7 @@ parlayANN::Graph<indexType> load_graph(std::istream& in) {
 
   parlayANN::Graph<indexType> G(max_deg, n);
 
-  if (n == 0) return G; // nothing more to read
+  if (n == 0) return G;  // nothing more to read
 
   // Read degrees of each node
   parlay::sequence<indexType> sizes(n);
@@ -168,14 +168,14 @@ parlayANN::Graph<indexType> load_graph(std::istream& in) {
   if (!in) throw std::runtime_error("load_graph: failed to read sizes");
 
   // Read edge data in blocks
-  size_t BLOCK_SIZE = 1000000; // Same block size as in Graph::save
+  size_t BLOCK_SIZE = 1000000;  // Same block size as in Graph::save
   size_t index = 0;
-  while(index < n){
+  while (index < n) {
     size_t floor = index;
     size_t ceiling = index + BLOCK_SIZE <= n ? index + BLOCK_SIZE : n;
     size_t total_edges_in_block = 0;
     for (size_t i = floor; i < ceiling; ++i) {
-        total_edges_in_block += sizes[i];
+      total_edges_in_block += sizes[i];
     }
 
     parlay::sequence<indexType> data(total_edges_in_block);
@@ -184,12 +184,12 @@ parlayANN::Graph<indexType> load_graph(std::istream& in) {
 
     size_t current_data_offset = 0;
     for (size_t i = floor; i < ceiling; ++i) {
-        parlay::sequence<indexType> node_edges(sizes[i]);
-        for (size_t j = 0; j < sizes[i]; ++j) {
-            node_edges[j] = data[current_data_offset + j];
-        }
-        G[i].update_neighbors(node_edges);
-        current_data_offset += sizes[i];
+      parlay::sequence<indexType> node_edges(sizes[i]);
+      for (size_t j = 0; j < sizes[i]; ++j) {
+        node_edges[j] = data[current_data_offset + j];
+      }
+      G[i].update_neighbors(node_edges);
+      current_data_offset += sizes[i];
     }
     index = ceiling;
   }
@@ -213,7 +213,7 @@ std::pair<parlay::sequence<std::vector<float>>, int> read_point_range(std::istre
   size_t n = static_cast<size_t>(n_u32);
   int dims = static_cast<int>(dims_u32);
 
-  if (n == 0) return {parlay::sequence<std::vector<float>>(), dims}; // nothing more to read
+  if (n == 0) return {parlay::sequence<std::vector<float>>(), dims};  // nothing more to read
 
   parlay::sequence<std::vector<float>> fdes(n);
   for (size_t i = 0; i < n; ++i) {

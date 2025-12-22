@@ -168,7 +168,7 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
       for (size_t l = 0; l < timings.size(); l++) {
         total_time += timings[l][j];
       }
-      avg_timings[j] = total_time / timings.size();
+      avg_timings[j] = total_time;  // / timings.size();
     }
 
     results[i] =

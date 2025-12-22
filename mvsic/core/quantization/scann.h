@@ -110,6 +110,35 @@ class ScaNN_Point_Range {
     return qq;
   }
 
+  Quantized_Query<Metric> quantize_query(const float* qptr) const {
+    Quantized_Query<Metric> qq(num_blocks);
+
+    for (uint32_t b = 0; b < num_blocks; ++b) {
+      Eigen::VectorXf q_sub(dim_per_block);
+      size_t offset = b * dim_per_block;
+      for (size_t j = 0; j < dim_per_block; ++j) {
+        q_sub[j] = qptr[offset + j];
+      }
+
+      // Precompute LUT:
+      // Using GEMV
+      Eigen::VectorXf dot_products = codebooks[b] * q_sub;
+
+      Eigen::Map<Eigen::VectorXf> lut_segment(&qq.lut[b * 256], num_clusters_per_block);
+
+      if constexpr (Metric) {  // Euclidean
+        // ||c||^2 - 2<c,q> + ||q||^2
+        float q_sq_norm = q_sub.squaredNorm();
+        lut_segment = codebook_norms[b] - (2.0f * dot_products);
+        lut_segment.array() += q_sq_norm;
+      } else {  // Inner Product (MIPS)
+        // -<c,q> (Minimize negative dot product)
+        lut_segment = -dot_products;
+      }
+    }
+    return qq;
+  }
+
   template<typename PointCloudTy>
   void quantize_query_batch(const PointCloudTy& query_cloud,
                             std::vector<Quantized_Query<Metric>>& out_luts) const {

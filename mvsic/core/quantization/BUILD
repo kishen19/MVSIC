@@ -49,53 +49,53 @@ cc_library(
     ],
 )
 
-cc_binary(
-    name = "test_pq",
-    srcs = ["main.cpp"],
-    # ENABLE AVX512 FLAGS HERE
-    copts = [
-        "-march=native",
-        "-mavx512f",
-        "-mavx512vpopcntdq",
-    ],
-    # CRITICAL: RaBitQ uses OpenMP, so we must link against it.
-    linkopts = [
-        "-pthread",
-        "-fopenmp",
-    ],
-    deps = [
-        ":pq",
-        ":rabitq",
-        ":scann",
-        "//mvsic/core/utils:parse_command_line",
-        "@parlayann//algorithms/utils:euclidian_point",
-        "@parlayann//algorithms/utils:point_range",
-        "@parlaylib//parlay:parallel",
-    ],
-)
+# cc_binary(
+#     name = "test_pq",
+#     srcs = ["main.cpp"],
+#     # ENABLE AVX512 FLAGS HERE
+#     copts = [
+#         "-march=native",
+#         "-mavx512f",
+#         "-mavx512vpopcntdq",
+#     ],
+#     # CRITICAL: RaBitQ uses OpenMP, so we must link against it.
+#     linkopts = [
+#         "-pthread",
+#         "-fopenmp",
+#     ],
+#     deps = [
+#         ":pq",
+#         ":rabitq",
+#         ":scann",
+#         "//mvsic/core/utils:parse_command_line",
+#         "@parlayann//algorithms/utils:euclidian_point",
+#         "@parlayann//algorithms/utils:point_range",
+#         "@parlaylib//parlay:parallel",
+#     ],
+# )
 
-cc_binary(
-    name = "test_pq_pc",
-    srcs = ["test_pq_pc.cpp"],
-    copts = [
-        "-march=native",
-        "-mavx512f",
-        "-mavx512vpopcntdq",
-    ],
-    linkopts = [
-        "-pthread",
-        "-fopenmp",
-    ],
-    deps = [
-        ":pq",
-        ":rabitq",
-        ":scann",
-        ":wrapper",
-        "//mvsic/core/types:chamfer_ip_point",
-        "//mvsic/core/types:chamfer_l2_point",
-        "//mvsic/core/types:point_cloud_set",
-        "//mvsic/core/utils:parse_command_line",
-        "@parlayann//algorithms/utils:euclidian_point",
-        "@parlaylib//parlay:parallel",
-    ],
-)
+# cc_binary(
+#     name = "test_pq_pc",
+#     srcs = ["test_pq_pc.cpp"],
+#     copts = [
+#         "-march=native",
+#         "-mavx512f",
+#         "-mavx512vpopcntdq",
+#     ],
+#     linkopts = [
+#         "-pthread",
+#         "-fopenmp",
+#     ],
+#     deps = [
+#         ":pq",
+#         ":rabitq",
+#         ":scann",
+#         ":wrapper",
+#         "//mvsic/core/types:chamfer_ip_point",
+#         "//mvsic/core/types:chamfer_l2_point",
+#         "//mvsic/core/types:point_cloud_set",
+#         "//mvsic/core/utils:parse_command_line",
+#         "@parlayann//algorithms/utils:euclidian_point",
+#         "@parlaylib//parlay:parallel",
+#     ],
+# )

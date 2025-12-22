@@ -21,12 +21,12 @@
 namespace mvsic {
 namespace rabitq {
 
-// ---------------------------------------------------------
-// Quantized Point: Aux Data Type
-// ---------------------------------------------------------
 template<bool Metric>
 class Quantized_Query;
 
+// ---------------------------------------------------------
+// Quantized Point: Aux Data Type
+// ---------------------------------------------------------
 template<bool Metric>
 class Quantized_Point {
  public:
@@ -197,9 +197,8 @@ class Quantized_Point_Range {
     // Determine metric for library
     rabitqlib::MetricType m_type = Metric ? rabitqlib::METRIC_L2 : rabitqlib::METRIC_IP;
 
-    std::cout << "Encoding " << n << " vectors (thread-local optimized)..." << std::endl;
+    std::cout << "Encoding " << n << " vectors..." << std::endl;
     parlay::parallel_for(0, n, [&](size_t i) {
-      // OPT 1: Reuse buffer to prevent N mallocs/frees
       static thread_local EncodingWorkspace ws;
       ws.ensure_size(padded_dim);
 
@@ -226,6 +225,18 @@ class Quantized_Point_Range {
     std::vector<float> q_vec(dim);
     for (size_t i = 0; i < dim; ++i)
       q_vec[i] = query[i];
+
+    std::vector<float> q_rot(padded_dim);
+    rotator->rotate(q_vec.data(), q_rot.data());
+
+    return Quantized_Query<Metric>(std::move(q_rot), centroid_rot.data(), padded_dim, ex_bits,
+                                   config);
+  }
+
+  Quantized_Query<Metric> quantize_query(const float* qptr) const {
+    std::vector<float> q_vec(dim);
+    for (size_t i = 0; i < dim; ++i)
+      q_vec[i] = qptr[i];
 
     std::vector<float> q_rot(padded_dim);
     rotator->rotate(q_vec.data(), q_rot.data());
