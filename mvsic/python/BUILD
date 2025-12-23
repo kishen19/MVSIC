@@ -20,6 +20,7 @@ pybind_extension(
         "//mvsic/mpool",
         "//mvsic/muvera",
         "//mvsic/mvivf",
+        "//mvsic/mvivf:mvivf_flat",
         "//mvsic/vamana",
         "@parlaylib//parlay:primitives",
     ],

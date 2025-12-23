@@ -5,6 +5,7 @@
 #include <iostream>
 #include <algorithm>
 #include <random>
+#include <cstring>
 
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
@@ -33,7 +34,7 @@ class ScaNN_Point_Range {
   size_t dim;
   size_t dim_per_block;
 
-  // Codebooks [num_blocks] -> Matrix(256, dim_per_block)
+  // Codebooks [num_blocks] -> Matrix(K, dim_per_block)
   std::vector<Eigen::MatrixXf> codebooks;
 
   // Optimization: Precomputed norms ||c||^2
@@ -82,58 +83,53 @@ class ScaNN_Point_Range {
   // ScaNN optimizes the codes, but the search metric (LUT generation) remains L2-based structure
   template<typename PointTy>
   Quantized_Query<Metric> quantize_query(const PointTy& query) const {
-    Quantized_Query<Metric> qq(num_blocks);
+    Quantized_Query<Metric> qq(num_blocks, num_clusters_per_block);
+
+    // Reuse buffers across blocks (avoids repeated mallocs)
+    Eigen::VectorXf q_sub(dim_per_block);
+    Eigen::VectorXf dot_products(num_clusters_per_block);
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      Eigen::VectorXf q_sub(dim_per_block);
-      size_t offset = b * dim_per_block;
+      const size_t offset = static_cast<size_t>(b) * dim_per_block;
       for (size_t j = 0; j < dim_per_block; ++j) {
-        q_sub[j] = query[offset + j];
+        q_sub[static_cast<Eigen::Index>(j)] = query[offset + j];
       }
 
-      // Precompute LUT:
-      // Using GEMV
-      Eigen::VectorXf dot_products = codebooks[b] * q_sub;
+      dot_products.noalias() = codebooks[b] * q_sub;
 
       Eigen::Map<Eigen::VectorXf> lut_segment(&qq.lut[b * 256], num_clusters_per_block);
 
       if constexpr (Metric) {  // Euclidean
-        // ||c||^2 - 2<c,q> + ||q||^2
-        float q_sq_norm = q_sub.squaredNorm();
-        lut_segment = codebook_norms[b] - (2.0f * dot_products);
-        lut_segment.array() += q_sq_norm;
+        const float q_sq = q_sub.squaredNorm();
+        lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products);
+        lut_segment.array() += q_sq;
       } else {  // Inner Product (MIPS)
-        // -<c,q> (Minimize negative dot product)
-        lut_segment = -dot_products;
+        lut_segment.noalias() = -dot_products;
       }
     }
     return qq;
   }
 
   Quantized_Query<Metric> quantize_query(const float* qptr) const {
-    Quantized_Query<Metric> qq(num_blocks);
+    Quantized_Query<Metric> qq(num_blocks, num_clusters_per_block);
+
+    // Reuse buffer across blocks
+    Eigen::VectorXf dot_products(num_clusters_per_block);
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      Eigen::VectorXf q_sub(dim_per_block);
-      size_t offset = b * dim_per_block;
-      for (size_t j = 0; j < dim_per_block; ++j) {
-        q_sub[j] = qptr[offset + j];
-      }
+      const float* sub = qptr + static_cast<size_t>(b) * dim_per_block;
+      Eigen::Map<const Eigen::VectorXf> q_map(sub, dim_per_block);
 
-      // Precompute LUT:
-      // Using GEMV
-      Eigen::VectorXf dot_products = codebooks[b] * q_sub;
+      dot_products.noalias() = codebooks[b] * q_map;
 
       Eigen::Map<Eigen::VectorXf> lut_segment(&qq.lut[b * 256], num_clusters_per_block);
 
       if constexpr (Metric) {  // Euclidean
-        // ||c||^2 - 2<c,q> + ||q||^2
-        float q_sq_norm = q_sub.squaredNorm();
-        lut_segment = codebook_norms[b] - (2.0f * dot_products);
-        lut_segment.array() += q_sq_norm;
+        const float q_sq = q_map.squaredNorm();
+        lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products);
+        lut_segment.array() += q_sq;
       } else {  // Inner Product (MIPS)
-        // -<c,q> (Minimize negative dot product)
-        lut_segment = -dot_products;
+        lut_segment.noalias() = -dot_products;
       }
     }
     return qq;
@@ -141,37 +137,54 @@ class ScaNN_Point_Range {
 
   template<typename PointCloudTy>
   void quantize_query_batch(const PointCloudTy& query_cloud,
-                            std::vector<Quantized_Query<Metric>>& out_luts) const {
-    uint32_t num_q = query_cloud.size();
-    out_luts.clear();
-    out_luts.reserve(num_q);
-    for (uint32_t i = 0; i < num_q; ++i)
-      out_luts.emplace_back(num_blocks);
+                            parlay::sequence<Quantized_Query<Metric>>& out_luts) const {
+    const uint32_t num_q = query_cloud.size();
+    const uint32_t dims = query_cloud.get_dims();
+    const float* base = query_cloud.data();  // contiguous [num_q * dims]
+
+    // Reuse out_luts storage if already correctly sized
+    if (out_luts.size() != num_q) {
+      out_luts.clear();
+      out_luts.reserve(num_q);
+      for (uint32_t i = 0; i < num_q; ++i)
+        out_luts.emplace_back(num_blocks, num_clusters_per_block);
+    } else {
+      // If you want to be extra safe:
+      // for (auto& q : out_luts) { assert(q.K == num_clusters_per_block && q.num_blocks ==
+      // num_blocks); }
+    }
+
+    // Allocate once per call
+    Eigen::MatrixXf dot_products(num_clusters_per_block, num_q);  // [K x num_q]
+    Eigen::VectorXf q_sq;                                         // [num_q] (Metric only)
+
+    using RowMajorMat = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    using StrideT = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      // 1. Map query cloud to a Matrix [num_q x dim_per_block]
-      // We use Eigen::Map to avoid copying query data
-      Eigen::MatrixXf Q_sub(num_q, dim_per_block);
-      size_t offset = b * dim_per_block;
-      for (size_t i = 0; i < num_q; ++i) {
-        for (size_t j = 0; j < dim_per_block; ++j) {
-          Q_sub(i, j) = query_cloud[i][offset + j];
-        }
+      const size_t offset = static_cast<size_t>(b) * dim_per_block;
+
+      // Strided view: Q_view(i,j) = base[offset + i*dims + j]
+      Eigen::Map<const RowMajorMat, 0, StrideT> Q_view(
+          base + offset, num_q, dim_per_block, StrideT(/*outerStride=*/dims, /*innerStride=*/1));
+
+      if constexpr (Metric) {
+        q_sq = Q_view.rowwise().squaredNorm();
       }
 
-      // 2. GEMM: [num_clusters x dim_per_block] * [dim_per_block x num_q]
-      // This is the primary speedup: codebook is loaded once and reused for all query vectors.
-      Eigen::MatrixXf dot_products = codebooks[b] * Q_sub.transpose();
+      // GEMM: [K x d] * [d x num_q] -> [K x num_q]
+      dot_products.noalias() = codebooks[b] * Q_view.transpose();
 
-      // 3. Populate all LUTs
-      for (size_t i = 0; i < num_q; ++i) {
-        Eigen::Map<Eigen::VectorXf> lut_segment(&out_luts[i].lut[b * 256], num_clusters_per_block);
+      for (uint32_t i = 0; i < num_q; ++i) {
+        Eigen::Map<Eigen::VectorXf> lut_segment(
+            &out_luts[i].lut[static_cast<size_t>(b) * num_clusters_per_block],
+            num_clusters_per_block);
+
         if constexpr (Metric) {
-          float q_sq_norm = Q_sub.row(i).squaredNorm();
-          lut_segment = codebook_norms[b] - (2.0f * dot_products.col(i));
-          lut_segment.array() += q_sq_norm;
+          lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products.col(i));
+          lut_segment.array() += q_sq[i];
         } else {
-          lut_segment = -dot_products.col(i);
+          lut_segment.noalias() = -dot_products.col(i);
         }
       }
     }
@@ -273,9 +286,9 @@ class ScaNN_Point_Range {
 
     void resize(uint32_t m, uint32_t k) {
       if (local_codes.size() != m) local_codes.resize(m);
-      if (parallel_projections.cols() != m || parallel_projections.rows() != k)
+      if (parallel_projections.cols() != (int)m || parallel_projections.rows() != (int)k)
         parallel_projections.resize(k, m);
-      if (scores.size() != k) scores.resize(k);
+      if (scores.size() != (int)k) scores.resize(k);
     }
   };
 
@@ -299,18 +312,18 @@ class ScaNN_Point_Range {
         size_t offset = b * dim_per_block;
         // Project all K centroids in block b onto x
         // Store in column b of workspace matrix (Size K)
-        ws.parallel_projections.col(b).noalias() =
-            codebooks[b] * x_full.segment(offset, dim_per_block);
+        ws.parallel_projections.col((int)b).noalias() =
+            codebooks[b] * x_full.segment((int)offset, (int)dim_per_block);
       }
 
       // Initial Greedy Selection
       for (size_t b = 0; b < num_blocks; ++b) {
         if constexpr (Metric) {  // Euclidean
           // dist = ||c||^2 - 2<c, x>
-          ws.scores = codebook_norms[b] - (2.0f * ws.parallel_projections.col(b));
+          ws.scores = codebook_norms[b] - (2.0f * ws.parallel_projections.col((int)b));
         } else {  // Inner Product
           // dist = -<c, x>
-          ws.scores = -ws.parallel_projections.col(b);
+          ws.scores = -ws.parallel_projections.col((int)b);
         }
 
         Eigen::Index min_idx;
@@ -322,7 +335,7 @@ class ScaNN_Point_Range {
       // Calculate initial Total Parallel Projection
       float total_parallel = 0.0f;
       for (size_t b = 0; b < num_blocks; ++b) {
-        total_parallel += ws.parallel_projections(ws.local_codes[b], b);
+        total_parallel += ws.parallel_projections((int)ws.local_codes[b], (int)b);
       }
 
       float weight = anisotropic_threshold * inv_norm_sq;
@@ -330,14 +343,11 @@ class ScaNN_Point_Range {
       for (int iter = 0; iter < num_iterations; ++iter) {
         for (size_t b = 0; b < num_blocks; ++b) {
           // Remove current block contribution
-          float current_p_proj = ws.parallel_projections(ws.local_codes[b], b);
+          float current_p_proj = ws.parallel_projections((int)ws.local_codes[b], (int)b);
           float other_parallel = total_parallel - current_p_proj;
           float target = x_sq_norm - other_parallel;
 
-          // Cost Calculation (Vectorized & Fused)
-          // Cost = Base_Dist + weight * Aniso_Penalty
-
-          const auto& projs = ws.parallel_projections.col(b);
+          const auto& projs = ws.parallel_projections.col((int)b);
 
           if constexpr (Metric) {  // Euclidean Base
             ws.scores = codebook_norms[b] - (2.0f * projs);
@@ -346,8 +356,6 @@ class ScaNN_Point_Range {
           }
 
           // Apply Anisotropic Penalty
-          // This penalty tries to correct the parallel projection error
-          // (projs.array() - target).square() -> || <c, x> - (||x||^2 - other_dot) ||^2
           ws.scores.array() += weight * (projs.array() - target).square();
 
           Eigen::Index best_idx;
@@ -355,7 +363,7 @@ class ScaNN_Point_Range {
 
           // Update
           ws.local_codes[b] = static_cast<uint8_t>(best_idx);
-          total_parallel = other_parallel + ws.parallel_projections(best_idx, b);
+          total_parallel = other_parallel + ws.parallel_projections(best_idx, (int)b);
         }
       }
 

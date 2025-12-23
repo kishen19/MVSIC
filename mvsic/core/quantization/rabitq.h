@@ -222,24 +222,29 @@ class Quantized_Point_Range {
 
   template<typename PointTy>
   Quantized_Query<Metric> quantize_query(const PointTy& query) const {
-    std::vector<float> q_vec(dim);
-    for (size_t i = 0; i < dim; ++i)
-      q_vec[i] = query[i];
+    // Fallback: copy query into a contiguous buffer (never modified),
+    // then rotate into a separate output buffer.
+    std::vector<float> tmp(dim);
+    for (size_t i = 0; i < dim; ++i) {
+      tmp[i] = query[i];
+    }
 
     std::vector<float> q_rot(padded_dim);
-    rotator->rotate(q_vec.data(), q_rot.data());
+    // Defensive: if rotate is not const-correct / might write to input, it only touches tmp.
+    rotator->rotate(tmp.data(), q_rot.data());
 
     return Quantized_Query<Metric>(std::move(q_rot), centroid_rot.data(), padded_dim, ex_bits,
                                    config);
   }
 
   Quantized_Query<Metric> quantize_query(const float* qptr) const {
-    std::vector<float> q_vec(dim);
-    for (size_t i = 0; i < dim; ++i)
-      q_vec[i] = qptr[i];
-
     std::vector<float> q_rot(padded_dim);
-    rotator->rotate(q_vec.data(), q_rot.data());
+
+    // Defensive: if rotate might write to input, make a local copy first.
+    // (Cost: one memcpy of dim floats, but guarantees qptr is not modified.)
+    std::vector<float> tmp(dim);
+    std::memcpy(tmp.data(), qptr, sizeof(float) * dim);
+    rotator->rotate(tmp.data(), q_rot.data());
 
     return Quantized_Query<Metric>(std::move(q_rot), centroid_rot.data(), padded_dim, ex_bits,
                                    config);
@@ -247,14 +252,26 @@ class Quantized_Point_Range {
 
   template<typename PointCloudTy>
   void quantize_query_batch(const PointCloudTy& query_cloud,
-                            std::vector<Quantized_Query<Metric>>& out_queries) const {
-    uint32_t num_q = query_cloud.size();
+                            parlay::sequence<Quantized_Query<Metric>>& out_queries) const {
+    const uint32_t num_q = query_cloud.size();
+    const uint32_t dims = query_cloud.get_dims();
+    const float* base = query_cloud.data();  // contiguous [num_q * dims]
+
+    out_queries.clear();
     out_queries.reserve(num_q);
 
-    for (size_t i = 0; i < num_q; ++i) {
+    // One reusable temp buffer per call (not thread_local).
+    std::vector<float> tmp(dim);
+
+    for (uint32_t i = 0; i < num_q; ++i) {
+      const float* qi = base + static_cast<size_t>(i) * dims;
+
+      // Copy into tmp to guarantee we never modify the original query storage.
+      std::memcpy(tmp.data(), qi, sizeof(float) * dim);
+
       std::vector<float> q_rot(padded_dim);
-      // Assuming your rotator can take raw data from PointCloudTy
-      rotator->rotate(query_cloud[i].data(), q_rot.data());
+      rotator->rotate(tmp.data(), q_rot.data());
+
       out_queries.emplace_back(std::move(q_rot), centroid_rot.data(), padded_dim, ex_bits, config);
     }
   }

@@ -57,17 +57,17 @@ template<typename QuantizedQueryVec, bool Metric>
 class Quantized_Query_Point_Cloud {
  public:
   using distanceType = float;
-  std::vector<QuantizedQueryVec> vec_queries;
+  parlay::sequence<QuantizedQueryVec> vec_queries;
 
   // Optimized Chamfer Distance for Quantized Handles
-  // This takes a Quantized_Point_Cloud and uses its operator[]
-  template<typename CloudHandle>
-  float distance(const CloudHandle& cloud) const {
+  template<typename QuantizedPointCloud>
+  float distance(const QuantizedPointCloud& cloud) const {
     size_t num_q = vec_queries.size();
     if (num_q == 0) return 0.0f;
 
     size_t cloud_size = cloud.size();
     float total_chamfer = 0.0f;
+    // Note: Better to keep this sequential
     for (const auto& q_vec : vec_queries) {
       float min_dist = std::numeric_limits<float>::max();
       for (size_t i = 0; i < cloud_size; ++i) {
@@ -86,6 +86,7 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
+    // TODO: fix the cmps value
     return {this->distance(cloud), vec_queries.size()};
   }
 
@@ -95,6 +96,8 @@ class Quantized_Query_Point_Cloud {
 // ---------------------------------------------------------
 // Quantized Point Cloud Set (The Main Container)
 // ---------------------------------------------------------
+// VectorQuantizer: The associated Quantized PointRange class
+//                  e.g.: pq::Quantized_Point_Range, rabitq::Quantized_Point_Range
 template<typename VectorQuantizer, bool Metric>
 class Quantized_Point_Cloud_Set {
  public:
@@ -130,25 +133,23 @@ class Quantized_Point_Cloud_Set {
     Quantized_Query_Point_Cloud<QVecType, Metric> qqc;
 
     size_t n_q = query_cloud.size();
+    // Batching seems to help
     if (n_q >= 8) {
       vec_quantizer.quantize_query_batch(query_cloud, qqc.vec_queries);
     } else {
-      qqc.vec_queries.reserve(n_q);
-      for (size_t i = 0; i < n_q; ++i) {
-        qqc.vec_queries.push_back(vec_quantizer.quantize_query(query_cloud[i].data()));
-      }
+      qqc.vec_queries = parlay::tabulate(
+          n_q, [&](size_t i) { return vec_quantizer.quantize_query(query_cloud[i].data()); });
     }
     return qqc;
   }
 
   template<typename QuantizedQueryTy, typename Seq>
-  size_t distances(const QuantizedQueryTy& q_query, const Seq indices, size_t n,
+  size_t distances(const QuantizedQueryTy& q_query, const Seq& indices, size_t n,
                    std::pair<uint32_t, float>* results) const {
     parlay::parallel_for(0, n, [&](size_t i) {
       uint32_t cloud_id = indices[i];
       // target_cloud is a Quantized_Point_Cloud
-      auto target_cloud = (*this)[cloud_id];
-      results[i] = {cloud_id, q_query.distance(target_cloud)};
+      results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
     });
     return q_query.vec_queries.size();
   }
