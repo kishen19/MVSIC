@@ -78,52 +78,52 @@ void run_quantizer_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const 
     size_t num_eval = P.getOptionIntValue("-num_eval", 100);
 
     if (queries.size() > 0 && points.size() > 0) {
-        std::cout << "\nCalculating Average K' for top " << top_k 
+        std::cout << "\nCalculating Average K' for top " << top_k
                   << " neighbors (evaluating first " << num_eval << " query vectors)..." << std::endl;
-        
+
         size_t num_db_vecs = points.total_size();
         float* db_data = points.data();
         uint32_t dims = points.get_dims();
-        
+
         using VecType = decltype(std::declval<ChPoint>()[0]);
-        
+
         std::atomic<size_t> total_k_prime(0);
         size_t processed_queries = 0;
-        
+
         for (size_t i = 0; i < queries.size(); ++i) {
             if (processed_queries >= num_eval) break;
-            
+
             auto q_query_cloud = q_db.quantize_query(queries[i]);
             size_t num_vecs = queries[i].size();
-            
+
             for (size_t j = 0; j < num_vecs; ++j) {
                 if (processed_queries >= num_eval) break;
                 processed_queries++;
-                
+
                 // 1. True Distances
                 auto true_q_vec = queries[i][j];
                 std::vector<std::pair<float, size_t>> true_dists(num_db_vecs);
-                
+
                 parlay::parallel_for(0, num_db_vecs, [&](size_t k) {
                     VecType db_vec(db_data + k * dims, dims, dims, k);
                     true_dists[k] = {true_q_vec.distance(db_vec), k};
                 });
-                
+
                 std::nth_element(true_dists.begin(), true_dists.begin() + top_k, true_dists.end());
                 std::unordered_set<size_t> true_nn_indices;
                 for(size_t k=0; k<top_k; ++k) true_nn_indices.insert(true_dists[k].second);
-                
+
                 // 2. Quantized Distances
                 auto q_vec_lut = q_query_cloud.vec_queries[j];
                 std::vector<std::pair<float, size_t>> q_dists(num_db_vecs);
-                
+
                 parlay::parallel_for(0, num_db_vecs, [&](size_t k) {
                     auto q_db_point = q_db.vec_quantizer[k];
                     q_dists[k] = {q_vec_lut.distance(q_db_point), k};
                 });
-                
+
                 std::sort(q_dists.begin(), q_dists.end());
-                
+
                 // 3. Find K'
                 size_t current_k_prime = 0;
                 size_t found_count = 0;
@@ -135,7 +135,7 @@ void run_quantizer_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const 
                     }
                 }
                 total_k_prime = total_k_prime + current_k_prime;
-                
+
                 if (processed_queries % 10 == 0) {
                      std::cout << "Processed " << processed_queries << "/" << num_eval << " vectors..." << std::endl;
                 }
@@ -157,7 +157,7 @@ void run_quantizer_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const 
         }
     }
     double total_time = t.next_time();
-    std::cout << "Quantized " << queries.size() << " queries in " << total_time << "s (" 
+    std::cout << "Quantized " << queries.size() << " queries in " << total_time << "s ("
               << (queries.size() / total_time) << " queries/s)" << std::endl;
 }
 
@@ -175,16 +175,18 @@ void run_microbenchmark(mvsic::commandLine &P) {
     std::cout << "Loading PointCloud from: " << inFile << " (mmap: " << is_mmap << ")" << std::endl;
     auto points = PC(inFile, is_mmap);
     std::cout << "Loaded " << points.size() << " point clouds with dim " << points.get_dims() << std::endl;
-
     check_normalized(points);
 
     PC queries;
     char *qFile = P.getOptionValue("-q");
-    if (qFile != nullptr) {
-        std::cout << "Loading Query PointCloud from: " << qFile << std::endl;
-        queries = PC(qFile);
-        std::cout << "Loaded " << queries.size() << " query point clouds" << std::endl;
+    if (qFile == nullptr) {
+        std::cout << "Error: Query file not specified. Use -q <file>" << std::endl;
+        return;
     }
+    std::cout << "Loading Query PointCloud from: " << qFile << std::endl;
+    queries = PC(qFile);
+    std::cout << "Loaded " << queries.size() << " query point clouds" << std::endl;
+    check_normalized(queries);
 
     bool use_rabitq = P.getOption("-rabitq");
     constexpr bool Metric = ChPoint::is_metric();
@@ -192,15 +194,15 @@ void run_microbenchmark(mvsic::commandLine &P) {
     if (use_rabitq) {
         uint32_t rbits = P.getOptionIntValue("-rbits", 8);
         std::cout << "Training RaBitQ with bits=" << rbits << std::endl;
-        
+
         using RaBitQ_Range = rabitq::Quantized_Point_Range<FlattenedPCRange<PC>, Metric>;
         using RaBitQ_Set = Quantized_Point_Cloud_Set<RaBitQ_Range, Metric>;
-        
+
         parlay::internal::timer t;
         t.start();
         RaBitQ_Set q_db(points, rbits);
         std::cout << "RaBitQ Training and Encoding completed in " << t.next_time() << "s" << std::endl;
-        
+
         if (qFile != nullptr) {
             run_quantizer_bench<RaBitQ_Set, PC, ChPoint>(P, q_db, points, queries);
         }
@@ -247,6 +249,6 @@ int main(int argc, char** argv) {
         using ChPoint = ChamferIP_Point;
         run_microbenchmark<ChPoint>(P);
     }
-    
+
     return 0;
 }
