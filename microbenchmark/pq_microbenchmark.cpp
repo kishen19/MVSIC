@@ -86,6 +86,39 @@ void run_microbenchmark(mvsic::commandLine &P) {
         auto queries = PC(qFile);
         std::cout << "Loaded " << queries.size() << " query point clouds" << std::endl;
 
+        if (queries.size() > 0 && points.size() > 0) {
+             std::cout << "Demonstrating single vector-vector distance computation:" << std::endl;
+             // Quantize the first query point cloud
+             auto q_query_0 = q_db.quantize_query(queries[0]);
+             
+             // Get the first quantized vector from this query
+             if (q_query_0.vec_queries.size() > 0) {
+                 auto q_vec = q_query_0.vec_queries[0];
+                 
+                 // Get the first database point cloud
+                 auto db_cloud = q_db[0];
+                 
+                 // Get the first quantized vector from this DB cloud
+                 if (db_cloud.size() > 0) {
+                     auto db_vec = db_cloud[0];
+                     
+                     // Compute distance
+                     float dist = q_vec.distance(db_vec);
+                     std::cout << "  Quantized Distance (Query[0].Vec[0] <-> DB[0].Vec[0]): " << dist << std::endl;
+
+                     // Compute true distance
+                     auto true_q_vec = queries[0][0];
+                     auto true_db_vec = points[0][0];
+                     float true_dist = true_q_vec.distance(true_db_vec);
+                     std::cout << "  True Distance      (Query[0].Vec[0] <-> DB[0].Vec[0]): " << true_dist << std::endl;
+                 } else {
+                     std::cout << "  DB Cloud[0] is empty." << std::endl;
+                 }
+             } else {
+                 std::cout << "  Query Cloud[0] is empty." << std::endl;
+             }
+        }
+
         std::cout << "Microbenchmarking PQ query quantization..." << std::endl;
         t.start();
         for (size_t i = 0; i < queries.size(); ++i) {
