@@ -3,6 +3,9 @@
 #include <string>
 #include <cmath>
 #include <atomic>
+#include <algorithm>
+#include <unordered_set>
+#include <utility>
 
 #include "parlay/parallel.h"
 
@@ -88,36 +91,99 @@ void run_microbenchmark(mvsic::commandLine &P) {
 
         if (queries.size() > 0 && points.size() > 0) {
              std::cout << "Demonstrating single vector-vector distance computation:" << std::endl;
-             // Quantize the first query point cloud
              auto q_query_0 = q_db.quantize_query(queries[0]);
-             
-             // Get the first quantized vector from this query
              if (q_query_0.vec_queries.size() > 0) {
                  auto q_vec = q_query_0.vec_queries[0];
-                 
-                 // Get the first database point cloud
                  auto db_cloud = q_db[0];
-                 
-                 // Get the first quantized vector from this DB cloud
                  if (db_cloud.size() > 0) {
                      auto db_vec = db_cloud[0];
-                     
-                     // Compute distance
                      float dist = q_vec.distance(db_vec);
                      std::cout << "  Quantized Distance (Query[0].Vec[0] <-> DB[0].Vec[0]): " << dist << std::endl;
-
-                     // Compute true distance
                      auto true_q_vec = queries[0][0];
                      auto true_db_vec = points[0][0];
                      float true_dist = true_q_vec.distance(true_db_vec);
                      std::cout << "  True Distance      (Query[0].Vec[0] <-> DB[0].Vec[0]): " << true_dist << std::endl;
-                 } else {
-                     std::cout << "  DB Cloud[0] is empty." << std::endl;
                  }
-             } else {
-                 std::cout << "  Query Cloud[0] is empty." << std::endl;
              }
         }
+
+        // K' Metric Calculation
+        size_t top_k = P.getOptionIntValue("-top_k", 10);
+        size_t num_eval = P.getOptionIntValue("-num_eval", 100);
+
+        if (queries.size() > 0 && points.size() > 0) {
+            std::cout << "\nCalculating Average K' for top " << top_k
+                      << " neighbors (evaluating first " << num_eval << " query vectors)..." << std::endl;
+
+            size_t num_db_vecs = points.total_size();
+            float* db_data = points.data();
+            uint32_t dims = points.get_dims();
+
+            using VecType = decltype(std::declval<ChPoint>()[0]);
+
+            std::atomic<size_t> total_k_prime(0);
+            size_t processed_queries = 0;
+
+            for (size_t i = 0; i < queries.size(); ++i) {
+                if (processed_queries >= num_eval) break;
+
+                auto q_query_cloud = q_db.quantize_query(queries[i]);
+                size_t num_vecs = queries[i].size();
+
+                for (size_t j = 0; j < num_vecs; ++j) {
+                    if (processed_queries >= num_eval) break;
+                    processed_queries++;
+
+                    // 1. True Distances
+                    auto true_q_vec = queries[i][j];
+                    std::vector<std::pair<float, size_t>> true_dists(num_db_vecs);
+
+                    parlay::parallel_for(0, num_db_vecs, [&](size_t k) {
+                        VecType db_vec(db_data + k * dims, dims, dims, k);
+                        true_dists[k] = {true_q_vec.distance(db_vec), k};
+                    });
+
+                    std::nth_element(true_dists.begin(), true_dists.begin() + top_k, true_dists.end());
+                    std::unordered_set<size_t> true_nn_indices;
+                    for(size_t k=0; k<top_k; ++k) {
+                      true_nn_indices.insert(true_dists[k].second);
+                    }
+
+                    // 2. Quantized Distances
+                    auto q_vec_lut = q_query_cloud.vec_queries[j];
+                    std::vector<std::pair<float, size_t>> q_dists(num_db_vecs);
+
+                    parlay::parallel_for(0, num_db_vecs, [&](size_t k) {
+                        auto q_db_point = q_db.vec_quantizer[k];
+                        q_dists[k] = {q_vec_lut.distance(q_db_point), k};
+                    });
+
+                    std::sort(q_dists.begin(), q_dists.end());
+
+                    // 3. Find K'
+                    size_t current_k_prime = 0;
+                    size_t found_count = 0;
+                    for (size_t k = 0; k < num_db_vecs; ++k) {
+                        if (true_nn_indices.count(q_dists[k].second)) {
+                            current_k_prime = k + 1;
+                            found_count++;
+                            if (found_count == top_k) break;
+                        }
+                    }
+                    total_k_prime = total_k_prime + current_k_prime;
+
+                    if (processed_queries % 10 == 0) {
+                         std::cout << "Processed " << processed_queries << "/" << num_eval << " vectors..." << std::endl;
+                    }
+                }
+            }
+            if (processed_queries > 0) {
+                double avg_k_prime = (double)total_k_prime / processed_queries;
+                std::cout << "Average K': " << avg_k_prime << std::endl;
+            }
+        }
+
+        std::cout << "Total vectors: " << points.total_size() << std::endl;
 
         std::cout << "Microbenchmarking PQ query quantization..." << std::endl;
         t.start();
@@ -128,14 +194,16 @@ void run_microbenchmark(mvsic::commandLine &P) {
             }
         }
         double total_time = t.next_time();
-        std::cout << "Quantized " << queries.size() << " queries in " << total_time << "s (" 
+        std::cout << "Quantized " << queries.size() << " queries in " << total_time << "s ("
                   << (queries.size() / total_time) << " queries/s)" << std::endl;
     }
 }
+
 int main(int argc, char** argv) {
     mvsic::commandLine P(argc, argv,
                        "[-i <inFile>] [-q <qFile>] [-mm] [-dist_func <IP|L2>] "
-                       "[-m <blocks>] [-k <clusters>] [-s <subsample>]");
+                       "[-m <blocks>] [-k <clusters>] [-s <subsample>] "
+                       "[-top_k <K>] [-num_eval <N>]");
 
     std::string df = P.getOptionValue("-dist_func", "IP");
 
@@ -152,6 +220,6 @@ int main(int argc, char** argv) {
         using ChPoint = ChamferIP_Point;
         run_microbenchmark<ChPoint>(P);
     }
-    
+
     return 0;
 }
