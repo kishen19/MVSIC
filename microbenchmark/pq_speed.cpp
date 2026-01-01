@@ -28,7 +28,7 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
     size_t n_queries = queries.total_size();
     size_t n_db = points.total_size();
     uint32_t dims = points.get_dims();
-    
+
     std::cout << "\nPreparing for Speed Benchmark..." << std::endl;
     std::cout << "Total Database Vectors: " << n_db << std::endl;
     std::cout << "Total Query Vectors: " << n_queries << std::endl;
@@ -43,12 +43,12 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
             flat_queries.push_back(queries[i][j]);
         }
     }
-    
+
     // 2. Flatten Queries (Quantized)
     using QQueryType = typename std::remove_reference<decltype(q_db.quantize_query(queries[0]).vec_queries[0])>::type;
     std::vector<QQueryType> flat_q_queries;
     flat_q_queries.reserve(n_queries);
-    
+
     // Pre-quantize queries
     for(size_t i=0; i<queries.size(); ++i) {
         auto q_query_cloud = q_db.quantize_query(queries[i]);
@@ -59,15 +59,15 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
 
     // Benchmark Parameters
     // We want at least ~100M comparisons to get a stable reading
-    size_t target_ops = 200000000; 
+    size_t target_ops = 200000000;
     size_t limit_q = flat_queries.size();
-    
+
     // Adjust limit_q if n_db is large enough to avoid running too long
     if (n_db > 0) {
         size_t needed_q = std::max((size_t)1, target_ops / n_db);
         if (needed_q < limit_q) limit_q = needed_q;
     }
-    
+
     std::cout << "Benchmarking with " << limit_q << " queries against " << n_db << " database vectors." << std::endl;
     std::cout << "Total comparisons per run: " << (limit_q * n_db) << std::endl;
 
@@ -76,7 +76,7 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
     {
         float* db_data = points.data();
         parlay::internal::timer t;
-        
+
         // Warmup
         for(size_t i=0; i<std::min(limit_q, (size_t)10); ++i) {
              const auto& q = flat_queries[i];
@@ -90,7 +90,7 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
 
         t.start();
         std::atomic<size_t> dummy_counter(0);
-        
+
         for(size_t i=0; i<limit_q; ++i) {
              const auto& q = flat_queries[i];
              float local_sum = 0;
@@ -98,13 +98,13 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
                  VecType db_vec(db_data + j * dims, dims, dims, j);
                  local_sum += q.distance(db_vec);
              }
-             if (local_sum > 1e10) dummy_counter++; 
+             if (local_sum > 1e10) dummy_counter++;
         }
-        
+
         double elapsed = t.next_time();
         double ops = (double)limit_q * n_db;
         double qps = ops / elapsed;
-        
+
         std::cout << "Time: " << elapsed << " s" << std::endl;
         std::cout << "Throughput: " << std::fixed << std::setprecision(2) << (qps / 1e6) << " M ops/sec" << std::endl;
         std::cout << "Latency: " << (elapsed * 1e9 / ops) << " ns/op" << std::endl;
@@ -115,7 +115,7 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
     {
         auto& quantizer = q_db.vec_quantizer;
         parlay::internal::timer t;
-        
+
         // Warmup
         for(size_t i=0; i<std::min(limit_q, (size_t)10); ++i) {
              const auto& q = flat_q_queries[i];
@@ -141,11 +141,11 @@ void run_speed_bench(mvsic::commandLine &P, const QuantizedSet& q_db, const PC& 
         double elapsed = t.next_time();
         double ops = (double)limit_q * n_db;
         double qps = ops / elapsed;
-        
+
         std::cout << "Time: " << elapsed << " s" << std::endl;
         std::cout << "Throughput: " << std::fixed << std::setprecision(2) << (qps / 1e6) << " M ops/sec" << std::endl;
         std::cout << "Latency: " << (elapsed * 1e9 / ops) << " ns/op" << std::endl;
-        
+
         // Calculate Speedup
         // Note: Can't calculate speedup relative to unquantized easily here without saving previous result
         // but user can see it.
@@ -165,7 +165,7 @@ void run_speed_main(mvsic::commandLine &P) {
 
     std::cout << "Loading PointCloud from: " << inFile << " (mmap: " << is_mmap << ")" << std::endl;
     auto points = PC(inFile, is_mmap);
-    
+
     PC queries;
     char *qFile = P.getOptionValue("-q");
     if (qFile == nullptr) {
@@ -179,12 +179,12 @@ void run_speed_main(mvsic::commandLine &P) {
     constexpr bool Metric = ChPoint::is_metric();
 
     if (use_rabitq) {
-        uint32_t rbits = P.getOptionIntValue("-rbits", 8);
+        uint32_t rbits = P.getOptionIntValue("-rbits", 1);
         std::cout << "Training RaBitQ with bits=" << rbits << std::endl;
-        
+
         using RaBitQ_Range = rabitq::Quantized_Point_Range<FlattenedPCRange<PC>, Metric>;
         using RaBitQ_Set = Quantized_Point_Cloud_Set<RaBitQ_Range, Metric>;
-        
+
         RaBitQ_Set q_db(points, rbits);
         run_speed_bench<RaBitQ_Set, PC, ChPoint>(P, q_db, points, queries);
 
@@ -223,6 +223,6 @@ int main(int argc, char** argv) {
         using ChPoint = ChamferIP_Point;
         run_speed_main<ChPoint>(P);
     }
-    
+
     return 0;
 }
