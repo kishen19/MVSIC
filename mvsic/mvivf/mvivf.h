@@ -11,7 +11,7 @@
 #include "mvsic/core/utils/util.h"
 #include "mvsic/core/distance_measures/many_to_many.h"
 
-// New Quantization & Wrapper Headers
+// Quantization Headers
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/scann.h"
