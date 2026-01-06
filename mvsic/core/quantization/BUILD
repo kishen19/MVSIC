@@ -29,7 +29,6 @@ cc_library(
     hdrs = ["rabitq.h"],
     # ENABLE AVX512 FLAGS HERE
     copts = [
-        "-march=native",
         "-mavx512f",
         "-mavx512vpopcntdq",
     ],

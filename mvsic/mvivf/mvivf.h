@@ -4,6 +4,8 @@
 #include <set>
 #include <optional>
 
+#include "absl/container/btree_set.h"
+
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
 #include "mvsic/core/utils/util.h"
@@ -43,6 +45,7 @@ class IndexMVIVF : public Index<metric> {
   using ScaNN_Set = Quantized_Point_Cloud_Set<pq::ScaNN_Point_Range<FlatRange, metric>, metric>;
   using QT = IndexParams::QuantizerType;
 
+  // kmeans tree nodes
   struct node_t {
     parlay::sequence<node_t *> children;
     // For internal nodes: data = centers of children
@@ -58,6 +61,7 @@ class IndexMVIVF : public Index<metric> {
   node_t *root = nullptr;  // Root of the k-means tree
 
   // Quantizer Storage
+  // TODO: optimize this by using std::variant
   std::optional<PQ_Set> quantizer_pq;
   std::optional<RaBitQ_Set> quantizer_rabitq;
   std::optional<ScaNN_Set> quantizer_scann;
@@ -142,9 +146,10 @@ class IndexMVIVF : public Index<metric> {
   struct GreedySearchResult {
     parlay::sequence<std::pair<float, node_t *>> probe_list;
     size_t dist_cmps_step1 = 0;
-    double time_step1_sec = 0.0;
+    double time_step1 = 0.0;
   };
 
+  // Simple Beam Search using std::set
   GreedySearchResult greedy_search(const ChPoint &query, size_t nprobes) const {
     using score_node = std::pair<float, node_t *>;
     auto less = [](const score_node &a, const score_node &b) {
@@ -154,85 +159,40 @@ class IndexMVIVF : public Index<metric> {
     parlay::internal::timer t;
     t.start();
 
-    // expand_heap is a MIN-heap on distance, implemented as a MAX-heap on (-dist)
-    // store (neg_dist, node*)
-    std::vector<score_node> expand_heap;
-    expand_heap.reserve(beam_length * 2 + 1024);
-    // beam_heap is a MAX-heap on distance (worst dist at top)
-    std::vector<score_node> beam_heap;
-    beam_heap.reserve(beam_length + 8);
-    std::vector<score_node> probe_vec;
-    probe_vec.reserve(std::max<size_t>(nprobes * 4, 1024));
-    std::vector<std::pair<uint32_t, float>> child_dists;  // scratch
-    auto expand_cmp = [](const score_node &a, const score_node &b) {
-      // heap largest first; we want smallest dist => largest (-dist)
-      return a.first < b.first;
-    };
-    auto beam_cmp = [](const score_node &a, const score_node &b) {
-      // heap largest dist first
-      return a.first < b.first;
-    };
-    auto beam_threshold = [&]() -> float {
-      if (beam_heap.size() < beam_length) return std::numeric_limits<float>::infinity();
-      return beam_heap.front().first;  // worst (largest) dist
-    };
-    auto try_push_internal = [&](float dist, node_t *node) {
-      float thr = beam_threshold();
-      if (beam_heap.size() < beam_length || dist < thr) {
-        // maintain bounded max-heap (beam)
-        beam_heap.emplace_back(dist, node);
-        std::push_heap(beam_heap.begin(), beam_heap.end(), beam_cmp);
-        if (beam_heap.size() > beam_length) {
-          std::pop_heap(beam_heap.begin(), beam_heap.end(), beam_cmp);
-          beam_heap.pop_back();
-        }
-        // push to expansion heap as (-dist, node)
-        expand_heap.emplace_back(-dist, node);
-        std::push_heap(expand_heap.begin(), expand_heap.end(), expand_cmp);
-      }
-    };
     size_t dist_cmps = 0;
-    // Seed root at distance 0
-    try_push_internal(0.0f, root);
+    std::set<score_node> beam;
+    std::vector<score_node> probe_vec;                    // To collect leaf nodes
+    std::vector<std::pair<uint32_t, float>> child_dists;  // Scratch memory
 
-    while (!expand_heap.empty()) {
-      // pop best (min dist) => pop largest (-dist)
-      std::pop_heap(expand_heap.begin(), expand_heap.end(), expand_cmp);
-      score_node cur = expand_heap.back();
-      expand_heap.pop_back();
+    // Initial seed
+    beam.insert({0.0f, root});
 
-      float cur_dist = -cur.first;
-      node_t *cur_node = cur.second;
-
-      // Skip stale entries
-      float thr = beam_threshold();
-      if (beam_heap.size() >= beam_length && cur_dist > thr) continue;
-
-      auto &centers = cur_node->data;
-      auto &children = cur_node->children;
+    while (!beam.empty()) {
+      // Pop the best node (smallest distance)
+      auto it = beam.begin();
+      score_node best = *it;
+      beam.erase(it);
+      node_t *current_node = best.second;
+      auto &children = current_node->children;
+      auto &centers = current_node->data;
       if (children.empty()) continue;
-
-      // distances to children (in centers order)
+      // Compute distances to children
       child_dists.resize(centers.size());
-      size_t d_c = centers.distances_naive(query, child_dists.data());
-      dist_cmps += d_c;
-
-      const size_t deg = children.size();
-      for (size_t i = 0; i < deg; ++i) {
-        node_t *child = children[i];
+      dist_cmps += centers.distances_naive(query, child_dists.data());
+      for (size_t i = 0; i < children.size(); ++i) {
         float d = child_dists[i].second;
+        node_t *child = children[i];
         if (child->children.empty()) {
-          probe_vec.emplace_back(d, child);
-          // Keep leaf candidates bounded to avoid huge sorts
-          if (probe_vec.size() > nprobes * 8) {
-            size_t keep = std::min(probe_vec.size(), nprobes * 4);
-            if (keep < probe_vec.size()) {  // critical: nth must be < end()
-              std::nth_element(probe_vec.begin(), probe_vec.begin() + keep, probe_vec.end(), less);
-              probe_vec.resize(keep);
+          // It's a leaf node: add to probe candidates
+          probe_vec.push_back({d, child});
+        } else {
+          // Internal node: add to beam if it's better than the current worst
+          if (beam.size() < beam_length || d < beam.rbegin()->first) {
+            beam.insert({d, child});
+            if (beam.size() > beam_length) {
+              beam.erase(std::prev(beam.end()));  // Prune the farthest node
             }
           }
-        } else {
-          try_push_internal(d, child);
         }
       }
     }
@@ -245,8 +205,7 @@ class IndexMVIVF : public Index<metric> {
 
     GreedySearchResult out;
     out.dist_cmps_step1 = dist_cmps;
-    out.time_step1_sec = t.stop();
-
+    out.time_step1 = t.stop();
     out.probe_list = parlay::sequence<score_node>::from_function(
         probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
     return out;
@@ -268,7 +227,7 @@ class IndexMVIVF : public Index<metric> {
     auto gs = greedy_search(query, nprobes);
     auto probe_list = std::move(gs.probe_list);
     dist_cmps += gs.dist_cmps_step1;
-    timings.push_back(gs.time_step1_sec);
+    timings.push_back(gs.time_step1);
 
     // -------------------------
     // Step 2: Probe clusters in probe_list
@@ -627,6 +586,184 @@ class IndexMVIVF : public Index<metric> {
       delete root;
     }
   }
+  // // Greedy Search to find top nprobes leaf nodes
+  // GreedySearchResult greedy_search_heaps(const ChPoint &query, size_t nprobes) const {
+  //   using score_node = std::pair<float, node_t *>;
+  //   auto less = [](const score_node &a, const score_node &b) {
+  //     return a.first < b.first || (a.first == b.first && a.second < b.second);
+  //   };
+  //   const size_t beam_length = 2 * nprobes;
+  //   parlay::internal::timer t;
+  //   t.start();
+
+  //   // expand_heap is a MIN-heap on distance, implemented as a MAX-heap on (-dist)
+  //   // store (neg_dist, node*)
+  //   std::vector<score_node> expand_heap;
+  //   expand_heap.reserve(beam_length * 2 + 1024);
+  //   // beam_heap is a MAX-heap on distance (worst dist at top)
+  //   std::vector<score_node> beam_heap;
+  //   beam_heap.reserve(beam_length + 8);
+  //   // Output
+  //   std::vector<score_node> probe_vec;
+  //   probe_vec.reserve(std::max<size_t>(nprobes * 4, 1024));
+  //   std::vector<std::pair<uint32_t, float>> child_dists;  // scratch
+  //   auto expand_cmp = [](const score_node &a, const score_node &b) {
+  //     // heap largest first; we want smallest dist => largest (-dist)
+  //     return a.first < b.first;
+  //   };
+  //   auto beam_cmp = [](const score_node &a, const score_node &b) {
+  //     // heap largest dist first
+  //     return a.first < b.first;
+  //   };
+  //   auto beam_threshold = [&]() -> float {
+  //     if (beam_heap.size() < beam_length) return std::numeric_limits<float>::infinity();
+  //     return beam_heap.front().first;  // worst (largest) dist
+  //   };
+  //   auto try_push_internal = [&](float dist, node_t *node) {
+  //     float thr = beam_threshold();
+  //     if (beam_heap.size() < beam_length || dist < thr) {
+  //       // maintain bounded max-heap (beam)
+  //       beam_heap.emplace_back(dist, node);
+  //       std::push_heap(beam_heap.begin(), beam_heap.end(), beam_cmp);
+  //       if (beam_heap.size() > beam_length) {
+  //         std::pop_heap(beam_heap.begin(), beam_heap.end(), beam_cmp);
+  //         beam_heap.pop_back();
+  //       }
+  //       // push to expansion heap as (-dist, node)
+  //       expand_heap.emplace_back(-dist, node);
+  //       std::push_heap(expand_heap.begin(), expand_heap.end(), expand_cmp);
+  //     }
+  //   };
+  //   size_t dist_cmps = 0;
+  //   // Seed root at distance 0
+  //   try_push_internal(0.0f, root);
+
+  //   while (!expand_heap.empty()) {
+  //     // pop best (min dist) => pop largest (-dist)
+  //     std::pop_heap(expand_heap.begin(), expand_heap.end(), expand_cmp);
+  //     score_node cur = expand_heap.back();
+  //     expand_heap.pop_back();
+
+  //     float cur_dist = -cur.first;
+  //     node_t *cur_node = cur.second;
+
+  //     // Skip stale entries
+  //     float thr = beam_threshold();
+  //     if (beam_heap.size() >= beam_length && cur_dist > thr) continue;
+
+  //     auto &centers = cur_node->data;
+  //     auto &children = cur_node->children;
+  //     if (children.empty()) continue;
+
+  //     // distances to children (in centers order)
+  //     child_dists.resize(centers.size());
+  //     size_t d_c = centers.distances_naive(query, child_dists.data());
+  //     dist_cmps += d_c;
+
+  //     const size_t deg = children.size();
+  //     for (size_t i = 0; i < deg; ++i) {
+  //       node_t *child = children[i];
+  //       float d = child_dists[i].second;
+  //       if (child->children.empty()) {
+  //         probe_vec.emplace_back(d, child);
+  //         // Keep leaf candidates bounded to avoid huge sorts
+  //         if (probe_vec.size() > nprobes * 8) {
+  //           size_t keep = std::min(probe_vec.size(), nprobes * 4);
+  //           if (keep < probe_vec.size()) {  // critical: nth must be < end()
+  //             std::nth_element(probe_vec.begin(), probe_vec.begin() + keep, probe_vec.end(),
+  //             less); probe_vec.resize(keep);
+  //           }
+  //         }
+  //       } else {
+  //         try_push_internal(d, child);
+  //       }
+  //     }
+  //   }
+  //   // Finalize probes: take best nprobes leaves
+  //   if (probe_vec.size() > nprobes) {
+  //     std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
+  //     probe_vec.resize(nprobes);
+  //   }
+  //   parlay::sort_inplace(probe_vec, less);
+
+  //   GreedySearchResult out;
+  //   out.dist_cmps_step1 = dist_cmps;
+  //   out.time_step1 = t.stop();
+
+  //   out.probe_list = parlay::sequence<score_node>::from_function(
+  //       probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
+  //   return out;
+  // }
+
+  // // Greedy Search using Abseil B-Tree Set
+  // GreedySearchResult greedy_search_absl(const ChPoint &query, size_t nprobes) const {
+  //   using score_node = std::pair<float, node_t *>;
+  //   auto less = [](const score_node &a, const score_node &b) {
+  //     return a.first < b.first || (a.first == b.first && a.second < b.second);
+  //   };
+
+  //   const size_t beam_length = 2 * nprobes;
+  //   parlay::internal::timer t;
+  //   t.start();
+
+  //   size_t dist_cmps = 0;
+  //   // B-tree set: The best of both worlds for N=2048
+  //   absl::btree_set<score_node, decltype(less)> beam(less);
+  //   std::vector<score_node> probe_vec;
+  //   probe_vec.reserve(nprobes * 4);
+  //   std::vector<std::pair<uint32_t, float>> child_dists;
+
+  //   beam.insert({0.0f, root});
+
+  //   while (!beam.empty()) {
+  //     // Pop the best node
+  //     auto it = beam.begin();
+  //     score_node best = *it;
+  //     beam.erase(it);
+
+  //     node_t *current_node = best.second;
+  //     if (current_node->children.empty()) continue;
+
+  //     auto &centers = current_node->data;
+  //     auto &children = current_node->children;
+
+  //     child_dists.resize(centers.size());
+  //     dist_cmps += centers.distances_naive(query, child_dists.data());
+
+  //     for (size_t i = 0; i < children.size(); ++i) {
+  //       float d = child_dists[i].second;
+  //       node_t *child = children[i];
+
+  //       if (child->children.empty()) {
+  //         probe_vec.emplace_back(d, child);
+  //       } else {
+  //         // Pruning logic
+  //         if (beam.size() < beam_length || d < beam.rbegin()->first) {
+  //           beam.insert({d, child});
+  //           if (beam.size() > beam_length) {
+  //             // Constant time or very fast leaf removal in B-tree
+  //             beam.erase(std::prev(beam.end()));
+  //           }
+  //         }
+  //       }
+  //     }
+  //   }
+
+  //   // Finalize probes
+  //   if (probe_vec.size() > nprobes) {
+  //     std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
+  //     probe_vec.resize(nprobes);
+  //   }
+  //   parlay::sort_inplace(probe_vec, less);
+
+  //   GreedySearchResult out;
+  //   out.dist_cmps_step1 = dist_cmps;
+  //   out.time_step1 = t.stop();
+  //   out.probe_list = parlay::sequence<score_node>::from_function(
+  //       probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
+
+  //   return out;
+  // }
 };
 
 using IndexMVIVFL2 = IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)

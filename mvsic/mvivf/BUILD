@@ -12,6 +12,7 @@ cc_library(
         "//mvsic/core/quantization:scann",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/utils:util",
+        "@com_google_absl//absl/container:btree",
     ],
 )
 
