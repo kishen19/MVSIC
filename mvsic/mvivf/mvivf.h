@@ -228,6 +228,7 @@ class IndexMVIVF : public Index<metric> {
     auto probe_list = std::move(gs.probe_list);
     dist_cmps += gs.dist_cmps_step1;
     timings.push_back(gs.time_step1);
+    nprobes = std::min(nprobes, probe_list.size());
 
     // -------------------------
     // Step 2: Probe clusters in probe_list
