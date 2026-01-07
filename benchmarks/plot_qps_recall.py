@@ -7,17 +7,10 @@ import seaborn as sns
 import yaml
 
 
-def plot_qps_vs_recall(config_path, affix=""):
+def generate_plot_for_dataset(dataset_config, k, results_to_plot, experiment_name, affix=""):
     """
-    Generates QPS vs. Recall plots from benchmark results based on a specific pathing convention.
+    Generates a QPS vs. Recall plot for a single dataset.
     """
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-
-    dataset_config = config['dataset']
-    k = config['k']
-    results_to_plot = config['results']
-
     dataset_name = dataset_config['name']
     base_results_dir = dataset_config['results']
 
@@ -119,14 +112,36 @@ def plot_qps_vs_recall(config_path, affix=""):
 
     # --- Save Plot ---
     affix_str = "" if len(affix) == 0 else f"{affix}_"
+    output_dir = f"./results/{experiment_name}"
+    os.makedirs(output_dir, exist_ok=True)
     output_filename = (
-        f"./results/plots/QPS_v_Recall/{affix_str}{dataset_name}_k={k}_qps_vs_recall.pdf"
+        f"{output_dir}/{affix_str}{dataset_name}_k={k}_qps_vs_recall.pdf"
     )
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     print(f"\nSaving plot to: {output_filename}")
     fig.savefig(output_filename)
     plt.close(fig)
+
+
+def plot_qps_vs_recall(config_path, affix=""):
+    """
+    Generates QPS vs. Recall plots from benchmark results based on a specific pathing convention.
+    """
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+
+    experiment_name = config.get('name', 'plots')
+
+    dataset_configs = config.get('datasets') or [config.get('dataset')]
+    if not dataset_configs or dataset_configs == [None]:
+        raise ValueError("No 'datasets' or 'dataset' key found in the config file.")
+
+    k = config['k']
+    results_to_plot = config['results']
+
+    for dataset_config in dataset_configs:
+        generate_plot_for_dataset(dataset_config, k, results_to_plot, experiment_name, affix)
 
 
 def main():

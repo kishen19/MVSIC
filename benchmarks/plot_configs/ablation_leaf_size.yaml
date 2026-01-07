@@ -1,0 +1,27 @@
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    results: results/beir/arguana
+  - name: quora
+    path: data/beir/quora
+    results: results/beir/quora
+  # - name: science_forum
+  #   path: data/lotte/dev/science
+  #   results: results/lotte/dev/science_forum
+  - name: tatdqa
+    path: data/vidore/tatdqa
+    results: results/vidore/tatdqa
+
+
+k: 10
+
+results:
+  - ["mvivf", "mvivf_50", ""]
+  - ["mvivf", "mvivf_100", ""]
+  - ["mvivf", "mvivf_150", ""]
+  - ["mvivf", "mvivf_200", ""]
+  - ["mvivf", "mvivf_250", ""]
+  - ["mvivf", "mvivf_300", ""]
+  - ["mvivf", "mvivf_400", ""]
+  - ["mvivf", "mvivf_500", ""]
+  - ["mvivf", "mvivf_1000", ""]
