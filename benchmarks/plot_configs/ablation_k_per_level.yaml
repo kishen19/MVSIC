@@ -1,4 +1,4 @@
-name: ablation_leaf_size
+name: ablation_k_per_level
 
 datasets:
   - name: arguana
@@ -21,12 +21,11 @@ datasets:
 k: 10
 
 results:
-  - ["mvivf", "mvivf_50", ""]
-  - ["mvivf", "mvivf_100", ""]
-  - ["mvivf", "mvivf_150", ""]
-  - ["mvivf", "mvivf_200", ""]
-  - ["mvivf", "mvivf_250", ""]
-  - ["mvivf", "mvivf_300", ""]
-  - ["mvivf", "mvivf_400", ""]
   - ["mvivf", "mvivf_500", ""]
-  - ["mvivf", "mvivf_1000", ""]
+  - ["mvivf", "mvivf_2_500", ""]
+  - ["mvivf", "mvivf_10_500", ""]
+  - ["mvivf", "mvivf_20_500", ""]
+  - ["mvivf", "mvivf_50_500", ""]
+  - ["mvivf", "mvivf_100_500", ""]
+  - ["mvivf", "mvivf_150_500", ""]
+  - ["mvivf", "mvivf_200_500", ""]

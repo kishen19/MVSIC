@@ -1,65 +1,72 @@
 import argparse
 import os
-
-import matplotlib.pyplot as plt
-import pandas as pd
-import seaborn as sns
 import yaml
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 def generate_plot_for_dataset(dataset_config, k, results_to_plot, experiment_name, affix=""):
     """
-    Generates a QPS vs. Recall plot for a single dataset.
+    Generates a beautified QPS vs. Recall plot using the original data logic.
     """
     dataset_name = dataset_config['name']
     base_results_dir = dataset_config['results']
 
     print(f"--- Generating plots for dataset: {dataset_name} (k={k}) ---")
 
-    # --- Setup Plots ---
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, axes = plt.subplots(2, 2, figsize=(20, 14))
-    fig.suptitle(f'QPS vs. Recall for {dataset_name} (k={k})', fontsize=16)
+    # --- Setup Scientific Styling ---
+    # Using a clean serif font and high-resolution settings
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "DejaVu Serif"],
+            "axes.labelsize": 18,
+            "font.size": 16,
+            "legend.fontsize": 14,
+            "xtick.labelsize": 14,
+            "ytick.labelsize": 14,
+            "lines.linewidth": 2.5,
+            "lines.markersize": 10,
+            "figure.titlesize": 22,
+        }
+    )
 
-    # Define the four plots to generate
-    # Use literal column names 'recall_1_k' and 'recall_k_k' as found in the CSV
+    fig, axes = plt.subplots(2, 2, figsize=(18, 16))
+    fig.suptitle(f'QPS vs. Recall for {dataset_name} ($k={k}$)', fontweight='bold')
+
+    # Colorblind-friendly high-contrast palette
+    palette = sns.color_palette("bright", len(results_to_plot))
+    markers = ['o', 's', 'X', 'D', '^', 'v', '<', '>']
+    linestyles = ['-', '--', '-.', ':']
+
     plot_configs = [
         {'ax': axes[0, 0], 'x': 'recall_1_k', 'y': 'QPS_seq', 'title': f'QPS_seq vs. Recall 1@{k}'},
-        {
-            'ax': axes[0, 1],
-            'x': 'recall_k_k',
-            'y': 'QPS_seq',
-            'title': f'QPS_seq vs. Recall {k}@{k}',
-        },
+        {'ax': axes[0, 1], 'x': 'recall_k_k', 'y': 'QPS_seq', 'title': f'QPS_seq vs. Recall {k}@{k}'},
         {'ax': axes[1, 0], 'x': 'recall_1_k', 'y': 'QPS_par', 'title': f'QPS_par vs. Recall 1@{k}'},
-        {
-            'ax': axes[1, 1],
-            'x': 'recall_k_k',
-            'y': 'QPS_par',
-            'title': f'QPS_par vs. Recall {k}@{k}',
-        },
+        {'ax': axes[1, 1], 'x': 'recall_k_k', 'y': 'QPS_par', 'title': f'QPS_par vs. Recall {k}@{k}'},
     ]
 
+    # Initialize subplots with grids and labels
     for p_config in plot_configs:
-        p_config['ax'].set_xlabel('Recall')
-        p_config['ax'].set_ylabel('QPS')
-        p_config['ax'].set_title(p_config['title'])
-        p_config['ax'].set_yscale('log')
-        p_config['ax'].grid(True, which="both", ls="--")
+        ax = p_config['ax']
+        ax.set_xlabel('Recall', labelpad=10)
+        ax.set_ylabel('QPS', labelpad=10)
+        ax.set_title(p_config['title'], pad=15)
+        ax.set_yscale('log')
+        ax.grid(True, which="major", linestyle='-', alpha=0.4, color='gray')
+        ax.grid(True, which="minor", linestyle=':', alpha=0.2, color='gray')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
 
-    # --- Load and Plot Results ---
-    all_data = []
-    for result_info in results_to_plot:
+    # --- Load and Plot Data ---
+    lines = []
+    labels = []
+
+    for i, result_info in enumerate(results_to_plot):
         method, build_name, search_variant = result_info
-
-        # Construct the specific path to the results file
         search_dir = os.path.join(base_results_dir, method, build_name, f"k={k}")
-
-        if search_variant == "":
-            result_filename = "results.csv"
-        else:
-            result_filename = f"{search_variant}_results.csv"
-
+        result_filename = f"{search_variant}_results.csv" if search_variant else "results.csv"
         result_path = os.path.join(search_dir, result_filename)
 
         if not os.path.exists(result_path):
@@ -69,70 +76,70 @@ def generate_plot_for_dataset(dataset_config, k, results_to_plot, experiment_nam
         print(f"  Loading results from: {result_path}")
         try:
             df = pd.read_csv(result_path)
+            label = f"{method}_{build_name}" + (f"_{search_variant}" if search_variant else "")
 
-            # Create a label for the plot legend
-            label = f"{method}_{build_name}"
-            if search_variant:
-                label += f"_{search_variant}"
-
-            # Sort by recall for a clean line plot
+            # Original sorting logic
             sort_col = 'recall_k_k'
             if sort_col in df.columns:
                 df = df.sort_values(by=sort_col).reset_index(drop=True)
 
-            all_data.append({'df': df, 'label': label})
+            color = palette[i]
+            marker = markers[i % len(markers)]
+            linestyle = linestyles[i % len(linestyles)]
 
+            for p_config in plot_configs:
+                ax = p_config['ax']
+                x_col, y_col = p_config['x'], p_config['y']
+
+                if x_col in df.columns and y_col in df.columns:
+                    # Plotting every point exactly as in the original script
+                    (line,) = ax.plot(
+                        df[x_col],
+                        df[y_col],
+                        marker=marker,
+                        linestyle=linestyle,
+                        label=label,
+                        color=color,
+                        markeredgecolor='white',
+                        markeredgewidth=1.0,
+                        alpha=0.9,
+                    )
+
+                    if p_config['ax'] == axes[0, 0]:
+                        lines.append(line)
+                        labels.append(label)
+                else:
+                    print(f"  Warning: Columns '{x_col}' or '{y_col}' not found for '{label}'.")
         except Exception as e:
             print(f"  Error reading {result_path}: {e}")
 
-    # --- Plotting ---
-    if not all_data:
+    if not lines:
         print("No data loaded. Exiting.")
         plt.close(fig)
         return
 
-    for data in all_data:
-        df = data['df']
-        label = data['label']
-
-        for p_config in plot_configs:
-            ax = p_config['ax']
-            x_col = p_config['x']
-            y_col = p_config['y']
-
-            if x_col in df.columns and y_col in df.columns:
-                ax.plot(df[x_col], df[y_col], marker='o', linestyle='-', label=label)
-            else:
-                print(
-                    f"  Warning: Columns '{x_col}' or '{y_col}' not found for '{label}'. Skipping plot."
-                )
-
-    for p_config in plot_configs:
-        p_config['ax'].legend()
+    # --- Create a single, centralized legend ---
+    fig.legend(lines, labels, loc='lower center', ncol=min(3, len(labels)), bbox_to_anchor=(0.5, 0.02), frameon=True, edgecolor='0.8')
 
     # --- Save Plot ---
-    affix_str = "" if len(affix) == 0 else f"{affix}_"
+    affix_str = f"{affix}_" if affix else ""
     output_dir = f"./results/{experiment_name}"
     os.makedirs(output_dir, exist_ok=True)
-    output_filename = (
-        f"{output_dir}/{affix_str}{dataset_name}_k={k}_qps_vs_recall.pdf"
-    )
+    output_filename = f"{output_dir}/{affix_str}{dataset_name}_k={k}_qps_vs_recall.pdf"
 
-    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-    print(f"\nSaving plot to: {output_filename}")
-    fig.savefig(output_filename)
+    # Adjust layout to prevent clipping (leaving space for legend at bottom)
+    plt.tight_layout(rect=[0, 0.07, 1, 0.95])
+
+    print(f"Saving plot to: {output_filename}")
+    fig.savefig(output_filename, bbox_inches='tight', dpi=300)
     plt.close(fig)
 
 
 def plot_qps_vs_recall(config_path, affix=""):
-    """
-    Generates QPS vs. Recall plots from benchmark results based on a specific pathing convention.
-    """
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
 
     experiment_name = config.get('name', 'plots')
-
     dataset_configs = config.get('datasets') or [config.get('dataset')]
     if not dataset_configs or dataset_configs == [None]:
         raise ValueError("No 'datasets' or 'dataset' key found in the config file.")
@@ -146,13 +153,8 @@ def plot_qps_vs_recall(config_path, affix=""):
 
 def main():
     parser = argparse.ArgumentParser(description="Plot QPS vs. Recall from benchmark results.")
-    parser.add_argument(
-        "--config",
-        type=str,
-        required=True,
-        help="Path to the YAML configuration file for plotting.",
-    )
-    parser.add_argument("--affix", type=str, default="", help="Name of Plot.")
+    parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
+    parser.add_argument("--affix", type=str, default="", help="Optional affix for the filename.")
     args = parser.parse_args()
     plot_qps_vs_recall(args.config, args.affix)
 

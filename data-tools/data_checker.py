@@ -19,9 +19,9 @@ def check_pointcloud_validity(pointcloud_file):
     num_non_unit = 0
     for query in tqdm(queries):
         for emb in query:
-            if np.isclose(np.linalg.norm(query), 0.0):
+            if np.isclose(np.linalg.norm(emb), 0.0):
                 num_zero += 1
-            if not np.isclose(np.linalg.norm(query), 1.0):
+            if not np.isclose(np.linalg.norm(emb), 1.0):
                 num_non_unit += 1
     if num_zero > 0:
         print(f"Found {num_zero} zero vectors in the pointcloud file.")
