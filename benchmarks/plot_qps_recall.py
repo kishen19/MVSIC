@@ -79,9 +79,10 @@ def generate_plot_for_dataset(dataset_config, k, results_to_plot, experiment_nam
             label = f"{method}_{build_name}" + (f"_{search_variant}" if search_variant else "")
 
             # Original sorting logic
-            sort_col = 'recall_k_k'
-            if sort_col in df.columns:
-                df = df.sort_values(by=sort_col).reset_index(drop=True)
+            if "nprobes" in df.columns:
+                df = df.sort_values(by="nprobes").reset_index(drop=True)
+            elif "L" in df.columns:
+                df = df.sort_values(by="L").reset_index(drop=True)
 
             color = palette[i]
             marker = markers[i % len(markers)]

@@ -13,6 +13,18 @@ cc_library(
 )
 
 cc_library(
+    name = "fastscan",
+    hdrs = ["fastscan.h"],
+    deps = [
+        "//mvsic/core/utils:kmeans_util",
+        "@eigen",
+        "@parlayann//algorithms/utils:point_range",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
     name = "scann",
     hdrs = ["scann.h"],
     deps = [

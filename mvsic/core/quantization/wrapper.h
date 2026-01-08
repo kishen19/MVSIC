@@ -146,11 +146,80 @@ class Quantized_Point_Cloud_Set {
   template<typename QuantizedQueryTy, typename Seq>
   size_t distances(const QuantizedQueryTy& q_query, const Seq& indices, size_t n,
                    std::pair<uint32_t, float>* results) const {
-    parlay::parallel_for(0, n, [&](size_t i) {
-      uint32_t cloud_id = indices[i];
-      // target_cloud is a Quantized_Point_Cloud
-      results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
-    });
+
+    if constexpr (VectorQuantizer::is_fastscan) {
+      parlay::parallel_for(0, n, [&](size_t i) {
+        uint32_t cloud_id = indices[i];
+        size_t start = offsets[cloud_id];
+        size_t end = offsets[cloud_id + 1];
+        size_t cloud_size = end - start;
+        float total_chamfer = 0.0f;
+        const uint32_t m_blocks = vec_quantizer.num_blocks;
+        const uint32_t strip_stride = m_blocks * 32;
+
+        size_t n_q = q_query.vec_queries.size();
+        size_t qi = 0;
+
+        // --- 1. Process Queries in Pairs (Interleaved Path) ---
+        for (; qi + 1 < n_q; qi += 2) {
+          const auto& q1 = q_query.vec_queries[qi];
+          const auto& q2 = q_query.vec_queries[qi + 1];
+
+          __m512i running_min_v1 = _mm512_set1_epi16(0xFFFF);
+          __m512i running_min_v2 = _mm512_set1_epi16(0xFFFF);
+
+          size_t j = 0;
+          for (; j + 63 < cloud_size; j += 64) {
+            const uint8_t* strip_ptr = &vec_quantizer.packed_codes[(start + j) / 64 * strip_stride];
+
+            // Software Prefetch
+            if (j + 127 < cloud_size) {
+              const uint8_t* next_strip =
+                  &vec_quantizer.packed_codes[(start + j + 64) / 64 * strip_stride];
+              for (uint32_t p = 0; p < strip_stride; p += 64)
+                __builtin_prefetch(next_strip + p, 0, 3);
+            }
+
+            // DUAL QUERY KERNEL: Computes min for two queries at once
+            vec_quantizer.scan_64_dual_query(q1, q2, strip_ptr, running_min_v1, running_min_v2);
+          }
+
+          float m1 = vec_quantizer.reduce_running_min(q1, running_min_v1);
+          float m2 = vec_quantizer.reduce_running_min(q2, running_min_v2);
+
+          // Scalar fallback for remainder of the cloud for both queries
+          for (; j < cloud_size; ++j) {
+            m1 = std::min(m1, q1.distance(vec_quantizer[start + j]));
+            m2 = std::min(m2, q2.distance(vec_quantizer[start + j]));
+          }
+          total_chamfer += (m1 + m2);
+        }
+
+        // --- 2. Handle Odd Query (Single Path) ---
+        if (qi < n_q) {
+          const auto& q_vec = q_query.vec_queries[qi];
+          __m512i running_min_v = _mm512_set1_epi16(0xFFFF);
+          size_t j = 0;
+          for (; j + 63 < cloud_size; j += 64) {
+            const uint8_t* strip_ptr = &vec_quantizer.packed_codes[(start + j) / 64 * strip_stride];
+            running_min_v = vec_quantizer.scan_64_running_min(q_vec, strip_ptr, running_min_v);
+          }
+          float min_d = vec_quantizer.reduce_running_min(q_vec, running_min_v);
+          for (; j < cloud_size; ++j) {
+            min_d = std::min(min_d, q_vec.distance(vec_quantizer[start + j]));
+          }
+          total_chamfer += min_d;
+        }
+
+        results[i] = {cloud_id, total_chamfer / static_cast<float>(n_q)};
+      });
+    } else {
+      // Vanilla path for PQ/RaBitQ
+      parlay::parallel_for(0, n, [&](size_t i) {
+        uint32_t cloud_id = indices[i];
+        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+      });
+    }
     return q_query.vec_queries.size();
   }
 

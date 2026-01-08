@@ -1,0 +1,119 @@
+datasets:
+  - name: quora
+    path: data/beir/quora
+    results: results/beir/quora
+
+indices:
+  - name: mvivf
+    build_configs:
+      - name: mvivf_500_fastscan_16_64
+        rebuild: false
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          pq_method: 3 # PQ
+          block_size: 64
+          num_clusters_per_block: 16
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16 , 32, 64] #, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "nr40opt1", num_rerank: 40}
+                # - {name: "nr160", num_rerank: 160}
+                # - {name: "nr640", num_rerank: 640}
+                # - {name: "nr2560", num_rerank: 2560}
+
+  # - name: muvera
+  #   build_configs:
+  #     - name: muvera_2560_pq_256_8
+  #       rebuild: true
+  #       params:
+  #         d_fde: 2560 # FDE dim [2560, 5120]
+  #         pq_method: 1
+  #         num_blocks: 320
+  #         num_clusters_per_block: 256
+  #       search_configs:
+  #         - name: k=10
+  #           append: false
+  #           params:
+  #             L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+  #             k: [10]
+  #             config:
+  #               - {name: "nr40", num_rerank: 40}
+  #               - {name: "nr160", num_rerank: 160}
+  #               - {name: "nr640", num_rerank: 640}
+  #               - {name: "nr2560", num_rerank: 2560}
+
+  #     - name: muvera_2560_rabitq_4
+  #       rebuild: true
+  #       params:
+  #         d_fde: 2560 # FDE dim [2560, 5120]
+  #         pq_method: 2
+  #         rabitq_bits: 4
+  #       search_configs:
+  #         - name: k=10
+  #           append: false
+  #           params:
+  #             L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+  #             k: [10]
+  #             config:
+  #               - {name: "nr40", num_rerank: 40}
+  #               - {name: "nr160", num_rerank: 160}
+  #               - {name: "nr640", num_rerank: 640}
+  #               - {name: "nr2560", num_rerank: 2560}
+
+      # - name: muvera_5120
+      #   rebuild: true
+      #   params:
+      #     d_fde: 5120 # FDE dim [2560, 5120]
+      #     pq_method: 0
+      #   search_configs:
+      #     - name: k=10
+      #       append: false
+      #       params:
+      #         L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+      #         k: [10]
+      #         config:
+      #           - {name: "nr40", num_rerank: 40}
+      #           - {name: "nr160", num_rerank: 160}
+      #           - {name: "nr640", num_rerank: 640}
+      #           - {name: "nr2560", num_rerank: 2560}
+
+      # - name: muvera_5120_pq_256_8
+      #   rebuild: true
+      #   params:
+      #     d_fde: 5120 # FDE dim [2560, 5120]
+      #     pq_method: 1
+      #     num_blocks: 640
+      #     num_clusters_per_block: 256
+      #   search_configs:
+      #     - name: k=10
+      #       append: false
+      #       params:
+      #         L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+      #         k: [10]
+      #         config:
+      #           - {name: "nr40", num_rerank: 40}
+      #           - {name: "nr160", num_rerank: 160}
+      #           - {name: "nr640", num_rerank: 640}
+      #           - {name: "nr2560", num_rerank: 2560}
+
+      # - name: muvera_5120_rabitq_4
+      #   rebuild: true
+      #   params:
+      #     d_fde: 5120 # FDE dim [2560, 5120]
+      #     pq_method: 2
+      #     rabitq_bits: 4
+      #   search_configs:
+      #     - name: k=10
+      #       append: false
+      #       params:
+      #         L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+      #         k: [10]
+      #         config:
+      #           - {name: "nr40", num_rerank: 40}
+      #           - {name: "nr160", num_rerank: 160}
+      #           - {name: "nr640", num_rerank: 640}
+      #           - {name: "nr2560", num_rerank: 2560}

@@ -131,6 +131,7 @@ inline float Quantized_Point<Metric>::distance(const Quantized_Query<Metric>& qq
 template<typename PointRange, bool Metric>
 class Quantized_Point_Range {
  public:
+  static constexpr bool is_fastscan = false;
   size_t n;
   size_t dim;
   size_t padded_dim;

@@ -30,6 +30,9 @@ cc_binary(
     copts = [
         "-march=native",
         "-mavx512f",
+        "-mavx512bw",
+        "-mavx512dq",
+        "-mavx512vl",
         "-mavx512vpopcntdq",
     ],
     linkopts = [
@@ -37,6 +40,7 @@ cc_binary(
         "-fopenmp",
     ],
     deps = [
+        "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:scann",

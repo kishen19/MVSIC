@@ -85,6 +85,7 @@ class Quantized_Point {
 template<typename PointRange, bool Metric>
 class Quantized_Point_Range {
  public:
+  static constexpr bool is_fastscan = false;
   uint32_t num_blocks;
   uint32_t num_clusters_per_block;
   uint32_t num_points_per_cluster;  // Default 20
@@ -99,12 +100,13 @@ class Quantized_Point_Range {
 
   Quantized_Point_Range() {}
 
-  Quantized_Point_Range(const PointRange& data, uint32_t m = 8, uint32_t k = 256,
+  Quantized_Point_Range(const PointRange& data, uint32_t block_size = 8, uint32_t k = 256,
                         uint32_t subsample_mult = 20) :
-      num_blocks(m), num_clusters_per_block(k), num_points_per_cluster(subsample_mult) {
+      num_clusters_per_block(k), num_points_per_cluster(subsample_mult) {
 
     n_points = data.size();
     dim = data.get_dims();
+    dim_per_block = block_size;
 
     // With uint8_t codes, we cannot represent >256 clusters per block.
     if (num_clusters_per_block > 256) {
@@ -113,11 +115,12 @@ class Quantized_Point_Range {
       abort();
     }
 
-    if (dim % num_blocks != 0) {
-      std::cerr << "Error: PQ Dimension " << dim << " not divisible by " << num_blocks << std::endl;
+    if (dim % dim_per_block != 0) {
+      std::cerr << "Error: PQ Dimension " << dim << " not divisible by " << dim_per_block
+                << std::endl;
       abort();
     }
-    dim_per_block = dim / num_blocks;
+    num_blocks = dim / dim_per_block;
 
     // Train the PQ
     train(data);

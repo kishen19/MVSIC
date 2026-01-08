@@ -5,6 +5,7 @@ cc_library(
     hdrs = ["muvera.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:scann",

@@ -7,6 +7,7 @@ cc_library(
         "//mvsic/core:index",
         "//mvsic/core/distance_measures:many_to_many",
         "//mvsic/core/mvclustering",
+        "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:scann",

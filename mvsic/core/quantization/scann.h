@@ -24,6 +24,7 @@ namespace pq {
 template<typename PointRange, bool Metric>
 class ScaNN_Point_Range {
  public:
+  static constexpr bool is_fastscan = false;
   // Layout parameters
   uint32_t num_blocks;
   uint32_t num_clusters_per_block;
@@ -45,21 +46,19 @@ class ScaNN_Point_Range {
 
   ScaNN_Point_Range() {}
 
-  ScaNN_Point_Range(const PointRange& data, uint32_t m = 8, uint32_t k = 256,
+  ScaNN_Point_Range(const PointRange& data, uint32_t block_size = 8, uint32_t k = 256,
                     uint32_t subsample_mult = 20, float T = 0.2f) :
-      num_blocks(m),
-      num_clusters_per_block(k),
-      num_points_per_cluster(subsample_mult),
-      anisotropic_threshold(T) {
+      num_clusters_per_block(k), num_points_per_cluster(subsample_mult), anisotropic_threshold(T) {
     n_points = data.size();
     dim = data.get_dims();
+    dim_per_block = block_size;
 
-    if (dim % num_blocks != 0) {
-      std::cerr << "ScaNN Error: Dimension " << dim << " not divisible by " << num_blocks
+    if (dim % dim_per_block != 0) {
+      std::cerr << "ScaNN Error: Dimension " << dim << " not divisible by " << dim_per_block
                 << std::endl;
       abort();
     }
-    dim_per_block = dim / num_blocks;
+    num_blocks = dim / dim_per_block;
 
     parlay::internal::timer t;
 

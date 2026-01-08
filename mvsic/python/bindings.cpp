@@ -37,6 +37,7 @@ PYBIND11_MODULE(mvsic, m) {
       .value("None", mvsic::IndexParams::QuantizerType::None)
       .value("PQ", mvsic::IndexParams::QuantizerType::PQ)
       .value("RaBitQ", mvsic::IndexParams::QuantizerType::RaBitQ)
+      .value("FastScan", mvsic::IndexParams::QuantizerType::FastScan)
       .value("ScaNN", mvsic::IndexParams::QuantizerType::ScaNN)
       .export_values();
 
@@ -63,7 +64,7 @@ PYBIND11_MODULE(mvsic, m) {
   py::class_<mvsic::IndexParams::pq_config>(m, "pq_config")
       .def(py::init<>())
       .def_readwrite("method", &mvsic::IndexParams::pq_config::method)
-      .def_readwrite("num_blocks", &mvsic::IndexParams::pq_config::num_blocks)
+      .def_readwrite("block_size", &mvsic::IndexParams::pq_config::block_size)
       .def_readwrite("num_clusters_per_block",
                      &mvsic::IndexParams::pq_config::num_clusters_per_block)
       .def_readwrite("num_points_per_cluster",
@@ -92,14 +93,14 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
-                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("num_blocks") = 8,
+                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
-                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("num_blocks") = 8,
+                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
       .def_static("muvera_custom", &mvsic::IndexParams::muvera_custom,
@@ -109,7 +110,7 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
                   py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1,
                   py::arg("num_pass") = 1, py::arg("compress_input") = false,
-                  py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("num_blocks") = 8,
+                  py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
       .def_static("muvera", &mvsic::IndexParams::muvera, py::arg("d_fde") = 2560,
@@ -117,19 +118,19 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
                   py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1,
                   py::arg("num_pass") = 1, py::arg("compress_input") = false,
-                  py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("num_blocks") = 8,
+                  py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
       .def_static("mpool", &mvsic::IndexParams::mpool, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("num_pass") = 1, py::arg("normalize") = true,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
-                  py::arg("pq_method") = 0, py::arg("num_blocks") = 8,
+                  py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
       .def_static("vamana", &mvsic::IndexParams::vamana, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("two_pass") = false,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
-                  py::arg("pq_method") = 0, py::arg("num_blocks") = 8,
+                  py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2);
 

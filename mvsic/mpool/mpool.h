@@ -12,6 +12,7 @@
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/scann.h"
+#include "mvsic/core/quantization/fastscan.h"
 
 // ParlayANN (Vamana) includes
 #include "algorithms/utils/beamSearch.h"
@@ -52,6 +53,8 @@ class IndexMPool : public Index<metric> {
   using RaBitQ_Point = rabitq::Quantized_Query<metric>;
   using ScaNN_Range = pq::ScaNN_Point_Range<Range, metric>;
   using ScaNN_Point = PQ_Point;
+  using FastScan_Range = fastscan::Quantized_Point_Range<Range, metric>;
+  using FastScan_Point = fastscan::Quantized_Query<metric>;
   using QT = IndexParams::QuantizerType;
 
   IndexParams params;
@@ -64,6 +67,7 @@ class IndexMPool : public Index<metric> {
   std::optional<PQ_Range> quantizer_pq;
   std::optional<RaBitQ_Range> quantizer_rabitq;
   std::optional<ScaNN_Range> quantizer_scann;
+  std::optional<FastScan_Range> quantizer_fastscan;
   QT active_quantizer = QT::None;
 
   IndexMPool(uint32_t d_) noexcept :
@@ -108,14 +112,19 @@ class IndexMPool : public Index<metric> {
         break;
       case QT::ScaNN:
         if (params.verbose >= 1) std::cout << "Training ScaNN..." << std::endl;
-        quantizer_scann.emplace(points_mp, params.pq.num_blocks, params.pq.num_clusters_per_block,
+        quantizer_scann.emplace(points_mp, params.pq.block_size, params.pq.num_clusters_per_block,
                                 params.pq.num_points_per_cluster, params.pq.scann_threshold);
         break;
       case QT::PQ:
         if (params.verbose >= 1) std::cout << "Training Standard PQ..." << std::endl;
-        quantizer_pq.emplace(points_mp, params.pq.num_blocks, params.pq.num_clusters_per_block,
+        quantizer_pq.emplace(points_mp, params.pq.block_size, params.pq.num_clusters_per_block,
                              params.pq.num_points_per_cluster);
         break;
+      case QT::FastScan:
+        if (params.verbose >= 1) std::cout << "Training FastScan..." << std::endl;
+        quantizer_fastscan.emplace(points_mp, params.pq.block_size);
+        break;
+      default: break;
     }
   }
 
@@ -172,6 +181,14 @@ class IndexMPool : public Index<metric> {
         dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
         break;
       }
+      case QT::FastScan: {
+        auto q_query = quantizer_fastscan->quantize_query(query_point);
+        auto [result, cmps] = parlayANN::beam_search<FastScan_Point, FastScan_Range, uint32_t>(
+            q_query, G, *quantizer_fastscan, start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps;
+        break;
+      }
       case QT::None: {
         auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
             query_point, G, points_mp, start_point, QP);
@@ -217,6 +234,7 @@ class IndexMPool : public Index<metric> {
       case QT::RaBitQ: quantizer_rabitq->save(out); break;
       case QT::ScaNN: quantizer_scann->save(out); break;
       case QT::PQ: quantizer_pq->save(out); break;
+      case QT::FastScan: quantizer_fastscan->save(out); break;
       case QT::None: parlayANN::io::save_point_range(points_mp, out); break;
     }
   }
@@ -248,6 +266,10 @@ class IndexMPool : public Index<metric> {
       case QT::PQ:
         quantizer_pq.emplace();
         quantizer_pq->load(in);
+        break;
+      case QT::FastScan:
+        quantizer_fastscan.emplace();
+        quantizer_fastscan->load(in);
         break;
       case QT::None:
         auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
