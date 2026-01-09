@@ -39,16 +39,12 @@ class Quantized_Query {
 
   Quantized_Query(uint32_t m) : num_blocks(m) { int_lut.resize(static_cast<size_t>(m) * K); }
 
-  /**
-   * @brief Converts the integer accumulated distance back to floating point.
-   */
+  // Converts the integer accumulated distance back to floating point.
   inline float decode(uint16_t int_dist) const {
     return (min_dist * static_cast<float>(num_blocks)) + (static_cast<float>(int_dist) * scale);
   }
 
-  /**
-   * @brief Scalar distance used by the generic wrapper.h distance() loop.
-   */
+  // Scalar distance used by the generic wrapper.h distance() loop.
   inline float distance(const Quantized_Point<Metric>& p) const {
     uint16_t acc = 0;
     // p.code_ptr points to the start of the block for the 64-vector strip.
@@ -91,7 +87,7 @@ class Quantized_Point_Range {
   static constexpr bool is_fastscan = true;
   uint32_t num_blocks;
   static constexpr uint32_t K = 16;
-  size_t n_points, dim, dim_per_block;
+  size_t dim, dim_per_block;
 
   std::vector<Eigen::MatrixXf> codebooks;
   std::vector<Eigen::VectorXf> codebook_norms;
@@ -99,17 +95,24 @@ class Quantized_Point_Range {
   // Storage: Interleaved strips of 64 vectors.
   // Each strip byte contains two 4-bit codes.
   parlay::sequence<uint8_t> packed_codes;
+  parlay::sequence<size_t> aligned_cloud_offsets;
+
+  // NEW: number of vectors representable in packed space (>= n_points_raw, due to gaps).
+  size_t n_points_raw = 0;
+  size_t n_points_packed = 0;
 
   Quantized_Point_Range() {}
 
-  Quantized_Point_Range(const PointRange& data, uint32_t block_size = 32) {
-    n_points = data.size();
+  template<typename Seq>
+  Quantized_Point_Range(const PointRange& data, const Seq& cloud_offsets,
+                        uint32_t block_size = 32) {
+    n_points_raw = data.size();
     dim = data.get_dims();
     dim_per_block = block_size;
     num_blocks = dim / block_size;
 
     train(data);
-    encode_database_4bit(data);
+    encode_database_4bit(data, cloud_offsets);  // cloud_offsets are FLOAT offsets
   }
 
   /**
@@ -413,12 +416,19 @@ class Quantized_Point_Range {
 
   void save(std::ofstream& out) const {
     out.write((char*)&num_blocks, sizeof(num_blocks));
-    out.write((char*)&n_points, sizeof(n_points));
+    out.write((char*)&n_points_raw, sizeof(n_points_raw));
+    out.write((char*)&n_points_packed, sizeof(n_points_packed));
     out.write((char*)&dim, sizeof(dim));
+
+    // NEW: aligned offsets
+    size_t n_off = aligned_cloud_offsets.size();
+    out.write((char*)&n_off, sizeof(n_off));
+    out.write((char*)aligned_cloud_offsets.data(), n_off * sizeof(size_t));
+
     for (const auto& cb : codebooks) {
-      size_t rows = cb.rows(), cols = cb.cols();
-      out.write((char*)&rows, sizeof(size_t));
-      out.write((char*)&cols, sizeof(size_t));
+      size_t rs = cb.rows(), cs = cb.cols();
+      out.write((char*)&rs, sizeof(size_t));
+      out.write((char*)&cs, sizeof(size_t));
       out.write((char*)cb.data(), cb.size() * sizeof(float));
     }
     size_t sz = packed_codes.size();
@@ -428,17 +438,25 @@ class Quantized_Point_Range {
 
   void load(std::ifstream& in) {
     in.read((char*)&num_blocks, sizeof(num_blocks));
-    in.read((char*)&n_points, sizeof(n_points));
+    in.read((char*)&n_points_raw, sizeof(n_points_raw));
+    in.read((char*)&n_points_packed, sizeof(n_points_packed));
     in.read((char*)&dim, sizeof(dim));
     dim_per_block = dim / num_blocks;
+
+    // NEW: aligned offsets
+    size_t n_off = 0;
+    in.read((char*)&n_off, sizeof(n_off));
+    aligned_cloud_offsets.resize(n_off);
+    in.read((char*)aligned_cloud_offsets.data(), n_off * sizeof(size_t));
+
     codebooks.resize(num_blocks);
     codebook_norms.resize(num_blocks);
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      size_t rows, cols;
-      in.read((char*)&rows, sizeof(size_t));
-      in.read((char*)&cols, sizeof(size_t));
-      codebooks[b] = Eigen::MatrixXf(rows, cols);
-      in.read((char*)codebooks[b].data(), rows * cols * sizeof(float));
+      size_t rs, cs;
+      in.read((char*)&rs, sizeof(size_t));
+      in.read((char*)&cs, sizeof(size_t));
+      codebooks[b] = Eigen::MatrixXf(rs, cs);
+      in.read((char*)codebooks[b].data(), rs * cs * sizeof(float));
       codebook_norms[b] = codebooks[b].rowwise().squaredNorm();
     }
     size_t sz;
@@ -447,16 +465,20 @@ class Quantized_Point_Range {
     in.read((char*)packed_codes.data(), sz);
   }
 
-  inline uint32_t size() const noexcept { return static_cast<uint32_t>(n_points); }
+  inline uint32_t size() const noexcept { return static_cast<uint32_t>(n_points_packed); }
+
   inline uint32_t get_dims() const noexcept { return static_cast<uint32_t>(dim); }
 
  private:
   Quantized_Query<Metric>& finish_quantize_query(Quantized_Query<Metric>& qq,
                                                  const std::vector<float>& float_lut, float g_min,
                                                  float g_max) const {
+
     qq.min_dist = g_min;
+
     float range = (g_max - g_min);
     qq.scale = std::max(1e-6f, range / 255.0f);
+
     for (size_t i = 0; i < float_lut.size(); ++i) {
       qq.int_lut[i] = static_cast<uint8_t>((float_lut[i] - g_min) / qq.scale);
     }
@@ -467,12 +489,12 @@ class Quantized_Point_Range {
     codebooks.resize(num_blocks);
     codebook_norms.resize(num_blocks);
 
-    size_t sample_size = std::min(static_cast<size_t>(K * 50), n_points);
+    size_t sample_size = std::min(static_cast<size_t>(K * 50), n_points_raw);
     parlay::parallel_for(0, num_blocks, [&](size_t b) {
       size_t offset = b * dim_per_block;
       parlay::sequence<parlay::sequence<float>> sub(sample_size);
       std::mt19937 rng(static_cast<unsigned int>(b + 1));
-      std::uniform_int_distribution<size_t> dist(0, n_points - 1);
+      std::uniform_int_distribution<size_t> dist(0, n_points_raw - 1);
       for (size_t i = 0; i < sample_size; ++i) {
         const float* raw = reinterpret_cast<const float*>(data.location(dist(rng)));
         sub[i] = parlay::sequence<float>(raw + offset, raw + offset + dim_per_block);
@@ -488,32 +510,92 @@ class Quantized_Point_Range {
     });
   }
 
-  void encode_database_4bit(const PointRange& data) {
-    size_t num_strips = (n_points + 63) / 64;
-    packed_codes.resize(num_strips * num_blocks * 32, 0);
+  // NEW helper: round up to multiple of 64
+  static inline size_t round_up_64(size_t x) { return (x + 63) & ~size_t(63); }
 
-    parlay::parallel_for(0, num_strips, [&](size_t s) {
-      for (size_t lane_pair = 0; lane_pair < 32; ++lane_pair) {
-        size_t v_even = s * 64 + lane_pair * 2;
-        size_t v_odd = v_even + 1;
-        if (v_even >= n_points) break;
+  template<typename Seq>
+  void encode_database_4bit(const PointRange& data, const Seq& cloud_offsets_float) {
+    // cloud_offsets_float are CSR-like offsets in FLOATS.
+    // Convert to VECTOR offsets by dividing by dim.
+    const size_t n_clouds = cloud_offsets_float.size() - 1;
 
-        for (uint32_t b = 0; b < num_blocks; ++b) {
-          uint8_t c_e = find_best(data.location(v_even), b);
-          uint8_t c_o = (v_odd < n_points) ? find_best(data.location(v_odd), b) : 0;
-          packed_codes[s * num_blocks * 32 + b * 32 + lane_pair] =
-              (c_e & 0x0F) | ((c_o & 0x0F) << 4);
+    parlay::sequence<size_t> vec_offsets(n_clouds + 1);
+    for (size_t i = 0; i <= n_clouds; ++i) {
+      // If you want safety, add asserts that divisible by dim.
+      vec_offsets[i] = static_cast<size_t>(cloud_offsets_float[i] / dim);
+    }
+
+    // Build aligned offsets in PACKED VECTOR INDEX space.
+    aligned_cloud_offsets.resize(n_clouds + 1);
+    size_t cur = 0;
+    aligned_cloud_offsets[0] = 0;
+
+    for (size_t c = 0; c < n_clouds; ++c) {
+      cur = round_up_64(cur);  // each cloud starts at strip boundary
+      aligned_cloud_offsets[c] = cur;
+      const size_t cloud_sz = vec_offsets[c + 1] - vec_offsets[c];
+      cur += cloud_sz;
+    }
+    aligned_cloud_offsets[n_clouds] = cur;
+    n_points_packed = cur;
+
+    // Allocate packed codes for the entire packed index space.
+    const size_t num_strips = (n_points_packed + 63) / 64;
+    packed_codes.resize(num_strips * num_blocks * 32);
+    std::fill(packed_codes.begin(), packed_codes.end(), uint8_t{0});
+
+    const size_t strip_stride = static_cast<size_t>(num_blocks) * 32;
+
+    // Encode each cloud into its aligned location.
+    parlay::parallel_for(0, n_clouds, [&](size_t c) {
+      const size_t src_start = vec_offsets[c];
+      const size_t src_end = vec_offsets[c + 1];
+      const size_t cloud_sz = src_end - src_start;
+
+      const size_t dst_start = aligned_cloud_offsets[c];  // aligned to 64
+      const size_t dst_strip0 = dst_start / 64;
+
+      const size_t cloud_strips = (cloud_sz + 63) / 64;
+
+      for (size_t s = 0; s < cloud_strips; ++s) {
+        const size_t base_src = src_start + s * 64;
+        const size_t dst_strip = dst_strip0 + s;
+
+        uint8_t* strip_base = packed_codes.data() + dst_strip * strip_stride;
+
+        for (size_t lane_pair = 0; lane_pair < 32; ++lane_pair) {
+          const size_t v_even = base_src + lane_pair * 2;
+          if (v_even >= src_end) break;
+
+          const size_t v_odd = v_even + 1;
+
+          for (uint32_t b = 0; b < num_blocks; ++b) {
+            const uint8_t c_e = find_best(data.location(v_even), b);
+            const uint8_t c_o = (v_odd < src_end) ? find_best(data.location(v_odd), b) : 0;
+
+            strip_base[static_cast<size_t>(b) * 32 + lane_pair] =
+                (c_e & 0x0F) | ((c_o & 0x0F) << 4);
+          }
         }
       }
     });
   }
 
+  // Inside the private section of Quantized_Point_Range in fastscan.h
   uint8_t find_best(const uint8_t* vec_ptr, uint32_t b) const {
-    const float* sub = reinterpret_cast<const float*>(vec_ptr) + b * dim_per_block;
-    Eigen::Map<const Eigen::VectorXf> q_map(sub, dim_per_block);
-    Eigen::VectorXf dots = codebooks[b] * q_map;
+    // 1. Cast the byte pointer to float* so we can do math
+    const float* raw_float_ptr = reinterpret_cast<const float*>(vec_ptr);
+
+    // 2. Point to the specific sub-vector for block 'b'
+    const float* sub_ptr = raw_float_ptr + (b * dim_per_block);
+
+    // 3. Map it for Eigen
+    Eigen::Map<const Eigen::VectorXf> q_sub(sub_ptr, dim_per_block);
+
+    Eigen::VectorXf dots = codebooks[b] * q_sub;
     float min_val = std::numeric_limits<float>::max();
     uint8_t best = 0;
+
     for (uint32_t i = 0; i < K; ++i) {
       float val = Metric ? (codebook_norms[b][i] - 2.0f * dots[i]) : -dots[i];
       if (val < min_val) {

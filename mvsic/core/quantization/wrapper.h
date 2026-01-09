@@ -150,76 +150,85 @@ class Quantized_Point_Cloud_Set {
     if constexpr (VectorQuantizer::is_fastscan) {
       parlay::parallel_for(0, n, [&](size_t i) {
         uint32_t cloud_id = indices[i];
-        size_t start = offsets[cloud_id];
-        size_t end = offsets[cloud_id + 1];
+
+        // IMPORTANT: use strip-aligned packed offsets from the fastscan quantizer
+        size_t start = vec_quantizer.aligned_cloud_offsets[cloud_id];
+        size_t end = vec_quantizer.aligned_cloud_offsets[cloud_id + 1];
         size_t cloud_size = end - start;
+
         float total_chamfer = 0.0f;
+
         const uint32_t m_blocks = vec_quantizer.num_blocks;
-        const uint32_t strip_stride = m_blocks * 32;
+        const size_t strip_stride = static_cast<size_t>(m_blocks) * 32;
 
-        size_t n_q = q_query.vec_queries.size();
-        size_t qi = 0;
+        // start is guaranteed 64-aligned by construction
+        const size_t strip0 = start / 64;
 
-        // --- 1. Process Queries in Pairs (Interleaved Path) ---
-        for (; qi + 1 < n_q; qi += 2) {
-          const auto& q1 = q_query.vec_queries[qi];
-          const auto& q2 = q_query.vec_queries[qi + 1];
+        // Process each query vector sequentially (Single Query Path)
+        for (const auto& q_vec : q_query.vec_queries) {
+          if (cloud_size == 0) {
+            total_chamfer += std::numeric_limits<float>::max();
+            continue;
+          }
 
-          __m512i running_min_v1 = _mm512_set1_epi16(0xFFFF);
-          __m512i running_min_v2 = _mm512_set1_epi16(0xFFFF);
+          // Number of vectors covered by whole strips
+          const size_t full = cloud_size & ~size_t(63);
+
+          // Keep 4 independent minimum accumulators to break dependency chains
+          __m512i min0 = _mm512_set1_epi16(0xFFFF);
+          __m512i min1 = _mm512_set1_epi16(0xFFFF);
+          __m512i min2 = _mm512_set1_epi16(0xFFFF);
+          __m512i min3 = _mm512_set1_epi16(0xFFFF);
 
           size_t j = 0;
-          for (; j + 63 < cloud_size; j += 64) {
-            const uint8_t* strip_ptr = &vec_quantizer.packed_codes[(start + j) / 64 * strip_stride];
 
-            // Software Prefetch
-            if (j + 127 < cloud_size) {
-              const uint8_t* next_strip =
-                  &vec_quantizer.packed_codes[(start + j + 64) / 64 * strip_stride];
-              for (uint32_t p = 0; p < strip_stride; p += 64)
-                __builtin_prefetch(next_strip + p, 0, 3);
-            }
+          // Process 256 vectors at a time (4 strips of 64)
+          for (; j + 255 < full; j += 256) {
+            const size_t base_strip = strip0 + (j / 64);
+            const uint8_t* base_ptr = &vec_quantizer.packed_codes[base_strip * strip_stride];
 
-            // DUAL QUERY KERNEL: Computes min for two queries at once
-            vec_quantizer.scan_64_dual_query(q1, q2, strip_ptr, running_min_v1, running_min_v2);
+            min0 = vec_quantizer.scan_64_running_min(q_vec, base_ptr, min0);
+            min1 = vec_quantizer.scan_64_running_min(q_vec, base_ptr + strip_stride, min1);
+            min2 = vec_quantizer.scan_64_running_min(q_vec, base_ptr + 2 * strip_stride, min2);
+            min3 = vec_quantizer.scan_64_running_min(q_vec, base_ptr + 3 * strip_stride, min3);
           }
 
-          float m1 = vec_quantizer.reduce_running_min(q1, running_min_v1);
-          float m2 = vec_quantizer.reduce_running_min(q2, running_min_v2);
+          // Combine the 4 streams into one running-min register
+          __m512i combined_min_v =
+              _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
 
-          // Scalar fallback for remainder of the cloud for both queries
+          // Handle remaining full strips (64 vectors at a time)
+          for (; j < full; j += 64) {
+            const size_t base_strip = strip0 + (j / 64);
+            const uint8_t* base_ptr = &vec_quantizer.packed_codes[base_strip * strip_stride];
+            combined_min_v = vec_quantizer.scan_64_running_min(q_vec, base_ptr, combined_min_v);
+          }
+
+          // Decode best among all fully-scanned strips
+          float min_d = (full > 0) ? vec_quantizer.reduce_running_min(q_vec, combined_min_v)
+                                   : std::numeric_limits<float>::max();
+
+          // Scalar tail (vectors remaining that didn't fit in a full strip)
           for (; j < cloud_size; ++j) {
-            m1 = std::min(m1, q1.distance(vec_quantizer[start + j]));
-            m2 = std::min(m2, q2.distance(vec_quantizer[start + j]));
+            float d = q_vec.distance(vec_quantizer[start + j]);
+            if (d < min_d) min_d = d;
           }
-          total_chamfer += (m1 + m2);
-        }
 
-        // --- 2. Handle Odd Query (Single Path) ---
-        if (qi < n_q) {
-          const auto& q_vec = q_query.vec_queries[qi];
-          __m512i running_min_v = _mm512_set1_epi16(0xFFFF);
-          size_t j = 0;
-          for (; j + 63 < cloud_size; j += 64) {
-            const uint8_t* strip_ptr = &vec_quantizer.packed_codes[(start + j) / 64 * strip_stride];
-            running_min_v = vec_quantizer.scan_64_running_min(q_vec, strip_ptr, running_min_v);
-          }
-          float min_d = vec_quantizer.reduce_running_min(q_vec, running_min_v);
-          for (; j < cloud_size; ++j) {
-            min_d = std::min(min_d, q_vec.distance(vec_quantizer[start + j]));
-          }
           total_chamfer += min_d;
         }
 
-        results[i] = {cloud_id, total_chamfer / static_cast<float>(n_q)};
+        // Store result as (ID, average Chamfer distance)
+        results[i] = {cloud_id, total_chamfer / static_cast<float>(q_query.vec_queries.size())};
       });
+
     } else {
-      // Vanilla path for PQ/RaBitQ
+      // Standard path for PQ, RaBitQ, or ScaNN
       parlay::parallel_for(0, n, [&](size_t i) {
         uint32_t cloud_id = indices[i];
         results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
       });
     }
+
     return q_query.vec_queries.size();
   }
 
