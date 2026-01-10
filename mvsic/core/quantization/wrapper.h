@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <immintrin.h>
 
 #include "parlay/sequence.h"
 #include "parlay/parallel.h"
@@ -148,76 +149,112 @@ class Quantized_Point_Cloud_Set {
                    std::pair<uint32_t, float>* results) const {
 
     if constexpr (VectorQuantizer::is_fastscan) {
-      parlay::parallel_for(0, n, [&](size_t i) {
-        uint32_t cloud_id = indices[i];
 
-        // IMPORTANT: use strip-aligned packed offsets from the fastscan quantizer
-        size_t start = vec_quantizer.aligned_cloud_offsets[cloud_id];
-        size_t end = vec_quantizer.aligned_cloud_offsets[cloud_id + 1];
-        size_t cloud_size = end - start;
+      parlay::parallel_for(0, n, [&](size_t i) {
+        const uint32_t cloud_id = indices[i];
+
+        // NEW (no padding): use true vector offsets (vector indices in the *flattened* DB)
+        const size_t start = vec_quantizer.cloud_vec_offsets[cloud_id];
+        const size_t end = vec_quantizer.cloud_vec_offsets[cloud_id + 1];
+        const size_t cloud_size = (end > start) ? (end - start) : 0;
 
         float total_chamfer = 0.0f;
 
-        const uint32_t m_blocks = vec_quantizer.num_blocks;
-        const size_t strip_stride = static_cast<size_t>(m_blocks) * 32;
+        const size_t strip_stride = static_cast<size_t>(vec_quantizer.num_blocks) * 32;
 
-        // start is guaranteed 64-aligned by construction
+        // Precompute strip / lane boundaries
         const size_t strip0 = start / 64;
+        const int lane0 = static_cast<int>(start % 64);
 
-        // Process each query vector sequentially (Single Query Path)
+        const size_t strip1 = end / 64;
+        const int lane1 = static_cast<int>(end % 64);  // if 0 => ends on strip boundary
+
+        // Process each query vector sequentially
         for (const auto& q_vec : q_query.vec_queries) {
+
           if (cloud_size == 0) {
             total_chamfer += std::numeric_limits<float>::max();
             continue;
           }
 
-          // Number of vectors covered by whole strips
-          const size_t full = cloud_size & ~size_t(63);
+          float min_d = std::numeric_limits<float>::max();
 
-          // Keep 4 independent minimum accumulators to break dependency chains
-          __m512i min0 = _mm512_set1_epi16(0xFFFF);
-          __m512i min1 = _mm512_set1_epi16(0xFFFF);
-          __m512i min2 = _mm512_set1_epi16(0xFFFF);
-          __m512i min3 = _mm512_set1_epi16(0xFFFF);
+          // Helper to get pointer to strip s
+          auto strip_ptr = [&](size_t s) -> const uint8_t* {
+            return &vec_quantizer.packed_codes[s * strip_stride];
+          };
 
-          size_t j = 0;
-
-          // Process 256 vectors at a time (4 strips of 64)
-          for (; j + 255 < full; j += 256) {
-            const size_t base_strip = strip0 + (j / 64);
-            const uint8_t* base_ptr = &vec_quantizer.packed_codes[base_strip * strip_stride];
-
-            min0 = vec_quantizer.scan_64_running_min(q_vec, base_ptr, min0);
-            min1 = vec_quantizer.scan_64_running_min(q_vec, base_ptr + strip_stride, min1);
-            min2 = vec_quantizer.scan_64_running_min(q_vec, base_ptr + 2 * strip_stride, min2);
-            min3 = vec_quantizer.scan_64_running_min(q_vec, base_ptr + 3 * strip_stride, min3);
+          // Case A: all vectors live in the same strip
+          if (strip0 == strip1) {
+            // range is [lane0, lane1) within strip0; note lane1 can be 0 only when end%64==0,
+            // but if strip0==strip1 and end%64==0, that implies start and end are both in same
+            // strip, and lane1==0 means "up to end of strip".
+            const int hi = (lane1 == 0) ? 64 : lane1;
+            min_d = vec_quantizer.scan_64_chunk_min_masked(q_vec, strip_ptr(strip0), lane0, hi);
+            total_chamfer += min_d;
+            continue;
           }
 
-          // Combine the 4 streams into one running-min register
-          __m512i combined_min_v =
-              _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+          // Case B: multi-strip range
 
-          // Handle remaining full strips (64 vectors at a time)
-          for (; j < full; j += 64) {
-            const size_t base_strip = strip0 + (j / 64);
-            const uint8_t* base_ptr = &vec_quantizer.packed_codes[base_strip * strip_stride];
-            combined_min_v = vec_quantizer.scan_64_running_min(q_vec, base_ptr, combined_min_v);
+          // 1) First partial strip: lanes [lane0, 64)
+          {
+            const float d0 =
+                vec_quantizer.scan_64_chunk_min_masked(q_vec, strip_ptr(strip0), lane0, 64);
+            if (d0 < min_d) min_d = d0;
           }
 
-          // Decode best among all fully-scanned strips
-          float min_d = (full > 0) ? vec_quantizer.reduce_running_min(q_vec, combined_min_v)
-                                   : std::numeric_limits<float>::max();
+          // 2) Middle full strips: (strip0+1) .. (strip_last_full)
+          // Determine last strip that is fully included.
+          // If lane1==0, end is exactly at boundary and strip1 is the first strip AFTER the range,
+          // so last full strip is strip1-1.
+          // If lane1!=0, strip1 is the last (partial) strip in range, so last full strip is
+          // strip1-1.
+          const size_t first_full = strip0 + 1;
+          const size_t last_full = (lane1 == 0) ? (strip1 - 1) : (strip1 - 1);
 
-          // Scalar tail (vectors remaining that didn't fit in a full strip)
-          for (; j < cloud_size; ++j) {
-            float d = q_vec.distance(vec_quantizer[start + j]);
-            if (d < min_d) min_d = d;
+          if (first_full <= last_full) {
+            // We want min over (possibly many) full strips.
+            // Use 4 accumulators for better ILP; reduce to scalar min at end.
+            __m512i min0 = _mm512_set1_epi16(0xFFFF);
+            __m512i min1 = _mm512_set1_epi16(0xFFFF);
+            __m512i min2 = _mm512_set1_epi16(0xFFFF);
+            __m512i min3 = _mm512_set1_epi16(0xFFFF);
+
+            size_t s = first_full;
+
+            // Process 4 strips per iteration
+            for (; s + 3 <= last_full; s += 4) {
+              const uint8_t* p0 = strip_ptr(s);
+              min0 = vec_quantizer.scan_64_running_min(q_vec, p0, min0);
+              min1 = vec_quantizer.scan_64_running_min(q_vec, p0 + strip_stride, min1);
+              min2 = vec_quantizer.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
+              min3 = vec_quantizer.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
+            }
+
+            __m512i combined =
+                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+
+            // Remaining strips one-by-one
+            for (; s <= last_full; ++s) {
+              combined = vec_quantizer.scan_64_running_min(q_vec, strip_ptr(s), combined);
+            }
+
+            const float d_full = vec_quantizer.reduce_running_min(q_vec, combined);
+            if (d_full < min_d) min_d = d_full;
+          }
+
+          // 3) Last partial strip (only if lane1 != 0)
+          if (lane1 != 0) {
+            const float d1 =
+                vec_quantizer.scan_64_chunk_min_masked(q_vec, strip_ptr(strip1), 0, lane1);
+            if (d1 < min_d) min_d = d1;
           }
 
           total_chamfer += min_d;
         }
 
-        // Store result as (ID, average Chamfer distance)
+        // Store (ID, avg chamfer)
         results[i] = {cloud_id, total_chamfer / static_cast<float>(q_query.vec_queries.size())};
       });
 
@@ -230,6 +267,94 @@ class Quantized_Point_Cloud_Set {
     }
 
     return q_query.vec_queries.size();
+  }
+
+  template<typename QuantizedQueryTy>
+  size_t distances_all(const QuantizedQueryTy& q_query, std::pair<uint32_t, float>* results) const {
+    const size_t num_q = q_query.vec_queries.size();
+
+    if constexpr (VectorQuantizer::is_fastscan) {
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        const uint32_t cloud_id = uint32_t(cid);
+
+        // wrapper offsets are VECTOR indices into the flattened DB
+        const size_t start = offsets[cloud_id];
+        const size_t end = offsets[cloud_id + 1];
+        const size_t cloud_size = (end > start) ? (end - start) : 0;
+
+        if (num_q == 0) {
+          results[cid] = {cloud_id, 0.0f};
+          return;
+        }
+        if (cloud_size == 0) {
+          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
+          return;
+        }
+
+        const size_t strip_stride = static_cast<size_t>(vec_quantizer.num_blocks) * 32;
+
+        // aligned-fast path (what our synthetic benchmark uses)
+        const bool aligned = ((start & 63) == 0) && ((end & 63) == 0);
+
+        float total = 0.0f;
+
+        if (aligned) {
+          const size_t strip0 = start / 64;
+          const size_t n_strips = cloud_size / 64;
+
+          auto strip_ptr = [&](size_t s) -> const uint8_t* {
+            return &vec_quantizer.packed_codes[(strip0 + s) * strip_stride];
+          };
+
+          for (const auto& qv : q_query.vec_queries) {
+            __m512i min0 = _mm512_set1_epi16(0xFFFF);
+            __m512i min1 = _mm512_set1_epi16(0xFFFF);
+            __m512i min2 = _mm512_set1_epi16(0xFFFF);
+            __m512i min3 = _mm512_set1_epi16(0xFFFF);
+
+            size_t s = 0;
+            for (; s + 3 < n_strips; s += 4) {
+              const uint8_t* p0 = strip_ptr(s);
+              min0 = vec_quantizer.scan_64_running_min(qv, p0, min0);
+              min1 = vec_quantizer.scan_64_running_min(qv, p0 + strip_stride, min1);
+              min2 = vec_quantizer.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
+              min3 = vec_quantizer.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
+            }
+
+            __m512i combined =
+                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+
+            for (; s < n_strips; ++s) {
+              combined = vec_quantizer.scan_64_running_min(qv, strip_ptr(s), combined);
+            }
+
+            total += vec_quantizer.reduce_running_min(qv, combined);
+          }
+
+          results[cid] = {cloud_id, total / float(num_q)};
+          return;
+        }
+
+        // general no-padding path (works for misalignment, slower)
+        for (const auto& qv : q_query.vec_queries) {
+          float md = std::numeric_limits<float>::max();
+          for (size_t j = 0; j < cloud_size; ++j) {
+            float d = qv.distance(vec_quantizer[start + j]);
+            if (d < md) md = d;
+          }
+          total += md;
+        }
+        results[cid] = {cloud_id, total / float(num_q)};
+      });
+
+      return num_q;
+    } else {
+      // PQ / other quantizers: use generic wrapper distance() on a cloud handle
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        results[cid] = {uint32_t(cid), q_query.distance((*this)[cid])};
+      });
+      return num_q;
+    }
   }
 
   inline size_t get_dist_cmps() const { return vec_quantizer.num_blocks; }
