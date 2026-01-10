@@ -109,15 +109,24 @@ class Quantized_Point_Cloud_Set {
   Quantized_Point_Cloud_Set() {}
 
   template<typename PCSet, typename... Args>
-  Quantized_Point_Cloud_Set(const PCSet& pcs, Args&&... args) :
-      vec_quantizer(FlattenedPCRange<PCSet>(pcs), std::forward<Args>(args)...) {
-    n_clouds = pcs.size();
-    auto pcs_offsets = pcs.get_offsets();
-    offsets = parlay::sequence<size_t>(pcs_offsets.begin(), pcs_offsets.end());
+  Quantized_Point_Cloud_Set(const PCSet& pcs, Args&&... args) {
 
-    uint32_t dimension = pcs.get_dims();
-    if (dimension > 0) {
-      parlay::parallel_for(0, offsets.size(), [&](size_t i) { offsets[i] /= dimension; });
+    if constexpr (VectorQuantizer::is_fastscan) {
+      vec_quantizer = VectorQuantizer(FlattenedPCRange<PCSet>(pcs), pcs.get_offsets(),
+                                      std::forward<Args>(args)...);
+      // Use FastScan's own (padded) offsets in VECTOR indices.
+      offsets = vec_quantizer.cloud_vec_offsets;
+      n_clouds = static_cast<uint32_t>(offsets.size() ? offsets.size() - 1 : 0);
+    } else {
+      vec_quantizer = VectorQuantizer(FlattenedPCRange<PCSet>(pcs), std::forward<Args>(args)...);
+      n_clouds = pcs.size();
+      auto pcs_offsets = pcs.get_offsets();
+      offsets = parlay::sequence<size_t>(pcs_offsets.begin(), pcs_offsets.end());
+
+      uint32_t dimension = pcs.get_dims();
+      if (dimension > 0) {
+        parlay::parallel_for(0, offsets.size(), [&](size_t i) { offsets[i] /= dimension; });
+      }
     }
   }
 

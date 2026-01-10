@@ -141,10 +141,11 @@ static double bench_quant_all(const QuantizedSet& qdb, const PCSet& queries,
   Timer t;
   double best = 1e100;
 
+  auto indices = parlay::iota(out.size());
   // warmup
   for (size_t i = 0; i < std::min<size_t>(queries.size(), 2); ++i) {
     auto qq = qdb.quantize_query(queries[i]);
-    qdb.distances_all(qq, out.data());  // IMPORTANT: distances_all
+    qdb.distances(qq, indices, indices.size(), out.data());  // IMPORTANT: distances_all
     sink += out[0].second;
   }
 
@@ -152,7 +153,7 @@ static double bench_quant_all(const QuantizedSet& qdb, const PCSet& queries,
     t.start();
     for (size_t qi = 0; qi < queries.size(); ++qi) {
       auto qq = qdb.quantize_query(queries[qi]);
-      qdb.distances_all(qq, out.data());  // IMPORTANT: distances_all
+      qdb.distances(qq, indices, indices.size(), out.data());  // IMPORTANT: distances_all
       sink += out[qi % out.size()].second;
     }
     best = std::min(best, t.sec());
@@ -207,7 +208,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   t.start();
   using FS_Range = fastscan::Quantized_Point_Range<FlattenedPCRange<PC>, Metric>;
   using FS_Set = Quantized_Point_Cloud_Set<FS_Range, Metric>;
-  FS_Set fs_db(db, db.get_offsets(), fs_block);
+  FS_Set fs_db(db, fs_block);
   double fs_build_s = t.sec();
 
   std::cout << "\n=== Build / Encode ===\n";

@@ -166,7 +166,7 @@ void run_speed_main(mvsic::commandLine& P) {
     std::cout << "Training FastScan with m=" << m << std::endl;
     using FS_Range = fastscan::Quantized_Point_Range<FlattenedPCRange<PC>, Metric>;
     using FS_Set = Quantized_Point_Cloud_Set<FS_Range, Metric>;
-    FS_Set q_db(points, points.get_offsets(), m);
+    FS_Set q_db(points, m);
     run_speed_bench<FS_Set, PC, ChPoint>(P, q_db, points, queries);
 
   } else if (P.getOption("-rabitq")) {

@@ -93,7 +93,8 @@ class Quantized_Point_Range {
   uint32_t num_blocks = 0;
   static constexpr uint32_t K = 16;
 
-  size_t n_points_raw = 0;  // number of vectors in flattened database
+  size_t n_points_raw = 0;           // number of vectors in flattened database
+  size_t n_points_raw_unpadded = 0;  // original number of vectors in flattened DB (no padding)
   size_t dim = 0;
   size_t dim_per_block = 0;
 
@@ -110,16 +111,31 @@ class Quantized_Point_Range {
 
   Quantized_Point_Range() = default;
 
+  // template<typename Seq>
+  // Quantized_Point_Range(const PointRange& data, const Seq& cloud_offsets_float,
+  //                       uint32_t block_size = 32) {
+  //   n_points_raw = data.size();
+  //   dim = data.get_dims();
+  //   dim_per_block = block_size;
+  //   num_blocks = static_cast<uint32_t>(dim / dim_per_block);
+
+  //   train(data);
+  //   encode_database_4bit_no_padding(data, cloud_offsets_float);
+  // }
   template<typename Seq>
   Quantized_Point_Range(const PointRange& data, const Seq& cloud_offsets_float,
                         uint32_t block_size = 32) {
-    n_points_raw = data.size();
+    n_points_raw_unpadded = data.size();
     dim = data.get_dims();
     dim_per_block = block_size;
     num_blocks = static_cast<uint32_t>(dim / dim_per_block);
 
+    // Train on the real data
+    n_points_raw = n_points_raw_unpadded;
     train(data);
-    encode_database_4bit_no_padding(data, cloud_offsets_float);
+
+    // Encode with explicit padding-by-cloud.
+    encode_database_4bit_padded_by_cloud(data, cloud_offsets_float);
   }
 
   // Access a single vector handle (by *global vector index* in packed layout).
@@ -461,6 +477,7 @@ class Quantized_Point_Range {
     out.write(reinterpret_cast<const char*>(&n_points_raw), sizeof(n_points_raw));
     out.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
     out.write(reinterpret_cast<const char*>(&dim_per_block), sizeof(dim_per_block));
+    out.write(reinterpret_cast<const char*>(&n_points_raw_unpadded), sizeof(n_points_raw_unpadded));
 
     // Save cloud_vec_offsets (vector indices)
     size_t n_off = cloud_vec_offsets.size();
@@ -485,6 +502,7 @@ class Quantized_Point_Range {
     in.read(reinterpret_cast<char*>(&n_points_raw), sizeof(n_points_raw));
     in.read(reinterpret_cast<char*>(&dim), sizeof(dim));
     in.read(reinterpret_cast<char*>(&dim_per_block), sizeof(dim_per_block));
+    in.read(reinterpret_cast<char*>(&n_points_raw_unpadded), sizeof(n_points_raw_unpadded));
 
     // Load cloud_vec_offsets
     size_t n_off = 0;
@@ -590,6 +608,77 @@ class Quantized_Point_Range {
           const uint8_t c_o = (v_odd < n_points_raw) ? find_best(data.location(v_odd), b) : 0;
 
           strip_base[static_cast<size_t>(b) * 32 + lane_pair] = (c_e & 0x0F) | ((c_o & 0x0F) << 4);
+        }
+      }
+    });
+  }
+
+  template<typename Seq>
+  void encode_database_4bit_padded_by_cloud(const PointRange& data,
+                                            const Seq& cloud_offsets_float) {
+    // cloud_offsets_float are offsets in FLOATS (CSR-like), size = n_clouds+1.
+    const size_t n_clouds = (cloud_offsets_float.size() > 0) ? (cloud_offsets_float.size() - 1) : 0;
+
+    // Build padded offsets in VECTOR indices.
+    // Each cloud gets padded to multiple of 64 vectors.
+    cloud_vec_offsets.resize(n_clouds + 1);
+    size_t cur = 0;
+    cloud_vec_offsets[0] = 0;
+
+    for (size_t c = 0; c < n_clouds; ++c) {
+      const size_t start_f = static_cast<size_t>(cloud_offsets_float[c]);
+      const size_t end_f = static_cast<size_t>(cloud_offsets_float[c + 1]);
+      const size_t sz_vecs = (end_f - start_f) / dim;  // original cloud size in vectors
+      const size_t padded = ((sz_vecs + 63) / 64) * 64;
+      cloud_vec_offsets[c] = cur;
+      cur += padded;
+    }
+    cloud_vec_offsets[n_clouds] = cur;
+
+    // Total padded vector count
+    n_points_raw = cur;
+
+    // Pack codes strip-major for padded DB
+    const size_t strip_stride = static_cast<size_t>(num_blocks) * 32;
+    const size_t num_strips = (n_points_raw + 63) / 64;  // should be exact since padded
+    packed_codes.resize(num_strips * strip_stride);
+    std::fill(packed_codes.begin(), packed_codes.end(), uint8_t{0});  // padding defaults to code 0
+
+    // Encode per cloud, per strip (each cloud occupies an integer number of strips)
+    parlay::parallel_for(0, n_clouds, [&](size_t c) {
+      const size_t start_f = static_cast<size_t>(cloud_offsets_float[c]);
+      const size_t end_f = static_cast<size_t>(cloud_offsets_float[c + 1]);
+
+      const size_t start_vec_src = start_f / dim;         // in the unpadded flattened DB
+      const size_t sz_vecs = (end_f - start_f) / dim;     // original size
+      const size_t start_vec_dst = cloud_vec_offsets[c];  // in padded DB
+      const size_t padded_sz = cloud_vec_offsets[c + 1] - cloud_vec_offsets[c];
+      const size_t n_strips_c = padded_sz / 64;
+
+      // dst strip index in global packed_codes
+      const size_t strip0_dst = start_vec_dst / 64;  // always aligned by construction
+
+      for (size_t s = 0; s < n_strips_c; ++s) {
+        uint8_t* strip_base = packed_codes.data() + (strip0_dst + s) * strip_stride;
+
+        for (size_t lane_pair = 0; lane_pair < 32; ++lane_pair) {
+          const size_t v_even_in_cloud = s * 64 + lane_pair * 2;
+          const size_t v_odd_in_cloud = v_even_in_cloud + 1;
+
+          // If beyond original sz_vecs, leave codes as 0 (already zeroed)
+          const bool has_even = (v_even_in_cloud < sz_vecs);
+          const bool has_odd = (v_odd_in_cloud < sz_vecs);
+
+          const size_t v_even_src = start_vec_src + v_even_in_cloud;
+          const size_t v_odd_src = start_vec_src + v_odd_in_cloud;
+
+          for (uint32_t b = 0; b < num_blocks; ++b) {
+            const uint8_t c_e = has_even ? find_best(data.location(v_even_src), b) : 0;
+            const uint8_t c_o = has_odd ? find_best(data.location(v_odd_src), b) : 0;
+
+            strip_base[static_cast<size_t>(b) * 32 + lane_pair] =
+                (c_e & 0x0F) | ((c_o & 0x0F) << 4);
+          }
         }
       }
     });

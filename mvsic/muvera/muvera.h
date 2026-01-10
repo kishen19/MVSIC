@@ -13,7 +13,6 @@
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/scann.h"
-#include "mvsic/core/quantization/fastscan.h"
 
 // ParlayANN (Vamana) includes
 #include "algorithms/utils/beamSearch.h"
@@ -50,8 +49,6 @@ class IndexMUVERA : public Index<metric> {
   using RaBitQ_Point = rabitq::Quantized_Query<metric>;
   using ScaNN_Range = pq::ScaNN_Point_Range<Range, metric>;
   using ScaNN_Point = PQ_Point;
-  using FastScan_Range = fastscan::Quantized_Point_Range<Range, metric>;
-  using FastScan_Point = fastscan::Quantized_Query<metric>;
   using QT = IndexParams::QuantizerType;
 
   IndexParams params;
@@ -65,7 +62,6 @@ class IndexMUVERA : public Index<metric> {
   std::optional<PQ_Range> quantizer_pq;
   std::optional<RaBitQ_Range> quantizer_rabitq;
   std::optional<ScaNN_Range> quantizer_scann;
-  std::optional<FastScan_Range> quantizer_fastscan;
   QT active_quantizer = QT::None;
 
   IndexMUVERA(uint32_t d_) noexcept :
@@ -135,10 +131,8 @@ class IndexMUVERA : public Index<metric> {
         quantizer_pq.emplace(points_fdes, params.pq.block_size, params.pq.num_clusters_per_block,
                              params.pq.num_points_per_cluster);
         break;
-      case QT::FastScan:
-        if (params.verbose >= 1) std::cout << "Training FastScan..." << std::endl;
-        quantizer_fastscan.emplace(points_fdes, params.pq.block_size);
-        break;
+      case QT::None: break;
+      default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
     }
   }
 
@@ -213,14 +207,6 @@ class IndexMUVERA : public Index<metric> {
         dist_cmps = cmps;
         break;
       }
-      case QT::FastScan: {
-        auto q_query = quantizer_fastscan->quantize_query(query_point);
-        auto [result, cmps] = parlayANN::beam_search<FastScan_Point, FastScan_Range, uint32_t>(
-            q_query, G, *quantizer_fastscan, start_point, QP);
-        visited = result.second;
-        dist_cmps = cmps;
-        break;
-      }
       case QT::None: {
         auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
             query_point, G, points_fdes, start_point, QP);
@@ -228,6 +214,7 @@ class IndexMUVERA : public Index<metric> {
         dist_cmps = cmps * 2 * d_fde;
         break;
       }
+      default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
     }
     timings.push_back(t.stop());
     t.reset();
@@ -266,7 +253,6 @@ class IndexMUVERA : public Index<metric> {
       case QT::RaBitQ: quantizer_rabitq->save(out); break;
       case QT::ScaNN: quantizer_scann->save(out); break;
       case QT::PQ: quantizer_pq->save(out); break;
-      case QT::FastScan: quantizer_fastscan->save(out); break;
       case QT::None: parlayANN::io::save_point_range(points_fdes, out); break;
     }
   }
@@ -301,11 +287,6 @@ class IndexMUVERA : public Index<metric> {
         quantizer_pq.emplace();
         quantizer_pq->load(in);
         d_fde = quantizer_pq->dim;
-        break;
-      case QT::FastScan:
-        quantizer_fastscan.emplace();
-        quantizer_fastscan->load(in);
-        d_fde = quantizer_fastscan->dim;
         break;
       case QT::None:
         auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);

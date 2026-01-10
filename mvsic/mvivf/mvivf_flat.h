@@ -107,7 +107,8 @@ class IndexMVIVFFlat : public Index<metric> {
                              params.pq.num_points_per_cluster);
         break;
       case QT::FastScan: quantizer_fastscan.emplace(points, params.pq.block_size); break;
-      default: break;
+      case QT::None: break;
+      default: std::cout << "Error: Unknown quantization method." << std::endl; abort();
     }
 
     if (params.verbose >= 1) {
@@ -217,6 +218,10 @@ class IndexMVIVFFlat : public Index<metric> {
         });
         dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
         break;
+      }
+      default: {
+        std::cout << "Error: Unknown quantization method." << std::endl;
+        abort();
       }
     }
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) {

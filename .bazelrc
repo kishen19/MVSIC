@@ -13,6 +13,10 @@ build --cxxopt=-march=native
 # AVX for RaBitQ
 build --cxxopt=-mavx512f
 build --cxxopt=-mavx512vpopcntdq
+# AVX for FastScan
+build --cxxopt=-mavx512bw
+build --cxxopt=-mavx512dq
+build --cxxopt=-mavx512vl
 
 build --cxxopt=-fvisibility=hidden
 build --cxxopt=-fvisibility-inlines-hidden
