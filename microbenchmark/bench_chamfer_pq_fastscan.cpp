@@ -26,6 +26,7 @@
 //     -dist_func <L2|IP> (default L2)
 //     -pq_block <u32>    (default 8)    // dim_per_block for PQ
 //     -fs_block <u32>    (default 8)    // dim_per_block for FastScan
+//     -rbits <u32>       (default 2)    // bits_per_code for RaBitQ
 //     -reps <u32>        (default 3)    // repetitions; report best
 //
 // Notes:
@@ -51,6 +52,7 @@
 
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
+#include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -167,7 +169,7 @@ static double bench_quant_all(const QModel& model, const EncSet& qdb, const PCSe
 // ---------------------------
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
-                         uint32_t pq_block, uint32_t fs_block, int reps) {
+                         uint32_t pq_block, uint32_t fs_block, uint32_t rbits, int reps) {
   using PC = PointCloudSet<ChPoint>;
   constexpr bool Metric = ChPoint::is_metric();
 
@@ -190,7 +192,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "Q : clouds=" << queries.size() << "  dims=" << D
             << "  total_vecs=" << queries.total_size() << "  avg_k=" << std::fixed
             << std::setprecision(2) << queries.average_size() << "\n";
-  std::cout << "pq_block=" << pq_block << "  fs_block=" << fs_block
+  std::cout << "pq_block=" << pq_block << "  fs_block=" << fs_block << "  rbits=" << rbits
             << "  dist=" << (Metric ? "L2" : "IP") << "  reps=" << reps << "\n";
 
   // ---------------------------
@@ -221,6 +223,16 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto fs_db = fs_model.encode(db);
   double fs_encode_s = t.sec();
 
+  // RaBitQ
+  MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
+  t.start();
+  rq_model.train(db, rbits);
+  double rq_train_s = t.sec();
+
+  t.start();
+  auto rq_db = rq_model.encode(db);
+  double rq_encode_s = t.sec();
+
   std::cout << "\n=== Train / Encode ===\n";
   std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
   std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
@@ -228,6 +240,9 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
   std::cout << "FastScan encode  : " << fs_encode_s << " s\n";
   std::cout << "FastScan total   : " << (fs_train_s + fs_encode_s) << " s\n";
+  std::cout << "RaBitQ train   : " << rq_train_s << " s\n";
+  std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
+  std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
 
   // ---------------------------
   // Benchmark: distances to ALL clouds
@@ -272,6 +287,17 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
               << " ns / cloud-dist\n";
   }
 
+  {
+    double best = bench_quant_all(rq_model, rq_db, queries, results, reps, sink);
+    double dps = double(ops) / best;
+    std::cout << "RaBitQ (wrapper::distances_all):\n";
+    std::cout << "  total_time : " << best << " s\n";
+    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
+              << " M cloud-dists/s\n";
+    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
+              << " ns / cloud-dist\n";
+  }
+
   std::cout << "\n(sink=" << sink << ")\n";
   return 0;
 }
@@ -281,7 +307,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 // ---------------------------
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
-                     uint64_t seed_q, uint32_t pq_block, uint32_t fs_block, int reps) {
+                     uint64_t seed_q, uint32_t pq_block, uint32_t fs_block, uint32_t rbits,
+                     int reps) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -295,14 +322,15 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
   fill_random_point_cloud_set(queries, seed_q, l2_normalize_vectors);
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, reps);
+  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps);
 }
 
 // ---------------------------
 // File mode
 // ---------------------------
 template<typename ChPoint>
-static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, int reps) {
+static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint32_t rbits,
+                     int reps) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -323,19 +351,20 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, int r
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, reps);
+  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps);
 }
 
 int main(int argc, char** argv) {
   commandLine P(argc, argv,
                 "[-i <dbFile>] [-q <qFile>] [-mm] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
-                "[-dist_func <L2|IP>] [-pq_block <b>] [-fs_block <b>] [-reps <r>]");
+                "[-dist_func <L2|IP>] [-pq_block <b>] [-fs_block <b>] [-rbits <b>] [-reps <r>]");
 
   // Common
   std::string df = P.getOptionValue("-dist_func", "L2");
   uint32_t pq_block = static_cast<uint32_t>(P.getOptionIntValue("-pq_block", 8));
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
+  uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
   int reps = std::max(1, P.getOptionIntValue("-reps", 3));
 
   // Decide mode: if both -i and -q are present => file mode, else synthetic
@@ -347,8 +376,9 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    if (df == "IP" || df == "ip") return run_files<ChamferIP_Point>(P, pq_block, fs_block, reps);
-    return run_files<ChamferL2_Point>(P, pq_block, fs_block, reps);
+    if (df == "IP" || df == "ip")
+      return run_files<ChamferIP_Point>(P, pq_block, fs_block, rbits, reps);
+    return run_files<ChamferL2_Point>(P, pq_block, fs_block, rbits, reps);
   }
 
   // Synthetic mode args
@@ -365,7 +395,8 @@ int main(int argc, char** argv) {
 
   if (df == "IP" || df == "ip") {
     return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block,
-                                      reps);
+                                      rbits, reps);
   }
-  return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block, reps);
+  return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block, rbits,
+                                    reps);
 }
