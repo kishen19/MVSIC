@@ -11,7 +11,6 @@
 // Quantization Headers
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/scann.h"
 
 // ParlayANN (Vamana) includes
 #include "algorithms/utils/beamSearch.h"
@@ -48,10 +47,13 @@ class IndexMPool : public Index<metric> {
   // Quantizer Types
   using PQ_Range = pq::Quantized_Point_Range<Range, metric>;
   using PQ_Point = pq::Quantized_Query<metric>;
-  using RaBitQ_Range = rabitq::Quantized_Point_Range<Range, metric>;
-  using RaBitQ_Point = rabitq::Quantized_Query<metric>;
-  using ScaNN_Range = pq::ScaNN_Point_Range<Range, metric>;
-  using ScaNN_Point = PQ_Point;
+  using RQ_Range = rabitq::Quantized_Point_Range<Range, metric>;
+  using RQ_Point = rabitq::Quantized_Query<metric>;
+  using PQ_Model = pq::Model<metric>;
+  using RQ_Model = rabitq::Model<metric>;
+
+  using QuantModel = std::variant<std::monostate, PQ_Model, RQ_Model>;
+  using QuantRange = std::variant<std::monostate, PQ_Range, RQ_Range>;
   using QT = IndexParams::QuantizerType;
 
   IndexParams params;
@@ -60,10 +62,9 @@ class IndexMPool : public Index<metric> {
   parlayANN::BuildParams BP;                       // Vamana build parameters
   parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
 
-  // Quantizer Storage (Only one will be active)
-  std::optional<PQ_Range> quantizer_pq;
-  std::optional<RaBitQ_Range> quantizer_rabitq;
-  std::optional<ScaNN_Range> quantizer_scann;
+  // Quantizer Storage
+  QuantModel quantizer = std::monostate{};
+  QuantRange quantized_data = std::monostate{};
   QT active_quantizer = QT::None;
 
   IndexMPool(uint32_t d_) noexcept :
@@ -84,7 +85,6 @@ class IndexMPool : public Index<metric> {
     if (params.compress_input) {
       // TODO: run Ward's HAC to compress input point clouds
     }
-
     // Step 1: Compute Mean-Pooled vectors of the data point clouds
     if (params.verbose >= 1)
       std::cout << "Computing mean-pooled vectors of input point clouds..." << std::endl;
@@ -93,7 +93,7 @@ class IndexMPool : public Index<metric> {
                          [&](size_t i) { mpvs[i] = mean_pooling(points[i], params.normalize); });
     points_mp = Range(mpvs, d);
 
-    // Step 2: Build Vamana index on the mean-pooled points
+    // Step 2: Build ANN index on the mean-pooled points
     if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
     G = parlayANN::Graph<uint32_t>(BP.R, points_mp.size());
     parlayANN::stats<uint32_t> BuildStats(G.size());
@@ -104,19 +104,20 @@ class IndexMPool : public Index<metric> {
     switch (active_quantizer) {
       case QT::RaBitQ:
         if (params.verbose >= 1) std::cout << "Training RaBitQ..." << std::endl;
-        quantizer_rabitq.emplace(points_mp, params.pq.rabitq_bits);
-        break;
-      case QT::ScaNN:
-        if (params.verbose >= 1) std::cout << "Training ScaNN..." << std::endl;
-        quantizer_scann.emplace(points_mp, params.pq.block_size, params.pq.num_clusters_per_block,
-                                params.pq.num_points_per_cluster, params.pq.scann_threshold);
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).train(points_mp, params.pq.rabitq_bits);
         break;
       case QT::PQ:
         if (params.verbose >= 1) std::cout << "Training Standard PQ..." << std::endl;
-        quantizer_pq.emplace(points_mp, params.pq.block_size, params.pq.num_clusters_per_block,
-                             params.pq.num_points_per_cluster);
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).train(points_mp, params.pq.block_size,
+                                            params.pq.num_clusters_per_block,
+                                            params.pq.num_points_per_cluster);
         break;
-      case QT::None: break;
+      case QT::None:
+        quantizer = std::monostate{};
+        quantized_data = std::monostate{};
+        break;
       default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
     }
   }
@@ -150,28 +151,22 @@ class IndexMPool : public Index<metric> {
     switch (active_quantizer) {
       case QT::RaBitQ: {
         // Quantize Query
-        auto q_query = quantizer_rabitq->quantize_query(query_point);
+        auto &m = std::get<RQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query_point);
         // Search
-        auto [result, cmps] = parlayANN::beam_search<RaBitQ_Point, RaBitQ_Range, uint32_t>(
-            q_query, G, *quantizer_rabitq, start_point, QP);
-        visited = result.second;
-        dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
-        break;
-      }
-      case QT::ScaNN: {
-        auto q_query = quantizer_scann->quantize_query(query_point);
-        auto [result, cmps] = parlayANN::beam_search<ScaNN_Point, ScaNN_Range, uint32_t>(
-            q_query, G, *quantizer_scann, start_point, QP);
+        auto [result, cmps] = parlayANN::beam_search<RQ_Point, RQ_Range, uint32_t>(
+            q_query, G, std::get<RQ_Range>(quantized_data), start_point, QP);
         visited = result.second;
         dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
         break;
       }
       case QT::PQ: {
-        auto q_query = quantizer_pq->quantize_query(query_point);
+        auto &m = std::get<PQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query_point);
         auto [result, cmps] = parlayANN::beam_search<PQ_Point, PQ_Range, uint32_t>(
-            q_query, G, *quantizer_pq, start_point, QP);
+            q_query, G, std::get<PQ_Range>(quantized_data), start_point, QP);
         visited = result.second;
-        dist_cmps = (params.pq.num_clusters_per_block + 1) * d;
+        dist_cmps = cmps;
         break;
       }
       case QT::None: {
@@ -215,11 +210,16 @@ class IndexMPool : public Index<metric> {
     int type_id = static_cast<int>(active_quantizer);
     out.write((char *)&type_id, sizeof(int));
 
-    // 3. Save Quantizer Data OR Exact Vectors
+    // 3. Save Quantizer Model and encodings OR Exact Vectors
     switch (active_quantizer) {
-      case QT::RaBitQ: quantizer_rabitq->save(out); break;
-      case QT::ScaNN: quantizer_scann->save(out); break;
-      case QT::PQ: quantizer_pq->save(out); break;
+      case QT::RaBitQ:
+        std::get<RQ_Model>(quantizer).save(out);
+        std::get<RQ_Range>(quantized_data).save(out);
+        break;
+      case QT::PQ:
+        std::get<PQ_Model>(quantizer).save(out);
+        std::get<PQ_Range>(quantized_data).save(out);
+        break;
       case QT::None: parlayANN::io::save_point_range(points_mp, out); break;
     }
   }
@@ -241,16 +241,16 @@ class IndexMPool : public Index<metric> {
     // 3. Load Data
     switch (active_quantizer) {
       case QT::RaBitQ:
-        quantizer_rabitq.emplace();  // Construct
-        quantizer_rabitq->load(in);
-        break;
-      case QT::ScaNN:
-        quantizer_scann.emplace();
-        quantizer_scann->load(in);
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).load(in);
+        quantized_data.template emplace<RQ_Range>();
+        std::get<RQ_Range>(quantized_data).load(in);
         break;
       case QT::PQ:
-        quantizer_pq.emplace();
-        quantizer_pq->load(in);
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).load(in);
+        quantized_data.template emplace<PQ_Range>();
+        std::get<PQ_Range>(quantized_data).load(in);
         break;
       case QT::None:
         auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);

@@ -37,7 +37,6 @@ PYBIND11_MODULE(mvsic, m) {
       .value("None", mvsic::IndexParams::QuantizerType::None)
       .value("PQ", mvsic::IndexParams::QuantizerType::PQ)
       .value("RaBitQ", mvsic::IndexParams::QuantizerType::RaBitQ)
-      .value("ScaNN", mvsic::IndexParams::QuantizerType::ScaNN)
       .value("FastScan", mvsic::IndexParams::QuantizerType::FastScan)
       .export_values();
 

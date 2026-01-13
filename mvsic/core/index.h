@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <tuple>
+#include <variant>
 
 #include "parlay/primitives.h"
 

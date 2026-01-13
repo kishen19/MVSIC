@@ -7,7 +7,6 @@ cc_library(
         "//mvsic/core:index",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:scann",
         "//mvsic/core/types:io",
         "@parlayann//algorithms/utils:beamSearch",
         "@parlayann//algorithms/utils:euclidian_point",

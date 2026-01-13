@@ -4,7 +4,7 @@
 #include <set>
 #include <optional>
 
-#include "absl/container/btree_set.h"
+// #include "absl/container/btree_set.h"
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
@@ -14,7 +14,6 @@
 // Quantization Headers
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/scann.h"
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/wrapper.h"
 
@@ -40,12 +39,20 @@ class IndexMVIVF : public Index<metric> {
 
   // Multi-Vector Quantizer Types using the Wrapper
   using FlatRange = FlattenedPCRange<PointCloudSet<ChPoint>>;
-  using PQ_Set = Quantized_Point_Cloud_Set<pq::Quantized_Point_Range<FlatRange, metric>, metric>;
-  using RaBitQ_Set =
-      Quantized_Point_Cloud_Set<rabitq::Quantized_Point_Range<FlatRange, metric>, metric>;
-  using ScaNN_Set = Quantized_Point_Cloud_Set<pq::ScaNN_Point_Range<FlatRange, metric>, metric>;
-  using FastScan_Set =
-      Quantized_Point_Cloud_Set<fastscan::Quantized_Point_Range<FlatRange, metric>, metric>;
+  using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
+  using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
+  using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
+
+  using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
+  using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
+  using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
+  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set>;
+
+  using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
+  using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
+  using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
+
+  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model>;
   using QT = IndexParams::QuantizerType;
 
   // kmeans tree nodes
@@ -54,7 +61,9 @@ class IndexMVIVF : public Index<metric> {
     // For internal nodes: data = centers of children
     // For leaves:         data = points in the cluster
     PointCloudSet<ChPoint> data;
-    node_t() noexcept : children(parlay::sequence<node_t *>(0)), data(PointCloudSet<ChPoint>()) {}
+    QuantSet quantized_data;  // std::monostate for inner nodes and unquantized leaves.
+
+    node_t() noexcept : children(), data(), quantized_data(std::monostate{}) {}
     ~node_t() noexcept {}
 
     inline size_t get_size() const noexcept { return data.size(); }
@@ -64,11 +73,7 @@ class IndexMVIVF : public Index<metric> {
   node_t *root = nullptr;  // Root of the k-means tree
 
   // Quantizer Storage
-  // TODO: optimize this by using std::variant
-  std::optional<PQ_Set> quantizer_pq;
-  std::optional<RaBitQ_Set> quantizer_rabitq;
-  std::optional<ScaNN_Set> quantizer_scann;
-  std::optional<FastScan_Set> quantizer_fastscan;
+  QuantModel quantizer = std::monostate{};
   QT active_quantizer = QT::None;
 
   IndexMVIVF(size_t d_) noexcept : params(IndexParams::mvivf()) { d = d_; }
@@ -112,6 +117,25 @@ class IndexMVIVF : public Index<metric> {
             recursive_build(child, child_points);
           } else {  // Leaf Node
             child->data = std::move(child_points);
+            switch (active_quantizer) {
+              case QT::PQ: {
+                auto &m = std::get<PQ_Model>(quantizer);
+                child->quantized_data = m.encode(child->data);
+                break;
+              }
+              case QT::FastScan: {
+                auto &m = std::get<FS_Model>(quantizer);
+                child->quantized_data = m.encode(child->data);
+                break;
+              }
+              case QT::RaBitQ: {
+                auto &m = std::get<RQ_Model>(quantizer);
+                child->quantized_data = m.encode(child->data);
+                break;
+              }
+              case QT::None:
+              default: child->quantized_data = std::monostate{}; break;
+            }
           }
         },
         1);
@@ -123,31 +147,32 @@ class IndexMVIVF : public Index<metric> {
     if (params.compress_input) {
       // TODO: run Ward's HAC to compress input point clouds
     }
-    recursive_build(root, points);
 
     // Quantization
     active_quantizer = params.pq.method;
     switch (active_quantizer) {
-      case QT::RaBitQ:
-        if (params.verbose >= 1) std::cout << "Training RaBitQ..." << std::endl;
-        quantizer_rabitq.emplace(points, params.pq.rabitq_bits);
+      case QT::PQ: {
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).train(points, params.pq.block_size,
+                                            params.pq.num_clusters_per_block,
+                                            params.pq.num_points_per_cluster);
         break;
-      case QT::ScaNN:
-        if (params.verbose >= 1) std::cout << "Training ScaNN..." << std::endl;
-        quantizer_scann.emplace(points, params.pq.block_size, params.pq.num_clusters_per_block,
-                                params.pq.num_points_per_cluster, params.pq.scann_threshold);
+      }
+      case QT::FastScan: {
+        quantizer.template emplace<FS_Model>();
+        std::get<FS_Model>(quantizer).train(points, params.pq.block_size);
         break;
-      case QT::PQ:
-        if (params.verbose >= 1) std::cout << "Training PQ..." << std::endl;
-        quantizer_pq.emplace(points, params.pq.block_size, params.pq.num_clusters_per_block,
-                             params.pq.num_points_per_cluster);
+      }
+      case QT::RaBitQ: {
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
         break;
-      case QT::FastScan:
-        if (params.verbose >= 1) std::cout << "Training FastScan..." << std::endl;
-        quantizer_fastscan.emplace(points, params.pq.block_size);
-        break;
-      default: break;
+      }
+      default: quantizer = std::monostate{}; break;
     }
+
+    // Recursively build k-means tree
+    recursive_build(root, points);
   }
 
   // Output type of Greedy Search
@@ -260,35 +285,19 @@ class IndexMVIVF : public Index<metric> {
     switch (active_quantizer) {
       case QT::RaBitQ: {
         t.start();
-        auto q_query = quantizer_rabitq->quantize_query(query);
+        auto &m = std::get<RQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query);
         t_quantize = t.stop();
         t.reset();
 
         t.start();
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
-          auto leaf_indices = parlay::delayed_tabulate(
-              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
-          quantizer_rabitq->distances(q_query, leaf_indices, leaf_indices.size(),
-                                      &visited[offsets[i]]);
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::ScaNN: {
-        t.start();
-        auto q_query = quantizer_scann->quantize_query(query);
-        t_quantize = t.stop();
-        t.reset();
-
-        t.start();
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t *leaf = probe_list[i].second;
-          auto leaf_indices = parlay::delayed_tabulate(
-              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
-          quantizer_scann->distances(q_query, leaf_indices, leaf_indices.size(),
-                                     &visited[offsets[i]]);
+          auto &qleaf = std::get<RQ_Set>(leaf->quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
+            visited[offsets[i] + j].first = leaf->data.get_id(j);
+          });
         });
         t_distances = t.stop();
         t.reset();
@@ -296,16 +305,19 @@ class IndexMVIVF : public Index<metric> {
       }
       case QT::PQ: {
         t.start();
-        auto q_query = quantizer_pq->quantize_query(query);
+        auto &m = std::get<PQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query);
         t_quantize = t.stop();
         t.reset();
 
         t.start();
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
-          auto leaf_indices = parlay::delayed_tabulate(
-              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
-          quantizer_pq->distances(q_query, leaf_indices, leaf_indices.size(), &visited[offsets[i]]);
+          auto &qleaf = std::get<PQ_Set>(leaf->quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
+            visited[offsets[i] + j].first = leaf->data.get_id(j);
+          });
         });
         t_distances = t.stop();
         t.reset();
@@ -313,17 +325,19 @@ class IndexMVIVF : public Index<metric> {
       }
       case QT::FastScan: {
         t.start();
-        auto q_query = quantizer_fastscan->quantize_query(query);
+        auto &m = std::get<FS_Model>(quantizer);
+        auto q_query = m.quantize_query(query);
         t_quantize = t.stop();
         t.reset();
 
         t.start();
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
-          auto leaf_indices = parlay::delayed_tabulate(
-              leaf->data.size(), [&](size_t j) { return leaf->data.get_id(j); });
-          quantizer_fastscan->distances(q_query, leaf_indices, leaf_indices.size(),
-                                        &visited[offsets[i]]);
+          auto &qleaf = std::get<FS_Set>(leaf->quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
+            visited[offsets[i] + j].first = leaf->data.get_id(j);
+          });
         });
         t_distances = t.stop();
         t.reset();
@@ -474,15 +488,18 @@ class IndexMVIVF : public Index<metric> {
       }
     }
 
-    // Quantization
+    // Quantization: save only the MODEL (leaf encodings are reconstructed on load)
     int type_id = static_cast<int>(active_quantizer);
-    outfile.write((char *)&type_id, sizeof(int));
+    outfile.write(reinterpret_cast<const char *>(&type_id), sizeof(int));
+
     switch (active_quantizer) {
-      case QT::RaBitQ: quantizer_rabitq->save(outfile); break;
-      case QT::ScaNN: quantizer_scann->save(outfile); break;
-      case QT::PQ: quantizer_pq->save(outfile); break;
-      case QT::FastScan: quantizer_fastscan->save(outfile); break;
-      default: break;
+      case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
+      case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
+      case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
+      case QT::None:
+      default:
+        // nothing
+        break;
     }
 
     outfile.close();
@@ -528,28 +545,27 @@ class IndexMVIVF : public Index<metric> {
                 point_values.size() * sizeof(uint32_t));
 
     // Quantization
-    int type_id;
-    infile.read((char *)&type_id, sizeof(int));
+    int type_id = 0;
+    infile.read(reinterpret_cast<char *>(&type_id), sizeof(int));
     active_quantizer = static_cast<QT>(type_id);
+
     switch (active_quantizer) {
-      case QT::RaBitQ:
-        quantizer_rabitq.emplace();
-        quantizer_rabitq->load(infile);
-        break;
-      case QT::ScaNN:
-        quantizer_scann.emplace();
-        quantizer_scann->load(infile);
-        break;
       case QT::PQ:
-        quantizer_pq.emplace();
-        quantizer_pq->load(infile);
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).load(infile);
         break;
       case QT::FastScan:
-        quantizer_fastscan.emplace();
-        quantizer_fastscan->load(infile);
+        quantizer.template emplace<FS_Model>();
+        std::get<FS_Model>(quantizer).load(infile);
         break;
-      default: break;
+      case QT::RaBitQ:
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).load(infile);
+        break;
+      case QT::None:
+      default: quantizer = std::monostate{}; break;
     }
+    infile.close();
 
     // Build the index
     size_t dim = points.get_dims();
@@ -600,7 +616,39 @@ class IndexMVIVF : public Index<metric> {
       });
     });
     root = ind_to_node[0];
-    infile.close();
+
+    // Re-encode leaf clusters (since we only saved the model)
+    if (active_quantizer != QT::None) {
+      parlay::parallel_for(
+          0, num,
+          [&](size_t i) {
+            node_t *node = ind_to_node[i];
+            if (!node) return;
+            if (!node->children.empty()) return;  // internal node
+            if (node->data.size() == 0) return;
+
+            switch (active_quantizer) {
+              case QT::PQ: {
+                auto &m = std::get<PQ_Model>(quantizer);
+                node->quantized_data = m.encode(node->data);
+                break;
+              }
+              case QT::FastScan: {
+                auto &m = std::get<FS_Model>(quantizer);
+                node->quantized_data = m.encode(node->data);
+                break;
+              }
+              case QT::RaBitQ: {
+                auto &m = std::get<RQ_Model>(quantizer);
+                node->quantized_data = m.encode(node->data);
+                break;
+              }
+              case QT::None:
+              default: node->quantized_data = std::monostate{}; break;
+            }
+          },
+          /*granularity=*/1);
+    }
   }
 
   // Traversing the tree and deleting nodes

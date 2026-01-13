@@ -54,8 +54,6 @@ void bench(mvsic::commandLine &P) {
     pq_method_t = 1;
   } else if (pq_method == "RabitQ") {
     pq_method_t = 2;
-  } else if (pq_method == "ScaNN") {
-    pq_method_t = 3;
   } else {
     std::cerr << "Unknown PQ method: " << pq_method << std::endl;
     exit(1);
@@ -64,7 +62,6 @@ void bench(mvsic::commandLine &P) {
   uint32_t num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
   uint32_t num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
   uint32_t rabitq_bits = P.getOptionIntValue("-rbits", 8);
-  float scann_threshold = P.getOptionDoubleValue("-scann_thresh", 0.2f);
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
@@ -77,8 +74,8 @@ void bench(mvsic::commandLine &P) {
   IndexParams index_params = IndexParams::muvera_custom(
       num_repetitions, num_simhash_projections, seed, projection_dimension, fill_empty_partitions,
       final_projection_dimension, !not_normalized, R, L_build, alpha, num_pass, compress_input,
-      verbose, pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
-      scann_threshold);
+      verbose, pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster,
+      rabitq_bits);
   SearchParams search_params = SearchParams::muvera(k, L, num_rerank, cut, norerank);
   IndexMUVERA<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {

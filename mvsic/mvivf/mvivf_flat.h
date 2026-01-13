@@ -10,7 +10,6 @@
 // New Quantization & Wrapper Headers
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/scann.h"
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/wrapper.h"
 
@@ -33,25 +32,38 @@ class IndexMVIVFFlat : public Index<metric> {
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Index<metric>::d;                           // Embedding dimension
 
-  // Multi-Vector Quantizer Types
+  // Multi-Vector Quantizer Types using the Wrapper
   using FlatRange = FlattenedPCRange<PointCloudSet<ChPoint>>;
-  using PQ_Set = Quantized_Point_Cloud_Set<pq::Quantized_Point_Range<FlatRange, metric>, metric>;
-  using RaBitQ_Set =
-      Quantized_Point_Cloud_Set<rabitq::Quantized_Point_Range<FlatRange, metric>, metric>;
-  using ScaNN_Set = Quantized_Point_Cloud_Set<pq::ScaNN_Point_Range<FlatRange, metric>, metric>;
-  using FastScan_Set =
-      Quantized_Point_Cloud_Set<fastscan::Quantized_Point_Range<FlatRange, metric>, metric>;
+  using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
+  using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
+  using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
+
+  using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
+  using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
+  using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
+  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set>;
+
+  using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
+  using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
+  using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
+
+  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model>;
   using QT = IndexParams::QuantizerType;
+
+  struct node_t {
+    PointCloudSet<ChPoint> data;
+    QuantSet quantized_data;
+
+    node_t() noexcept : data(), quantized_data(std::monostate{}) {}
+    size_t size() const noexcept { return data.size(); }
+  };
 
   IndexParams params;
   PointCloudSet<ChPoint> centers;  // Centers of clusters
-  parlay::sequence<PointCloudSet<ChPoint>> clusters = {};
+  parlay::sequence<node_t> clusters = {};
 
-  // Quantizer Storage (Active based on params)
-  std::optional<PQ_Set> quantizer_pq;
-  std::optional<RaBitQ_Set> quantizer_rabitq;
-  std::optional<ScaNN_Set> quantizer_scann;
-  std::optional<FastScan_Set> quantizer_fastscan;
+  // Quantizer Storage
+  QuantModel quantizer = std::monostate{};
   QT active_quantizer = QT::None;
 
   IndexMVIVFFlat(uint32_t d_) noexcept : params(IndexParams::mvivf_flat()) { d = d_; }
@@ -72,16 +84,40 @@ class IndexMVIVFFlat : public Index<metric> {
     if (params.compress_input) {
       // TODO: run Ward's HAC to compress input point clouds
     }
-    // Step 1: Run MV-Lloyds on points
+
+    // Quantization
+    active_quantizer = params.pq.method;
+    switch (active_quantizer) {
+      case QT::PQ: {
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).train(points, params.pq.block_size,
+                                            params.pq.num_clusters_per_block,
+                                            params.pq.num_points_per_cluster);
+        break;
+      }
+      case QT::FastScan: {
+        quantizer.template emplace<FS_Model>();
+        std::get<FS_Model>(quantizer).train(points, params.pq.block_size);
+        break;
+      }
+      case QT::RaBitQ: {
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
+        break;
+      }
+      default: quantizer = std::monostate{}; break;
+    }
+
+    // Run MV-Lloyds on points
     MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
     Clus.train(points);
     centers = std::move(Clus.centers);
     parlay::sequence<uint32_t> &cluster_ids = Clus.cluster_ids;
-    // Step 2: Collect Clusters
+    // Collect Clusters
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
 
-    // Step 3: Collect point clouds by clusters
+    // Collect point clouds by clusters
     clusters.resize(num_clusters);
     parlay::parallel_for(
         0, grouped.size(),
@@ -90,26 +126,28 @@ class IndexMVIVFFlat : public Index<metric> {
           auto group = parlay::delayed_seq<uint32_t>(
               grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
           PointCloudSet<ChPoint> cluster_points = PointCloudSet<ChPoint>(points.filter(group), d);
-          clusters[cluster_id] = std::move(cluster_points);
+          clusters[cluster_id].data = std::move(cluster_points);
+          switch (active_quantizer) {
+            case QT::PQ: {
+              auto &m = std::get<PQ_Model>(quantizer);
+              clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
+              break;
+            }
+            case QT::FastScan: {
+              auto &m = std::get<FS_Model>(quantizer);
+              clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
+              break;
+            }
+            case QT::RaBitQ: {
+              auto &m = std::get<RQ_Model>(quantizer);
+              clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
+              break;
+            }
+            case QT::None:
+            default: clusters[cluster_id].quantized_data = std::monostate{}; break;
+          }
         },
         1);
-
-    // Quantization
-    active_quantizer = params.pq.method;
-    switch (active_quantizer) {
-      case QT::RaBitQ: quantizer_rabitq.emplace(points, params.pq.rabitq_bits); break;
-      case QT::ScaNN:
-        quantizer_scann.emplace(points, params.pq.block_size, params.pq.num_clusters_per_block,
-                                params.pq.num_points_per_cluster, params.pq.scann_threshold);
-        break;
-      case QT::PQ:
-        quantizer_pq.emplace(points, params.pq.block_size, params.pq.num_clusters_per_block,
-                             params.pq.num_points_per_cluster);
-        break;
-      case QT::FastScan: quantizer_fastscan.emplace(points, params.pq.block_size); break;
-      case QT::None: break;
-      default: std::cout << "Error: Unknown quantization method." << std::endl; abort();
-    }
 
     if (params.verbose >= 1) {
       std::cout << "Index built. Mean cluster size: " << mean_cluster_size()
@@ -153,68 +191,52 @@ class IndexMVIVFFlat : public Index<metric> {
     size_t total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
 
+    // --- quantize + distances ---
     switch (active_quantizer) {
       case QT::RaBitQ: {
-        auto q_query = quantizer_rabitq->quantize_query(query);
+        auto &m = std::get<RQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
-          auto &leaf_points = clusters[cluster_id];
-          parlay::sequence<uint32_t> leaf_indices =
-              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
-          quantizer_rabitq->distances(q_query, leaf_indices.data(), leaf_indices.size(),
-                                      &visited[offsets[i]]);
+          auto &qleaf = std::get<RQ_Set>(clusters[cluster_id].quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
+            visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
+          });
         });
-        // TODO: fix this
-        // dist_cmps += total_size;
-        break;
-      }
-      case QT::ScaNN: {
-        auto q_query = quantizer_scann->quantize_query(query);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          uint32_t cluster_id = id_dist[i].first;
-          auto &leaf_points = clusters[cluster_id];
-          parlay::sequence<uint32_t> leaf_indices =
-              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
-          quantizer_scann->distances(q_query, leaf_indices.data(), leaf_indices.size(),
-                                     &visited[offsets[i]]);
-        });
-        // TODO: fix this
-        // dist_cmps += total_size;
         break;
       }
       case QT::PQ: {
-        auto q_query = quantizer_pq->quantize_query(query);
+        auto &m = std::get<PQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
-          auto &leaf_points = clusters[cluster_id];
-          parlay::sequence<uint32_t> leaf_indices =
-              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
-          quantizer_pq->distances(q_query, leaf_indices.data(), leaf_indices.size(),
-                                  &visited[offsets[i]]);
+          auto &qleaf = std::get<PQ_Set>(clusters[cluster_id].quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
+            visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
+          });
         });
-        // TODO: fix this
-        // dist_cmps += total_size;
         break;
       }
       case QT::FastScan: {
-        auto q_query = quantizer_fastscan->quantize_query(query);
+        auto &m = std::get<FS_Model>(quantizer);
+        auto q_query = m.quantize_query(query);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
-          auto &leaf_points = clusters[cluster_id];
-          parlay::sequence<uint32_t> leaf_indices =
-              parlay::tabulate(leaf_points.size(), [&](size_t j) { return leaf_points.get_id(j); });
-          quantizer_fastscan->distances(q_query, leaf_indices.data(), leaf_indices.size(),
-                                        &visited[offsets[i]]);
+          auto &qleaf = std::get<FS_Set>(clusters[cluster_id].quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
+            visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
+          });
         });
-        // TODO: fix this
-        // dist_cmps += total_size;
         break;
       }
       case QT::None: {
         auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
-          leaf_dist_cmps[i] = clusters[cluster_id].distances(query, &visited[offsets[i]]);
+          leaf_dist_cmps[i] = clusters[cluster_id].data.distances(query, &visited[offsets[i]]);
         });
         dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
         break;
@@ -284,20 +306,21 @@ class IndexMVIVFFlat : public Index<metric> {
     for (size_t i = 0; i < num; ++i) {
       if (clusters[i].size() > 0) {
         for (size_t j = 0; j < clusters[i].size(); ++j) {
-          uint32_t point_id = clusters[i].get_id(j);
+          uint32_t point_id = clusters[i].data.get_id(j);
           outfile.write(reinterpret_cast<const char *>(&point_id), sizeof(uint32_t));
         }
       }
     }
 
-    // Quantization
-    int type_id = static_cast<int>(active_quantizer);
-    outfile.write((char *)&type_id, sizeof(int));
+    // quantizer MODEL only
+    const int type_id = static_cast<int>(active_quantizer);
+    outfile.write(reinterpret_cast<const char *>(&type_id), sizeof(int));
+
     switch (active_quantizer) {
-      case QT::RaBitQ: quantizer_rabitq->save(outfile); break;
-      case QT::ScaNN: quantizer_scann->save(outfile); break;
-      case QT::PQ: quantizer_pq->save(outfile); break;
-      case QT::FastScan: quantizer_fastscan->save(outfile); break;
+      case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
+      case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
+      case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
+      case QT::None:
       default: break;
     }
 
@@ -339,29 +362,28 @@ class IndexMVIVFFlat : public Index<metric> {
     infile.read(reinterpret_cast<char *>(clusters_values.begin()),
                 clusters_values.size() * sizeof(uint32_t));
 
-    // Quantization
-    int type_id;
-    infile.read((char *)&type_id, sizeof(int));
+    // quantizer model
+    int type_id = 0;
+    infile.read(reinterpret_cast<char *>(&type_id), sizeof(int));
     active_quantizer = static_cast<QT>(type_id);
+
     switch (active_quantizer) {
-      case QT::RaBitQ:
-        quantizer_rabitq.emplace();
-        quantizer_rabitq->load(infile);
-        break;
-      case QT::ScaNN:
-        quantizer_scann.emplace();
-        quantizer_scann->load(infile);
-        break;
       case QT::PQ:
-        quantizer_pq.emplace();
-        quantizer_pq->load(infile);
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).load(infile);
         break;
       case QT::FastScan:
-        quantizer_fastscan.emplace();
-        quantizer_fastscan->load(infile);
+        quantizer.template emplace<FS_Model>();
+        std::get<FS_Model>(quantizer).load(infile);
         break;
-      default: break;
+      case QT::RaBitQ:
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).load(infile);
+        break;
+      case QT::None: quantizer = std::monostate{}; break;
+      default: std::cerr << "IndexMVIVFFlat: Unsupported quantizer in load.\n"; abort();
     }
+    infile.close();
 
     // Build the index
     auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
@@ -376,10 +398,28 @@ class IndexMVIVFFlat : public Index<metric> {
           uint32_t point_id = clusters_values[clusters_offsets[i] + j];
           return point_id_to_data_id[point_id];
         });
-        clusters[i] = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
+        clusters[i].data = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
+        switch (active_quantizer) {
+          case QT::PQ: {
+            auto &m = std::get<PQ_Model>(quantizer);
+            clusters[i].quantized_data = m.encode(clusters[i].data);
+            break;
+          }
+          case QT::FastScan: {
+            auto &m = std::get<FS_Model>(quantizer);
+            clusters[i].quantized_data = m.encode(clusters[i].data);
+            break;
+          }
+          case QT::RaBitQ: {
+            auto &m = std::get<RQ_Model>(quantizer);
+            clusters[i].quantized_data = m.encode(clusters[i].data);
+            break;
+          }
+          case QT::None:
+          default: clusters[i].quantized_data = std::monostate{}; break;
+        }
       }
     });
-    infile.close();
   }
 
   size_t mean_cluster_size() const noexcept override {

@@ -7,7 +7,6 @@ cc_library(
         "//mvsic/core:index",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:scann",
         "//mvsic/core/types:io",
         "//mvsic/muvera/fde:fixed_dimensional_encoding",
         "@parlayann//algorithms/utils:beamSearch",

@@ -32,6 +32,7 @@
 // - PQ uses K=16 to match FastScan.
 // - Exact uses PointCloudSet::distances() (your OneToMany path).
 // - Quantized uses Quantized_Point_Cloud_Set::distances_all() (wrapper.h).
+// - Training/encoding is now separated: use Quantized_Model<VecModel, Metric>.
 
 #include <algorithm>
 #include <chrono>
@@ -48,13 +49,13 @@
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
 
-#include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/fastscan.h"
+#include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/wrapper.h"
 
-#include "mvsic/core/types/point_cloud_set.h"
-#include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
+#include "mvsic/core/types/chamfer_l2_point.h"
+#include "mvsic/core/types/point_cloud_set.h"
 
 #include "mvsic/core/utils/parse_command_line.h"
 
@@ -134,26 +135,26 @@ static double bench_exact_all(const PCSet& db, const PCSet& queries,
   return best;
 }
 
-template<typename QuantizedSet, typename PCSet>
-static double bench_quant_all(const QuantizedSet& qdb, const PCSet& queries,
+// Quantized benchmark: model builds per-query LUT cloud, encoded set computes distances_all.
+template<typename QModel, typename EncSet, typename PCSet>
+static double bench_quant_all(const QModel& model, const EncSet& qdb, const PCSet& queries,
                               std::vector<std::pair<uint32_t, float>>& out, int reps,
                               volatile double& sink) {
   Timer t;
   double best = 1e100;
 
-  auto indices = parlay::iota(out.size());
   // warmup
   for (size_t i = 0; i < std::min<size_t>(queries.size(), 2); ++i) {
-    auto qq = qdb.quantize_query(queries[i]);
-    qdb.distances(qq, indices, indices.size(), out.data());  // IMPORTANT: distances_all
+    auto qq = model.quantize_query(queries[i]);
+    qdb.distances_all(qq, out.data());  // IMPORTANT: all db clouds
     sink += out[0].second;
   }
 
   for (int r = 0; r < reps; ++r) {
     t.start();
     for (size_t qi = 0; qi < queries.size(); ++qi) {
-      auto qq = qdb.quantize_query(queries[qi]);
-      qdb.distances(qq, indices, indices.size(), out.data());  // IMPORTANT: distances_all
+      auto qq = model.quantize_query(queries[qi]);
+      qdb.distances_all(qq, out.data());  // IMPORTANT: all db clouds
       sink += out[qi % out.size()].second;
     }
     best = std::min(best, t.sec());
@@ -193,27 +194,40 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
             << "  dist=" << (Metric ? "L2" : "IP") << "  reps=" << reps << "\n";
 
   // ---------------------------
-  // Build quantized DBs
+  // Train + Encode quantized DBs
   // ---------------------------
   Timer t;
+
   const uint32_t PQ_K = 16;
   const uint32_t PQ_S = 20;
 
+  // PQ
+  MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
   t.start();
-  using PQ_Range = pq::Quantized_Point_Range<FlattenedPCRange<PC>, Metric>;
-  using PQ_Set = Quantized_Point_Cloud_Set<PQ_Range, Metric>;
-  PQ_Set pq_db(db, pq_block, PQ_K, PQ_S);
-  double pq_build_s = t.sec();
+  pq_model.train(db, pq_block, PQ_K, PQ_S);
+  double pq_train_s = t.sec();
 
   t.start();
-  using FS_Range = fastscan::Quantized_Point_Range<FlattenedPCRange<PC>, Metric>;
-  using FS_Set = Quantized_Point_Cloud_Set<FS_Range, Metric>;
-  FS_Set fs_db(db, fs_block);
-  double fs_build_s = t.sec();
+  auto pq_db = pq_model.encode(db);
+  double pq_encode_s = t.sec();
 
-  std::cout << "\n=== Build / Encode ===\n";
-  std::cout << "PQ(K=16)   : " << pq_build_s << " s\n";
-  std::cout << "FastScan16 : " << fs_build_s << " s\n";
+  // FastScan
+  MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
+  t.start();
+  fs_model.train(db, fs_block);
+  double fs_train_s = t.sec();
+
+  t.start();
+  auto fs_db = fs_model.encode(db);
+  double fs_encode_s = t.sec();
+
+  std::cout << "\n=== Train / Encode ===\n";
+  std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
+  std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
+  std::cout << "PQ(K=16) total   : " << (pq_train_s + pq_encode_s) << " s\n";
+  std::cout << "FastScan train   : " << fs_train_s << " s\n";
+  std::cout << "FastScan encode  : " << fs_encode_s << " s\n";
+  std::cout << "FastScan total   : " << (fs_train_s + fs_encode_s) << " s\n";
 
   // ---------------------------
   // Benchmark: distances to ALL clouds
@@ -237,7 +251,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   }
 
   {
-    double best = bench_quant_all(pq_db, queries, results, reps, sink);
+    double best = bench_quant_all(pq_model, pq_db, queries, results, reps, sink);
     double dps = double(ops) / best;
     std::cout << "PQ(K=16) (wrapper::distances_all):\n";
     std::cout << "  total_time : " << best << " s\n";
@@ -248,7 +262,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   }
 
   {
-    double best = bench_quant_all(fs_db, queries, results, reps, sink);
+    double best = bench_quant_all(fs_model, fs_db, queries, results, reps, sink);
     double dps = double(ops) / best;
     std::cout << "FastScan(K=16) (wrapper::distances_all):\n";
     std::cout << "  total_time : " << best << " s\n";

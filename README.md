@@ -13,7 +13,7 @@ MVSIC provides implementations of several state-of-the-art algorithms and also i
 *   Natively supports both **L2 (Euclidean)** and **Inner Product (MIPS)** distances for Chamfer distance calculations.
 *   Includes a benchmarking suite for comparing the QPS-Recall performance of different indexing methods.
 
-## Available Algorithms
+## Algorithms
 
 MVSIC includes the following multi-vector indexing algorithms:
 
