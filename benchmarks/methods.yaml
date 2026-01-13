@@ -4,6 +4,10 @@ mvivf:
   variable_param: nprobes
   class: "MVIVF" 
 
+mvivf_flat:
+  variable_param: nprobes
+  class: "MVIVFFlat" 
+
 muvera:
   variable_param: L
   class: "MUVERA"
