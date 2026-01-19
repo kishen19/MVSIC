@@ -20,9 +20,9 @@ vamana:
   variable_param: L
   class: "Vamana"
 
-svh:
+svh_ivf:
   variable_param: nprobes
-  class: "SVH"
+  class: "SVHIVF"
 
 fastplaid:
   variable_param: n_ivf_probe

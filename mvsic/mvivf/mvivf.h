@@ -51,8 +51,16 @@ class IndexMVIVF : public Index<metric> {
   using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
   using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
   using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
-
   using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model>;
+
+  // helper for decltype
+  template<class M, class Q>
+  using QQueryT = decltype(std::declval<M &>().quantize_query(std::declval<Q const &>()));
+  using PQ_Q = QQueryT<PQ_Model, ChPoint>;
+  using FS_Q = QQueryT<FS_Model, ChPoint>;
+  using RQ_Q = QQueryT<RQ_Model, ChPoint>;
+  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q>;
+
   using QT = IndexParams::QuantizerType;
 
   // kmeans tree nodes
@@ -103,6 +111,28 @@ class IndexMVIVF : public Index<metric> {
       node->data = PointCloudSet<ChPoint>(centers.filter(active_centers_ind), d);
     } else {
       node->data = std::move(centers);
+    }
+    // Quantize centers
+    if (params.quantize_centers) {
+      switch (active_quantizer) {
+        case QT::PQ: {
+          auto &m = std::get<PQ_Model>(quantizer);
+          node->quantized_data = m.encode(node->data);
+          break;
+        }
+        case QT::FastScan: {
+          auto &m = std::get<FS_Model>(quantizer);
+          node->quantized_data = m.encode(node->data);
+          break;
+        }
+        case QT::RaBitQ: {
+          auto &m = std::get<RQ_Model>(quantizer);
+          node->quantized_data = m.encode(node->data);
+          break;
+        }
+        case QT::None:
+        default: node->quantized_data = std::monostate{}; break;
+      }
     }
     parlay::parallel_for(
         0, grouped.size(),
@@ -178,12 +208,13 @@ class IndexMVIVF : public Index<metric> {
   // Output type of Greedy Search
   struct GreedySearchResult {
     parlay::sequence<std::pair<float, node_t *>> probe_list;
-    size_t dist_cmps_step1 = 0;
-    double time_step1 = 0.0;
+    size_t dist_cmps = 0;
+    double time = 0.0;
   };
 
   // Simple Beam Search using std::set
-  GreedySearchResult greedy_search(const ChPoint &query, size_t nprobes) const {
+  GreedySearchResult greedy_search(const ChPoint &query, const QuantQuery &q_query_var,
+                                   size_t nprobes) const {
     using score_node = std::pair<float, node_t *>;
     auto less = [](const score_node &a, const score_node &b) {
       return a.first < b.first || (a.first == b.first && a.second < b.second);
@@ -207,11 +238,39 @@ class IndexMVIVF : public Index<metric> {
       beam.erase(it);
       node_t *current_node = best.second;
       auto &children = current_node->children;
-      auto &centers = current_node->data;
       if (children.empty()) continue;
       // Compute distances to children
-      child_dists.resize(centers.size());
-      dist_cmps += centers.distances_naive(query, child_dists.data());
+      child_dists.resize(children.size());
+      if (!params.quantize_centers) {
+        auto &centers = current_node->data;
+        dist_cmps += centers.distances_naive(query, child_dists.data());
+      } else {
+        switch (active_quantizer) {
+          case QT::RaBitQ: {
+            auto &q_query = std::get<RQ_Q>(q_query_var);
+            auto &qleaf = std::get<RQ_Set>(current_node->quantized_data);
+            qleaf.distances_all(q_query, child_dists.data());
+            break;
+          }
+          case QT::PQ: {
+            auto &q_query = std::get<PQ_Q>(q_query_var);
+            auto &qleaf = std::get<PQ_Set>(current_node->quantized_data);
+            qleaf.distances_all(q_query, child_dists.data());
+            break;
+          }
+          case QT::FastScan: {
+            auto &q_query = std::get<FS_Q>(q_query_var);
+            auto &qleaf = std::get<FS_Set>(current_node->quantized_data);
+            qleaf.distances_all(q_query, child_dists.data());
+            break;
+          }
+          case QT::None:
+          default:
+            std::cerr << "Error: Invalid quantizer type in greedy search." << std::endl;
+            abort();
+        }
+      }
+
       for (size_t i = 0; i < children.size(); ++i) {
         float d = child_dists[i].second;
         node_t *child = children[i];
@@ -237,8 +296,8 @@ class IndexMVIVF : public Index<metric> {
     parlay::sort_inplace(probe_vec, less);
 
     GreedySearchResult out;
-    out.dist_cmps_step1 = dist_cmps;
-    out.time_step1 = t.stop();
+    out.dist_cmps = dist_cmps;
+    out.time = t.stop();
     out.probe_list = parlay::sequence<score_node>::from_function(
         probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
     return out;
@@ -254,21 +313,52 @@ class IndexMVIVF : public Index<metric> {
     size_t nprobes = search_params.nprobes;
     size_t dist_cmps = 0;
 
+    double t_quantize = 0.0;
+    double t_distances = 0.0;
+    double t_rest = 0.0;
+
+    // -------------------------
+    // Step 0: Quantize Query
+    // -------------------------
+    QuantQuery q_query_var;
+    t.start();
+    switch (active_quantizer) {
+      case QT::RaBitQ: {
+        auto &m = std::get<RQ_Model>(quantizer);
+        q_query_var = m.quantize_query(query);
+        break;
+      }
+      case QT::PQ: {
+        auto &m = std::get<PQ_Model>(quantizer);
+        q_query_var = m.quantize_query(query);
+        break;
+      }
+      case QT::FastScan: {
+        auto &m = std::get<FS_Model>(quantizer);
+        q_query_var = m.quantize_query(query);
+        break;
+      }
+      case QT::None: {
+        q_query_var = std::monostate{};
+        break;
+      }
+      default: abort();
+    }
+    t_quantize = t.stop();
+    t.reset();
+
     // -------------------------
     // Step 1: Greedy search (heap-based)
     // -------------------------
-    auto gs = greedy_search(query, nprobes);
+    auto gs = greedy_search(query, q_query_var, nprobes);
     auto probe_list = std::move(gs.probe_list);
-    dist_cmps += gs.dist_cmps_step1;
-    timings.push_back(gs.time_step1);
+    dist_cmps += gs.dist_cmps;
+    timings.push_back(gs.time);
     nprobes = std::min(nprobes, probe_list.size());
 
     // -------------------------
     // Step 2: Probe clusters in probe_list
     // -------------------------
-    double t_quantize = 0.0;
-    double t_distances = 0.0;
-    double t_rest = 0.0;
 
     // --- "rest" part 1: sizes/scan/allocation ---
     t.start();
@@ -285,12 +375,7 @@ class IndexMVIVF : public Index<metric> {
     switch (active_quantizer) {
       case QT::RaBitQ: {
         t.start();
-        auto &m = std::get<RQ_Model>(quantizer);
-        auto q_query = m.quantize_query(query);
-        t_quantize = t.stop();
-        t.reset();
-
-        t.start();
+        auto &q_query = std::get<RQ_Q>(q_query_var);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
           auto &qleaf = std::get<RQ_Set>(leaf->quantized_data);
@@ -305,12 +390,7 @@ class IndexMVIVF : public Index<metric> {
       }
       case QT::PQ: {
         t.start();
-        auto &m = std::get<PQ_Model>(quantizer);
-        auto q_query = m.quantize_query(query);
-        t_quantize = t.stop();
-        t.reset();
-
-        t.start();
+        auto &q_query = std::get<PQ_Q>(q_query_var);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
           auto &qleaf = std::get<PQ_Set>(leaf->quantized_data);
@@ -325,12 +405,7 @@ class IndexMVIVF : public Index<metric> {
       }
       case QT::FastScan: {
         t.start();
-        auto &m = std::get<FS_Model>(quantizer);
-        auto q_query = m.quantize_query(query);
-        t_quantize = t.stop();
-        t.reset();
-
-        t.start();
+        auto &q_query = std::get<FS_Q>(q_query_var);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
           auto &qleaf = std::get<FS_Set>(leaf->quantized_data);
@@ -345,7 +420,6 @@ class IndexMVIVF : public Index<metric> {
       }
       case QT::None: {
         t_quantize = 0.0;
-
         t.start();
         auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
@@ -617,14 +691,14 @@ class IndexMVIVF : public Index<metric> {
     });
     root = ind_to_node[0];
 
-    // Re-encode leaf clusters (since we only saved the model)
+    // Re-encode nodes (since we only saved the model)
     if (active_quantizer != QT::None) {
       parlay::parallel_for(
           0, num,
           [&](size_t i) {
             node_t *node = ind_to_node[i];
             if (!node) return;
-            if (!node->children.empty()) return;  // internal node
+            if (!params.quantize_centers && !node->children.empty()) return;  // internal node
             if (node->data.size() == 0) return;
 
             switch (active_quantizer) {
@@ -761,14 +835,14 @@ class IndexMVIVF : public Index<metric> {
   //   }
   //   // Finalize probes: take best nprobes leaves
   //   if (probe_vec.size() > nprobes) {
-  //     std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
-  //     probe_vec.resize(nprobes);
+  //     std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(),
+  //     less); probe_vec.resize(nprobes);
   //   }
   //   parlay::sort_inplace(probe_vec, less);
 
   //   GreedySearchResult out;
-  //   out.dist_cmps_step1 = dist_cmps;
-  //   out.time_step1 = t.stop();
+  //   out.dist_cmps = dist_cmps;
+  //   out.time = t.stop();
 
   //   out.probe_list = parlay::sequence<score_node>::from_function(
   //       probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
@@ -831,14 +905,14 @@ class IndexMVIVF : public Index<metric> {
 
   //   // Finalize probes
   //   if (probe_vec.size() > nprobes) {
-  //     std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
-  //     probe_vec.resize(nprobes);
+  //     std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(),
+  //     less); probe_vec.resize(nprobes);
   //   }
   //   parlay::sort_inplace(probe_vec, less);
 
   //   GreedySearchResult out;
-  //   out.dist_cmps_step1 = dist_cmps;
-  //   out.time_step1 = t.stop();
+  //   out.dist_cmps = dist_cmps;
+  //   out.time = t.stop();
   //   out.probe_list = parlay::sequence<score_node>::from_function(
   //       probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
 

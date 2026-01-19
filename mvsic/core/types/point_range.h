@@ -124,6 +124,10 @@ struct PointRange {
 
   Point operator[](long i) { return Point(values.get() + i * aligned_dims, dims, aligned_dims, i); }
 
+  const uint8_t *location(size_t i) const {
+    return reinterpret_cast<const uint8_t *>(values.get() + i * static_cast<size_t>(dims));
+  }
+
   T *data() const noexcept { return values.get(); }
 
   void save(char *filename) {

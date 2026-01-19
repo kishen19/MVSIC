@@ -27,6 +27,7 @@ void bench(mvsic::commandLine &P) {
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
   bool is_mmap = P.getOption("-mm");
+  bool quantize_centers = P.getOption("-qc");
 
   bool compress_input = P.getOption("-compress_input");
   uint32_t verbose = P.getOptionIntValue("-v", 0);
@@ -69,12 +70,13 @@ void bench(mvsic::commandLine &P) {
   if (is_flat) {
     index_params = IndexParams::mvivf_flat(
         k_per_level, compress_input, verbose, 5, 20, "Random", 0, false, 0, pq_method_t, block_size,
-        num_clusters_per_block, num_points_per_cluster, rabitq_bits);
+        num_clusters_per_block, num_points_per_cluster, rabitq_bits, quantize_centers);
     search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else {
-    index_params = IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose, 5, 20,
-                                      "Random", 0, false, 0, pq_method_t, block_size,
-                                      num_clusters_per_block, num_points_per_cluster, rabitq_bits);
+    index_params =
+        IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose, 5, 20, "Random", 0,
+                           false, 0, pq_method_t, block_size, num_clusters_per_block,
+                           num_points_per_cluster, rabitq_bits, quantize_centers);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 

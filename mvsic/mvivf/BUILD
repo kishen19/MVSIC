@@ -10,7 +10,6 @@ cc_library(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:scann",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/utils:util",
         "@com_google_absl//absl/container:btree",
@@ -23,9 +22,9 @@ cc_library(
     deps = [
         "//mvsic/core:index",
         "//mvsic/core/mvclustering",
+        "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:scann",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/utils:util",
     ],

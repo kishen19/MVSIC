@@ -253,10 +253,12 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   volatile double sink = 0.0;
 
   std::cout << "\n=== All-cloud distance time (Qclouds * Nclouds) ===\n";
+  double exact;
 
   {
     double best = bench_exact_all(db, queries, results, reps, sink);
     double dps = double(ops) / best;
+    exact = best;
     std::cout << "Exact (PointCloudSet::distances):\n";
     std::cout << "  total_time : " << best << " s\n";
     std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
@@ -274,6 +276,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
               << " M cloud-dists/s\n";
     std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
               << " ns / cloud-dist\n";
+    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
   }
 
   {
@@ -285,6 +288,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
               << " M cloud-dists/s\n";
     std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
               << " ns / cloud-dist\n";
+    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
   }
 
   {
@@ -296,6 +300,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
               << " M cloud-dists/s\n";
     std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
               << " ns / cloud-dist\n";
+    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
   }
 
   std::cout << "\n(sink=" << sink << ")\n";

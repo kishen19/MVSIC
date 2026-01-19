@@ -45,21 +45,6 @@ struct SearchParams {
     return params;
   }
 
-  // single vector heuristic
-  // static SearchParams svh(size_t k, size_t nprobes, size_t cands, size_t beam_length = 0) {
-  //   SearchParams params;
-  //   params.method = "svh";
-  //   params.k = k;
-  //   params.nprobes = nprobes;
-  //   params.cands = cands;
-  //   if (beam_length == 0) {
-  //     params.beam_length = nprobes;
-  //   } else {
-  //     params.beam_length = beam_length;
-  //   }
-  //   return params;
-  // }
-
   // vamana
   static SearchParams vamana(size_t k, size_t L, double cut = 1.35, size_t num_rerank = 0) {
     SearchParams params;
@@ -93,6 +78,20 @@ struct SearchParams {
     params.k = k;
     params.L = L;
     params.cut = cut;
+    params.norerank = norerank;
+    params.num_rerank = num_rerank;
+    assert(num_rerank >= k);
+    return params;
+  }
+
+  // svh_ivf search params
+  static SearchParams svh_ivf(size_t k, size_t nprobes, size_t num_rerank, bool norerank = false) {
+    SearchParams params;
+    params.method = "svh_ivf";
+    params.k = k;
+    assert(k > 0);
+    params.nprobes = nprobes;
+    assert(nprobes > 0);
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);

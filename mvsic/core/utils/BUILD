@@ -32,8 +32,6 @@ cc_library(
     deps = [],
 )
 
-
-
 cc_library(
     name = "parse_command_line",
     hdrs = ["parse_command_line.h"],
@@ -43,8 +41,8 @@ cc_library(
     name = "top_neighbors",
     hdrs = ["top_neighbors.h"],
     deps = [
-        "//mvsic/core/types:point_cloud_set",
         ":util",
+        "//mvsic/core/types:point_cloud_set",
         "@eigen",
         "@parlaylib//parlay:primitives",
     ],

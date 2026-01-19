@@ -14,6 +14,7 @@
 #include "mvsic/muvera/muvera.h"
 #include "mvsic/vamana/vamana.h"
 #include "mvsic/mpool/mpool.h"
+#include "mvsic/svh/svh_ivf.h"
 #include "parlay/primitives.h"
 
 namespace py = pybind11;
@@ -68,8 +69,7 @@ PYBIND11_MODULE(mvsic, m) {
                      &mvsic::IndexParams::pq_config::num_clusters_per_block)
       .def_readwrite("num_points_per_cluster",
                      &mvsic::IndexParams::pq_config::num_points_per_cluster)
-      .def_readwrite("rabitq_bits", &mvsic::IndexParams::pq_config::rabitq_bits)
-      .def_readwrite("scann_threshold", &mvsic::IndexParams::pq_config::scann_threshold);
+      .def_readwrite("rabitq_bits", &mvsic::IndexParams::pq_config::rabitq_bits);
 
   py::class_<mvsic::IndexParams>(m, "IndexParams")
       .def(py::init([]() { return mvsic::IndexParams(); }))
@@ -78,15 +78,18 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("compress_input", &mvsic::IndexParams::compress_input)
       .def_readwrite("k_per_level", &mvsic::IndexParams::k_per_level)
       .def_readwrite("max_leaf_size", &mvsic::IndexParams::max_leaf_size)
+      .def_readwrite("quantize_centers", &mvsic::IndexParams::quantize_centers)
+      .def_readwrite("mvclus", &mvsic::IndexParams::mvclus)
       .def_readwrite("s", &mvsic::IndexParams::s)
       .def_readwrite("fde", &mvsic::IndexParams::fde)
       .def_readwrite("ann", &mvsic::IndexParams::ann)
-      .def_readwrite("pq", &mvsic::IndexParams::pq)
       .def_readwrite("normalize", &mvsic::IndexParams::normalize)
       .def_readwrite("R", &mvsic::IndexParams::R)
       .def_readwrite("L", &mvsic::IndexParams::L)
       .def_readwrite("alpha", &mvsic::IndexParams::alpha)
       .def_readwrite("two_pass", &mvsic::IndexParams::two_pass)
+      .def_readwrite("pq", &mvsic::IndexParams::pq)
+      .def_readwrite("max_points_per_centroid", &mvsic::IndexParams::max_points_per_centroid)
       .def_static("mvivf", &mvsic::IndexParams::mvivf, py::arg("k_per_level") = 0,
                   py::arg("max_leaf_size") = 200, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("niters") = 5,
@@ -94,24 +97,23 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
+                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
-      .def_static("muvera_custom", &mvsic::IndexParams::muvera_custom,
-                  py::arg("num_repetitions") = 20, py::arg("num_simhash_projections") = 4,
-                  py::arg("seed") = 1, py::arg("projection_dimension") = 8,
-                  py::arg("fill_empty_partitions") = false,
-                  py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
-                  py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1,
-                  py::arg("num_pass") = 1, py::arg("compress_input") = false,
-                  py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
+                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+      .def_static(
+          "muvera_custom", &mvsic::IndexParams::muvera_custom, py::arg("num_repetitions") = 20,
+          py::arg("num_simhash_projections") = 4, py::arg("seed") = 1,
+          py::arg("projection_dimension") = 8, py::arg("fill_empty_partitions") = false,
+          py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
+          py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1, py::arg("num_pass") = 1,
+          py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("pq_method") = 0,
+          py::arg("block_size") = 8, py::arg("num_clusters_per_block") = 256,
+          py::arg("num_points_per_cluster") = 20, py::arg("rabitq_bits") = 8)
       .def_static("muvera", &mvsic::IndexParams::muvera, py::arg("d_fde") = 2560,
                   py::arg("seed") = 1, py::arg("fill_empty_partitions") = false,
                   py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
@@ -119,19 +121,25 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("num_pass") = 1, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
+                  py::arg("rabitq_bits") = 8)
       .def_static("mpool", &mvsic::IndexParams::mpool, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("num_pass") = 1, py::arg("normalize") = true,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2)
+                  py::arg("rabitq_bits") = 8)
       .def_static("vamana", &mvsic::IndexParams::vamana, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("two_pass") = false,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("scann_threshold") = 0.2);
+                  py::arg("rabitq_bits") = 8)
+      .def_static("svh_ivf", &mvsic::IndexParams::svh_ivf, py::arg("k_per_level") = 0,
+                  py::arg("max_leaf_size") = 500, py::arg("compress_input") = false,
+                  py::arg("verbose") = 0, py::arg("max_points_per_centroid") = 100,
+                  py::arg("pq_method") = 0, py::arg("block_size") = 8,
+                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
+                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false);
 
   py::class_<mvsic::SearchParams>(m, "SearchParams")
       .def(py::init([]() { return mvsic::SearchParams(); }))
@@ -151,7 +159,9 @@ PYBIND11_MODULE(mvsic, m) {
       .def_static("muvera", &mvsic::SearchParams::muvera, py::arg("k"), py::arg("L"),
                   py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
       .def_static("mpool", &mvsic::SearchParams::mpool, py::arg("k"), py::arg("L"),
-                  py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false);
+                  py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
+      .def_static("svh_ivf", &mvsic::SearchParams::svh_ivf, py::arg("k"), py::arg("nprobes"),
+                  py::arg("num_rerank"), py::arg("norerank") = false);
 
   //======================================
   // Point Cloud and Point Types
@@ -261,6 +271,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexVamanaIP, ChamferIP_Point, "IndexVamanaIP")
   BIND_INDEX(IndexMPoolL2, ChamferL2_Point, "IndexMPoolL2")
   BIND_INDEX(IndexMPoolIP, ChamferIP_Point, "IndexMPoolIP")
+  BIND_INDEX(IndexSVHIVFL2, ChamferL2_Point, "IndexSVHIVFL2")
+  BIND_INDEX(IndexSVHIVFIP, ChamferIP_Point, "IndexSVHIVFIP")
 
   //======================================
   // Stats Functions
@@ -351,4 +363,6 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_COMPUTE_STATS(IndexVamanaL2, ChamferL2_Point, "VamanaL2")
   BIND_COMPUTE_STATS(IndexMPoolIP, ChamferIP_Point, "MPoolIP")
   BIND_COMPUTE_STATS(IndexMPoolL2, ChamferL2_Point, "MPoolL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFIP, ChamferIP_Point, "SVHIVFIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFL2, ChamferL2_Point, "SVHIVFL2")
 }

@@ -14,8 +14,9 @@ struct IndexParams {
   bool compress_input = false;  // Compress input points clouds using Ward's method
 
   // mvivf
-  uint32_t k_per_level = 0;      // Number of clusters at each node. [0 = 4*sqrt(n)]
-  uint32_t max_leaf_size = 200;  // Maximum size of leaves (enforced)
+  uint32_t k_per_level = 0;       // Number of clusters at each node. [0 = 4*sqrt(n)]
+  uint32_t max_leaf_size = 200;   // Maximum size of leaves (enforced)
+  bool quantize_centers = false;  // Quantize center point clouds
 
   // MVClustering params
   MVClusteringConfig mvclus = MVClusteringConfig();
@@ -60,7 +61,7 @@ struct IndexParams {
     uint32_t num_clusters_per_block = 256;       // Number of clusters per block
     uint32_t num_points_per_cluster = 20;        // Subsample size*k
     uint32_t rabitq_bits = 8;                    // Total bits for RaBitQ
-    float scann_threshold = 0.2f;                // Threshold for ScaNN
+    // float scann_threshold = 0.2f;                // Threshold for ScaNN
   };
   pq_config pq = pq_config();
 
@@ -74,18 +75,15 @@ struct IndexParams {
                            uint32_t pq_method = 0, uint32_t block_size = 64,
                            uint32_t num_clusters_per_block = 256,
                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                           float scann_threshold = 0.2) {
+                           bool quantize_centers = false) {
     IndexParams params;
     params.method = "mvivf";
     params.k_per_level = k_per_level;
     params.max_leaf_size = max_leaf_size;
+    params.quantize_centers = quantize_centers;
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
     params.mvclus = MVClusteringConfig(niters, max_points_per_centroid_inner_kmeans,
                                        (params.verbose > 0) ? params.verbose - 1 : 0, init, seed,
@@ -102,17 +100,14 @@ struct IndexParams {
                                 uint32_t pq_method = 0, uint32_t block_size = 64,
                                 uint32_t num_clusters_per_block = 256,
                                 uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                                float scann_threshold = 0.2) {
+                                bool quantize_centers = false) {
     IndexParams params;
     params.method = "mvivf_flat";
     params.k_per_level = k_per_level;
+    params.quantize_centers = quantize_centers;
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
     params.mvclus = MVClusteringConfig(niters, max_points_per_centroid_inner_kmeans,
                                        (params.verbose > 0) ? params.verbose - 1 : 0, init, seed,
@@ -121,23 +116,21 @@ struct IndexParams {
     return params;
   }
 
-  static IndexParams muvera_custom(
-      int32_t num_repetitions = 20, int32_t num_simhash_projections = 4, int32_t seed = 1,
-      int32_t projection_dimension = 8, bool fill_empty_partitions = false,
-      int32_t final_projection_dimension = 0, bool normalize = true, uint32_t R = 200,
-      uint32_t L = 600, double alpha = 1.1, int num_pass = 1, bool compress_input = false,
-      uint32_t verbose = 0, uint32_t pq_method = 0, uint32_t block_size = 8,
-      uint32_t num_clusters_per_block = 256, uint32_t num_points_per_cluster = 20,
-      uint32_t rabitq_bits = 8, float scann_threshold = 0.2) {
+  static IndexParams muvera_custom(int32_t num_repetitions = 20,
+                                   int32_t num_simhash_projections = 4, int32_t seed = 1,
+                                   int32_t projection_dimension = 8,
+                                   bool fill_empty_partitions = false,
+                                   int32_t final_projection_dimension = 0, bool normalize = true,
+                                   uint32_t R = 200, uint32_t L = 600, double alpha = 1.1,
+                                   int num_pass = 1, bool compress_input = false,
+                                   uint32_t verbose = 0, uint32_t pq_method = 0,
+                                   uint32_t block_size = 8, uint32_t num_clusters_per_block = 256,
+                                   uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
     params.method = "muvera";
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.fde = fde_config{
         num_repetitions,       num_simhash_projections,    seed,     projection_dimension,
         fill_empty_partitions, final_projection_dimension, normalize};
@@ -153,17 +146,12 @@ struct IndexParams {
                             int num_pass = 1, bool compress_input = false, uint32_t verbose = 0,
                             uint32_t pq_method = 0, uint32_t block_size = 8,
                             uint32_t num_clusters_per_block = 256,
-                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                            float scann_threshold = 0.2) {
+                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
     params.method = "muvera";
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     int32_t num_repetitions, num_simhash_projections, projection_dimension;
     if (d_fde == 640) {
       num_repetitions = 10;
@@ -207,17 +195,12 @@ struct IndexParams {
                            bool normalize = true, bool compress_input = false, uint32_t verbose = 0,
                            uint32_t pq_method = 0, uint32_t block_size = 64,
                            uint32_t num_clusters_per_block = 256,
-                           uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                           float scann_threshold = 0.2) {
+                           uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
     params.method = "mpool";
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.ann = ann_config{R, L, alpha, num_pass};
     params.normalize = normalize;
     params.verbose = verbose;
@@ -228,8 +211,7 @@ struct IndexParams {
                             bool two_pass = false, bool compress_input = false,
                             uint32_t verbose = 0, uint32_t pq_method = 0, uint32_t block_size = 64,
                             uint32_t num_clusters_per_block = 256,
-                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                            float scann_threshold = 0.2) {
+                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
     params.method = "vamana";
     params.R = R;
@@ -237,12 +219,8 @@ struct IndexParams {
     params.alpha = alpha;
     params.two_pass = two_pass;
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
     return params;
   }
@@ -252,39 +230,30 @@ struct IndexParams {
                              uint32_t max_points_per_centroid = 100, uint32_t pq_method = 0,
                              uint32_t block_size = 64, uint32_t num_clusters_per_block = 256,
                              uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                             float scann_threshold = 0.2) {
+                             bool quantize_centers = false) {
     IndexParams params;
     params.method = "svh_ivf";
     params.k_per_level = k_per_level;
     params.max_leaf_size = max_leaf_size;
-    params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
     params.max_points_per_centroid = max_points_per_centroid;
+    params.quantize_centers = quantize_centers;
+    params.compress_input = compress_input;
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
     return params;
   }
 
-  static IndexParams svh_vamana(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
-                                int num_pass = 1, bool compress_input = false, uint32_t verbose = 0,
-                                uint32_t pq_method = 0, uint32_t block_size = 64,
-                                uint32_t num_clusters_per_block = 256,
-                                uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                                float scann_threshold = 0.2) {
+  static IndexParams svh(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2, int num_pass = 1,
+                         bool compress_input = false, uint32_t verbose = 0, uint32_t pq_method = 0,
+                         uint32_t block_size = 64, uint32_t num_clusters_per_block = 256,
+                         uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
     params.method = "svh_vamana";
     params.ann = ann_config{R, L, alpha, num_pass};
     params.compress_input = compress_input;
-    params.pq = {static_cast<QuantizerType>(pq_method),
-                 block_size,
-                 num_clusters_per_block,
-                 num_points_per_cluster,
-                 rabitq_bits,
-                 scann_threshold};
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
     return params;
   }
