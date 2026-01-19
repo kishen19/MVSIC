@@ -1,9 +1,9 @@
 #include <Eigen/Dense>
 #include <iostream>
-#include "mvsic/core/utils/chamfer_ip_point.h"
-#include "mvsic/core/utils/chamfer_l2_point.h"
+#include "mvsic/core/types/chamfer_ip_point.h"
+#include "mvsic/core/types/chamfer_l2_point.h"
+#include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/core/utils/point_cloud_set.h"
 #include "mvsic/core/stats.h"
 #include "mvivf.h"
 #include "mvivf_flat.h"
@@ -27,37 +27,56 @@ void bench(mvsic::commandLine &P) {
   std::string outFile = P.getOptionValue("-o", "");
   std::string indexFile = P.getOptionValue("-index", "");
   bool is_mmap = P.getOption("-mm");
+  bool quantize_centers = P.getOption("-qc");
+
+  bool compress_input = P.getOption("-compress_input");
+  uint32_t verbose = P.getOptionIntValue("-v", 0);
 
   // MVIVF params
   uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
   uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 200);
-  uint32_t verbose = P.getOptionIntValue("-v", 0);
-  bool compress_input = P.getOption("-compress_input");
+
+  // Flat params
+  bool is_flat = P.getOption("-flat");
+
+  // PQ params
+  std::string pq_method = P.getOptionValue("-pq_method", "None");
+  uint32_t pq_method_t = 0;
+  if (pq_method == "None") {
+    pq_method_t = 0;
+  } else if (pq_method == "PQ") {
+    pq_method_t = 1;
+  } else if (pq_method == "RabitQ") {
+    pq_method_t = 2;
+  } else if (pq_method == "FastScan") {
+    pq_method_t = 3;
+  } else {
+    std::cerr << "Unknown PQ method: " << pq_method << std::endl;
+    exit(1);
+  }
+  uint32_t block_size = P.getOptionIntValue("-m", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
+  uint32_t num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
+  uint32_t rabitq_bits = P.getOptionIntValue("-rbits", 8);
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
   size_t nprobes = P.getOptionLongValue("-nprobes", 2);
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
-  // Flat params
-  bool is_flat = P.getOption("-flat");
-
-  // PQ params
-  bool enable_PQ = P.getOption("-pq");
-  uint32_t num_blocks = P.getOptionIntValue("-pq_nb", 8);
-  uint32_t num_clusters_per_block = P.getOptionIntValue("-pq_nc", 256);
-  uint32_t sample_size = P.getOptionIntValue("-pq_ss", 100000);
-
   auto points = PC(inFile, is_mmap);
   IndexParams index_params;
   SearchParams search_params;
   if (is_flat) {
-    index_params = IndexParams::mvivf_flat(k_per_level, compress_input, verbose);
-    index_params.pq = {enable_PQ, num_blocks, num_clusters_per_block, sample_size};
+    index_params = IndexParams::mvivf_flat(
+        k_per_level, compress_input, verbose, 5, 20, "Random", 0, false, 0, pq_method_t, block_size,
+        num_clusters_per_block, num_points_per_cluster, rabitq_bits, quantize_centers);
     search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else {
-    index_params = IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose);
-    index_params.pq = {enable_PQ, num_blocks, num_clusters_per_block, sample_size};
+    index_params =
+        IndexParams::mvivf(k_per_level, max_leaf_size, compress_input, verbose, 5, 20, "Random", 0,
+                           false, 0, pq_method_t, block_size, num_clusters_per_block,
+                           num_points_per_cluster, rabitq_bits, quantize_centers);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 
@@ -86,63 +105,63 @@ void bench(mvsic::commandLine &P) {
       double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
 
       // Compute Stats:
-      parlay::internal::timer t;
-      recall_1_k = 0.0;
-      recall_k_k = 0.0;
-      double query_time = 0.0;
-      for (size_t i = 0; i < queries.size(); i++) {
-        if (i % 100 == 0) {
-          std::cout << queries.size() - i << " queries left" << std::endl;
-        }
-        std::unordered_set<size_t> out_set;
-        // Run Index search
-        t.start();
-        auto [results_new, _cmps] = index.search(queries[i], points, search_params);
-        t.stop();
-        query_time += t.total_time();
-        t.reset();
-        for (const auto &[id, dist] : results_new) {
-          out_set.insert(id);
-        }
+      // parlay::internal::timer t;
+      // recall_1_k = 0.0;
+      // recall_k_k = 0.0;
+      // double query_time = 0.0;
+      // for (size_t i = 0; i < queries.size(); i++) {
+      //   if (i % 100 == 0) {
+      //     std::cout << queries.size() - i << " queries left" << std::endl;
+      //   }
+      //   std::unordered_set<size_t> out_set;
+      //   // Run Index search
+      //   t.start();
+      //   auto [results_new, _cmps] = index.search(queries[i], points, search_params);
+      //   t.stop();
+      //   query_time += t.total_time();
+      //   t.reset();
+      //   for (const auto &[id, dist] : results_new) {
+      //     out_set.insert(id);
+      //   }
 
-        // Run Brute-force search
-        auto [bf_results, dist_cmps] = mvsic::get_knn(queries[i], points, 2 * k);
+      //   // Run Brute-force search
+      //   auto [bf_results, dist_cmps] = mvsic::get_knn(queries[i], points, 2 * k);
 
-        // Calculate recall
-        size_t correct = 0;
-        for (size_t j = 0; j < k; j++) {
-          auto [id, dist] = bf_results[j];
-          if (out_set.find(id) != out_set.end()) {
-            correct++;
-          }
-        }
-        // Dealing with duplicates and near duplicates: fine to return
-        // any of the (near) duplicates of the last point
-        float last_dist = bf_results[k - 1].second;
-        for (size_t j = k; j < bf_results.size(); j++) {
-          auto [id, dist] = bf_results[j];
-          if (std::abs(dist - last_dist) < 1e-6) {
-            if (out_set.find(id) != out_set.end()) {
-              correct++;
-            }
-          } else {
-            break;
-          }
-        }
-        recall_k_k += static_cast<double>(correct) / k;
-        if (out_set.find(bf_results[0].first) != out_set.end()) {
-          recall_1_k += 1.0;
-        }
-      }
-      recall_1_k /= queries.size();
-      recall_k_k /= queries.size();
-      double QPS = queries.size() / query_time;
-      double avg_query_time = 1 / QPS;
-      std::cout << "Number of Queries: " << queries.size() << std::endl;
-      std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
-      std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-      std::cout << "QPS: " << QPS << std::endl;
-      std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
+      //   // Calculate recall
+      //   size_t correct = 0;
+      //   for (size_t j = 0; j < k; j++) {
+      //     auto [id, dist] = bf_results[j];
+      //     if (out_set.find(id) != out_set.end()) {
+      //       correct++;
+      //     }
+      //   }
+      //   // Dealing with duplicates and near duplicates: fine to return
+      //   // any of the (near) duplicates of the last point
+      //   float last_dist = bf_results[k - 1].second;
+      //   for (size_t j = k; j < bf_results.size(); j++) {
+      //     auto [id, dist] = bf_results[j];
+      //     if (std::abs(dist - last_dist) < 1e-6) {
+      //       if (out_set.find(id) != out_set.end()) {
+      //         correct++;
+      //       }
+      //     } else {
+      //       break;
+      //     }
+      //   }
+      //   recall_k_k += static_cast<double>(correct) / k;
+      //   if (out_set.find(bf_results[0].first) != out_set.end()) {
+      //     recall_1_k += 1.0;
+      //   }
+      // }
+      // recall_1_k /= queries.size();
+      // recall_k_k /= queries.size();
+      // double QPS = queries.size() / query_time;
+      // double avg_query_time = 1 / QPS;
+      // std::cout << "Number of Queries: " << queries.size() << std::endl;
+      // std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
+      // std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
+      // std::cout << "QPS: " << QPS << std::endl;
+      // std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
       // Compute Stats:
       std::cout << "Computing stats..." << std::endl;
       Stats result = compute_stats(index, points, queries, gt, search_params);

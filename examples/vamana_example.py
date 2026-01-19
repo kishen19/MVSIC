@@ -29,7 +29,7 @@ def main():
     gt = mvsic.ReadGT(args.gt_path, queries.size())
 
     print("Setting up index...")
-    index_params = mvsic.IndexParams.mvvamana()
+    index_params = mvsic.IndexParams.vamana()
     index = mvsic.IndexVamanaIP(args.dim, index_params)
 
     print("Building index...")
@@ -42,7 +42,7 @@ def main():
     # index.load(args.index_path, points)
 
     print("Computing stats...")
-    search_params = mvsic.SearchParams.mvvamana(
+    search_params = mvsic.SearchParams.vamana(
         args.k, args.L, args.cut, points.size(), args.degree_limit
     )
     stats = mvsic.compute_stats(index, points, queries, gt, search_params)

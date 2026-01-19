@@ -1,0 +1,38 @@
+name: beir_plots
+
+datasets:
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    results: results/beir/nfcorpus
+  - name: scifact
+    path: data/beir/scifact
+    results: results/beir/scifact
+  - name: arguana
+    path: data/beir/arguana
+    results: results/beir/arguana
+  - name: scidocs
+    path: data/beir/scidocs
+    results: results/beir/scidocs
+  - name: fiqa
+    path: data/beir/fiqa
+    results: results/beir/fiqa
+  # - name: quora
+  #   path: data/beir/quora
+  #   results: results/beir/quora
+  # - name: nq
+  #   path: data/beir/nq
+  #   results: results/beir/nq
+  # - name: hotpotqa
+  #   path: data/beir/hotpotqa
+  #   results: results/beir/hotpotqa
+
+
+k: 10
+
+results:
+  - ["mvivf", "mvivf_500", ""]
+  - ["mvivf", "mvivf_500_pq_16_64", "nr2560"]
+  - ["mvivf", "mvivf_500_rabitq_2", "nr40"]
+  - ["muvera", "muvera_2560", "nr2560"]
+  - ["muvera", "muvera_2560_pq_256_8", "nr2560"]
+  - ["muvera", "muvera_2560_rabitq_2", "nr2560"]

@@ -1,0 +1,112 @@
+name: "Ablation: s (# points per center-point-cloud)"
+
+datasets:
+  # - name: arguana
+  #   path: data/beir/arguana
+  #   results: results/beir/arguana
+  - name: scidocs
+    path: data/beir/scidocs
+    results: results/beir/scidocs
+  # - name: quora
+  #   path: data/beir/quora
+  #   results: results/beir/quora
+  # - name: science_forum
+  #   path: data/lotte/dev/science
+  #   results: results/lotte/dev/science_forum
+  # - name: tatdqa
+  #   path: data/vidore/tatdqa
+  #   results: results/vidore/tatdqa
+
+indices:
+  - name: mvivf
+    build_configs:
+      - name: mvivf_500
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_1
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          s: 1
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_5
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          s: 5
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_10
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          s: 10
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_25
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          s: 25
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_50
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          s: 50
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_100
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          s: 100
+          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}

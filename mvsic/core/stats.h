@@ -1,7 +1,6 @@
 #pragma once
 
 #include "parlay/primitives.h"
-#include "utils/csvfile.h"
 #include "search_params.h"
 
 namespace mvsic {
@@ -20,6 +19,26 @@ struct Stats {
       avg_cmps(avg_cmps),
       recall_1_k(recall_1_k),
       recall_k_k(recall_k_k) {}
+};
+
+struct StatsExtended {
+  double QPS_seq = 0.0;
+  double QPS_par = 0.0;
+  double avg_cmps = 0.0;
+  double recall_1_k = 0.0;
+  double recall_k_k = 0.0;
+  parlay::sequence<double> avg_timings;
+
+  StatsExtended() {}
+
+  StatsExtended(double QPS_seq, double QPS_par, double avg_cmps, double recall_1_k,
+                double recall_k_k, parlay::sequence<double> avg_timings) :
+      QPS_seq(QPS_seq),
+      QPS_par(QPS_par),
+      avg_cmps(avg_cmps),
+      recall_1_k(recall_1_k),
+      recall_k_k(recall_k_k),
+      avg_timings(avg_timings) {}
 };
 }  // namespace mvsic
 
@@ -66,172 +85,152 @@ double compute_recall(const parlay::sequence<parlay::sequence<std::pair<uint32_t
 }
 
 template<typename Index, typename PC>
+parlay::sequence<mvsic::Stats> compute_stats(
+    Index &index, const PC &points, const PC &query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
+    const parlay::sequence<mvsic::SearchParams> &params) {
+  auto results = parlay::sequence<mvsic::Stats>(params.size());
+  for (size_t i = 0; i < params.size(); i++) {
+    parlay::internal::timer t;
+    size_t k = params[i].k;
+    double query_time_seq = 1e15;
+    auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
+    auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
+    // Warmup
+    for (size_t j = 0; j < std::min(static_cast<size_t>(100), query_points.size()); j++) {
+      auto [p, c] = index.search(query_points[j], points, params[i]);
+    }
+    // Single Batch Run for 3 reps
+    for (size_t it = 0; it < 3; it++) {
+      double query_time_seq_it = 0.0;
+      for (size_t j = 0; j < query_points.size(); j++) {
+        t.start();
+        auto [p, c] = index.search(query_points[j], points, params[i]);
+        t.stop();
+        query_time_seq_it += t.total_time();
+        t.reset();
+        if (it == 0) {
+          pred[j] = p;
+          cmps[j] = c;
+        }
+      }
+      query_time_seq = std::min(query_time_seq, query_time_seq_it);
+    }
+
+    // Batch Run (all queries) for 3 reps
+    double query_time_par = 1e15;
+    for (size_t it = 0; it < 3; it++) {
+      t.start();
+      auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
+      t.stop();
+      query_time_par = std::min(query_time_par, t.total_time());
+      t.reset();
+    }
+
+    double QPS_seq = query_points.size() / query_time_seq;
+    double QPS_par = query_points.size() / query_time_par;
+    double avg_cmps = (double)parlay::reduce(cmps) / (double)cmps.size();
+    double recall_1_k = compute_recall(pred, gt, k, 1);
+    double recall_k_k = compute_recall(pred, gt, k, k);
+    results[i] = mvsic::Stats(QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k);
+  }
+  return results;
+}
+
+template<typename Index, typename PC>
+parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
+    Index &index, const PC &points, const PC &query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
+    const parlay::sequence<mvsic::SearchParams> &params) {
+  auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
+  for (size_t i = 0; i < params.size(); i++) {
+    parlay::internal::timer t;
+    size_t k = params[i].k;
+    double query_time_seq = 1e15;
+    auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
+    auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
+    auto timings = parlay::sequence<std::vector<double>>(query_points.size());
+
+    // Warmup
+    for (size_t j = 0; j < std::min(static_cast<size_t>(100), query_points.size()); j++) {
+      auto [p, c] = index.search(query_points[j], points, params[i]);
+    }
+    // Single Batch Run for 3 reps
+    for (size_t it = 0; it < 3; it++) {
+      double query_time_seq_it = 0.0;
+      for (size_t j = 0; j < query_points.size(); j++) {
+        t.start();
+        auto [p, c, time] = index.search_with_stats(query_points[j], points, params[i]);
+        t.stop();
+        query_time_seq_it += t.total_time();
+        t.reset();
+        if (it == 0) {
+          pred[j] = p;
+          cmps[j] = c;
+          timings[j] = time;
+        }
+      }
+      query_time_seq = std::min(query_time_seq, query_time_seq_it);
+    }
+
+    // Batch Run (all queries) for 3 reps
+    double query_time_par = 1e15;
+    for (size_t it = 0; it < 3; it++) {
+      t.start();
+      auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
+      t.stop();
+      query_time_par = std::min(query_time_par, t.total_time());
+      t.reset();
+    }
+
+    double QPS_seq = query_points.size() / query_time_seq;
+    double QPS_par = query_points.size() / query_time_par;
+    double avg_cmps = (double)parlay::reduce(cmps) / (double)cmps.size();
+    double recall_1_k = compute_recall(pred, gt, k, 1);
+    double recall_k_k = compute_recall(pred, gt, k, k);
+
+    size_t num_timings = 0;
+    if (query_points.size() > 0) {
+      num_timings = timings[0].size();
+    }
+    auto avg_timings = parlay::sequence<double>(num_timings);
+    for (size_t j = 0; j < num_timings; j++) {
+      double total_time = 0;
+      for (size_t l = 0; l < timings.size(); l++) {
+        total_time += timings[l][j];
+      }
+      avg_timings[j] = total_time;  // / timings.size();
+    }
+
+    results[i] =
+        mvsic::StatsExtended(QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k, avg_timings);
+  }
+  return results;
+}
+
+template<typename Index, typename PC>
 mvsic::Stats compute_stats(Index &index, const PC &points, const PC &query_points,
                            const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
                            const mvsic::SearchParams &params) {
-  parlay::internal::timer t;
-  size_t k = params.k;
-  double query_time_seq = 0.0;
-  auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
-  auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
-  for (size_t i = 0; i < query_points.size(); i++) {
-    t.start();
-    auto [results, dist_cmps_i] = index.search(query_points[i], points, params);
-    t.stop();
-    query_time_seq += t.total_time();
-    t.reset();
-    pred[i] = results;
-    cmps[i] = dist_cmps_i;
-  }
-  t.start();
-  parlay::parallel_for(0, query_points.size(), [&](size_t i) {
-    auto [results, dist_cmps_i] = index.search(query_points[i], points, params);
-    pred[i] = results;
-    assert(cmps[i] == dist_cmps_i);
-    cmps[i] = dist_cmps_i;
-  });
-  t.stop();
-  double query_time_par = t.total_time();
-  t.reset();
-  double QPS_seq = query_points.size() / query_time_seq;
-  double QPS_par = query_points.size() / query_time_par;
-  double avg_cmps = (double)parlay::reduce(cmps) / (double)cmps.size();
-  double recall_1_k = compute_recall(pred, gt, k, 1);
-  double recall_k_k = compute_recall(pred, gt, k, k);
-  return mvsic::Stats(QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k);
+  return compute_stats(index, points, query_points, gt,
+                       parlay::sequence<mvsic::SearchParams>{params})[0];
 }
 
-std::pair<double, double> compute_stats(
+template<typename Index, typename PC>
+mvsic::StatsExtended compute_stats_extended(
+    Index &index, const PC &points, const PC &query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
+    const mvsic::SearchParams &params) {
+  return compute_stats_extended(index, points, query_points, gt,
+                                parlay::sequence<mvsic::SearchParams>{params})[0];
+}
+
+std::pair<double, double> compute_scores(
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt, size_t k) {
   double recall_1_k = compute_recall(pred, gt, k, 1);
   double recall_k_k = compute_recall(pred, gt, k, k);
   return std::make_pair(recall_1_k, recall_k_k);
-}
-
-template<typename Index, typename PC>
-mvsic::Stats compute_stats_gold(
-    Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-    const mvsic::SearchParams &params) {
-  parlay::internal::timer t;
-  size_t k = params.k;
-  // Identify indices with at least 1 gt value
-  auto atleast_1 = parlay::delayed_seq<bool>(gt.size(), [&](size_t i) { return gt[i].size() > 0; });
-  auto ind_atleast_1 = parlay::pack_index(atleast_1);
-  std::cout << "At least 1: " << ind_atleast_1.size() << std::endl;
-  auto pred_1 =
-      parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(ind_atleast_1.size());
-  auto gt_1 = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>::from_function(
-      ind_atleast_1.size(), [&](size_t id) {
-        uint32_t i = ind_atleast_1[id];
-        return gt[i];
-      });
-  auto cmps_1 = parlay::sequence<size_t>::uninitialized(ind_atleast_1.size());
-  double query_time_seq = 0.0;
-  for (size_t id = 0; id < ind_atleast_1.size(); id++) {
-    uint32_t i = ind_atleast_1[id];
-    t.start();
-    auto [results, dist_cmps_i] = index.search(query_points[i], points, params);
-    t.stop();
-    query_time_seq += t.total_time();
-    t.reset();
-    pred_1[id] = results;
-    cmps_1[id] = dist_cmps_i;
-  }
-  t.start();
-  parlay::parallel_for(0, ind_atleast_1.size(), [&](size_t id) {
-    size_t i = ind_atleast_1[id];
-    auto [results, dist_cmps_i] = index.search(query_points[i], points, params);
-    pred_1[id] = results;
-    assert(cmps_1[id] == dist_cmps_i);
-    cmps_1[id] = dist_cmps_i;
-  });
-  t.stop();
-  double query_time_par = t.total_time();
-  t.reset();
-  double QPS_seq = ind_atleast_1.size() / query_time_seq;
-  double QPS_par = ind_atleast_1.size() / query_time_par;
-  double avg_cmps = (double)parlay::reduce(cmps_1) / (double)cmps_1.size();
-  double recall_1_k = compute_recall(pred_1, gt_1, k, 1);
-  return mvsic::Stats(QPS_seq, QPS_par, avg_cmps, recall_1_k, 0.0);
-}
-
-inline void write_to_csv(const std::string csv_filename,
-                         const parlay::sequence<mvsic::Stats> &results,
-                         const parlay::sequence<mvsic::SearchParams> &params) {
-  assert(results.size() == params.size());
-  csvfile csv(csv_filename);
-  csv << "k";
-  if (params[0].method == "mvivf" || params[0].method == "svh") {
-    csv << "nprobes";
-  } else if (params[0].method == "vamana" || params[0].method == "muvera" ||
-             params[0].method == "mpool") {
-    csv << "L";
-  }
-  csv << "QPS_seq"
-      << "QPS_par"
-      << "Avg Cmps"
-      << "Recall 1@k"
-      << "Recall k@k" << endrow;
-  for (size_t i = 0; i < results.size(); ++i) {
-    csv << params[i].k;
-    if (params[i].method == "mvivf" || params[i].method == "svh") {
-      csv << params[i].nprobes;
-    } else if (params[i].method == "vamana" || params[i].method == "muvera" ||
-               params[i].method == "mpool") {
-      csv << params[i].L;
-    }
-    csv << results[i].QPS_seq << results[i].QPS_par << results[i].avg_cmps << results[i].recall_1_k
-        << results[i].recall_k_k << endrow;
-  }
-  csv << endrow;
-}
-
-// TODO: batch queries
-
-template<typename Index, typename PC>
-void search_all(Index &index, const PC &base_points, const PC &query_points,
-                const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-                const char *res_file, const parlay::sequence<mvsic::SearchParams> &params) {
-  parlay::sequence<mvsic::Stats> results;
-  std::cout << "[" << params.size() << "] : ";
-  for (size_t i = 0; i < params.size(); ++i) {
-    auto result = compute_stats(index, base_points, query_points, gt, params[i]);
-    results.push_back(result);
-    std::cout << "#" << std::flush;
-  }
-  std::cout << std::endl;
-  write_to_csv(std::string(res_file), results, params);
-}
-
-template<typename Index, typename PC>
-void search_all(Index &index, const PC &base_points, const PC &query_points,
-                const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-                const char *res_file, const mvsic::SearchParams &params) {
-  search_all(index, base_points, query_points, gt, res_file, {params});
-}
-
-template<typename Index, typename PC>
-void search_all_gold(Index &index, const PC &base_points, const PC &query_points,
-                     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-                     const char *res_file, const parlay::sequence<mvsic::SearchParams> &params) {
-  parlay::sequence<mvsic::Stats> results;
-  std::cout << "[" << params.size() << "] : ";
-  for (size_t i = 0; i < params.size(); ++i) {
-    auto result = compute_stats_gold(index, base_points, query_points, gt, params[i]);
-    results.push_back(result);
-    std::cout << "#" << std::flush;
-  }
-  std::cout << std::endl;
-  write_to_csv(std::string(res_file), results, params);
-}
-
-template<typename Index, typename PC>
-void search_all_gold(Index &index, const PC &base_points, const PC &query_points,
-                     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-                     const char *res_file, const mvsic::SearchParams &params) {
-  search_all_gold(index, base_points, query_points, gt, res_file, {params});
 }
 
 parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGT(std::string &file_path,

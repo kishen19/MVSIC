@@ -1,0 +1,31 @@
+name: ablation_k_per_level
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    results: results/beir/arguana
+  - name: scidocs
+    path: data/beir/scidocs
+    results: results/beir/scidocs
+  - name: quora
+    path: data/beir/quora
+    results: results/beir/quora
+  # - name: science_forum
+  #   path: data/lotte/dev/science
+  #   results: results/lotte/dev/science_forum
+  - name: tatdqa
+    path: data/vidore/tatdqa
+    results: results/vidore/tatdqa
+
+
+k: 10
+
+results:
+  - ["mvivf", "mvivf_500", ""]
+  - ["mvivf", "mvivf_2_500", ""]
+  - ["mvivf", "mvivf_10_500", ""]
+  - ["mvivf", "mvivf_20_500", ""]
+  - ["mvivf", "mvivf_50_500", ""]
+  - ["mvivf", "mvivf_100_500", ""]
+  - ["mvivf", "mvivf_150_500", ""]
+  - ["mvivf", "mvivf_200_500", ""]

@@ -4,11 +4,12 @@
 #include <cstring>
 #include "parlay/primitives.h"
 
-#include "mvsic/core/utils/chamfer_ip_point.h"
-#include "mvsic/core/utils/chamfer_l2_point.h"
+#include "mvsic/core/types/chamfer_ip_point.h"
+#include "mvsic/core/types/chamfer_l2_point.h"
+#include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/kmeans_util.h"
-#include "mvsic/core/utils/point_cloud_set.h"
 #include "mvsic/core/utils/util.h"
+#include "mvsic/core/distance_measures/many_to_many.h"
 
 #include "seeding/uniformlyrandom.h"
 #include "mvclustering_config.h"
@@ -61,36 +62,38 @@ class MVClustering {
                                 random_seed, use_weighted_inner_kmeans)) {}
   /* ------------------------------------------------------------------------------------------- */
   // Data given as a PointCloudSet Object: Main implementation
-  void train(const PointCloudSet<ChPoint> &data);
+  void train(const PointCloudSet<ChPoint>& data);
 
   // Raw data given
-  void train(uint32_t n, const float *data, const size_t *offsets, const uint32_t *ids) {
+  void train(uint32_t n, const float* data, const size_t* offsets, const uint32_t* ids) {
     PointCloudSet<ChPoint> points(n, d, data, offsets, ids);
     train(points);
   }
   // Data given as a range type: data[i][j][k]
   template<template<typename> class seqA, template<typename> class seqB,
            template<typename> class seqC>
-  void train(const seqA<seqB<seqC<float>>> &data) {
+  void train(const seqA<seqB<seqC<float>>>& data) {
     PointCloudSet<ChPoint> points(data, d, {});
     train(points);
   }
 
   // Computes cluster ids for each doc point cloud given centroid-point clouds
-  void compute_cluster_ids(const PointCloudSet<ChPoint> &points,
-                           parlay::sequence<uint32_t> &cluster_ids);
-  void compute_cluster_ids_naive(const PointCloudSet<ChPoint> &points,
-                                 parlay::sequence<uint32_t> &cluster_ids);
+  void compute_cluster_ids(const PointCloudSet<ChPoint>& points,
+                           parlay::sequence<uint32_t>& cluster_ids);
+  void compute_cluster_ids_naive(const PointCloudSet<ChPoint>& points,
+                                 parlay::sequence<uint32_t>& cluster_ids);
+  void compute_cluster_ids_old(const PointCloudSet<ChPoint>& points,
+                               parlay::sequence<uint32_t>& cluster_ids);
   // Compute the MV Kmedian cost
-  float compute_cost(const PointCloudSet<ChPoint> &points,
-                     const parlay::sequence<uint32_t> &cluster_ids) const;
+  float compute_cost(const PointCloudSet<ChPoint>& points,
+                     const parlay::sequence<uint32_t>& cluster_ids) const;
 };
 
 /* =======================================Implementation======================================= */
 
 // Data given as a PointCloudSet Object: Main Implementation
 template<bool metric>
-void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
+void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   uint32_t n = points.size();
   if (s == 0) {  // Default
     auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
@@ -198,8 +201,8 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint> &points) {
 // Computes cluster ids for each doc point cloud given centroid-point clouds
 // Naive Approach: Independently run one-to-one chamfer computation, and find best for each doc.
 template<bool metric>
-void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint> &points,
-                                                     parlay::sequence<uint32_t> &cluster_ids) {
+void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint>& points,
+                                                     parlay::sequence<uint32_t>& cluster_ids) {
   size_t n = points.size();
   parlay::parallel_for(0, n, [&](uint32_t i) {
     auto dist =
@@ -212,8 +215,8 @@ void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint
 // TODO: Need to auto optimize this. Useful function to have for many-to-one and many-to-many
 // chamfer computation.
 template<bool metric>
-void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &points,
-                                               parlay::sequence<uint32_t> &cluster_ids) {
+void MVClustering<metric>::compute_cluster_ids_old(const PointCloudSet<ChPoint>& points,
+                                                   parlay::sequence<uint32_t>& cluster_ids) {
   const size_t n = points.size();
   auto points_offsets = points.get_offsets();
   auto centers_offsets = centers.get_offsets();
@@ -284,11 +287,18 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint> &poi
   });
 }
 
+template<bool metric>
+void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& points,
+                                               parlay::sequence<uint32_t>& cluster_ids) {
+  auto results = ManyToMany<PointCloudSet<ChPoint>>::Top(points, centers);
+  parlay::parallel_for(0, points.size(), [&](size_t i) { cluster_ids[i] = results[i].first; });
+}
+
 // Computes the k-median cost with chamfer distances, given cluster ids
 // Not optimized with many-to-many computations, since not necessary for optimized runs.
 template<bool metric>
-float MVClustering<metric>::compute_cost(const PointCloudSet<ChPoint> &points,
-                                         const parlay::sequence<uint32_t> &cluster_ids) const {
+float MVClustering<metric>::compute_cost(const PointCloudSet<ChPoint>& points,
+                                         const parlay::sequence<uint32_t>& cluster_ids) const {
   auto distances = parlay::delayed_tabulate(
       points.size(), [&](size_t i) { return points[i].distance(centers[cluster_ids[i]]); });
   return parlay::reduce(distances);

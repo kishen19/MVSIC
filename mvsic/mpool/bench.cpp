@@ -1,9 +1,9 @@
 #include <Eigen/Dense>
 #include <iostream>
-#include "mvsic/core/utils/chamfer_ip_point.h"
-#include "mvsic/core/utils/chamfer_l2_point.h"
+#include "mvsic/core/types/chamfer_ip_point.h"
+#include "mvsic/core/types/chamfer_l2_point.h"
+#include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/core/utils/point_cloud_set.h"
 #include "mvsic/core/stats.h"
 #include "mpool.h"
 
@@ -28,15 +28,32 @@ void bench(mvsic::commandLine &P) {
   bool is_mmap = P.getOption("-mm");
 
   bool compress_input = P.getOption("-compress_input");
-  bool use_PQ = P.getOption("-pq");
-  bool normalize = P.getOption("-norm");
   uint32_t verbose = P.getOptionIntValue("-v", 0);
+  bool not_normalized = P.getOption("-no_norm");
 
   // Vamana params
   uint32_t R = 200;
   uint32_t L_build = 600;
   double alpha = P.getOptionDoubleValue("-a", 1.2);
-  bool two_pass = P.getOption("-tp");
+  int num_pass = P.getOptionIntValue("-np", 1);
+
+  // PQ params
+  std::string pq_method = P.getOptionValue("-pq_method", "None");
+  uint32_t pq_method_t = 0;
+  if (pq_method == "None") {
+    pq_method_t = 0;
+  } else if (pq_method == "PQ") {
+    pq_method_t = 1;
+  } else if (pq_method == "RabitQ") {
+    pq_method_t = 2;
+  } else {
+    std::cerr << "Unknown PQ method: " << pq_method << std::endl;
+    exit(1);
+  }
+  uint32_t block_size = P.getOptionIntValue("-m", 8);
+  uint32_t num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
+  uint32_t num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
+  uint32_t rabitq_bits = P.getOptionIntValue("-rbits", 8);
 
   // Search Params
   size_t k = P.getOptionLongValue("-k", 10);
@@ -46,10 +63,10 @@ void bench(mvsic::commandLine &P) {
   bool norerank = P.getOption("-norerank");
 
   auto points = PC(inFile, is_mmap);
-  IndexParams index_params =
-      IndexParams::mpool(R, L_build, alpha, two_pass, normalize, compress_input, use_PQ, verbose);
-  SearchParams search_params =
-      SearchParams::mpool(k, L, cut, points.size(), R, num_rerank, norerank);
+  IndexParams index_params = IndexParams::mpool(
+      R, L_build, alpha, num_pass, !not_normalized, compress_input, verbose, pq_method_t,
+      block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits);
+  SearchParams search_params = SearchParams::mpool(k, L, num_rerank, cut, norerank);
   IndexMPool<metric> index(points.get_dims(), index_params);
   if (indexFile != "") {
     std::cout << "Loading index from " << indexFile << std::endl;

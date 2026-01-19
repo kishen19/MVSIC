@@ -2,15 +2,23 @@
 
 #include <queue>
 #include <set>
+#include <variant>
+#include <optional>
 
 #include "mvsic/muvera/fde/fixed_dimensional_encoding.h"
 #include "mvsic/core/index.h"
-#include "mvsic/core/utils/point_range.h"
-#include "mvsic/core/utils/l2_point.h"
-#include "mvsic/core/utils/ip_point.h"
+#include "mvsic/core/types/io.h"
+
+// Quantization Headers
+#include "mvsic/core/quantization/pq.h"
+#include "mvsic/core/quantization/rabitq.h"
 
 // ParlayANN (Vamana) includes
+#include "algorithms/utils/beamSearch.h"
+#include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/graph.h"
+#include "algorithms/utils/mips_point.h"
+#include "algorithms/utils/point_range.h"
 #include "algorithms/utils/stats.h"
 #include "algorithms/utils/types.h"
 #include "algorithms/vamana/index.h"
@@ -28,30 +36,45 @@ template<bool metric>
 class IndexMUVERA : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  // using Point = std::conditional_t<metric, Euclidian_Point<float>, Mips_Point<float>>;
-  using Point = std::conditional_t<metric, L2_Point<float>, IP_Point<float>>;
-  using Range = PointRange<float, Point>;
+  using Point =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<Point>;
   using Index<metric>::d;  // Embedding dimension
 
+  // Quantizer Types
+  using PQ_Range = pq::Quantized_Point_Range<Range, metric>;
+  using PQ_Point = pq::Quantized_Query<metric>;
+  using RQ_Range = rabitq::Quantized_Point_Range<Range, metric>;
+  using RQ_Point = rabitq::Quantized_Query<metric>;
+  using PQ_Model = pq::Model<metric>;
+  using RQ_Model = rabitq::Model<metric>;
+
+  using QuantModel = std::variant<std::monostate, PQ_Model, RQ_Model>;
+  using QuantRange = std::variant<std::monostate, PQ_Range, RQ_Range>;
+  using QT = IndexParams::QuantizerType;
+
   IndexParams params;
-  uint32_t d_fde;                       // FDE dimension
-  Range points_fdes;                    // FDEs
-  Graph<uint32_t> G;                    // Vamana graph
-  BuildParams BP;                       // Vamana build parameters
-  knn_index<Point, Range, uint32_t> I;  // Vamana index
+  uint32_t d_fde;                                  // FDE dimension
+  Range points_fdes;                               // FDEs
+  parlayANN::Graph<uint32_t> G;                    // Vamana graph
+  parlayANN::BuildParams BP;                       // Vamana build parameters
+  parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
+
+  // Quantizer Storage
+  QuantModel quantizer = std::monostate{};
+  QuantRange quantized_data = std::monostate{};
+  QT active_quantizer = QT::None;
 
   IndexMUVERA(uint32_t d_) noexcept :
       params(IndexParams::muvera()),
-      BP(BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                     params.vamana.two_pass)),
-      I(knn_index<Point, Range, uint32_t>(BP)) {
+      BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
+      I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
   IndexMUVERA(uint32_t d_, const IndexParams &params) noexcept :
       params(params),
-      BP(BuildParams(params.vamana.R, params.vamana.L, params.vamana.alpha,
-                     params.vamana.two_pass)),
-      I(knn_index<Point, Range, uint32_t>(BP)) {
+      BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
+      I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
   }
 
@@ -84,25 +107,51 @@ class IndexMUVERA : public Index<metric> {
     });
     d_fde = fdes[0].size();
     points_fdes = Range(fdes, d_fde);
-    if (params.use_PQ) {
-      // TODO: PQ
-    }
-    // Step 2: Build Vamana index on the FDEs
-    if (params.verbose >= 1) std::cout << "Building Vamana Index..." << std::endl;
-    G = Graph<uint32_t>(BP.R, points.size());
-    stats<uint32_t> BuildStats(G.size());
-    I.build_index(G, points_fdes, BuildStats);
+
+    // Step 2: Build ANN index on the FDEs
+    if (params.verbose >= 1) std::cout << "Building ANN Index..." << std::endl;
+    G = parlayANN::Graph<uint32_t>(BP.R, points.size());
+    parlayANN::stats<uint32_t> BuildStats(G.size());
+    I.build_index(G, points_fdes, points_fdes, BuildStats);
     if (params.verbose >= 1) std::cout << "FDE Dimension: " << points_fdes.get_dims() << std::endl;
+
+    // Step3: Quantization
+    active_quantizer = params.pq.method;
+    switch (active_quantizer) {
+      case QT::RaBitQ:
+        if (params.verbose >= 1) std::cout << "Training RaBitQ..." << std::endl;
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).train(points_fdes, params.pq.rabitq_bits);
+        quantized_data = std::get<RQ_Model>(quantizer).encode(points_fdes);
+        break;
+      case QT::PQ:
+        if (params.verbose >= 1) std::cout << "Training Standard PQ..." << std::endl;
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).train(points_fdes, params.pq.block_size,
+                                            params.pq.num_clusters_per_block,
+                                            params.pq.num_points_per_cluster);
+        quantized_data = std::get<PQ_Model>(quantizer).encode(points_fdes);
+        break;
+      case QT::None:
+        quantizer = std::monostate{};
+        quantized_data = std::monostate{};
+        break;
+      default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
+    }
   }
 
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
-  std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
-      const ChPoint &query, const PointCloudSet<ChPoint> &points,
-      const SearchParams &search_params) override {
+  std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
+  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
+                    const SearchParams &search_params) override {
+    parlay::internal::timer t;
+    std::vector<double> timings;
+
     size_t k = search_params.k;
     // Step 1: Compute FDE of the query point cloud
     // FDE config
+    t.start();
     graph_mining::FixedDimensionalEncodingConfig fde_config{
         static_cast<int32_t>(d),
         params.fde.num_repetitions,
@@ -121,95 +170,131 @@ class IndexMUVERA : public Index<metric> {
     std::vector<float> query_fde =
         graph_mining::GenerateFixedDimensionalEncoding(query_vec, fde_config);
     assert(query_fde.size() == d_fde);
+    typename Point::parameters parlayann_pr_params(d_fde);
+    Point query_point(reinterpret_cast<typename Point::byte *>(query_fde.data()), -1,
+                      parlayann_pr_params);
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 2: Run beam search
+    t.start();
     uint32_t start_point = I.get_start();
-    auto QP = QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
-                          search_params.limit, search_params.degree_limit);
-    auto query_point = Point(query_fde.data(), d_fde, d_fde, -1);
-    auto [result, dist_cmps] =
-        beam_search<Point, Range, uint32_t>(query_point, G, points_fdes, start_point, QP);
-    parlay::sequence<std::pair<uint32_t, float>> visited = result.second;
-    dist_cmps = dist_cmps * 2 * d_fde;
+    auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
+                                     points.size(), params.ann.R);
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    size_t dist_cmps;
+
+    switch (active_quantizer) {
+      case QT::RaBitQ: {
+        // Quantize Query
+        auto &m = std::get<RQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query_point);
+        // Search
+        auto [result, cmps] = parlayANN::beam_search<RQ_Point, RQ_Range, uint32_t>(
+            q_query, G, std::get<RQ_Range>(quantized_data), start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps;  // RaBitQ usually counts its own ops or we estimate
+        break;
+      }
+      case QT::PQ: {
+        auto &m = std::get<PQ_Model>(quantizer);
+        auto q_query = m.quantize_query(query_point);
+        auto [result, cmps] = parlayANN::beam_search<PQ_Point, PQ_Range, uint32_t>(
+            q_query, G, std::get<PQ_Range>(quantized_data), start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps;
+        break;
+      }
+      case QT::None: {
+        auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
+            query_point, G, points_fdes, start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps * 2 * d_fde;
+        break;
+      }
+      default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
+    }
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 3: Re-ranking
+    t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (!search_params.norerank) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      auto cmp_rerank = parlay::sequence<size_t>::uninitialized(num_rerank);
-      auto results_rerank =
-          parlay::sequence<std::pair<uint32_t, float>>::from_function(num_rerank, [&](size_t i) {
-            uint32_t id = visited[i].first;
-            auto [dist, d_c] = query.distance_w_cmps(points[id]);
-            cmp_rerank[i] = d_c;
-            return std::make_pair(id, dist);
-          });
-      dist_cmps += parlay::reduce(cmp_rerank);
-      parlay::sort_inplace(results_rerank, [](const auto &a, const auto &b) {
-        return a.second < b.second;  // Sort by distance
-      });
-      parlay::parallel_for(0, final_results.size(),
-                           [&](size_t i) { final_results[i] = results_rerank[i]; });
+      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    return std::make_pair(final_results, dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
+    return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   // Write the index to a file in disk
   void save(const std::string &filename) override {
-    std::string graph_filename = filename;
-    size_t pos = graph_filename.rfind(".");
-    if (pos != std::string::npos) {
-      graph_filename.insert(pos, "_graph.muvera");
-    } else {
-      // If . not found, append _graph.muvera.bin
-      graph_filename += "_graph.muvera.bin";
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) throw std::runtime_error("save: cannot open file: " + filename);
+
+    // 1. Save graph
+    parlayANN::io::save_graph(G, out);
+
+    // 2. Save Quantizer Type Header
+    out.write((char *)&d_fde, sizeof(uint32_t));
+    int type_id = static_cast<int>(active_quantizer);
+    out.write((char *)&type_id, sizeof(int));
+
+    // 3. Save Quantizer Model and encodings OR Exact Vectors
+    switch (active_quantizer) {
+      case QT::RaBitQ:
+        std::get<RQ_Model>(quantizer).save(out);
+        std::get<RQ_Range>(quantized_data).save(out);
+        break;
+      case QT::PQ:
+        std::get<PQ_Model>(quantizer).save(out);
+        std::get<PQ_Range>(quantized_data).save(out);
+        break;
+      case QT::None: parlayANN::io::save_point_range(points_fdes, out); break;
     }
-
-    char *graph_filename_c = (char *)graph_filename.c_str();
-    G.save(graph_filename_c);
-
-    std::string fdes_filename = filename;
-    pos = fdes_filename.rfind(".");
-    if (pos != std::string::npos) {
-      fdes_filename.insert(pos, "_fdes.muvera");
-    } else {
-      // If . not found, append _fdes.muvera.bin
-      fdes_filename += "_fdes.muvera.bin";
-    }
-
-    char *fdes_filename_c = (char *)fdes_filename.c_str();
-    points_fdes.save(fdes_filename_c);
   }
 
   // Read the index from a file in disk
   void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override {
-    // Construct graph filename
-    std::string graph_filename = filename;
-    size_t pos = graph_filename.rfind(".");
-    if (pos != std::string::npos) {
-      graph_filename.insert(pos, "_graph.muvera");
-    } else {
-      graph_filename += "_graph.muvera.bin";
-    }
-    char *graph_filename_c = (char *)graph_filename.c_str();
-    G = Graph<uint32_t>(graph_filename_c);
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load: cannot open file: " + filename);
+
+    // 1. Load Graph
+    G = parlayANN::io::load_graph<uint32_t>(in);
     I.set_start();
 
-    // Construct fdes filename
-    std::string fdes_filename = filename;
-    pos = fdes_filename.rfind(".");
-    if (pos != std::string::npos) {
-      fdes_filename.insert(pos, "_fdes.muvera");
-    } else {
-      fdes_filename += "_fdes.muvera.bin";
+    // 2. Load Quantizer Type
+    in.read((char *)&d_fde, sizeof(uint32_t));
+    int type_id;
+    in.read((char *)&type_id, sizeof(int));
+    active_quantizer = static_cast<QT>(type_id);
+
+    // 3. Load Data
+    switch (active_quantizer) {
+      case QT::RaBitQ:
+        quantizer.template emplace<RQ_Model>();
+        std::get<RQ_Model>(quantizer).load(in);
+        quantized_data.template emplace<RQ_Range>();
+        std::get<RQ_Range>(quantized_data).load(in);
+        break;
+      case QT::PQ:
+        quantizer.template emplace<PQ_Model>();
+        std::get<PQ_Model>(quantizer).load(in);
+        quantized_data.template emplace<PQ_Range>();
+        std::get<PQ_Range>(quantized_data).load(in);
+        break;
+      case QT::None:
+        auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
+        points_fdes = Range(fdes_data, d_fde);
+        break;
     }
-    char *fdes_filename_c = (char *)fdes_filename.c_str();
-    points_fdes = Range(fdes_filename_c);
-    d_fde = points_fdes.get_dims();
   }
 };
 

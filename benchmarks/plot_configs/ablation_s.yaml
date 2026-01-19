@@ -1,0 +1,30 @@
+name: ablation_s
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    results: results/beir/arguana
+  - name: scidocs
+    path: data/beir/scidocs
+    results: results/beir/scidocs
+  - name: quora
+    path: data/beir/quora
+    results: results/beir/quora
+  # - name: science_forum
+  #   path: data/lotte/dev/science
+  #   results: results/lotte/dev/science_forum
+  - name: tatdqa
+    path: data/vidore/tatdqa
+    results: results/vidore/tatdqa
+
+
+k: 10
+
+results:
+  - ["mvivf", "mvivf_500", ""]
+  - ["mvivf", "mvivf_500_1", ""]
+  - ["mvivf", "mvivf_500_5", ""]
+  - ["mvivf", "mvivf_500_10", ""]
+  - ["mvivf", "mvivf_500_25", ""]
+  - ["mvivf", "mvivf_500_50", ""]
+  - ["mvivf", "mvivf_500_100", ""]

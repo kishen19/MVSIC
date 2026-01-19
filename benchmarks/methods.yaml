@@ -1,0 +1,29 @@
+# This file defines schema and metadata for each indexing method.
+
+mvivf:
+  variable_param: nprobes
+  class: "MVIVF" 
+
+mvivf_flat:
+  variable_param: nprobes
+  class: "MVIVFFlat" 
+
+muvera:
+  variable_param: L
+  class: "MUVERA"
+
+mpool:
+  variable_param: L
+  class: "MPool"
+
+vamana:
+  variable_param: L
+  class: "Vamana"
+
+svh_ivf:
+  variable_param: nprobes
+  class: "SVHIVF"
+
+fastplaid:
+  variable_param: n_ivf_probe
+  class: "FastPlaid"

@@ -7,17 +7,18 @@ module(
 
 bazel_dep(name = "bazel_skylib", version = "1.7.1")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "googletest", version = "1.14.0")
+bazel_dep(name = "googletest", version = "1.17.0")
+bazel_dep(name = "google_benchmark", version = "1.9.4")
 bazel_dep(name = "highway", version = "1.3.0")
-
 bazel_dep(name = "abseil-cpp", version = "20250127.1", repo_name = "com_google_absl")
 bazel_dep(name = "eigen", version = "4.0.0-20241125.bcr.2")
-bazel_dep(name = "kmeans", version = "0.0.1")
+
+# bazel_dep(name = "kmeans", version = "0.0.1")
 bazel_dep(name = "scann", version = "0.0.1")
 # bazel_dep(name = "parlayann", version = "0.0.1")
 
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
-bazel_dep(name = "rules_python", version = "0.31.0")
+bazel_dep(name = "rules_python", version = "1.5.1")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
@@ -26,6 +27,37 @@ http_archive(
     sha256 = "68c062ad116fd49d77651d7a24fb985aa66e8ec9ad05176b6af3ab5d29a16b1f",
     strip_prefix = "parlaylib-bazel/include/",
     urls = ["https://github.com/ParAlg/parlaylib/archive/refs/tags/bazel.tar.gz"],
+)
+
+http_archive(
+    name = "rabitq",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "rabitqlib",
+    # HEADER FILTER: Include everything EXCEPT the embedded Eigen
+    hdrs = glob(
+        ["include/**"], 
+        exclude = ["include/rabitqlib/third/Eigen/**"]
+    ),
+    
+    # Add 'include' to path so "rabitqlib/..." works
+    includes = ["include"],
+    
+    copts = ["-Ofast", "-march=native", "-fopenmp", "-w"],
+    linkopts = ["-fopenmp"],
+    
+    # DEPENDENCY: Force it to use the external Eigen
+    deps = ["@eigen//:eigen"],
+)
+""",
+    # PATCH: Rewrite include paths to use the standard Eigen location
+    patch_cmds = [
+        "find include -type f \\( -name '*.hpp' -o -name '*.h' \\) -exec sed -i 's|rabitqlib/third/Eigen/|Eigen/|g' {} +",
+    ],
+    strip_prefix = "RaBitQ-Library-main",
+    urls = ["https://github.com/VectorDB-NTU/RaBitQ-Library/archive/refs/heads/main.zip"],
 )
 
 # git_override(
@@ -39,8 +71,15 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 
 git_repository(
     name = "parlayann",
-    branch = "bazel",
-    remote = "https://github.com/cmuparlay/parlayann.git",
+    branch = "main",
+    # remote = "https://github.com/cmuparlay/parlayann.git",
+    remote = "https://github.com/kishen19/ParlayANN.git",
+)
+
+git_repository(
+    name = "kmeans",
+    branch = "mvsic",
+    remote = "git@github.com:ParAlg/Parallel-KMeans.git",
 )
 
 # git_repository(
@@ -70,10 +109,10 @@ git_repository(
 #     tag = "v1.11.0",
 # )
 
-local_path_override(
-    module_name = "kmeans",
-    path = "./external/kmeans/",
-)
+# local_path_override(
+#     module_name = "kmeans",
+#     path = "./external/kmeans/",
+# )
 
 local_path_override(
     module_name = "scann",
@@ -83,6 +122,6 @@ local_path_override(
 # python bindings relevant
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
-    python_version = "3.13",
     is_default = True,
+    python_version = "3.13",
 )

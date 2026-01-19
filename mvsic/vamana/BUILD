@@ -29,7 +29,10 @@ cc_library(
         ":beam_search",
         ":graph",
         "//mvsic/core:index",
-        "@parlaylib//parlay:primitives",
+        "//mvsic/core/quantization:fastscan",
+        "//mvsic/core/quantization:pq",
+        "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:wrapper",
     ],
 )
 
@@ -39,9 +42,9 @@ cc_binary(
     deps = [
         ":vamana",
         "//mvsic/core:stats",
-        "//mvsic/core/utils:chamfer_ip_point",
-        "//mvsic/core/utils:chamfer_l2_point",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/utils:parse_command_line",
-        "//mvsic/core/utils:point_cloud_set",
     ],
 )

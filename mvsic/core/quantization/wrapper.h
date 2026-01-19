@@ -1,0 +1,569 @@
+// mvsic/core/quantization/wrapper.h
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <immintrin.h>
+#include <limits>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "parlay/parallel.h"
+#include "parlay/sequence.h"
+
+namespace mvsic {
+
+// ---------------------------------------------------------
+// Helper: Flatten PointCloudSet into a PointRange-like view
+// ---------------------------------------------------------
+template<typename PCSet>
+struct FlattenedPCRange {
+  const float* raw_data;
+  size_t _size;
+  uint32_t _dim;
+
+  explicit FlattenedPCRange(const PCSet& s) :
+      raw_data(s.data()), _size(s.total_size()), _dim(s.get_dims()) {}
+
+  size_t size() const { return _size; }
+  uint32_t get_dims() const { return _dim; }
+
+  const uint8_t* location(size_t i) const {
+    return reinterpret_cast<const uint8_t*>(raw_data + i * static_cast<size_t>(_dim));
+  }
+
+  const float* data() const { return raw_data; }
+};
+
+// ---------------------------------------------------------
+// Quantized Point Cloud: Aux Type (handle over encoded vectors)
+// ---------------------------------------------------------
+template<typename EncRange, bool Metric>
+class Quantized_Point_Cloud {
+ public:
+  const EncRange* db = nullptr;
+  size_t start_idx = 0;
+  size_t end_idx = 0;
+
+  Quantized_Point_Cloud() = default;
+  Quantized_Point_Cloud(const EncRange* d, size_t start, size_t end) :
+      db(d), start_idx(start), end_idx(end) {}
+
+  size_t size() const { return end_idx - start_idx; }
+
+  auto operator[](size_t j) const { return (*db)[start_idx + j]; }
+};
+
+// ---------------------------------------------------------
+// Quantized Query Point Cloud
+//  - stores per-vector quantized queries (LUTs, etc.)
+//  - generic Chamfer over a Quantized_Point_Cloud handle
+// ---------------------------------------------------------
+template<typename QuantizedQueryVec, bool Metric>
+class Quantized_Query_Point_Cloud {
+ public:
+  using distanceType = float;
+
+  parlay::sequence<QuantizedQueryVec> vec_queries;
+
+  template<typename QuantizedPointCloud>
+  float distance(const QuantizedPointCloud& cloud) const {
+    const size_t num_q = vec_queries.size();
+    if (num_q == 0) return 0.0f;
+
+    const size_t cloud_size = cloud.size();
+    if (cloud_size == 0) return std::numeric_limits<float>::max();
+
+    float total_chamfer = 0.0f;
+
+    // Keep sequential (usually query-cloud small)
+    for (const auto& q_vec : vec_queries) {
+      float min_dist = std::numeric_limits<float>::max();
+      for (size_t i = 0; i < cloud_size; ++i) {
+        if (i + 1 < cloud_size) cloud[i + 1].prefetch();
+        float d = q_vec.distance(cloud[i]);
+        if (d < min_dist) min_dist = d;
+      }
+      total_chamfer += min_dist;
+    }
+
+    return total_chamfer / static_cast<float>(num_q);
+  }
+
+  // TODO: fix cmps
+  template<typename CloudHandle>
+  std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
+    return {this->distance(cloud), vec_queries.size()};
+  }
+
+  static constexpr bool is_metric() { return Metric; }
+};
+
+// ---------------------------------------------------------
+// Quantized Point Cloud Set (encoded DB + offsets + distances)
+//   EncRange: encoded vector storage type
+//            e.g. pq::Quantized_Point_Range<...>, fastscan::Quantized_Point_Range<...>, etc.
+// ---------------------------------------------------------
+template<typename EncRange, bool Metric>
+class Quantized_Point_Cloud_Set {
+ public:
+  EncRange vec_db;
+  parlay::sequence<size_t> offsets;  // vector-index offsets into flattened DB (size n_clouds+1)
+  parlay::sequence<uint32_t> sizes_unpadded;  // size = n_clouds (only meaningful for fastscan)
+
+  uint32_t n_clouds = 0;
+
+  Quantized_Point_Cloud_Set() = default;
+
+  Quantized_Point_Cloud_Set(EncRange&& enc, parlay::sequence<size_t>&& offs) :
+      vec_db(std::move(enc)), offsets(std::move(offs)) {
+    n_clouds = static_cast<uint32_t>(offsets.size() ? offsets.size() - 1 : 0);
+  }
+
+  Quantized_Point_Cloud_Set(EncRange&& enc, parlay::sequence<size_t>&& offs,
+                            parlay::sequence<uint32_t>&& sizes) :
+      vec_db(std::move(enc)), offsets(std::move(offs)), sizes_unpadded(std::move(sizes)) {
+    n_clouds = static_cast<uint32_t>(offsets.size() ? offsets.size() - 1 : 0);
+  }
+
+  auto operator[](size_t i) const {
+    const size_t start = offsets[i];
+    size_t end = offsets[i + 1];
+
+    if constexpr (EncRange::is_fastscan) {
+      if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
+        end = start + static_cast<size_t>(sizes_unpadded[i]);  // unpadded end
+      }
+    }
+    return Quantized_Point_Cloud<EncRange, Metric>(&vec_db, start, end);
+  }
+
+  template<typename QuantizedQueryTy, typename Seq>
+  size_t distances(const QuantizedQueryTy& q_query, const Seq& indices, size_t n,
+                   std::pair<uint32_t, float>* results) const {
+
+    if constexpr (EncRange::is_fastscan) {
+      parlay::parallel_for(0, n, [&](size_t i) {
+        const uint32_t cloud_id = indices[i];
+
+        const size_t start = offsets[cloud_id];
+
+        // True (unpadded) cloud size in *vectors* if available; else fall back to padded.
+        size_t cloud_size = 0;
+        if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
+          cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
+        } else {
+          const size_t end_padded = offsets[cloud_id + 1];
+          cloud_size = (end_padded > start) ? (end_padded - start) : 0;
+        }
+
+        const size_t num_q = q_query.vec_queries.size();
+        if (num_q == 0) {
+          results[i] = {cloud_id, 0.0f};
+          return;
+        }
+        if (cloud_size == 0) {
+          results[i] = {cloud_id, std::numeric_limits<float>::max()};
+          return;
+        }
+
+        const size_t true_end = start + cloud_size;
+
+        const size_t strip_stride = static_cast<size_t>(vec_db.num_blocks) * 32;
+
+        const size_t strip0 = start / 64;
+        const int lane0 = static_cast<int>(start % 64);
+
+        const size_t strip1 = true_end / 64;
+        const int lane1 = static_cast<int>(true_end % 64);  // if 0 => ends on strip boundary
+
+        auto strip_ptr = [&](size_t s) -> const uint8_t* {
+          return &vec_db.packed_codes[s * strip_stride];
+        };
+
+        float total_chamfer = 0.0f;
+
+        // If the cloud covers only full strips and is strip-aligned, we can do a pure running-min
+        // scan.
+        const bool fully_aligned_full =
+            (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);  // at least 1 strip
+
+        for (const auto& q_vec : q_query.vec_queries) {
+          float min_d = std::numeric_limits<float>::max();
+
+          // A) entirely within one strip (rare for fastscan since starts align, but safe)
+          if (strip0 == strip1) {
+            const int hi = (lane1 == 0) ? 64 : lane1;
+            min_d = vec_db.scan_64_chunk_min_masked(q_vec, strip_ptr(strip0), lane0, hi);
+            total_chamfer += min_d;
+            continue;
+          }
+
+          // B) aligned + exact full strips
+          if (fully_aligned_full) {
+            const size_t first_full = strip0;
+            const size_t last_full = strip1 - 1;
+
+            __m512i min0 = _mm512_set1_epi16(0xFFFF);
+            __m512i min1 = _mm512_set1_epi16(0xFFFF);
+            __m512i min2 = _mm512_set1_epi16(0xFFFF);
+            __m512i min3 = _mm512_set1_epi16(0xFFFF);
+
+            size_t s = first_full;
+
+            for (; s + 3 <= last_full; s += 4) {
+              const uint8_t* p0 = strip_ptr(s);
+              min0 = vec_db.scan_64_running_min(q_vec, p0, min0);
+              min1 = vec_db.scan_64_running_min(q_vec, p0 + strip_stride, min1);
+              min2 = vec_db.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
+              min3 = vec_db.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
+            }
+
+            __m512i combined =
+                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+
+            for (; s <= last_full; ++s) {
+              combined = vec_db.scan_64_running_min(q_vec, strip_ptr(s), combined);
+            }
+
+            min_d = vec_db.reduce_running_min(q_vec, combined);
+            total_chamfer += min_d;
+            continue;
+          }
+
+          // C) general (possibly partial first/last strip): masked on ends + running-min on full
+          // middle strips
+
+          // First strip (masked)
+          {
+            const float d0 = vec_db.scan_64_chunk_min_masked(q_vec, strip_ptr(strip0), lane0, 64);
+            if (d0 < min_d) min_d = d0;
+          }
+
+          const size_t first_full = strip0 + 1;
+          const size_t last_full = strip1 - 1;
+
+          // Middle full strips
+          if (first_full <= last_full) {
+            __m512i min0 = _mm512_set1_epi16(0xFFFF);
+            __m512i min1 = _mm512_set1_epi16(0xFFFF);
+            __m512i min2 = _mm512_set1_epi16(0xFFFF);
+            __m512i min3 = _mm512_set1_epi16(0xFFFF);
+
+            size_t s = first_full;
+
+            for (; s + 3 <= last_full; s += 4) {
+              const uint8_t* p0 = strip_ptr(s);
+              min0 = vec_db.scan_64_running_min(q_vec, p0, min0);
+              min1 = vec_db.scan_64_running_min(q_vec, p0 + strip_stride, min1);
+              min2 = vec_db.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
+              min3 = vec_db.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
+            }
+
+            __m512i combined =
+                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+
+            for (; s <= last_full; ++s) {
+              combined = vec_db.scan_64_running_min(q_vec, strip_ptr(s), combined);
+            }
+
+            const float d_full = vec_db.reduce_running_min(q_vec, combined);
+            if (d_full < min_d) min_d = d_full;
+          }
+
+          // Last strip (masked), only if partial
+          if (lane1 != 0) {
+            const float d1 = vec_db.scan_64_chunk_min_masked(q_vec, strip_ptr(strip1), 0, lane1);
+            if (d1 < min_d) min_d = d1;
+          }
+
+          total_chamfer += min_d;
+        }
+
+        results[i] = {cloud_id, total_chamfer / static_cast<float>(num_q)};
+      });
+
+      return q_query.vec_queries.size();
+    } else {
+      parlay::parallel_for(0, n, [&](size_t i) {
+        uint32_t cloud_id = indices[i];
+        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+      });
+      return q_query.vec_queries.size();
+    }
+  }
+
+  template<typename QuantizedQueryTy>
+  size_t distances_all(const QuantizedQueryTy& q_query, std::pair<uint32_t, float>* results) const {
+
+    const size_t num_q = q_query.vec_queries.size();
+
+    if constexpr (EncRange::is_fastscan) {
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        const uint32_t cloud_id = static_cast<uint32_t>(cid);
+
+        // True (unpadded) cloud size in vectors if available; else fall back to padded.
+        const size_t start = offsets[cloud_id];
+        size_t cloud_size = 0;
+        if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
+          cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
+        } else {
+          const size_t end_padded = offsets[cloud_id + 1];
+          cloud_size = (end_padded > start) ? (end_padded - start) : 0;
+        }
+
+        if (num_q == 0) {
+          results[cid] = {cloud_id, 0.0f};
+          return;
+        }
+        if (cloud_size == 0) {
+          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
+          return;
+        }
+
+        const size_t true_end = start + cloud_size;
+
+        const size_t strip_stride = static_cast<size_t>(vec_db.num_blocks) * 32;
+
+        const size_t strip0 = start / 64;
+        const int lane0 = static_cast<int>(start % 64);
+
+        const size_t strip1 = true_end / 64;
+        const int lane1 = static_cast<int>(true_end % 64);
+
+        auto strip_ptr = [&](size_t s) -> const uint8_t* {
+          return &vec_db.packed_codes[s * strip_stride];
+        };
+
+        float total = 0.0f;
+
+        // Fast path: fully aligned + exact full strips
+        const bool fully_aligned_full = (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
+
+        for (const auto& qv : q_query.vec_queries) {
+          float min_d = std::numeric_limits<float>::max();
+
+          // All in one strip
+          if (strip0 == strip1) {
+            const int hi = (lane1 == 0) ? 64 : lane1;
+            min_d = vec_db.scan_64_chunk_min_masked(qv, strip_ptr(strip0), lane0, hi);
+            total += min_d;
+            continue;
+          }
+
+          if (fully_aligned_full) {
+            const size_t first_full = strip0;
+            const size_t last_full = strip1 - 1;
+
+            __m512i min0 = _mm512_set1_epi16(0xFFFF);
+            __m512i min1 = _mm512_set1_epi16(0xFFFF);
+            __m512i min2 = _mm512_set1_epi16(0xFFFF);
+            __m512i min3 = _mm512_set1_epi16(0xFFFF);
+
+            size_t s = first_full;
+
+            for (; s + 3 <= last_full; s += 4) {
+              const uint8_t* p0 = strip_ptr(s);
+              min0 = vec_db.scan_64_running_min(qv, p0, min0);
+              min1 = vec_db.scan_64_running_min(qv, p0 + strip_stride, min1);
+              min2 = vec_db.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
+              min3 = vec_db.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
+            }
+
+            __m512i combined =
+                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+
+            for (; s <= last_full; ++s) {
+              combined = vec_db.scan_64_running_min(qv, strip_ptr(s), combined);
+            }
+
+            min_d = vec_db.reduce_running_min(qv, combined);
+            total += min_d;
+            continue;
+          }
+
+          // General case: masked ends + running-min middle strips
+
+          // First strip (masked)
+          {
+            const float d0 = vec_db.scan_64_chunk_min_masked(qv, strip_ptr(strip0), lane0, 64);
+            if (d0 < min_d) min_d = d0;
+          }
+
+          const size_t first_full = strip0 + 1;
+          const size_t last_full = strip1 - 1;
+
+          if (first_full <= last_full) {
+            __m512i min0 = _mm512_set1_epi16(0xFFFF);
+            __m512i min1 = _mm512_set1_epi16(0xFFFF);
+            __m512i min2 = _mm512_set1_epi16(0xFFFF);
+            __m512i min3 = _mm512_set1_epi16(0xFFFF);
+
+            size_t s = first_full;
+
+            for (; s + 3 <= last_full; s += 4) {
+              const uint8_t* p0 = strip_ptr(s);
+              min0 = vec_db.scan_64_running_min(qv, p0, min0);
+              min1 = vec_db.scan_64_running_min(qv, p0 + strip_stride, min1);
+              min2 = vec_db.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
+              min3 = vec_db.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
+            }
+
+            __m512i combined =
+                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
+
+            for (; s <= last_full; ++s) {
+              combined = vec_db.scan_64_running_min(qv, strip_ptr(s), combined);
+            }
+
+            const float d_full = vec_db.reduce_running_min(qv, combined);
+            if (d_full < min_d) min_d = d_full;
+          }
+
+          // Last strip (masked) if partial
+          if (lane1 != 0) {
+            const float d1 = vec_db.scan_64_chunk_min_masked(qv, strip_ptr(strip1), 0, lane1);
+            if (d1 < min_d) min_d = d1;
+          }
+
+          total += min_d;
+        }
+
+        results[cid] = {cloud_id, total / float(num_q)};
+      });
+
+      return num_q;
+    } else {
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+      });
+      return num_q;
+    }
+  }
+
+  // TODO: fix this
+  inline size_t get_dist_cmps() const { return 0; }
+
+  void save(std::ofstream& out) const {
+    out.write(reinterpret_cast<const char*>(&n_clouds), sizeof(n_clouds));
+
+    // offsets
+    size_t off_size = offsets.size();
+    out.write(reinterpret_cast<const char*>(&off_size), sizeof(off_size));
+    if (off_size) {
+      out.write(reinterpret_cast<const char*>(offsets.data()), off_size * sizeof(size_t));
+    }
+
+    // sizes_unpadded (needed for fastscan correctness; empty for non-fastscan is fine)
+    size_t sz_size = sizes_unpadded.size();
+    out.write(reinterpret_cast<const char*>(&sz_size), sizeof(sz_size));
+    if (sz_size) {
+      out.write(reinterpret_cast<const char*>(sizes_unpadded.data()), sz_size * sizeof(uint32_t));
+    }
+
+    vec_db.save(out);
+  }
+
+  void load(std::ifstream& in) {
+    in.read(reinterpret_cast<char*>(&n_clouds), sizeof(n_clouds));
+
+    // offsets
+    size_t off_size = 0;
+    in.read(reinterpret_cast<char*>(&off_size), sizeof(off_size));
+    offsets.resize(off_size);
+    if (off_size) {
+      in.read(reinterpret_cast<char*>(offsets.data()), off_size * sizeof(size_t));
+    }
+
+    // sizes_unpadded
+    size_t sz_size = 0;
+    in.read(reinterpret_cast<char*>(&sz_size), sizeof(sz_size));
+    sizes_unpadded.resize(sz_size);
+    if (sz_size) {
+      in.read(reinterpret_cast<char*>(sizes_unpadded.data()), sz_size * sizeof(uint32_t));
+    }
+
+    vec_db.load(in);
+  }
+};
+
+// ---------------------------------------------------------
+// Model wrapper: owns the vector-quantizer model and provides
+//  - train
+//  - encode(pcs) -> Quantized_Point_Cloud_Set
+//  - quantize_query(query_cloud) -> Quantized_Query_Point_Cloud
+// ---------------------------------------------------------
+template<typename VecModel, bool Metric>
+class MultiVecQuantizer {
+ public:
+  VecModel vec_model;
+
+  MultiVecQuantizer() = default;
+
+  // Train on a PointCloudSet by flattening
+  template<typename PCSet, typename... Args>
+  void train(const PCSet& pcs, Args&&... args) {
+    vec_model.train(FlattenedPCRange<PCSet>(pcs), std::forward<Args>(args)...);
+  }
+
+  // Encode a PointCloudSet into a cloud-set container
+  template<typename PCSet>
+  auto encode(const PCSet& pcs) {
+    FlattenedPCRange<PCSet> flat(pcs);
+
+    // offsets are in FLOAT indices into flattened float buffer
+    const auto pcs_offsets_float = pcs.get_offsets();
+
+    if constexpr (VecModel::is_fastscan) {
+      auto enc = vec_model.encode(flat, pcs_offsets_float);
+      using EncRange = decltype(enc);
+      // FastScan range already stores vector-index offsets (possibly padded per cloud)
+      parlay::sequence<size_t> offs = enc.cloud_vec_offsets;
+      parlay::sequence<uint32_t> sizes(offs.size() ? offs.size() - 1 : 0);
+      const size_t dim = static_cast<size_t>(pcs.get_dims());
+      parlay::parallel_for(0, sizes.size(), [&](size_t c) {
+        const size_t start_f = static_cast<size_t>(pcs_offsets_float[c]);
+        const size_t end_f = static_cast<size_t>(pcs_offsets_float[c + 1]);
+        sizes[c] = static_cast<uint32_t>((end_f - start_f) / dim);  // UNPADDED vectors
+      });
+      return Quantized_Point_Cloud_Set<EncRange, Metric>(std::move(enc), std::move(offs),
+                                                         std::move(sizes));
+    } else {
+      auto enc = vec_model.encode(flat);
+      using EncRange = decltype(enc);
+      parlay::sequence<size_t> offs(pcs_offsets_float.begin(), pcs_offsets_float.end());
+      const size_t dim = static_cast<size_t>(pcs.get_dims());
+      if (dim > 0) {
+        parlay::parallel_for(0, offs.size(), [&](size_t i) { offs[i] /= dim; });
+      }
+      return Quantized_Point_Cloud_Set<EncRange, Metric>(std::move(enc), std::move(offs));
+    }
+  }
+
+  // Quantize an input query cloud (per-vector LUTs etc.)
+  template<typename ChPoint>
+  auto quantize_query(const ChPoint& query_cloud) const {
+    using QVecType = decltype(vec_model.quantize_query(query_cloud[0].data()));
+    Quantized_Query_Point_Cloud<QVecType, Metric> qqc;
+
+    const size_t n_q = query_cloud.size();
+    if (n_q == 0) return qqc;
+
+    if (n_q >= 8) {
+      vec_model.quantize_query_batch(query_cloud, qqc.vec_queries);
+      return qqc;
+    }
+    qqc.vec_queries = parlay::tabulate(
+        n_q, [&](size_t i) { return vec_model.quantize_query(query_cloud[i].data()); });
+    return qqc;
+  }
+
+  void save(std::ofstream& out) const { vec_model.save(out); }
+  void load(std::ifstream& in) { vec_model.load(in); }
+};
+
+}  // namespace mvsic

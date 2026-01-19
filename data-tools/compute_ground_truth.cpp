@@ -3,11 +3,11 @@
 #include <vector>
 #include <string>
 #include <algorithm>
-#include "mvsic/core/utils/point_cloud_set.h"
+#include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
 #include "mvsic/core/utils/top_neighbors.h"
-#include "mvsic/core/utils/chamfer_l2_point.h"
-#include "mvsic/core/utils/chamfer_ip_point.h"
+#include "mvsic/core/types/chamfer_l2_point.h"
+#include "mvsic/core/types/chamfer_ip_point.h"
 #include "parlay/primitives.h"
 
 template<typename ChPoint>

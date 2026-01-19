@@ -1,13 +1,7 @@
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/core/utils/chamfer_ip_point.h"
-#include "mvsic/core/utils/chamfer_l2_point.h"
-#include "mvsic/core/utils/point_cloud_set.h"
-
 #include "mvsic/core/mvclustering/mvclustering.h"
 
-using namespace mvsic;
-
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
                        "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                        "[-data_type <tp>] [-dist_func <dist_func>]"
@@ -23,12 +17,12 @@ int main(int argc, char *argv[]) {
 
   // MVClusteringParams params(iters, seeding, os_rate, verbose, lb);
   if (df == "L2") {
-    auto points = PointCloudSet<ChamferL2_Point>(P.getOptionValue("-i"));
-    MVClustering<true> clus(points.get_dims(), k, s, iters, 20, verbose);
+    auto points = mvsic::PointCloudSet<mvsic::ChamferL2_Point>(P.getOptionValue("-i"));
+    mvsic::MVClustering<true> clus(points.get_dims(), k, s, iters, 20, verbose);
     clus.train(points);
   } else if (df == "IP") {
-    auto points = PointCloudSet<ChamferIP_Point>(P.getOptionValue("-i"));
-    MVClustering<false> clus(points.get_dims(), k, s, iters, 20, verbose);
+    auto points = mvsic::PointCloudSet<mvsic::ChamferIP_Point>(P.getOptionValue("-i"));
+    mvsic::MVClustering<false> clus(points.get_dims(), k, s, iters, 20, verbose);
     clus.train(points);
   }
   return 0;
