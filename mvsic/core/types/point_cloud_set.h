@@ -40,7 +40,7 @@ struct PointCloudSet {
   // Helper to read mmap file
   void read_mmap_file(const char* filename);
   // Returns number of point clouds
-  inline uint32_t size() const noexcept { return n; }
+  inline size_t size() const noexcept { return n; }
   // Returns total number of individual embeddings
   inline size_t total_size() const noexcept { return offsets[n] / dims; }
   // Returns average number of embeddings per point cloud

@@ -28,6 +28,8 @@
 #include <set>
 #include <unordered_set>
 #include <queue>
+#include <limits>
+#include <cmath>
 
 #include "parlay/io.h"
 #include "parlay/parallel.h"
@@ -44,14 +46,14 @@ template<typename indexType, typename ChPoint, typename PC, class GT>
 std::pair<std::pair<parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>,
                     parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>>,
           size_t>
-beam_search_impl(const ChPoint p, GT &G, const PC &Points,
+beam_search_impl(const ChPoint &p, GT &G, const PC &Points,
                  parlay::sequence<indexType> starting_points, const SearchParams &params);
 
 template<typename indexType, typename ChPoint, typename PC, class GT>
 std::pair<std::pair<parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>,
                     parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>>,
-          indexType>
-beam_search(const ChPoint p, GT &G, const PC &Points, indexType starting_point,
+          size_t>
+beam_search(const ChPoint &p, GT &G, const PC &Points, indexType starting_point,
             const SearchParams &params) {
   parlay::sequence<indexType> start_points = {starting_point};
   return beam_search_impl<indexType>(p, G, Points, start_points, params);
@@ -61,7 +63,7 @@ template<typename indexType, typename ChPoint, typename PC, class GT>
 std::pair<std::pair<parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>,
                     parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>>,
           size_t>
-beam_search(const ChPoint p, GT &G, const PC &Points, parlay::sequence<indexType> starting_points,
+beam_search(const ChPoint &p, GT &G, const PC &Points, parlay::sequence<indexType> starting_points,
             const SearchParams &params) {
   return beam_search_impl<indexType>(p, G, Points, starting_points, params);
 }
@@ -71,7 +73,7 @@ template<typename indexType, typename ChPoint, typename PC, class GT>
 std::pair<std::pair<parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>,
                     parlay::sequence<std::pair<indexType, typename ChPoint::distanceType>>>,
           size_t>
-beam_search_impl(const ChPoint p, GT &G, const PC &Points,
+beam_search_impl(const ChPoint &p, GT &G, const PC &Points,
                  parlay::sequence<indexType> starting_points, const SearchParams &params) {
   if (starting_points.size() == 0) {
     std::cout << "beam search expects at least one start point" << std::endl;
@@ -100,7 +102,6 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
   size_t dist_cmps = 0;
   int remain = 1;
   int num_visited = 0;
-  double total;
 
   // Frontier maintains the closest points found so far and its size
   // is always at most L.  Each entry is a (id,distance) pair.
@@ -133,7 +134,7 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
 
   // The main loop.  Terminate beam search when the entire frontier
   // has been visited or have reached max_visit.
-  while (remain > 0 && num_visited < Points.size()) {
+  while (remain > 0 && num_visited < G.size()) {
     // the next node to visit is the unvisited frontier node that is closest to
     // p
     std::pair<indexType, distanceType> current = unvisited_frontier[0];
@@ -159,11 +160,10 @@ beam_search_impl(const ChPoint p, GT &G, const PC &Points,
     // Further filter on whether distance is greater than current
     // furthest distance in current frontier (if full).
     distanceType cutoff =
-        ((frontier.size() < params.L) ? (distanceType)std::numeric_limits<int>::max()
+        ((frontier.size() < params.L) ? std::numeric_limits<distanceType>::infinity()
                                       : frontier[frontier.size() - 1].second);
     for (auto a : keep) {
       auto [dist, d_c] = p.distance_w_cmps(Points[a]);
-      total += dist;
       dist_cmps += d_c;
       // skip if frontier not full and distance too large
       if (dist >= cutoff) continue;

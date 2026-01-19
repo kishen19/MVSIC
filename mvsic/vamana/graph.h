@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <fcntl.h>
 #include <iostream>
+#include <fstream>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -139,13 +140,7 @@ struct Graph {
 
   Graph(long maxDeg, size_t n) : maxDeg(maxDeg), n(n) { allocate_graph(maxDeg, n); }
 
-  Graph(char* gFile) {
-    std::ifstream reader(gFile);
-    if (!reader.is_open()) {
-      std::cout << "graph file " << gFile << " not found" << std::endl;
-      abort();
-    }
-
+  Graph(std::ifstream& reader) {
     // read num points and max degree
     indexType num_points;
     indexType max_deg;
@@ -196,14 +191,12 @@ struct Graph {
     delete[] degrees_start;
   }
 
-  void save(char* oFile) {
+  void save(std::ofstream& writer) {
     std::cout << "Writing graph with " << n << " points and max degree " << maxDeg << std::endl;
     parlay::sequence<indexType> preamble = {static_cast<indexType>(n),
                                             static_cast<indexType>(maxDeg)};
     parlay::sequence<indexType> sizes =
         parlay::tabulate(n, [&](size_t i) { return static_cast<indexType>((*this)[i].size()); });
-    std::ofstream writer;
-    writer.open(oFile, std::ios::binary | std::ios::out);
     writer.write((char*)preamble.begin(), 2 * sizeof(indexType));
     writer.write((char*)sizes.begin(), sizes.size() * sizeof(indexType));
     size_t BLOCK_SIZE = 1000000;
@@ -218,7 +211,6 @@ struct Graph {
       writer.write((char*)data.begin(), data.size() * sizeof(indexType));
       index = ceiling;
     }
-    writer.close();
   }
 
   edgeRange<indexType> operator[](indexType i) const {

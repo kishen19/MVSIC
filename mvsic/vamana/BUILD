@@ -29,7 +29,10 @@ cc_library(
         ":beam_search",
         ":graph",
         "//mvsic/core:index",
-        "@parlaylib//parlay:primitives",
+        "//mvsic/core/quantization:fastscan",
+        "//mvsic/core/quantization:pq",
+        "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:wrapper",
     ],
 )
 

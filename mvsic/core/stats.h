@@ -93,24 +93,39 @@ parlay::sequence<mvsic::Stats> compute_stats(
   for (size_t i = 0; i < params.size(); i++) {
     parlay::internal::timer t;
     size_t k = params[i].k;
-    double query_time_seq = 0.0;
+    double query_time_seq = 1e15;
     auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
     auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
-    for (size_t j = 0; j < query_points.size(); j++) {
-      t.start();
+    // Warmup
+    for (size_t j = 0; j < std::min(static_cast<size_t>(100), query_points.size()); j++) {
       auto [p, c] = index.search(query_points[j], points, params[i]);
-      t.stop();
-      query_time_seq += t.total_time();
-      t.reset();
-      pred[j] = p;
-      cmps[j] = c;
+    }
+    // Single Batch Run for 3 reps
+    for (size_t it = 0; it < 3; it++) {
+      double query_time_seq_it = 0.0;
+      for (size_t j = 0; j < query_points.size(); j++) {
+        t.start();
+        auto [p, c] = index.search(query_points[j], points, params[i]);
+        t.stop();
+        query_time_seq_it += t.total_time();
+        t.reset();
+        if (it == 0) {
+          pred[j] = p;
+          cmps[j] = c;
+        }
+      }
+      query_time_seq = std::min(query_time_seq, query_time_seq_it);
     }
 
-    t.start();
-    auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
-    t.stop();
-    double query_time_par = t.total_time();
-    t.reset();
+    // Batch Run (all queries) for 3 reps
+    double query_time_par = 1e15;
+    for (size_t it = 0; it < 3; it++) {
+      t.start();
+      auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
+      t.stop();
+      query_time_par = std::min(query_time_par, t.total_time());
+      t.reset();
+    }
 
     double QPS_seq = query_points.size() / query_time_seq;
     double QPS_par = query_points.size() / query_time_par;
@@ -131,26 +146,42 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
   for (size_t i = 0; i < params.size(); i++) {
     parlay::internal::timer t;
     size_t k = params[i].k;
-    double query_time_seq = 0.0;
+    double query_time_seq = 1e15;
     auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
     auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
     auto timings = parlay::sequence<std::vector<double>>(query_points.size());
 
-    for (size_t j = 0; j < query_points.size(); j++) {
-      t.start();
-      auto [p, c, time] = index.search_with_stats(query_points[j], points, params[i]);
-      t.stop();
-      query_time_seq += t.total_time();
-      t.reset();
-      pred[j] = p;
-      cmps[j] = c;
-      timings[j] = time;
+    // Warmup
+    for (size_t j = 0; j < std::min(static_cast<size_t>(100), query_points.size()); j++) {
+      auto [p, c] = index.search(query_points[j], points, params[i]);
     }
-    t.start();
-    auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
-    t.stop();
-    double query_time_par = t.total_time();
-    t.reset();
+    // Single Batch Run for 3 reps
+    for (size_t it = 0; it < 3; it++) {
+      double query_time_seq_it = 0.0;
+      for (size_t j = 0; j < query_points.size(); j++) {
+        t.start();
+        auto [p, c, time] = index.search_with_stats(query_points[j], points, params[i]);
+        t.stop();
+        query_time_seq_it += t.total_time();
+        t.reset();
+        if (it == 0) {
+          pred[j] = p;
+          cmps[j] = c;
+          timings[j] = time;
+        }
+      }
+      query_time_seq = std::min(query_time_seq, query_time_seq_it);
+    }
+
+    // Batch Run (all queries) for 3 reps
+    double query_time_par = 1e15;
+    for (size_t it = 0; it < 3; it++) {
+      t.start();
+      auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
+      t.stop();
+      query_time_par = std::min(query_time_par, t.total_time());
+      t.reset();
+    }
 
     double QPS_seq = query_points.size() / query_time_seq;
     double QPS_par = query_points.size() / query_time_par;
