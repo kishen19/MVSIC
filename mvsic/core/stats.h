@@ -143,6 +143,12 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
     const parlay::sequence<mvsic::SearchParams> &params) {
   auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
+  size_t reps = 3;
+  if (query_points.size() > 5000) {
+    reps = 1;
+  } else if (query_points.size() > 2000) {
+    reps = 2;
+  }
   for (size_t i = 0; i < params.size(); i++) {
     parlay::internal::timer t;
     size_t k = params[i].k;
@@ -155,8 +161,8 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
     for (size_t j = 0; j < std::min(static_cast<size_t>(100), query_points.size()); j++) {
       auto [p, c] = index.search(query_points[j], points, params[i]);
     }
-    // Single Batch Run for 3 reps
-    for (size_t it = 0; it < 3; it++) {
+    // Single Batch Run
+    for (size_t it = 0; it < reps; it++) {
       double query_time_seq_it = 0.0;
       for (size_t j = 0; j < query_points.size(); j++) {
         t.start();
@@ -175,7 +181,7 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
 
     // Batch Run (all queries) for 3 reps
     double query_time_par = 1e15;
-    for (size_t it = 0; it < 3; it++) {
+    for (size_t it = 0; it < reps; it++) {
       t.start();
       auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
       t.stop();
@@ -213,12 +219,12 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
     Index &index, const PC &points, const PC &query_points,
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
     const parlay::sequence<mvsic::SearchParams> &params, size_t num_threads = 1) {
+  // Single-Threaded Version
   auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
   auto func = [&]() {
     for (size_t i = 0; i < params.size(); i++) {
       parlay::internal::timer t;
       size_t k = params[i].k;
-      double query_time_seq = 1e15;
       auto pred =
           parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
       auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
@@ -228,22 +234,17 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
       for (size_t j = 0; j < std::min(static_cast<size_t>(10), query_points.size()); j++) {
         auto [p, c] = index.search(query_points[j], points, params[i]);
       }
-      // Single Batch Run for 3 reps
-      for (size_t it = 0; it < 1; it++) {
-        double query_time_seq_it = 0.0;
-        for (size_t j = 0; j < query_points.size(); j++) {
-          t.start();
-          auto [p, c, time] = index.search_with_stats(query_points[j], points, params[i]);
-          t.stop();
-          query_time_seq_it += t.total_time();
-          t.reset();
-          if (it == 0) {
-            pred[j] = p;
-            cmps[j] = c;
-            timings[j] = time;
-          }
-        }
-        query_time_seq = std::min(query_time_seq, query_time_seq_it);
+      double query_time_seq = 0.0;
+      // Single Batch Run
+      for (size_t j = 0; j < query_points.size(); j++) {
+        t.start();
+        auto [p, c, time] = index.search_with_stats(query_points[j], points, params[i]);
+        t.stop();
+        query_time_seq += t.total_time();
+        t.reset();
+        pred[j] = p;
+        cmps[j] = c;
+        timings[j] = time;
       }
 
       double QPS_seq = query_points.size() / query_time_seq;
@@ -270,6 +271,38 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
     }
   };
   parlay::execute_with_scheduler(num_threads, func);
+
+  // Batch Run (all queries on all cores, each running single-threaded)
+  for (size_t i = 0; i < params.size(); i++) {
+    size_t Q = query_points.size();
+    size_t P = parlay::num_workers();
+    constexpr size_t B = 2;  // block size (tune)
+    std::atomic<size_t> next{0};
+
+    parlay::internal::timer t;
+    t.start();
+
+    parlay::parallel_for(
+        0, P,
+        [&](size_t wid) {
+          auto worker_func = [&]() {
+            while (true) {
+              size_t start = next.fetch_add(B, std::memory_order_relaxed);
+              if (start >= Q) break;
+              size_t end = std::min(start + B, Q);
+
+              for (size_t j = start; j < end; j++) {
+                auto [p, c] = index.search(query_points[j], points, params[i]);
+              }
+            }
+          };
+          parlay::execute_with_scheduler(num_threads, worker_func);
+        },
+        1);
+    t.stop();
+    double total_time = t.total_time();
+    results[i].QPS_par = (total_time > 0.0) ? (static_cast<double>(Q) / total_time) : 0.0;
+  }
   return results;
 }
 
@@ -295,8 +328,9 @@ mvsic::StatsExtended compute_stats_extended_p_threaded(
     Index &index, const PC &points, const PC &query_points,
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
     const mvsic::SearchParams &params, size_t num_threads = 1) {
-  return compute_stats_extended(index, points, query_points, gt,
-                                parlay::sequence<mvsic::SearchParams>{params}, num_threads)[0];
+  return compute_stats_extended_p_threaded(index, points, query_points, gt,
+                                           parlay::sequence<mvsic::SearchParams>{params},
+                                           num_threads)[0];
 }
 
 std::pair<double, double> compute_scores(

@@ -1,16 +1,17 @@
 import argparse
-import yaml
-import os
 import hashlib
 import json
-from itertools import product
-import pandas as pd
+import os
 import signal
 import sys
 import time
+from itertools import product
 
+import pandas as pd
+import yaml
 from framework_utils import *
 from utils import load_point_clouds
+
 import mvsic
 
 
@@ -96,7 +97,7 @@ def generate_search_params(search_config, method_info):
     return all_param_combos
 
 
-def run(config, methods, experiment_name, tasks):
+def run(config, methods, experiment_name, tasks, num_threads=None):
     """
     Builds indices and runs searches based on the experiment config and specified tasks.
     """
@@ -298,7 +299,12 @@ def run(config, methods, experiment_name, tasks):
                                     search_params_func = getattr(mvsic.SearchParams, index_name)
                                     search_params_obj = search_params_func(**params)
                                     with suppress_stdout_stderr():
-                                        result = mvsic.compute_stats_extended(index, points, queries, gt, [search_params_obj])
+                                        if num_threads:
+                                            result = mvsic.compute_stats_extended_p_threaded(
+                                                index, points, queries, gt, [search_params_obj], num_threads
+                                            )
+                                        else:
+                                            result = mvsic.compute_stats_extended(index, points, queries, gt, [search_params_obj])
                                         result_ = StatsExtended(
                                             k=params['k'],
                                             recall_1_k=min(1.0, result[0].recall_1_k),
@@ -376,6 +382,7 @@ def main():
         default="benchmarks/methods.yaml",
         help="Path to the methods schema file.",
     )
+    parser.add_argument("--num_threads", type=int, help="Number of threads for parallel search.")
 
     args = parser.parse_args()
 
@@ -395,8 +402,9 @@ def main():
         tasks_to_run = [args.task]
 
     if tasks_to_run:
-        run(config, methods, experiment_name, tasks_to_run)
+        run(config, methods, experiment_name, tasks_to_run, args.num_threads)
 
 
 if __name__ == "__main__":
+    main()
     main()
