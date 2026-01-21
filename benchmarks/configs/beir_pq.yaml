@@ -16,9 +16,9 @@ datasets:
   - name: fiqa
     path: data/beir/fiqa
     results: results/beir/fiqa
-  # - name: quora
-  #   path: data/beir/quora
-  #   results: results/beir/quora
+  - name: quora
+    path: data/beir/quora
+    results: results/beir/quora
   # - name: nq
   #   path: data/beir/nq
   #   results: results/beir/nq
@@ -28,60 +28,40 @@ datasets:
 
 indices:
   - name: mvivf
+    rebuild: True
     build_configs:
-      - name: mvivf_500_pq_16_64
+      - name: mvivf_500_fastscan_16_8
         params:
           k_per_level: 0
           max_leaf_size: 500
-          pq_method: 1 # [None, PQ, RabitQ, ScaNN]
-          block_size: 64
+          pq_method: 3
+          block_size: 8
           num_clusters_per_block: 16
         search_configs:
           - name: k=10
+            append: False
             params:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
               config:
-                - {name: "nr40", num_rerank: 40}
-                - {name: "nr160", num_rerank: 160}
-                - {name: "nr640", num_rerank: 640}
-                - {name: "nr2560", num_rerank: 2560}
-      - name: mvivf_500_rabitq_2
-        params:
-          k_per_level: 0
-          max_leaf_size: 500
-          pq_method: 2 # [None, PQ, RabitQ, ScaNN]
-          rabitq_bits: 2
-        search_configs:
-          - name: k=10
+                - {name: "nr10", num_rerank: 0}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+          - name: k=100
+            append: False
             params:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-              k: [10]
+              k: [100]
               config:
-                - {name: "nr40", num_rerank: 40}
-                # - {name: "nr160", num_rerank: 160}
-                # - {name: "nr640", num_rerank: 640}
-                # - {name: "nr2560", num_rerank: 2560}
+                - {name: "nr100", num_rerank: 0}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
   
   - name: muvera
     build_configs:
-      - name: muvera_2560_pq_256_8
-        params:
-          d_fde: 2560 # FDE dim [2560, 5120]
-          pq_method: 1
-          block_size: 8
-          num_clusters_per_block: 256
-        search_configs:
-          - name: k=10
-            params:
-              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-              k: [10]
-              config:
-                # - {name: "nr40", num_rerank: 40}
-                # - {name: "nr160", num_rerank: 160}
-                # - {name: "nr640", num_rerank: 640}
-                - {name: "nr2560", num_rerank: 2560}
       - name: muvera_2560_rabitq_2
+        rebuild: True
         params:
           d_fde: 2560 # FDE dim [2560, 5120]
           pq_method: 2
@@ -92,7 +72,70 @@ indices:
               L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
               config:
-                # - {name: "nr40", num_rerank: 40}
-                # - {name: "nr160", num_rerank: 160}
-                # - {name: "nr640", num_rerank: 640}
-                - {name: "nr2560", num_rerank: 2560}
+                - {name: "nr10", num_rerank: 10, norerank: True}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+          - name: k=100
+            params:
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [100]
+              config:
+                - {name: "nr100", num_rerank: 100, norerank: True}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+
+  - name: svh_ivf
+    build_configs:
+      - name: svh_ivf_500_fastscan_16_8
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          pq_method: 3
+          block_size: 8
+          num_clusters_per_block: 16
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - {name: "nr10", num_rerank: 10, norerank: True}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+          - name: k=100
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [100]
+              config:
+                - {name: "nr100", num_rerank: 100, norerank: True}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+
+  - name: vamana
+    build_configs:
+      - name: vamana_200_fastscan_16_8
+        params:
+          R: 200
+          pq_method: 3
+          block_size: 8
+          num_clusters_per_block: 16
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - {name: "nr10", num_rerank: 0}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+          - name: k=100
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [100]
+              config:
+                - {name: "nr100", num_rerank: 0}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}

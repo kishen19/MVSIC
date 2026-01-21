@@ -351,7 +351,33 @@ PYBIND11_MODULE(mvsic, m) {
       },                                                                                           \
       "Compute extended stats for " index_name_str " index for a sequence of params",              \
       py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
-      py::arg("params"));
+      py::arg("params"));                                                                          \
+  m.def(                                                                                           \
+      "compute_stats_extended_p_threaded",                                                         \
+      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
+         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
+         const mvsic::SearchParams &params, size_t num_threads) {                                  \
+        return compute_stats_extended_p_threaded(index, points, query_points, gt, params,          \
+                                                 num_threads);                                     \
+      },                                                                                           \
+      "Compute extended stats for " index_name_str " index, using p threads per query",            \
+      py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
+      py::arg("params"), py::arg("num_threads"));                                                  \
+                                                                                                   \
+  m.def(                                                                                           \
+      "compute_stats_extended_p_threaded",                                                         \
+      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
+         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
+         const parlay::sequence<mvsic::SearchParams> &params, size_t num_threads) {                \
+        return compute_stats_extended_p_threaded(index, points, query_points, gt, params,          \
+                                                 num_threads);                                     \
+      },                                                                                           \
+      "Compute extended stats for " index_name_str                                                 \
+      " index, using p threads per query, for a sequence of params",                               \
+      py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
+      py::arg("params"), py::arg("num_threads"));
 
   BIND_COMPUTE_STATS(IndexMVIVFIP, ChamferIP_Point, "MVIVFIP")
   BIND_COMPUTE_STATS(IndexMVIVFL2, ChamferL2_Point, "MVIVFL2")

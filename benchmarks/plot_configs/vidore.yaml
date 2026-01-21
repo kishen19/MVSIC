@@ -1,0 +1,50 @@
+name: vidore_plots
+
+datasets:
+  - name: docvqa
+    path: data/vidore/docvqa
+    results: results/vidore/docvqa
+  - name: infovqa
+    path: data/vidore/infovqa
+    results: results/vidore/infovqa
+  - name: tatdqa
+    path: data/vidore/tatdqa
+    results: results/vidore/tatdqa
+  - name: arxivqa
+    path: data/vidore/arxivqa
+    results: results/vidore/arxivqa
+  - name: tabfquad
+    path: data/vidore/tabfquad
+    results: results/vidore/tabfquad
+  # - name: synth_healthcare
+  #   path: data/vidore/synth_healthcare
+  #   results: results/vidore/synth_healthcare
+  # - name: synth_ai
+  #   path: data/vidore/synth_ai
+  #   results: results/vidore/synth_ai
+  # - name: shiftproject
+  #   path: data/vidore/shiftproject
+  #   results: results/vidore/shiftproject
+
+plots:
+  - name: ""
+    k: 10
+    results:
+      - ["mvivf", "mvivf_500", ""]
+      - ["mvivf", "mvivf_500_fastscan_16_8", "nr10", "nr50", "nr100", "nr500"]
+      - ["muvera", "muvera_2560", "nr10", "nr50", "nr100", "nr500"]
+      # - ["muvera", "muvera_2560_rabitq_2", "nr2560"]
+      - ["svh_ivf", "svh_ivf_500", "nr10", "nr50", "nr100", "nr500"]
+      - ["vamana", "vamana_200", ""]
+      # - ["mvivf", "mvivf_500_pq_16_64", "nr2560"]
+      # - ["mvivf", "mvivf_500_rabitq_2", "nr40"]
+      # - ["mvivf", "mvivf_500_fastscan_16_16", "nr50"]
+      # - ["muvera", "muvera_2560_pq_256_8", "nr2560"]
+
+  - name: ""
+    k: 100
+    results:
+      - ["mvivf", "mvivf_500", ""]
+      - ["muvera", "muvera_2560", "nr100", "nr200", "nr500", "nr1000"]
+      - ["svh_ivf", "svh_ivf_500", "nr100", "nr200", "nr500", "nr1000"]
+      - ["vamana", "vamana_200", ""]

@@ -16,9 +16,9 @@ datasets:
   - name: fiqa
     path: data/beir/fiqa
     results: results/beir/fiqa
-  # - name: quora
-  #   path: data/beir/quora
-  #   results: results/beir/quora
+  - name: quora
+    path: data/beir/quora
+    results: results/beir/quora
   # - name: nq
   #   path: data/beir/nq
   #   results: results/beir/nq
@@ -26,13 +26,27 @@ datasets:
   #   path: data/beir/hotpotqa
   #   results: results/beir/hotpotqa
 
+plots:
+  - name: ""
+    k: 10
+    results:
+      - ["muvera", "muvera_2560", "nr10", "nr50", "nr500", "nr5000"]
+      - ["muvera", "muvera_2560_rabitq_2", "nr10", "nr50", "nr500", "nr5000"]
+      - ["svh_ivf", "svh_ivf_500", "nr10", "nr50", "nr500", "nr5000"]
+      - ["svh_ivf", "svh_ivf_500_fastscan_16_8", "nr10", "nr50", "nr500", "nr5000"]
+      - ["vamana", "vamana_200", ""]
+      - ["vamana", "vamana_200_fastscan_16_8", "nr10", "nr50", "nr500", "nr5000"]
+      - ["mvivf", "mvivf_500", ""]
+      - ["mvivf", "mvivf_500_fastscan_16_8", "nr10", "nr50", "nr500", "nr5000"]
 
-k: 10
-
-results:
-  - ["mvivf", "mvivf_500", ""]
-  - ["mvivf", "mvivf_500_pq_16_64", "nr2560"]
-  - ["mvivf", "mvivf_500_rabitq_2", "nr40"]
-  - ["muvera", "muvera_2560", "nr2560"]
-  - ["muvera", "muvera_2560_pq_256_8", "nr2560"]
-  - ["muvera", "muvera_2560_rabitq_2", "nr2560"]
+  - name: ""
+    k: 100
+    results:
+      - ["muvera", "muvera_2560", "nr100", "nr500", "nr5000"]
+      - ["muvera", "muvera_2560_rabitq_2", "nr100", "nr500", "nr5000"]
+      - ["svh_ivf", "svh_ivf_500", "nr100", "nr500", "nr5000"]
+      - ["svh_ivf", "svh_ivf_500_fastscan_16_8", "nr100", "nr500", "nr5000"]
+      - ["vamana", "vamana_200", ""]
+      - ["vamana", "vamana_200_fastscan_16_8", "nr100", "nr500", "nr5000"]
+      - ["mvivf", "mvivf_500", ""]
+      - ["mvivf", "mvivf_500_fastscan_16_8", "nr100", "nr500", "nr5000"]

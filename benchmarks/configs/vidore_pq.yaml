@@ -1,4 +1,4 @@
-name: "ViDoRe Datasets"
+name: "ViDoRe Datasets w/ Product Quantization"
 
 datasets:
   - name: docvqa
@@ -26,36 +26,47 @@ datasets:
   #   path: data/vidore/shiftproject
   #   results: results/vidore/shiftproject
 
-
 indices:
   - name: mvivf
+    rebuild: True
     build_configs:
-      - name: mvivf_500
-        rebuild: True
+      - name: mvivf_500_fastscan_16_8
         params:
           k_per_level: 0
           max_leaf_size: 500
-          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+          pq_method: 3
+          block_size: 8
+          num_clusters_per_block: 16
         search_configs:
           - name: k=10
+            append: False
             params:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
               k: [10]
               config:
-                - {name: "", num_rerank: 0}
+                - {name: "nr10", num_rerank: 0}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr100", num_rerank: 100}
+                - {name: "nr500", num_rerank: 500}
           - name: k=100
+            append: False
             params:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
               k: [100]
               config:
-                - {name: "", num_rerank: 0}
+                - {name: "nr100", num_rerank: 0}
+                - {name: "nr200", num_rerank: 200}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr1000", num_rerank: 1000}
   
   - name: muvera
     build_configs:
-      - name: muvera_2560
+      - name: muvera_2560_rabitq_2
+        rebuild: True
         params:
           d_fde: 2560 # FDE dim [2560, 5120]
-          pq_method: 0
+          pq_method: 2
+          rabitq_bits: 2
         search_configs:
           - name: k=10
             params:
@@ -78,11 +89,13 @@ indices:
 
   - name: svh_ivf
     build_configs:
-      - name: svh_ivf_500
+      - name: svh_ivf_500_fastscan_16_8
         params:
           k_per_level: 0
           max_leaf_size: 500
-          pq_method: 0 # [None, PQ, RabitQ, ScaNN]
+          pq_method: 3
+          block_size: 8
+          num_clusters_per_block: 16
         search_configs:
           - name: k=10
             params:
@@ -105,20 +118,28 @@ indices:
 
   - name: vamana
     build_configs:
-      - name: vamana_200
+      - name: vamana_200_fastscan_16_8
         params:
           R: 200
-          pq_method: 0
+          pq_method: 3
+          block_size: 8
+          num_clusters_per_block: 16
         search_configs:
           - name: k=10
             params:
-              L: [16, 32, 64, 128, 256, 512, 1024]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
               k: [10]
               config:
-                - {name: "", num_rerank: 0}
+                - {name: "nr10", num_rerank: 0}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr100", num_rerank: 100}
+                - {name: "nr500", num_rerank: 500}
           - name: k=100
             params:
-              L: [16, 32, 64, 128, 256, 512, 1024]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
               k: [100]
               config:
-                - {name: "", num_rerank: 0}
+                - {name: "nr100", num_rerank: 0}
+                - {name: "nr200", num_rerank: 200}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr1000", num_rerank: 1000}
