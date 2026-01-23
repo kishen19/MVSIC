@@ -90,6 +90,7 @@ parlay::sequence<mvsic::Stats> compute_stats(
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
     const parlay::sequence<mvsic::SearchParams> &params) {
   auto results = parlay::sequence<mvsic::Stats>(params.size());
+  size_t reps = 3;
   for (size_t i = 0; i < params.size(); i++) {
     parlay::internal::timer t;
     size_t k = params[i].k;
@@ -97,11 +98,11 @@ parlay::sequence<mvsic::Stats> compute_stats(
     auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(query_points.size());
     auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
     // Warmup
-    for (size_t j = 0; j < std::min(static_cast<size_t>(100), query_points.size()); j++) {
+    for (size_t j = 0; j < std::min(static_cast<size_t>(10), query_points.size()); j++) {
       auto [p, c] = index.search(query_points[j], points, params[i]);
     }
-    // Single Batch Run for 3 reps
-    for (size_t it = 0; it < 3; it++) {
+    // Single Batch Run
+    for (size_t it = 0; it < reps; it++) {
       double query_time_seq_it = 0.0;
       for (size_t j = 0; j < query_points.size(); j++) {
         t.start();
@@ -117,9 +118,9 @@ parlay::sequence<mvsic::Stats> compute_stats(
       query_time_seq = std::min(query_time_seq, query_time_seq_it);
     }
 
-    // Batch Run (all queries) for 3 reps
+    // Batch Run (all queries)
     double query_time_par = 1e15;
-    for (size_t it = 0; it < 3; it++) {
+    for (size_t it = 0; it < reps; it++) {
       t.start();
       auto [pred_par, cmps_par] = index.search_all(query_points, points, params[i]);
       t.stop();
@@ -144,11 +145,6 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
     const parlay::sequence<mvsic::SearchParams> &params) {
   auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
   size_t reps = 3;
-  if (query_points.size() > 5000) {
-    reps = 1;
-  } else if (query_points.size() > 2000) {
-    reps = 2;
-  }
   for (size_t i = 0; i < params.size(); i++) {
     parlay::internal::timer t;
     size_t k = params[i].k;

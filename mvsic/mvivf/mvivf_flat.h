@@ -175,6 +175,9 @@ class IndexMVIVFFlat : public Index<metric> {
     t.reset();
 
     // Step 2: Probe top nprobe clusters
+    double t_quantize = 0.0;
+    double t_distances = 0.0;
+    double t_rest = 0.0;
     t.start();
     // Find the minimum number of probes needed to obtain k neighbors
     size_t nprobes_minimal = 0, cur = 0;
@@ -190,12 +193,18 @@ class IndexMVIVFFlat : public Index<metric> {
     auto &offsets = scan_result.first;
     size_t total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+    t_rest += t.stop();
+    t.reset();
 
     // --- quantize + distances ---
     switch (active_quantizer) {
       case QT::RaBitQ: {
+        t.start();
         auto &m = std::get<RQ_Model>(quantizer);
         auto q_query = m.quantize_query(query);
+        t_quantize += t.stop();
+        t.reset();
+        t.start();
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
           auto &qleaf = std::get<RQ_Set>(clusters[cluster_id].quantized_data);
@@ -204,11 +213,17 @@ class IndexMVIVFFlat : public Index<metric> {
             visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
           });
         });
+        t_distances += t.stop();
+        t.reset();
         break;
       }
       case QT::PQ: {
+        t.start();
         auto &m = std::get<PQ_Model>(quantizer);
         auto q_query = m.quantize_query(query);
+        t_quantize += t.stop();
+        t.reset();
+        t.start();
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
           auto &qleaf = std::get<PQ_Set>(clusters[cluster_id].quantized_data);
@@ -217,11 +232,17 @@ class IndexMVIVFFlat : public Index<metric> {
             visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
           });
         });
+        t_distances += t.stop();
+        t.reset();
         break;
       }
       case QT::FastScan: {
+        t.start();
         auto &m = std::get<FS_Model>(quantizer);
         auto q_query = m.quantize_query(query);
+        t_quantize += t.stop();
+        t.reset();
+        t.start();
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
           auto &qleaf = std::get<FS_Set>(clusters[cluster_id].quantized_data);
@@ -230,9 +251,13 @@ class IndexMVIVFFlat : public Index<metric> {
             visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
           });
         });
+        t_distances += t.stop();
+        t.reset();
         break;
       }
       case QT::None: {
+        t_quantize = 0.0;
+        t.start();
         auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
@@ -240,6 +265,8 @@ class IndexMVIVFFlat : public Index<metric> {
               clusters[cluster_id].data.distances_naive(query, &visited[offsets[i]]);
         });
         dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
+        t_distances += t.stop();
+        t.reset();
         break;
       }
       default: {
@@ -247,11 +274,15 @@ class IndexMVIVFFlat : public Index<metric> {
         abort();
       }
     }
+    t.start();
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
       return a.second < b.second;  // Sort by distance
     });
-    timings.push_back(t.stop());
+    t_rest += t.stop();
     t.reset();
+    timings.push_back(t_quantize);
+    timings.push_back(t_distances);
+    timings.push_back(t_rest);
 
     // Step 3: Re-ranking
     t.start();

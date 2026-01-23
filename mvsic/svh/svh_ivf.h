@@ -483,14 +483,20 @@ class IndexSVHIVF : public Index<metric> {
     size_t q = query.size();
 
     // Step 1: Search each query independently to obtain candidates
+    t.start();
     auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q * num_rerank);
     auto in_dist_cmps = parlay::sequence<size_t>::uninitialized(q);
+    auto timings_each = parlay::sequence<std::vector<double>>::uninitialized(q);
     parlay::parallel_for(0, q, [&](size_t i) {
-      std::vector<double> dummy_timings;
-      std::tie(in_dist_cmps[i], dummy_timings) =
+      std::tie(in_dist_cmps[i], timings_each[i]) =
           search_each(query[i], nprobes, num_rerank, &results[i * num_rerank]);
     });
+    dist_cmps += parlay::reduce(in_dist_cmps);
+    timings.push_back(t.stop());
+    t.reset();
+
     // Step 2: Dedup
+    t.start();
     parlay::sort_inplace(results, [](const auto& a, const auto& b) { return a.second < b.second; });
     parlay::sequence<std::pair<uint32_t, float>> visited;
     visited.reserve(num_rerank);
@@ -511,6 +517,8 @@ class IndexSVHIVF : public Index<metric> {
         count++;
       }
     }
+    timings.push_back(t.stop());
+    t.reset();
 
     // Step 3: Re-ranking
     t.start();
@@ -525,6 +533,25 @@ class IndexSVHIVF : public Index<metric> {
     }
     timings.push_back(t.stop());
     t.reset();
+
+    // Add timings_each
+    double t_search = 0.0;
+    double t_quantize = 0.0;
+    double t_distances = 0.0;
+    double t_rest = 0.0;
+    double t_dedup = 0.0;
+    for (auto& v : timings_each) {
+      t_search += v[0];
+      t_quantize += v[1];
+      t_distances += v[2];
+      t_rest += v[3];
+      t_dedup += v[4];
+    }
+    timings.push_back(t_search);
+    timings.push_back(t_quantize);
+    timings.push_back(t_distances);
+    timings.push_back(t_rest);
+    timings.push_back(t_dedup);
 
     return std::make_tuple(final_results, dist_cmps, timings);
   }
@@ -552,8 +579,7 @@ class IndexSVHIVF : public Index<metric> {
 
     // Write center data for internal nodes
     auto center_scan = parlay::scan(center_offsets).first;
-    auto center_data =
-        parlay::sequence<float>::uninitialized(parlay::reduce(center_offsets) * d);
+    auto center_data = parlay::sequence<float>::uninitialized(parlay::reduce(center_offsets) * d);
     parlay::parallel_for(0, num_nodes, [&](size_t i) {
       if (!ind_to_node[i]->children.empty()) {
         auto node_centers = ind_to_node[i]->data;
@@ -564,8 +590,7 @@ class IndexSVHIVF : public Index<metric> {
         });
       }
     });
-    outfile.write(reinterpret_cast<const char*>(center_offsets.data()),
-                  num_nodes * sizeof(size_t));
+    outfile.write(reinterpret_cast<const char*>(center_offsets.data()), num_nodes * sizeof(size_t));
     outfile.write(reinterpret_cast<const char*>(center_data.data()),
                   center_data.size() * sizeof(float));
 

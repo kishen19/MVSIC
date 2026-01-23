@@ -259,7 +259,9 @@ PYBIND11_MODULE(mvsic, m) {
           "Search all queries.", py::arg("query_points"), py::arg("points"), py::arg("params"))    \
       .def("save", &mvsic::index_type::save, "Save the index to a file.")                          \
       .def("load", &mvsic::index_type::load, "Load the index from a file.", py::arg("filename"),   \
-           py::arg("points"));
+           py::arg("points"))                                                                      \
+      .def("get_height", &mvsic::index_type::get_height,                                           \
+           "Returns height of kmeans tree, if applicable.");
 
   BIND_INDEX(IndexMVIVFL2, ChamferL2_Point, "IndexMVIVFL2")
   BIND_INDEX(IndexMVIVFIP, ChamferIP_Point, "IndexMVIVFIP")

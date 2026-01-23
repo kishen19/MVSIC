@@ -179,6 +179,8 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                                 'index_size_mb': index_size_bytes / (1024 * 1024),
                                 'build_params': build_params_dict,
                             }
+                            if index_name == 'mvivf':
+                                build_stats['kmeans_tree_height'] = index.get_height()
                             stats_path = os.path.join(index_dir, 'build_stats.json')
                             with open(stats_path, 'w') as f:
                                 json.dump(build_stats, f, indent=2)
@@ -246,7 +248,10 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
 
                             results_dir = os.path.join(index_dir, search_name)
                             os.makedirs(results_dir, exist_ok=True)
-                            results_filename = f"{variant_name}_results.csv" if variant_name else "results.csv"
+                            if num_threads:
+                                results_filename = f"seq_{variant_name}_results.csv" if variant_name else "seq_results.csv"
+                            else:
+                                results_filename = f"{variant_name}_results.csv" if variant_name else "results.csv"
                             results_path = os.path.join(results_dir, results_filename)
 
                             append_results = search_config.get('append', True)
@@ -406,5 +411,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
     main()

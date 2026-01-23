@@ -118,6 +118,10 @@ class Index {
     std::cout << "max_cluster_size() not implemented for this index type" << std::endl;
     return 0;
   }
+  virtual size_t get_height() const noexcept {
+    std::cout << "get_height() not implemented for this index type" << std::endl;
+    return 0;
+  }
 };
 
 // template struct Index<true>;   // Instantiates for L2 metric (metric = true)

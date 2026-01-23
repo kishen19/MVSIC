@@ -177,45 +177,68 @@ class IndexMUVERA : public Index<metric> {
     t.reset();
 
     // Step 2: Run beam search
+    double t_rest = 0.0;
+    double t_quantize = 0.0;
+    double t_search = 0.0;
     t.start();
     uint32_t start_point = I.get_start();
     auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
                                      points.size(), params.ann.R);
     parlay::sequence<std::pair<uint32_t, float>> visited;
     size_t dist_cmps;
+    t_rest += t.stop();
+    t.reset();
 
     switch (active_quantizer) {
       case QT::RaBitQ: {
         // Quantize Query
+        t.start();
         auto &m = std::get<RQ_Model>(quantizer);
         auto q_query = m.quantize_query(query_point);
+        t_quantize += t.stop();
+        t.reset();
         // Search
+        t.start();
         auto [result, cmps] = parlayANN::beam_search<RQ_Point, RQ_Range, uint32_t>(
             q_query, G, std::get<RQ_Range>(quantized_data), start_point, QP);
         visited = result.second;
         dist_cmps = cmps;  // RaBitQ usually counts its own ops or we estimate
+        t_search += t.stop();
+        t.reset();
         break;
       }
       case QT::PQ: {
+        // Quantize Query
+        t.start();
         auto &m = std::get<PQ_Model>(quantizer);
         auto q_query = m.quantize_query(query_point);
+        t_quantize += t.stop();
+        t.reset();
+        // Search
+        t.start();
         auto [result, cmps] = parlayANN::beam_search<PQ_Point, PQ_Range, uint32_t>(
             q_query, G, std::get<PQ_Range>(quantized_data), start_point, QP);
         visited = result.second;
         dist_cmps = cmps;
+        t_search += t.stop();
+        t.reset();
         break;
       }
       case QT::None: {
+        t.start();
         auto [result, cmps] = parlayANN::beam_search<Point, Range, uint32_t>(
             query_point, G, points_fdes, start_point, QP);
         visited = result.second;
         dist_cmps = cmps * 2 * d_fde;
+        t_search += t.stop();
+        t.reset();
         break;
       }
       default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
     }
-    timings.push_back(t.stop());
-    t.reset();
+    timings.push_back(t_quantize);
+    timings.push_back(t_search);
+    timings.push_back(t_rest);
 
     // Step 3: Re-ranking
     t.start();
