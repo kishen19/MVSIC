@@ -5,25 +5,24 @@ module(
     version = "0.0.1",
 )
 
-bazel_dep(name = "bazel_skylib", version = "1.7.1")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "rules_cc", version = "0.2.14")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "googletest", version = "1.17.0")
-bazel_dep(name = "google_benchmark", version = "1.9.4")
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2")
+bazel_dep(name = "google_benchmark", version = "1.9.5")
 bazel_dep(name = "highway", version = "1.3.0")
-bazel_dep(name = "abseil-cpp", version = "20250127.1", repo_name = "com_google_absl")
+bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
 bazel_dep(name = "eigen", version = "4.0.0-20241125.bcr.2")
-
-# bazel_dep(name = "kmeans", version = "0.0.1")
-bazel_dep(name = "scann", version = "0.0.1")
-# bazel_dep(name = "parlayann", version = "0.0.1")
-
-bazel_dep(name = "pybind11_bazel", version = "2.13.6")
-bazel_dep(name = "rules_python", version = "1.5.1")
+bazel_dep(name = "pybind11_bazel", version = "3.0.0")
+bazel_dep(name = "rules_python", version = "1.7.0")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
     name = "parlaylib",
+    patch_cmds = [
+        "find . -name 'BUILD' -o -name 'BUILD.bazel' | xargs -r sed -i '1i load(\"@rules_cc//cc:defs.bzl\", \"cc_binary\", \"cc_library\", \"cc_test\")\\n'",
+    ],
     sha256 = "57c177c860c5daaf963fbca9dff9d5172ec73fcdad16a713cc1af6b151c84640",
     strip_prefix = "parlaylib-bzlmod-2025/include/",
     urls = ["https://github.com/ParAlg/parlaylib/archive/refs/tags/bzlmod-2025.tar.gz"],
@@ -60,13 +59,6 @@ cc_library(
     urls = ["https://github.com/VectorDB-NTU/RaBitQ-Library/archive/refs/heads/main.zip"],
 )
 
-# git_override(
-#     module_name = "parlayann",
-#     remote = "https://github.com/cmuparlay/ParlayANN.git",
-#     commit = "8db984232a37cfdd7b26bd0ee158f47c513cebc9",
-#     build_file = "//external/parlayann:BUILD.bazel",
-# )
-
 git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 git_repository(
@@ -80,43 +72,6 @@ git_repository(
     name = "kmeans",
     branch = "mvsic",
     remote = "git@github.com:ParAlg/Parallel-KMeans.git",
-)
-
-# git_repository(
-#     name = "faiss",
-#     build_file_content = """
-# cc_library(
-#     name = "faiss_core",
-#     srcs = glob([
-#         "faiss/**/*.cpp",
-#     ], exclude = [
-#         "faiss/gpu/**/*.cpp",
-#         "faiss/python/**/*.cpp",
-#     ]),
-#     hdrs = glob([
-#         "faiss/**/*.h",
-#     ], exclude = [
-#         "faiss/gpu/**/*.h",
-#         "faiss/python/**/*.h",
-#     ]),
-#     includes = ["."],
-#     copts = ["-fopenmp"],
-#     linkopts = ["-fopenmp", "-lopenblas"],
-#     visibility = ["//visibility:public"],
-# )
-# """,
-#     remote = "https://github.com/facebookresearch/faiss.git",
-#     tag = "v1.11.0",
-# )
-
-# local_path_override(
-#     module_name = "kmeans",
-#     path = "./external/kmeans/",
-# )
-
-local_path_override(
-    module_name = "scann",
-    path = "./external/scann/",
 )
 
 # python bindings relevant

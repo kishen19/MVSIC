@@ -1,6 +1,7 @@
-package(default_visibility = ["//visibility:public"])
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
-# load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+package(default_visibility = ["//visibility:public"])
 
 cc_binary(
     name = "compute_ground_truth",

@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -73,21 +75,21 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "pq_helper",
-    hdrs = ["pq_helper.h"],
-    deps = [
-        ":point_cloud_set",
-        "@eigen",
-        "@parlayann//algorithms/utils:point_range",
-        "@scann//scann/data_format:dataset",
-        "@scann//scann/hashes/asymmetric_hashing2:indexing",
-        "@scann//scann/hashes/asymmetric_hashing2:querying",
-        "@scann//scann/hashes/asymmetric_hashing2:training",
-        "@scann//scann/proto:scann_cc_proto",
-        "@scann//scann/utils:types",
-    ],
-)
+# cc_library(
+#     name = "pq_helper",
+#     hdrs = ["pq_helper.h"],
+#     deps = [
+#         ":point_cloud_set",
+#         "@eigen",
+#         "@parlayann//algorithms/utils:point_range",
+#         "@scann//scann/data_format:dataset",
+#         "@scann//scann/hashes/asymmetric_hashing2:indexing",
+#         "@scann//scann/hashes/asymmetric_hashing2:querying",
+#         "@scann//scann/hashes/asymmetric_hashing2:training",
+#         "@scann//scann/proto:scann_cc_proto",
+#         "@scann//scann/utils:types",
+#     ],
+# )
 
 # cc_library(
 #     name = "quantized_chamfer_point",

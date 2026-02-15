@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
 package(default_visibility = ["//visibility:public"])
 
 # cc_library(
@@ -8,6 +10,12 @@ package(default_visibility = ["//visibility:public"])
 #         "@parlaylib//parlay:sequence",
 #     ],
 # )
+
+cc_library(
+    name = "evals",
+    hdrs = ["evals.h"],
+    deps = [],
+)
 
 cc_library(
     name = "mvclustering_config",
@@ -35,6 +43,7 @@ cc_binary(
     name = "bench",
     srcs = ["bench.cpp"],
     deps = [
+        ":evals",
         "//mvsic/core/mvclustering",
         "//mvsic/core/utils:parse_command_line",
     ],
