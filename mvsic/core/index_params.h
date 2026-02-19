@@ -69,6 +69,7 @@ struct IndexParams {
 
   static IndexParams mvivf(uint32_t k_per_level = 0, uint32_t max_leaf_size = 200,
                            bool compress_input = false, uint32_t verbose = 0, uint32_t niters = 5,
+                           uint32_t max_point_clouds_per_cluster = 0,
                            uint32_t max_points_per_centroid_inner_kmeans = 20,
                            std::string init = "Random", uint32_t seed = 0,
                            bool use_weighted_inner_kmeans = false, uint32_t s = 0,
@@ -85,15 +86,16 @@ struct IndexParams {
     params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
                  num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
-    params.mvclus = MVClusteringConfig(niters, max_points_per_centroid_inner_kmeans,
-                                       (params.verbose > 0) ? params.verbose - 1 : 0, init, seed,
-                                       use_weighted_inner_kmeans);
+    params.mvclus = MVClusteringConfig(
+        niters, max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans,
+        (params.verbose > 0) ? params.verbose - 1 : 0, init, seed, use_weighted_inner_kmeans);
     params.s = s;
     return params;
   }
 
   static IndexParams mvivf_flat(uint32_t k_per_level = 0, bool compress_input = false,
                                 uint32_t verbose = 0, uint32_t niters = 5,
+                                uint32_t max_point_clouds_per_cluster = 0,
                                 uint32_t max_points_per_centroid_inner_kmeans = 20,
                                 std::string init = "Random", uint32_t seed = 0,
                                 bool use_weighted_inner_kmeans = false, uint32_t s = 0,
@@ -109,9 +111,9 @@ struct IndexParams {
     params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
                  num_points_per_cluster, rabitq_bits};
     params.verbose = verbose;
-    params.mvclus = MVClusteringConfig(niters, max_points_per_centroid_inner_kmeans,
-                                       (params.verbose > 0) ? params.verbose - 1 : 0, init, seed,
-                                       use_weighted_inner_kmeans);
+    params.mvclus = MVClusteringConfig(
+        niters, max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans,
+        (params.verbose > 0) ? params.verbose - 1 : 0, init, seed, use_weighted_inner_kmeans);
     params.s = s;
     return params;
   }

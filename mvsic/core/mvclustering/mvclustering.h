@@ -52,14 +52,16 @@ class MVClustering {
   MVClustering(uint32_t d, uint32_t k, uint32_t s, MVClusteringConfig params) noexcept :
       d(d), k(k), s(s), params(params) {}
   MVClustering(uint32_t d, uint32_t k, uint32_t s = 0, uint32_t niters = 5,
+               uint32_t max_point_clouds_per_cluster = 0,
                uint32_t max_points_per_centroid_inner_kmeans = 20, uint32_t verbose = 0,
                std::string init = "Random", uint32_t random_seed = 0,
                bool use_weighted_inner_kmeans = false) :
       d(d),
       k(k),
       s(s),
-      params(MVClusteringConfig(niters, max_points_per_centroid_inner_kmeans, verbose, init,
-                                random_seed, use_weighted_inner_kmeans)) {}
+      params(MVClusteringConfig(niters, max_point_clouds_per_cluster,
+                                max_points_per_centroid_inner_kmeans, verbose, init, random_seed,
+                                use_weighted_inner_kmeans)) {}
   /* ------------------------------------------------------------------------------------------- */
   // Data given as a PointCloudSet Object: Main implementation
   void train(const PointCloudSet<ChPoint>& data);
@@ -94,10 +96,61 @@ class MVClustering {
 // Data given as a PointCloudSet Object: Main Implementation
 template<bool metric>
 void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
+  // Subsample if dataset is too large
+  if (params.max_point_clouds_per_cluster > 0 &&
+      points.size() > params.max_point_clouds_per_cluster * k) {
+    if (params.verbose >= 1) {
+      std::cout << "[MVClustering] Subsampling from " << points.size() << " to "
+                << params.max_point_clouds_per_cluster * k << " point clouds for training"
+                << std::endl;
+    }
+    parlay::internal::timer _subt;
+    _subt.start();
+    // Generate Sample
+    auto sampled_ids =
+        parlay::sequence<uint32_t>::uninitialized(params.max_point_clouds_per_cluster * k);
+    parlay::parallel_for(0, params.max_point_clouds_per_cluster * k, [&](size_t i) {
+      sampled_ids[i] = parlay::hash32(params.seed + i) % points.size();
+    });
+    auto sampled_pcs = parlay::delayed_tabulate(sampled_ids.size(),
+                                                [&](size_t i) { return points[sampled_ids[i]]; });
+    PointCloudSet<ChPoint> sampled_points(sampled_pcs, d);
+    _subt.stop();
+    if (params.verbose >= 1) {
+      std::cout << "[MVClustering] Subsampling time: " << _subt.total_time() << " seconds"
+                << std::endl;
+    }
+    _subt.reset();
+    // Train
+    _subt.start();
+    train(sampled_points);
+    _subt.stop();
+    if (params.verbose >= 1) {
+      std::cout << "[MVClustering] Training on subsampled dataset time: " << _subt.total_time()
+                << " seconds" << std::endl;
+    }
+    _subt.reset();
+    // Assign all points to clusters
+    _subt.start();
+    cluster_ids.resize(points.size());
+    compute_cluster_ids(points, cluster_ids);
+    _subt.stop();
+
+    if (params.verbose >= 1) {
+      std::cout << "[MVClustering] Assignment time for full dataset: " << _subt.total_time()
+                << " seconds";
+      if (params.verbose >= 2) {
+        auto full_cost = compute_cost(points, cluster_ids);
+        std::cout << ", cost = " << full_cost;
+      }
+      std::cout << std::endl;
+    }
+    return;
+  }
+
   uint32_t n = points.size();
   if (s == 0) {  // Default
-    auto pc_sizes = parlay::delayed_seq<size_t>(n, [&](size_t i) { return points.get_size(i); });
-    s = static_cast<uint32_t>((parlay::reduce(pc_sizes) + n) / n);
+    s = static_cast<uint32_t>(std::ceil(points.average_size()));
   }
   if (params.verbose >= 1)
     std::cout << "[MVClustering] Centroid-Point Cloud Size: " << s << std::endl;
@@ -107,7 +160,8 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   // Step 1: Initialization
   parlay::internal::timer _st;
   _st.start();
-  std::cout << "[MVClustering] Seeding algorithm: " << params.init << std::endl;
+  if (params.verbose >= 1)
+    std::cout << "[MVClustering] Seeding algorithm: " << params.init << std::endl;
   if (params.init == "Random") {
     centers = UniformlyRandomMV(points, k, params.seed);
   } else {

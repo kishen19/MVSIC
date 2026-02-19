@@ -3,6 +3,8 @@
 #include <queue>
 #include <set>
 #include <optional>
+#include <vector>
+#include <algorithm>
 
 // #include "absl/container/btree_set.h"
 
@@ -93,7 +95,8 @@ class IndexMVIVF : public Index<metric> {
   // Recursive kmeans tree builder
   void recursive_build(node_t *node, const PointCloudSet<ChPoint> &points) {
     size_t n = points.size();
-    size_t num_clusters = (params.k_per_level > 0) ? params.k_per_level : std::ceil(std::sqrt(n));
+    size_t num_clusters = (params.k_per_level > 0) ? params.k_per_level
+                                                   : static_cast<size_t>(std::ceil(std::sqrt(n)));
     if (params.verbose >= 1) {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
@@ -227,125 +230,13 @@ class IndexMVIVF : public Index<metric> {
     double t_dists = 0.0;
     double t_beam = 0.0;
     double t_rest = 0.0;
-
-    t.start();
-    size_t dist_cmps = 0;
-    std::set<score_node> beam;
-    parlay::sequence<score_node> probe_vec;               // To collect leaf nodes
-    std::vector<std::pair<uint32_t, float>> child_dists;  // Scratch memory
-    t_rest += t.stop();
-    t.reset();
-
-    // Initial seed
-    t.start();
-    beam.insert({0.0f, root});
-    t_beam += t.stop();
-    t.reset();
-
-    while (!beam.empty()) {
-      // Pop the best node (smallest distance)
-      t.start();
-      auto it = beam.begin();
-      score_node best = *it;
-      beam.erase(it);
-      t_beam += t.stop();
-      t.reset();
-      t.start();
-      node_t *current_node = best.second;
-      auto &children = current_node->children;
-      if (children.empty()) continue;
-      // Compute distances to children
-      child_dists.resize(children.size());
-      if (!params.quantize_centers) {
-        auto &centers = current_node->data;
-        dist_cmps += centers.distances_naive(query, child_dists.data());
-      } else {
-        switch (active_quantizer) {
-          case QT::RaBitQ: {
-            auto &q_query = std::get<RQ_Q>(q_query_var);
-            auto &qleaf = std::get<RQ_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::PQ: {
-            auto &q_query = std::get<PQ_Q>(q_query_var);
-            auto &qleaf = std::get<PQ_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::FastScan: {
-            auto &q_query = std::get<FS_Q>(q_query_var);
-            auto &qleaf = std::get<FS_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::None:
-          default:
-            std::cerr << "Error: Invalid quantizer type in greedy search." << std::endl;
-            abort();
-        }
-      }
-      t_dists += t.stop();
-      t.reset();
-
-      for (size_t i = 0; i < children.size(); ++i) {
-        float d = child_dists[i].second;
-        node_t *child = children[i];
-        if (child->children.empty()) {
-          t.start();
-          // It's a leaf node: add to probe candidates
-          probe_vec.push_back({d, child});
-          t_rest += t.stop();
-          t.reset();
-        } else {
-          // Internal node: add to beam if it's better than the current worst
-          t.start();
-          if (beam.size() < beam_length || d < beam.rbegin()->first) {
-            beam.insert({d, child});
-            if (beam.size() > beam_length) {
-              beam.erase(std::prev(beam.end()));  // Prune the farthest node
-            }
-          }
-          t_beam += t.stop();
-          t.reset();
-        }
-      }
-    }
-    // Finalize probes: take best nprobes leaves
-    t.start();
-    if (probe_vec.size() > nprobes) {
-      std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
-      probe_vec.resize(nprobes);
-    }
-    t_rest += t.stop();
-    t.reset();
-
-    GreedySearchResult out;
-    out.dist_cmps = dist_cmps;
-    out.timings = {t_dists, t_beam, t_rest};
-    out.probe_list = std::move(probe_vec);
-    return out;
-  }
-
-  // Simple Beam Search using std::set
-  GreedySearchResult greedy_search_beam_converge(const ChPoint &query,
-                                                 const QuantQuery &q_query_var,
-                                                 size_t nprobes) const {
-    using score_node = std::pair<float, node_t *>;
-    auto less = [](const score_node &a, const score_node &b) {
-      return a.first < b.first || (a.first == b.first && a.second < b.second);
-    };
-    const size_t beam_length = 2 * nprobes;
-    parlay::internal::timer t;
-    double t_dists = 0.0;
-    double t_beam = 0.0;
-    double t_rest = 0.0;
     t.start();
     size_t dist_cmps = 0;
     std::set<score_node> beam;
     parlay::sequence<score_node> top_probes;
     top_probes.reserve(nprobes + 1);
     std::vector<std::pair<uint32_t, float>> child_dists;  // Scratch memory
+    child_dists.reserve(root->children.size());           // Reserve reasonable initial capacity
     t_rest += t.stop();
     t.reset();
 
@@ -375,7 +266,7 @@ class IndexMVIVF : public Index<metric> {
       child_dists.resize(children.size());
       if (!params.quantize_centers) {
         auto &centers = current_node->data;
-        dist_cmps += centers.distances_naive(query, child_dists.data());
+        dist_cmps += centers.distances(query, child_dists.data());
       } else {
         switch (active_quantizer) {
           case QT::RaBitQ: {
@@ -424,10 +315,15 @@ class IndexMVIVF : public Index<metric> {
         } else {
           t.start();
           // Internal node: add to beam if it's better than the current worst
-          if (beam.size() < beam_length || d < beam.rbegin()->first) {
+          const size_t beam_size = beam.size();
+          if (beam_size < beam_length) {
             beam.insert({d, child});
-            if (beam.size() > beam_length) {
-              beam.erase(std::prev(beam.end()));  // Prune the farthest node
+          } else {
+            // Only check worst if beam is full
+            auto worst_it = std::prev(beam.end());
+            if (d < worst_it->first) {
+              beam.erase(worst_it);
+              beam.insert({d, child});
             }
           }
           t_beam += t.stop();
@@ -488,10 +384,9 @@ class IndexMVIVF : public Index<metric> {
     t.reset();
 
     // -------------------------
-    // Step 1: Greedy search (heap-based)
+    // Step 1: Greedy search
     // -------------------------
-    // auto gs = greedy_search(query, q_query_var, nprobes);
-    auto gs = greedy_search_beam_converge(query, q_query_var, nprobes);
+    auto gs = greedy_search(query, q_query_var, nprobes);
     auto probe_list = std::move(gs.probe_list);
     dist_cmps += gs.dist_cmps;
     for (double time : gs.timings) {
@@ -564,7 +459,7 @@ class IndexMVIVF : public Index<metric> {
         auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf_node = probe_list[i].second;
-          leaf_dist_cmps[i] = leaf_node->data.distances_naive(query, &visited[offsets[i]]);
+          leaf_dist_cmps[i] = leaf_node->data.distances(query, &visited[offsets[i]]);
         });
         dist_cmps += parlay::reduce(leaf_dist_cmps);
         t_distances = t.stop();

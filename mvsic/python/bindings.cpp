@@ -93,6 +93,7 @@ PYBIND11_MODULE(mvsic, m) {
       .def_static("mvivf", &mvsic::IndexParams::mvivf, py::arg("k_per_level") = 0,
                   py::arg("max_leaf_size") = 200, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("niters") = 5,
+                  py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
@@ -100,6 +101,7 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
+                  py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,

@@ -31,6 +31,7 @@ int main(int argc, char* argv[]) {
   size_t s = P.getOptionLongValue("-s", 0);
   // auto seeding = P.getOptionValue("-seed", "Random");
   size_t iters = P.getOptionLongValue("-iters", 5);
+  size_t max_point_clouds_per_cluster = P.getOptionLongValue("-mpcc", 0);
   // bool lb = P.getOption("-lb");
   int verbose = P.getOptionIntValue("-v", 0);
 
@@ -38,7 +39,8 @@ int main(int argc, char* argv[]) {
   parlay::sequence<uint32_t> clustering;
   if (df == "L2") {
     auto points = mvsic::PointCloudSet<mvsic::ChamferL2_Point>(P.getOptionValue("-i"));
-    mvsic::MVClustering<true> clus(points.get_dims(), k, s, iters, 20, verbose);
+    mvsic::MVClustering<true> clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster, 20,
+                                   verbose);
     clus.train(points);
     clustering = clus.cluster_ids;
   } else if (df == "IP") {
@@ -46,7 +48,8 @@ int main(int argc, char* argv[]) {
     std::cout << points.size() << " point clouds read." << std::endl;
     std::cout << points.get_dims() << " dimensions per point cloud." << std::endl;
     std::cout << points.average_size() << " average number of points per point cloud." << std::endl;
-    mvsic::MVClustering<false> clus(points.get_dims(), k, s, iters, 20, verbose);
+    mvsic::MVClustering<false> clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster,
+                                    20, verbose);
     clus.train(points);
     clustering = clus.cluster_ids;
   }

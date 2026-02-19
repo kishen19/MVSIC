@@ -169,7 +169,7 @@ class IndexMVIVFFlat : public Index<metric> {
     // Step 1: Compute distances to centers
     t.start();
     parlay::sequence<std::pair<uint32_t, float>> id_dist;
-    std::tie(id_dist, dist_cmps) = centers.distances_naive(query);
+    std::tie(id_dist, dist_cmps) = centers.distances(query);
     parlay::sort_inplace(id_dist, [](const auto &a, const auto &b) { return a.second < b.second; });
     timings.push_back(t.stop());
     t.reset();
@@ -261,8 +261,7 @@ class IndexMVIVFFlat : public Index<metric> {
         auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           uint32_t cluster_id = id_dist[i].first;
-          leaf_dist_cmps[i] =
-              clusters[cluster_id].data.distances_naive(query, &visited[offsets[i]]);
+          leaf_dist_cmps[i] = clusters[cluster_id].data.distances(query, &visited[offsets[i]]);
         });
         dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
         t_distances += t.stop();

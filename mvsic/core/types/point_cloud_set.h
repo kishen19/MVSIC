@@ -67,27 +67,25 @@ struct PointCloudSet {
   static constexpr bool is_metric() noexcept { return ChPoint::is_metric(); }
 
   // Return list of distances from a query to all point clouds
-  // TODO: make this blocked, and thread_local
-  inline size_t distances_naive(const ChPoint& query, std::pair<uint32_t, float>* results) const {
+  inline size_t distances(const ChPoint& query, std::pair<uint32_t, float>* results) const {
     auto cmps = parlay::sequence<size_t>::uninitialized(n);
     parlay::parallel_for(0, n, [&](uint32_t i) {
-      float dist;
-      size_t cmp;
-      std::tie(dist, cmp) = query.distance_w_cmps((*this)[i]);
-      cmps[i] = cmp;
-      results[i] = std::make_pair(get_id(i), dist);
+      std::tie(results[i].second, cmps[i]) = query.distance_w_cmps((*this)[i]);
+      results[i].first = get_id(i);
     });
     return parlay::reduce(cmps);
   }
 
-  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances_naive(
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
       const ChPoint& query) const {
-    auto results = parlay::sequence<std::pair<uint32_t, float>>(n);
-    auto cmps = distances_naive(query, results.data());
+    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n);
+    auto cmps = distances(query, results.begin());
     return std::make_pair(results, cmps);
   }
 
-  inline size_t distances(const ChPoint& query, std::pair<uint32_t, float>* results) const {
+  // Trying out some optimizations.The following is not able to beat the above simple implementation
+  // in the microbenchmark: one_to_many_bench.cpp
+  inline size_t distances_blocked(const ChPoint& query, std::pair<uint32_t, float>* results) const {
     auto cmps = query.size() * dims + offsets[n];
     auto dists = OneToMany<ChPoint, PointCloudSet<ChPoint>>::AllDistances(query, *this);
     parlay::parallel_for(0, n,
@@ -95,10 +93,10 @@ struct PointCloudSet {
     return cmps;
   }
 
-  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances(
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances_blocked(
       const ChPoint& query) const {
-    auto results = parlay::sequence<std::pair<uint32_t, float>>(n);
-    auto cmps = distances(query, results.data());
+    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n);
+    auto cmps = distances_blocked(query, results.begin());
     return std::make_pair(results, cmps);
   }
 
