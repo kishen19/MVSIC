@@ -27,6 +27,16 @@ cc_library(
 )
 
 cc_library(
+    name = "turboquant",
+    hdrs = ["turboquant.h"],
+    deps = [
+        "@eigen",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_library(
     name = "scann",
     hdrs = ["scann.h"],
     deps = [

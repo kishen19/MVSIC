@@ -1,6 +1,6 @@
 // bench_chamfer_pq_fastscan.cpp
 //
-// Point-cloud benchmark: Exact vs PQ(K=16) vs FastScan(K=16)
+// Point-cloud benchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant
 // Measures time for "query cloud -> ALL db clouds" using distances_all() for quantized,
 // and PointCloudSet::distances() for exact.
 //
@@ -53,6 +53,7 @@
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
+#include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -233,6 +234,16 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto rq_db = rq_model.encode(db);
   double rq_encode_s = t.sec();
 
+  // TurboQuant
+  MultiVecQuantizer<turboquant::Model<Metric>, Metric> tq_model;
+  t.start();
+  tq_model.train(db);
+  double tq_train_s = t.sec();
+
+  t.start();
+  auto tq_db = tq_model.encode(db);
+  double tq_encode_s = t.sec();
+
   std::cout << "\n=== Train / Encode ===\n";
   std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
   std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
@@ -243,6 +254,9 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "RaBitQ train   : " << rq_train_s << " s\n";
   std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
   std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
+  std::cout << "TurboQuant train : " << tq_train_s << " s\n";
+  std::cout << "TurboQuant encode: " << tq_encode_s << " s\n";
+  std::cout << "TurboQuant total : " << (tq_train_s + tq_encode_s) << " s\n";
 
   // ---------------------------
   // Benchmark: distances to ALL clouds
@@ -295,6 +309,18 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     double best = bench_quant_all(rq_model, rq_db, queries, results, reps, sink);
     double dps = double(ops) / best;
     std::cout << "RaBitQ (wrapper::distances_all):\n";
+    std::cout << "  total_time : " << best << " s\n";
+    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
+              << " M cloud-dists/s\n";
+    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
+              << " ns / cloud-dist\n";
+    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
+  }
+
+  {
+    double best = bench_quant_all(tq_model, tq_db, queries, results, reps, sink);
+    double dps = double(ops) / best;
+    std::cout << "TurboQuant (wrapper::distances_all):\n";
     std::cout << "  total_time : " << best << " s\n";
     std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
               << " M cloud-dists/s\n";

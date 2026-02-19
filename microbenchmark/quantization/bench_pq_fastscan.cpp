@@ -1,10 +1,11 @@
 // bench_pq_fastscan.cpp
 //
 // Benchmarks (full scan distance computation):
-//   1) Exact (unquantized) float L2 distance via efanna2e::DistanceL2 (NSGDist)
+//   1) Exact (unquantized) float IP distance via efanna2e::DistanceInnerProduct (NSGDist)
 //   2) PQ with K=16 using Quantized_Query::distances_all (parlay-parallel inside)
 //   3) FastScan (K=16) using Quantized_Query::distances_all (parlay-parallel inside)
 //   4) RaBitQ using Quantized_Query::distances_all (parlay-parallel inside)
+//   5) TurboQuant (8-bit scalar per dim) using Quantized_Query::distances_all (parlay-parallel inside)
 //
 // Usage (Bazel):
 //   PARLAY_NUM_THREADS=16 bazel run -c opt //:bench_pq_fastscan -- [N] [Q] [D] [pq_block]
@@ -16,7 +17,7 @@
 // Notes:
 // - FastScan requires AVX-512 (AVX512F + AVX512BW recommended).
 // - PQ uses K=16 to match FastScan's K=16 exactly.
-// - Metric is fixed to L2 (Metric=true). If you want IP, change constexpr Metric=false.
+// - Metric is fixed to IP (Metric=false). Distance = -inner_product (smaller = more similar).
 // - Since distances_all() is parlay-parallel internally, we run queries serially to avoid nested
 //   parallelism.
 
@@ -40,6 +41,7 @@
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
+#include "mvsic/core/quantization/turboquant.h"
 
 #if !defined(__AVX512F__)
 #warning "AVX-512 not enabled by compiler flags; fastscan benchmarks will be skipped."
@@ -118,9 +120,9 @@ static void fill_random(DensePointRange& r, uint64_t seed, bool l2_normalize) {
 }
 
 // ---------------------------
-// Exact: DB-parallel sum for one query
+// Exact: DB-parallel sum for one query (IP: distance = -inner_product)
 // ---------------------------
-static inline float full_scan_sum_exact_l2_dbpar(const DensePointRange& db, const float* q,
+static inline float full_scan_sum_exact_ip_dbpar(const DensePointRange& db, const float* q,
                                                  uint32_t D, size_t grain = 4096) {
   const size_t N = db.size();
   const float* base = db.data();
@@ -129,7 +131,7 @@ static inline float full_scan_sum_exact_l2_dbpar(const DensePointRange& db, cons
   parlay::sequence<double> block_sums(num_blocks, 0.0);
 
   parlay::parallel_for(0, num_blocks, [&](size_t bi) {
-    static thread_local efanna2e::DistanceL2 distfunc;
+    static thread_local efanna2e::DistanceInnerProduct distfunc;
 
     const size_t s = bi * grain;
     const size_t e = std::min(N, s + grain);
@@ -137,7 +139,7 @@ static inline float full_scan_sum_exact_l2_dbpar(const DensePointRange& db, cons
     double local = 0.0;
     for (size_t i = s; i < e; ++i) {
       const float* p = base + i * size_t(D);
-      local += double(distfunc.compare(q, p, D));
+      local += double(-distfunc.compare(q, p, D));  // distance = -IP
     }
     block_sums[bi] = local;
   });
@@ -159,7 +161,7 @@ static inline float scan_all_queries_exact_serial(const DensePointRange& db,
 
   for (size_t qi = 0; qi < Q; ++qi) {
     const float* q = qbase + qi * size_t(D);
-    per_q_sum[qi] = double(full_scan_sum_exact_l2_dbpar(db, q, D));
+    per_q_sum[qi] = double(full_scan_sum_exact_ip_dbpar(db, q, D));
   }
 
   double total = 0.0;
@@ -204,14 +206,14 @@ int main(int argc, char** argv) {
   int REPS = (argc > 7 ? int(std::stoi(argv[7])) : 2);
   if (REPS < 1) REPS = 1;
 
-  // L2 mode
-  constexpr bool Metric = true;
+  // IP mode (distance = -inner_product; smaller = more similar)
+  constexpr bool Metric = false;
   constexpr uint32_t K16 = 16;
   constexpr uint32_t PQ_S = 20;  // subsample_mult
 
   std::cout << "N=" << N << " Q=" << Q << " D=" << D << " pq_block=" << pq_block
             << " fs_block=" << fs_block << " rbits=" << rbits << " K=16"
-            << " (Metric=" << (Metric ? "L2" : "IP") << ")\n";
+            << " (Metric=IP)\n";
 
   if (D % pq_block != 0) {
     std::cerr << "ERROR: D not divisible by pq_block.\n";
@@ -261,6 +263,15 @@ int main(int argc, char** argv) {
   auto rq = rq_model.encode(db);
   double rq_build_s = t.sec();
 
+  // ---------------------------
+  // Build TurboQuant model + encode
+  // ---------------------------
+  t.start();
+  mvsic::turboquant::Model<Metric> tq_model;
+  tq_model.train(db);
+  auto tq = tq_model.encode(db);
+  double tq_build_s = t.sec();
+
   std::cout << "\n=== Build / Encode time ===\n";
   std::cout << "PQ(K=16):        " << pq_build_s << " s\n";
 #if defined(__AVX512F__)
@@ -269,7 +280,9 @@ int main(int argc, char** argv) {
   std::cout << "FastScan(K=16):  (skipped, no AVX512)\n";
 #endif
   std::cout << "RaBitQ(bits=" << rbits << "): " << rq_build_s << " s\n";
-  std::cout << "Exact (float):   (no build)\n";
+  std::cerr << "bench: before TurboQuant build cout\n";
+  std::cout << "TurboQuant:      " << tq_build_s << " s\n";
+  std::cout << "Exact (float IP): (no build)\n";
 
   // ---------------------------
   // LUT construction time
@@ -284,6 +297,9 @@ int main(int argc, char** argv) {
 
   std::vector<mvsic::rabitq::Quantized_Query<Metric>> rq_q;
   rq_q.reserve(Q);
+
+  std::vector<mvsic::turboquant::Quantized_Query<Metric>> tq_q;
+  tq_q.reserve(Q);
 
   t.start();
   for (size_t i = 0; i < Q; ++i) {
@@ -305,6 +321,12 @@ int main(int argc, char** argv) {
   }
   double rq_lut_s = t.sec();
 
+  t.start();
+  for (size_t i = 0; i < Q; ++i) {
+    tq_q.push_back(tq_model.quantize_query(queries.data() + i * size_t(D)));
+  }
+  double tq_lut_s = t.sec();
+
   std::cout << "\n=== Query LUT time (Q=" << Q << ") ===\n";
   std::cout << "PQ(K=16):        " << pq_lut_s << " s  (" << (pq_lut_s * 1e6 / Q) << " us/query)\n";
 #if defined(__AVX512F__)
@@ -313,7 +335,8 @@ int main(int argc, char** argv) {
   std::cout << "FastScan(K=16):  (skipped, no AVX512)\n";
 #endif
   std::cout << "RaBitQ:          " << rq_lut_s << " s  (" << (rq_lut_s * 1e6 / Q) << " us/query)\n";
-  std::cout << "Exact (float):   (no LUT)\n";
+  std::cout << "TurboQuant:      " << tq_lut_s << " s  (" << (tq_lut_s * 1e6 / Q) << " us/query)\n";
+  std::cout << "Exact (float IP): (no LUT)\n";
 
   // ---------------------------
   // Full scan kernel time (Q * N distances)
@@ -323,6 +346,7 @@ int main(int argc, char** argv) {
   // scratch buffers for distances_all()
   std::vector<float> pq_out(N);
   std::vector<float> rq_out(N);
+  std::vector<float> tq_out(N);
 
 #if defined(__AVX512F__)
   const size_t fs_N_total = static_cast<size_t>(fs.size());  // may include padding
@@ -331,7 +355,7 @@ int main(int argc, char** argv) {
 
   // Warmup (avoid cold-start effects)
   for (size_t i = 0; i < std::min<size_t>(Q, 2); ++i) {
-    sink += full_scan_sum_exact_l2_dbpar(db, queries.data() + i * size_t(D), D);
+    sink += full_scan_sum_exact_ip_dbpar(db, queries.data() + i * size_t(D), D);
 
     pq_q[i].distances_all(pq16, pq_out.data());
     for (size_t j = 0; j < N; ++j)
@@ -346,6 +370,10 @@ int main(int argc, char** argv) {
     rq_q[i].distances_all(rq, rq_out.data());
     for (size_t j = 0; j < N; ++j)
       sink += rq_out[j];
+
+    tq_q[i].distances_all(tq, tq_out.data());
+    for (size_t j = 0; j < N; ++j)
+      sink += tq_out[j];
   }
 
   parlay::sequence<double> per_q_sum(Q, 0.0);
@@ -366,7 +394,7 @@ int main(int argc, char** argv) {
       acc = local;
     }
     sink += acc;
-    print_scan_stats("Exact float L2 (NSGDist)", best, num_dists, Q);
+    print_scan_stats("Exact float IP (NSGDist)", best, num_dists, Q);
   }
 
   // PQ
@@ -417,6 +445,50 @@ int main(int argc, char** argv) {
     }
     sink += acc;
     print_scan_stats("RaBitQ distances_all", best, num_dists, Q);
+  }
+
+  // TurboQuant
+  {
+    double best = 1e100;
+    float acc = 0.0f;
+    for (int r = 0; r < REPS; ++r) {
+      t.start();
+      float local = scan_all_queries_distances_all_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
+      double s = t.sec();
+      best = std::min(best, s);
+      acc = local;
+    }
+    sink += acc;
+    print_scan_stats("TurboQuant distances_all", best, num_dists, Q);
+  }
+
+  // ---------------------------
+  // Optional: correctness check (quantized vs exact for a small subset)
+  // ---------------------------
+  const size_t check_queries = std::min<size_t>(10, Q);
+  const size_t check_db = std::min<size_t>(5000, N);
+  double pq_max_ae = 0.0;
+  double pq_mean_ae = 0.0;
+  uint64_t check_count = 0;
+  for (size_t qi = 0; qi < check_queries; ++qi) {
+    pq_q[qi].distances_all(pq16, pq_out.data());
+    const float* q = queries.data() + qi * size_t(D);
+    for (size_t i = 0; i < check_db; ++i) {
+      static thread_local efanna2e::DistanceInnerProduct distfunc;
+      float exact = -distfunc.compare(q, db.data() + i * size_t(D), D);  // distance = -IP
+      float approx = pq_out[i];
+      double ae = std::fabs(static_cast<double>(exact) - static_cast<double>(approx));
+      pq_max_ae = std::max(pq_max_ae, ae);
+      pq_mean_ae += ae;
+      check_count++;
+    }
+  }
+  if (check_count > 0) {
+    pq_mean_ae /= static_cast<double>(check_count);
+    std::cout << "\n=== Correctness (PQ vs exact IP, sample " << check_queries << " q x " << check_db
+              << " db) ===\n";
+    std::cout << "PQ max |approx - exact|: " << pq_max_ae << "  mean |approx - exact|: " << pq_mean_ae
+              << "\n";
   }
 
   std::cout << "\n(sink=" << sink << ")\n";
