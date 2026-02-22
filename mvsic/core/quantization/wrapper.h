@@ -115,6 +115,40 @@ class Quantized_Query_Point_Cloud {
   }
 #endif  // __AVX512F__
 
+#if !defined(__AVX512F__) && defined(__AVX2__)
+  // Batch Chamfer: AVX2 GEMM scoring (maddubs-based, non-AVX512 fallback).
+  template<typename QuantizedPointCloud>
+  float distance_batch(const QuantizedPointCloud& cloud) const {
+    const size_t num_q = vec_queries.size();
+    if (num_q == 0) return 0.0f;
+
+    const size_t cloud_size = cloud.size();
+    if (cloud_size == 0) return std::numeric_limits<float>::max();
+
+    const auto* db = cloud.db;
+    const size_t start = cloud.start_idx;
+
+    const size_t strip_idx = start / 64;
+    const size_t strip_stride = db->stride;
+    const size_t n_strips = (cloud_size + 63) / 64;
+
+    const uint8_t* strip_data = db->packed_codes.data() +
+                                strip_idx * strip_stride;
+    const float* norms = db->norm_scaling_factors.data() + start;
+    const float* sqn = db->unquantized_squared_norms.data() + start;
+
+    std::vector<const QuantizedQueryVec*> qptrs(num_q);
+    for (size_t i = 0; i < num_q; ++i)
+      qptrs[i] = &vec_queries[i];
+
+    float total = one_to_many_turboquant::chamfer_avx2_gemm<Metric>(
+        qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
+        db->num_bytes_per_datapoint, cloud_size);
+
+    return total / static_cast<float>(num_q);
+  }
+#endif  // !__AVX512F__ && __AVX2__
+
   // Per-point Chamfer: original path for quantizers without batch support.
   template<typename QuantizedPointCloud>
   float distance_perpoint(const QuantizedPointCloud& cloud) const {
