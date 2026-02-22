@@ -92,14 +92,24 @@ class Quantized_Point {
   float norm_scaling_factor = 0.0f;
   float unquantized_squared_norm = 0.0f;
 
+  // Owned buffer for when point bytes are gathered from strip layout.
+  std::vector<uint8_t> owned_codes;
+
   Quantized_Point() = default;
   Quantized_Point(const uint8_t* ptr, size_t nb, float nsf, float usn)
       : code_ptr(ptr), num_bytes(nb), norm_scaling_factor(nsf),
         unquantized_squared_norm(usn) {}
 
+  // Constructor that takes ownership of gathered bytes.
+  Quantized_Point(std::vector<uint8_t>&& codes, size_t nb, float nsf, float usn)
+      : num_bytes(nb), norm_scaling_factor(nsf),
+        unquantized_squared_norm(usn), owned_codes(std::move(codes)) {
+    code_ptr = owned_codes.data();
+  }
+
   inline float distance(const Quantized_Query<Metric>& qq) const;
 
-  void prefetch() const { __builtin_prefetch(code_ptr, 0, 3); }
+  void prefetch() const { if (code_ptr) __builtin_prefetch(code_ptr, 0, 3); }
   bool same_as(const Quantized_Point<Metric>&) const { return false; }
   bool same_as(const Quantized_Query<Metric>&) const { return false; }
   bool is_metric() const { return Metric; }
@@ -873,20 +883,22 @@ class Quantized_Point_Range {
 
   Quantized_Point_Range() = default;
 
-  // Per-point access (for fallback path). Slow — reconstructs from strip.
+  // Per-point access (for fallback path). Gathers bytes from strip layout
+  // into a contiguous buffer.
   Quantized_Point<Metric> operator[](size_t i) const {
-    // The encoded byte for point i at byte-position j is at:
-    //   strip = i / 64
-    //   lane = i % 64
-    //   offset = strip * stride + j * 64 + lane
-    // We can't return a contiguous byte pointer for a single point,
-    // so we use a small wrapper. For the per-point fallback, the wrapper
-    // currently doesn't hit this path when has_batch_distances=true.
-    // Return a dummy that uses contiguous scratch. This is only used
-    // if the batch path is bypassed.
-    return Quantized_Point<Metric>(nullptr, num_bytes_per_datapoint, 
-                                   norm_scaling_factors[i],
-                                   Metric ? unquantized_squared_norms[i] : 0.0f);
+    const size_t strip = i / 64;
+    const size_t lane = i % 64;
+    const size_t nb = num_bytes_per_datapoint;
+
+    std::vector<uint8_t> codes(nb);
+    for (size_t j = 0; j < nb; ++j) {
+      codes[j] = packed_codes[strip * stride + j * 64 + lane];
+    }
+
+    return Quantized_Point<Metric>(
+        std::move(codes), nb,
+        norm_scaling_factors[i],
+        Metric ? unquantized_squared_norms[i] : 0.0f);
   }
 
   inline uint32_t size() const noexcept {
