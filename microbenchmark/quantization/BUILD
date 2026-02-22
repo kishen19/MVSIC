@@ -25,6 +25,7 @@ cc_binary(
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:turboquant",
         "//mvsic/core/quantization:one_to_many_turboquant",
+        "//mvsic/core/quantization:byte_turboquant",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",

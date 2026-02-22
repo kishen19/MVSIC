@@ -54,6 +54,7 @@
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/one_to_many_turboquant.h"
+#include "mvsic/core/quantization/byte_turboquant.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -255,7 +256,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double rq_encode_s = t.sec();
 #endif  // __AVX512F__
 
-  // TurboQuant
+  // TurboQuant (4-bit)
   MultiVecQuantizer<one_to_many_turboquant::Model<Metric>, Metric> tq_model;
   t.start();
   tq_model.train(db);
@@ -264,6 +265,16 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   t.start();
   auto tq_db = tq_model.encode(db);
   double tq_encode_s = t.sec();
+
+  // Byte TurboQuant (int8)
+  MultiVecQuantizer<byte_turboquant::Model<Metric>, Metric> btq_model;
+  t.start();
+  btq_model.train(db);
+  double btq_train_s = t.sec();
+
+  t.start();
+  auto btq_db = btq_model.encode(db);
+  double btq_encode_s = t.sec();
 
   std::cout << "\n=== Train / Encode ===\n";
   std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
@@ -280,6 +291,9 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "TurboQuant train : " << tq_train_s << " s\n";
   std::cout << "TurboQuant encode: " << tq_encode_s << " s\n";
   std::cout << "TurboQuant total : " << (tq_train_s + tq_encode_s) << " s\n";
+  std::cout << "ByteTQ train     : " << btq_train_s << " s\n";
+  std::cout << "ByteTQ encode    : " << btq_encode_s << " s\n";
+  std::cout << "ByteTQ total     : " << (btq_train_s + btq_encode_s) << " s\n";
 
   // ---------------------------
   // Benchmark: distances to ALL clouds
@@ -312,7 +326,12 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
   {
     double best = bench_quant_all(tq_model, tq_db, queries, results, reps, sink);
-    print_result("TurboQuant (wrapper::distances_all)", best, ops, exact_best);
+    print_result("TurboQuant-4bit (wrapper::distances_all)", best, ops, exact_best);
+  }
+
+  {
+    double best = bench_quant_all(btq_model, btq_db, queries, results, reps, sink);
+    print_result("ByteTQ-int8 (wrapper::distances_all)", best, ops, exact_best);
   }
 
   std::cout << "\n(sink=" << sink << ")\n";

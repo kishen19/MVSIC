@@ -79,9 +79,7 @@ class Quantized_Query_Point_Cloud {
       : std::bool_constant<T::has_batch_distances> {};
 
 #ifdef __AVX512F__
-  // Batch Chamfer: VNNI GEMM scoring.
-  // Decodes queries to row-major int8, DB to block-transposed uint8 panels,
-  // then uses vpdpbusd micro-kernel with kMq=8 query batching.
+  // Batch Chamfer: VNNI GEMM scoring (or byte TQ AVX2 GEMM).
   template<typename QuantizedPointCloud>
   float distance_batch(const QuantizedPointCloud& cloud) const {
     const size_t num_q = vec_queries.size();
@@ -102,21 +100,29 @@ class Quantized_Query_Point_Cloud {
     const float* norms = db->norm_scaling_factors.data() + start;
     const float* sqn = db->unquantized_squared_norms.data() + start;
 
-    // Collect query pointers for VNNI GEMM batching.
     std::vector<const QuantizedQueryVec*> qptrs(num_q);
     for (size_t i = 0; i < num_q; ++i)
       qptrs[i] = &vec_queries[i];
 
-    float total = one_to_many_turboquant::chamfer_vnni_gemm<Metric>(
-        qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
-        db->num_bytes_per_datapoint, cloud_size);
+    float total;
+    if constexpr (std::is_same_v<QuantizedQueryVec,
+                                  byte_turboquant::Quantized_Query<Metric>>) {
+      total = byte_turboquant::chamfer_byte_tq_gemm<Metric>(
+          qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
+          db->num_bytes_per_datapoint, cloud_size);
+    } else {
+      total = one_to_many_turboquant::chamfer_vnni_gemm<Metric>(
+          qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
+          db->num_bytes_per_datapoint, cloud_size);
+    }
 
     return total / static_cast<float>(num_q);
   }
 #endif  // __AVX512F__
 
 #if !defined(__AVX512F__) && defined(__AVX2__)
-  // Batch Chamfer: AVX2 GEMM scoring (maddubs-based, non-AVX512 fallback).
+  // Batch Chamfer: AVX2 GEMM scoring.
+  // Dispatches to byte_turboquant or one_to_many_turboquant GEMM.
   template<typename QuantizedPointCloud>
   float distance_batch(const QuantizedPointCloud& cloud) const {
     const size_t num_q = vec_queries.size();
@@ -141,9 +147,18 @@ class Quantized_Query_Point_Cloud {
     for (size_t i = 0; i < num_q; ++i)
       qptrs[i] = &vec_queries[i];
 
-    float total = one_to_many_turboquant::chamfer_avx2_gemm<Metric>(
-        qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
-        db->num_bytes_per_datapoint, cloud_size);
+    float total;
+    // Detect byte_turboquant types at compile time.
+    if constexpr (std::is_same_v<QuantizedQueryVec,
+                                  byte_turboquant::Quantized_Query<Metric>>) {
+      total = byte_turboquant::chamfer_byte_tq_gemm<Metric>(
+          qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
+          db->num_bytes_per_datapoint, cloud_size);
+    } else {
+      total = one_to_many_turboquant::chamfer_avx2_gemm<Metric>(
+          qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
+          db->num_bytes_per_datapoint, cloud_size);
+    }
 
     return total / static_cast<float>(num_q);
   }
