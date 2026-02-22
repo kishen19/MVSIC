@@ -24,6 +24,7 @@ cc_binary(
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:turboquant",
+        "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
@@ -78,5 +79,33 @@ cc_binary(
         "//mvsic/core/utils:parse_command_line",
         "@eigen",
         "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
+    name = "bench_one_to_many_turboquant",
+    srcs = ["bench_one_to_many_turboquant.cc"],
+    copts = [
+        "-mavx512f",
+        "-mavx512bw",
+        "-mavx512vl",
+    ],
+    deps = [
+        "//mvsic/core/quantization:one_to_many_turboquant",
+        "@google_benchmark//:benchmark_main",
+    ],
+)
+
+cc_binary(
+    name = "test_vnni_chamfer",
+    srcs = ["test_vnni_chamfer.cc"],
+    copts = [
+        "-mavx512f",
+        "-mavx512bw",
+        "-mavx512vl",
+        "-mavx512vnni",
+    ],
+    deps = [
+        "//mvsic/core/quantization:one_to_many_turboquant",
     ],
 )

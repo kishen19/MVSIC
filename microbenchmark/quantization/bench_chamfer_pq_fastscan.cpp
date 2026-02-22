@@ -54,6 +54,7 @@
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/one_to_many_turboquant.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -235,7 +236,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double rq_encode_s = t.sec();
 
   // TurboQuant
-  MultiVecQuantizer<turboquant::Model<Metric>, Metric> tq_model;
+  MultiVecQuantizer<one_to_many_turboquant::Model<Metric>, Metric> tq_model;
   t.start();
   tq_model.train(db);
   double tq_train_s = t.sec();

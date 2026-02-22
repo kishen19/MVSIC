@@ -70,8 +70,52 @@ class Quantized_Query_Point_Cloud {
 
   parlay::sequence<QuantizedQueryVec> vec_queries;
 
+ private:
+  // SFINAE: detect if QuantizedQueryVec has batch distances support.
+  template<typename T, typename = void>
+  struct has_batch_distances_t : std::false_type {};
+  template<typename T>
+  struct has_batch_distances_t<T, std::void_t<decltype(T::has_batch_distances)>>
+      : std::bool_constant<T::has_batch_distances> {};
+
+  // Batch Chamfer: VNNI GEMM scoring.
+  // Decodes queries to row-major int8, DB to block-transposed uint8 panels,
+  // then uses vpdpbusd micro-kernel with kMq=8 query batching.
   template<typename QuantizedPointCloud>
-  float distance(const QuantizedPointCloud& cloud) const {
+  float distance_batch(const QuantizedPointCloud& cloud) const {
+    const size_t num_q = vec_queries.size();
+    if (num_q == 0) return 0.0f;
+
+    const size_t cloud_size = cloud.size();
+    if (cloud_size == 0) return std::numeric_limits<float>::max();
+
+    const auto* db = cloud.db;
+    const size_t start = cloud.start_idx;
+
+    const size_t strip_idx = start / 64;
+    const size_t strip_stride = db->stride;
+    const size_t n_strips = (cloud_size + 63) / 64;
+
+    const uint8_t* strip_data = db->packed_codes.data() +
+                                strip_idx * strip_stride;
+    const float* norms = db->norm_scaling_factors.data() + start;
+    const float* sqn = db->unquantized_squared_norms.data() + start;
+
+    // Collect query pointers for VNNI GEMM batching.
+    std::vector<const QuantizedQueryVec*> qptrs(num_q);
+    for (size_t i = 0; i < num_q; ++i)
+      qptrs[i] = &vec_queries[i];
+
+    float total = one_to_many_turboquant::chamfer_vnni_gemm<Metric>(
+        qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
+        db->num_bytes_per_datapoint, cloud_size);
+
+    return total / static_cast<float>(num_q);
+  }
+
+  // Per-point Chamfer: original path for quantizers without batch support.
+  template<typename QuantizedPointCloud>
+  float distance_perpoint(const QuantizedPointCloud& cloud) const {
     const size_t num_q = vec_queries.size();
     if (num_q == 0) return 0.0f;
 
@@ -80,7 +124,6 @@ class Quantized_Query_Point_Cloud {
 
     float total_chamfer = 0.0f;
 
-    // Keep sequential (usually query-cloud small)
     for (const auto& q_vec : vec_queries) {
       float min_dist = std::numeric_limits<float>::max();
       for (size_t i = 0; i < cloud_size; ++i) {
@@ -92,6 +135,16 @@ class Quantized_Query_Point_Cloud {
     }
 
     return total_chamfer / static_cast<float>(num_q);
+  }
+
+ public:
+  template<typename QuantizedPointCloud>
+  float distance(const QuantizedPointCloud& cloud) const {
+    if constexpr (has_batch_distances_t<QuantizedQueryVec>::value) {
+      return distance_batch(cloud);
+    } else {
+      return distance_perpoint(cloud);
+    }
   }
 
   // TODO: fix cmps
