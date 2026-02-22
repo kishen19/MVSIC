@@ -164,7 +164,9 @@ class Quantized_Query_Point_Cloud {
   }
 #endif  // !__AVX512F__ && __AVX2__
 
+ public:
   // Per-point Chamfer: original path for quantizers without batch support.
+  // Also used as scalar reference for verification.
   template<typename QuantizedPointCloud>
   float distance_perpoint(const QuantizedPointCloud& cloud) const {
     const size_t num_q = vec_queries.size();
@@ -188,7 +190,6 @@ class Quantized_Query_Point_Cloud {
     return total_chamfer / static_cast<float>(num_q);
   }
 
- public:
   template<typename QuantizedPointCloud>
   float distance(const QuantizedPointCloud& cloud) const {
     if constexpr (has_batch_distances_t<QuantizedQueryVec>::value) {

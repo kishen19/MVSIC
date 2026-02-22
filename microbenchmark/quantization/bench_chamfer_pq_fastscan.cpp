@@ -166,6 +166,66 @@ static double bench_quant_all(const QModel& model, const EncSet& qdb, const PCSe
   return best;
 }
 
+// Verification: compare GEMM (batch) distances against scalar per-point reference.
+// For each query cloud × each DB cloud, computes distance both ways and checks.
+template<typename QModel, typename EncSet, typename PCSet>
+static void verify_quant(const char* label, const QModel& model, const EncSet& qdb,
+                         const PCSet& queries,
+                         size_t max_q_clouds = 0, size_t max_db_clouds = 0) {
+  const size_t nq = queries.size();
+  const size_t ndb = qdb.n_clouds;
+  if (max_q_clouds == 0 || max_q_clouds > nq) max_q_clouds = nq;
+  if (max_db_clouds == 0 || max_db_clouds > ndb) max_db_clouds = ndb;
+
+  std::cout << "\n=== Verifying " << label << " ==="
+            << " (" << max_q_clouds << " query clouds × " << max_db_clouds << " DB clouds)\n";
+
+  double max_rel_err = 0.0;
+  double max_abs_err = 0.0;
+  size_t n_mismatches = 0;
+  size_t n_checked = 0;
+
+  for (size_t qi = 0; qi < max_q_clouds; ++qi) {
+    auto qq = model.quantize_query(queries[qi]);
+
+    for (size_t di = 0; di < max_db_clouds; ++di) {
+      auto cloud = qdb[di];
+
+      // GEMM path (batch).
+      float d_gemm = qq.distance(cloud);
+
+      // Scalar per-point path.
+      float d_scalar = qq.distance_perpoint(cloud);
+
+      float abs_err = std::fabs(d_gemm - d_scalar);
+      float denom = std::max(std::fabs(d_scalar), 1e-8f);
+      float rel_err = abs_err / denom;
+
+      if (abs_err > max_abs_err) max_abs_err = abs_err;
+      if (rel_err > max_rel_err) max_rel_err = rel_err;
+
+      if (rel_err > 1e-4f && abs_err > 1e-3f) {
+        if (n_mismatches < 10) {
+          std::cout << "  MISMATCH q=" << qi << " db=" << di
+                    << " gemm=" << d_gemm << " scalar=" << d_scalar
+                    << " rel_err=" << rel_err << " abs_err=" << abs_err << "\n";
+        }
+        ++n_mismatches;
+      }
+      ++n_checked;
+    }
+  }
+
+  std::cout << "  checked: " << n_checked << " pairs\n";
+  std::cout << "  max_rel_err: " << max_rel_err << "\n";
+  std::cout << "  max_abs_err: " << max_abs_err << "\n";
+  if (n_mismatches > 0) {
+    std::cout << "  *** " << n_mismatches << " MISMATCHES ***\n";
+  } else {
+    std::cout << "  PASS\n";
+  }
+}
+
 // Helper to print a benchmark result.
 static void print_result(const char* label, double best, uint64_t ops, double exact_best) {
   double dps = double(ops) / best;
@@ -185,7 +245,8 @@ static void print_result(const char* label, double best, uint64_t ops, double ex
 // ---------------------------
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
-                         uint32_t pq_block, uint32_t fs_block, uint32_t rbits, int reps) {
+                         uint32_t pq_block, uint32_t fs_block, uint32_t rbits, int reps,
+                         bool verify) {
   using PC = PointCloudSet<ChPoint>;
   constexpr bool Metric = ChPoint::is_metric();
 
@@ -334,6 +395,15 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     print_result("ByteTQ-int8 (wrapper::distances_all)", best, ops, exact_best);
   }
 
+  // ---------------------------
+  // Verification (if requested)
+  // ---------------------------
+  if (verify) {
+    // Limit to first 20 query clouds × first 100 DB clouds for speed.
+    verify_quant("TurboQuant-4bit", tq_model, tq_db, queries, 20, 100);
+    verify_quant("ByteTQ-int8", btq_model, btq_db, queries, 20, 100);
+  }
+
   std::cout << "\n(sink=" << sink << ")\n";
   return 0;
 }
@@ -344,7 +414,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
                      uint64_t seed_q, uint32_t pq_block, uint32_t fs_block, uint32_t rbits,
-                     int reps) {
+                     int reps, bool verify) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -358,7 +428,7 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
   fill_random_point_cloud_set(queries, seed_q, l2_normalize_vectors);
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps);
+  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps, verify);
 }
 
 // ---------------------------
@@ -366,7 +436,7 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 // ---------------------------
 template<typename ChPoint>
 static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint32_t rbits,
-                     int reps) {
+                     int reps, bool verify) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -387,14 +457,15 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint3
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps);
+  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps, verify);
 }
 
 int main(int argc, char** argv) {
   commandLine P(argc, argv,
                 "[-i <dbFile>] [-q <qFile>] [-mm] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
-                "[-dist_func <L2|IP>] [-pq_block <b>] [-fs_block <b>] [-rbits <b>] [-reps <r>]");
+                "[-dist_func <L2|IP>] [-pq_block <b>] [-fs_block <b>] [-rbits <b>] [-reps <r>] "
+                "[-verify]");
 
   // Common
   std::string df = P.getOptionValue("-dist_func", "L2");
@@ -402,6 +473,7 @@ int main(int argc, char** argv) {
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
   int reps = std::max(1, P.getOptionIntValue("-reps", 3));
+  bool verify = P.getOption("-verify");
 
   // Decide mode: if both -i and -q are present => file mode, else synthetic
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
@@ -413,8 +485,8 @@ int main(int argc, char** argv) {
     }
 
     if (df == "IP" || df == "ip")
-      return run_files<ChamferIP_Point>(P, pq_block, fs_block, rbits, reps);
-    return run_files<ChamferL2_Point>(P, pq_block, fs_block, rbits, reps);
+      return run_files<ChamferIP_Point>(P, pq_block, fs_block, rbits, reps, verify);
+    return run_files<ChamferL2_Point>(P, pq_block, fs_block, rbits, reps, verify);
   }
 
   // Synthetic mode args
@@ -431,8 +503,8 @@ int main(int argc, char** argv) {
 
   if (df == "IP" || df == "ip") {
     return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block,
-                                      rbits, reps);
+                                      rbits, reps, verify);
   }
   return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block, rbits,
-                                    reps);
+                                    reps, verify);
 }
