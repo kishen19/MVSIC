@@ -128,6 +128,7 @@ class Quantized_Query {
     return p.distance(*this);
   }
 
+#ifdef __AVX512F__
   // ---- Strip-based scoring: 64 points at once ----
   // Scores 64 points from a strip. strip_ptr points to the strip start
   // (byte_pos=0, point_0). Layout: for byte_pos j, 64 contiguous bytes
@@ -317,8 +318,10 @@ class Quantized_Query {
 
   // Tag for SFINAE detection in wrapper.
   static constexpr bool has_batch_distances = true;
+#endif  // __AVX512F__
 };
 
+#ifdef __AVX512F__
 // =========================================================================
 // VNNI GEMM Chamfer: vpdpbusd-based micro-kernel for maximum throughput
 // =========================================================================
@@ -819,6 +822,7 @@ inline float chamfer_vnni_gemm(
 
   return total_chamfer;
 }
+#endif  // __AVX512F__
 
 // ---- Quantized_Point::distance (per-point fallback, uses strip byte order) ----
 template<bool Metric>

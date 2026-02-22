@@ -39,11 +39,6 @@ cc_library(
 cc_library(
     name = "one_to_many_turboquant",
     hdrs = ["one_to_many_turboquant.h"],
-    copts = [
-        "-mavx512f",
-        "-mavx512bw",
-        "-mavx512vl",
-    ],
     deps = [
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",

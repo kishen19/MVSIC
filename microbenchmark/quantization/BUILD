@@ -99,11 +99,6 @@ cc_binary(
 cc_binary(
     name = "test_vnni_chamfer",
     srcs = ["test_vnni_chamfer.cc"],
-    copts = [
-        "-mavx512f",
-        "-mavx512bw",
-        "-mavx512vl",
-    ],
     deps = [
         "//mvsic/core/quantization:one_to_many_turboquant",
     ],

@@ -78,6 +78,7 @@ class Quantized_Query_Point_Cloud {
   struct has_batch_distances_t<T, std::void_t<decltype(T::has_batch_distances)>>
       : std::bool_constant<T::has_batch_distances> {};
 
+#ifdef __AVX512F__
   // Batch Chamfer: VNNI GEMM scoring.
   // Decodes queries to row-major int8, DB to block-transposed uint8 panels,
   // then uses vpdpbusd micro-kernel with kMq=8 query batching.
@@ -112,6 +113,7 @@ class Quantized_Query_Point_Cloud {
 
     return total / static_cast<float>(num_q);
   }
+#endif  // __AVX512F__
 
   // Per-point Chamfer: original path for quantizers without batch support.
   template<typename QuantizedPointCloud>
@@ -356,6 +358,7 @@ class Quantized_Point_Cloud_Set {
     const size_t num_q = q_query.vec_queries.size();
 
     if constexpr (EncRange::is_fastscan) {
+#ifdef __AVX512F__
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         const uint32_t cloud_id = static_cast<uint32_t>(cid);
 
@@ -490,6 +493,13 @@ class Quantized_Point_Cloud_Set {
       });
 
       return num_q;
+#else
+      // AVX-512 not available — fall through to per-cloud scalar path.
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+      });
+      return num_q;
+#endif  // __AVX512F__
     } else {
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
