@@ -103,7 +103,6 @@ cc_binary(
         "-mavx512f",
         "-mavx512bw",
         "-mavx512vl",
-        "-mavx512vnni",
     ],
     deps = [
         "//mvsic/core/quantization:one_to_many_turboquant",

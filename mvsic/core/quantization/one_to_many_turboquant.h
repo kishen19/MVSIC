@@ -468,6 +468,22 @@ inline void decode_strip_to_panel_simd(
   }
 }
 
+// Portable unsigned×signed int8 dot product accumulate.
+// When VNNI is available, uses the native vpdpbusd instruction (1 cycle).
+// Otherwise, emulates with pmaddubsw + pmaddwd + paddd (3 instructions).
+inline __m512i tq_dpbusd(__m512i acc, __m512i a_unsigned, __m512i b_signed) {
+#ifdef __AVX512VNNI__
+  return _mm512_dpbusd_epi32(acc, a_unsigned, b_signed);
+#else
+  // pmaddubsw: unsigned×signed byte pairs → int16 (adjacent pairs summed)
+  const __m512i prod16 = _mm512_maddubs_epi16(a_unsigned, b_signed);
+  // pmaddwd: adjacent int16 pairs → int32
+  const __m512i prod32 = _mm512_madd_epi16(prod16, _mm512_set1_epi16(1));
+  // Accumulate into int32
+  return _mm512_add_epi32(acc, prod32);
+#endif
+}
+
 // VNNI micro-kernel: accumulate kVnniMq queries × 1 panel.
 // acc[q] accumulates kVnniPoints int32 dot products (one per DB point in panel).
 template<size_t Mq>
@@ -490,8 +506,7 @@ inline void vnni_micro_kernel_1panel(
       // Broadcast 4 query bytes as int32.
       const __m512i qv = _mm512_set1_epi32(
           reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
-      // vpdpbusd: unsigned(b) × signed(qv), accumulate int32.
-      acc[q] = _mm512_dpbusd_epi32(acc[q], b, qv);
+      acc[q] = tq_dpbusd(acc[q], b, qv);
     }
   }
 }
@@ -520,8 +535,8 @@ inline void vnni_micro_kernel_2panel(
     for (size_t q = 0; q < Mq; ++q) {
       const __m512i qv = _mm512_set1_epi32(
           reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
-      acc0[q] = _mm512_dpbusd_epi32(acc0[q], b0, qv);
-      acc1[q] = _mm512_dpbusd_epi32(acc1[q], b1, qv);
+      acc0[q] = tq_dpbusd(acc0[q], b0, qv);
+      acc1[q] = tq_dpbusd(acc1[q], b1, qv);
     }
   }
 }
@@ -562,10 +577,10 @@ inline void vnni_micro_kernel_4panel(
     for (size_t q = 0; q < Mq; ++q) {
       const __m512i qv = _mm512_set1_epi32(
           reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
-      acc0[q] = _mm512_dpbusd_epi32(acc0[q], b0, qv);
-      acc1[q] = _mm512_dpbusd_epi32(acc1[q], b1, qv);
-      acc2[q] = _mm512_dpbusd_epi32(acc2[q], b2, qv);
-      acc3[q] = _mm512_dpbusd_epi32(acc3[q], b3, qv);
+      acc0[q] = tq_dpbusd(acc0[q], b0, qv);
+      acc1[q] = tq_dpbusd(acc1[q], b1, qv);
+      acc2[q] = tq_dpbusd(acc2[q], b2, qv);
+      acc3[q] = tq_dpbusd(acc3[q], b3, qv);
     }
   }
 }
