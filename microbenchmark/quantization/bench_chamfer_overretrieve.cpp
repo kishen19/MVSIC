@@ -1,6 +1,6 @@
 // bench_chamfer_overretrieve.cpp
 //
-// Quality microbenchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant.
+// Quality microbenchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant-4bit vs ByteTQ.
 // Reports average overretrieval (%) needed to achieve target recall@K (e.g. 90%, 95%).
 //
 // For each query cloud:
@@ -54,7 +54,8 @@
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/one_to_many_turboquant.h"
+#include "mvsic/core/quantization/byte_turboquant.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -167,15 +168,19 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   rq_model.train(db, rbits);
   auto rq_db = rq_model.encode(db);
 
-  MultiVecQuantizer<turboquant::Model<Metric>, Metric> tq_model;
+  MultiVecQuantizer<one_to_many_turboquant::Model<Metric>, Metric> tq_model;
   tq_model.train(db);
   auto tq_db = tq_model.encode(db);
+
+  MultiVecQuantizer<byte_turboquant::Model<Metric>, Metric> btq_model;
+  btq_model.train(db);
+  auto btq_db = btq_model.encode(db);
 
   std::vector<std::pair<uint32_t, float>> exact_scores(Nclouds);
   std::vector<std::pair<uint32_t, float>> approx_scores(Nclouds);
 
-  enum Method { PQ = 0, FASTSCAN = 1, RABITQ = 2, TURBOQUANT = 3, NUM_METHODS = 4 };
-  const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant"};
+  enum Method { PQ = 0, FASTSCAN = 1, RABITQ = 2, TURBOQUANT_4BIT = 3, BYTETQ = 4, NUM_METHODS = 5 };
+  const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant-4bit", "ByteTQ"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) {
@@ -229,7 +234,12 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     {
       auto qq = tq_model.quantize_query(queries[qi]);
       tq_db.distances_all(qq, approx_scores.data());
-      eval_method(TURBOQUANT);
+      eval_method(TURBOQUANT_4BIT);
+    }
+    {
+      auto qq = btq_model.quantize_query(queries[qi]);
+      btq_db.distances_all(qq, approx_scores.data());
+      eval_method(BYTETQ);
     }
   }
 

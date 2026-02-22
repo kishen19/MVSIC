@@ -54,10 +54,11 @@ cc_binary(
     name = "bench_chamfer_overretrieve",
     srcs = ["bench_chamfer_overretrieve.cpp"],
     deps = [
+        "//mvsic/core/quantization:byte_turboquant",
         "//mvsic/core/quantization:fastscan",
+        "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:turboquant",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
