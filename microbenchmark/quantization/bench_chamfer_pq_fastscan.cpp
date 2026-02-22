@@ -4,6 +4,9 @@
 // Measures time for "query cloud -> ALL db clouds" using distances_all() for quantized,
 // and PointCloudSet::distances() for exact.
 //
+// FastScan / RaBitQ require AVX-512. On non-AVX512 machines, only Exact, PQ,
+// and TurboQuant are benchmarked.
+//
 // Threads:
 //   PARLAY_NUM_THREADS=16 bazel run //path/to:bench -- [args]
 //
@@ -16,7 +19,7 @@
 //   Synthetic mode (default if -i/-q not provided):
 //     -N_db <u32>      (default 20000)
 //     -N_q  <u32>      (default 200)
-//     -K_db <u32>      (default 64)     // DB vectors per cloud (try multiple of 64)
+//     -K_db <u32>      (default 64)
 //     -D    <u32>      (default 128)
 //     -seed_db <u64>   (default 12345)
 //     -seed_q  <u64>   (default 999)
@@ -24,16 +27,10 @@
 //
 //   Common:
 //     -dist_func <L2|IP> (default L2)
-//     -pq_block <u32>    (default 8)    // dim_per_block for PQ
-//     -fs_block <u32>    (default 8)    // dim_per_block for FastScan
-//     -rbits <u32>       (default 2)    // bits_per_code for RaBitQ
-//     -reps <u32>        (default 3)    // repetitions; report best
-//
-// Notes:
-// - PQ uses K=16 to match FastScan.
-// - Exact uses PointCloudSet::distances() (your OneToMany path).
-// - Quantized uses Quantized_Point_Cloud_Set::distances_all() (wrapper.h).
-// - Training/encoding is now separated: use Quantized_Model<VecModel, Metric>.
+//     -pq_block <u32>    (default 8)
+//     -fs_block <u32>    (default 8)
+//     -rbits <u32>       (default 2)
+//     -reps <u32>        (default 3)
 
 #include <algorithm>
 #include <chrono>
@@ -50,9 +47,11 @@
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
 
+#ifdef __AVX512F__
 #include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
+#endif  // __AVX512F__
+#include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/one_to_many_turboquant.h"
 #include "mvsic/core/quantization/wrapper.h"
@@ -166,6 +165,20 @@ static double bench_quant_all(const QModel& model, const EncSet& qdb, const PCSe
   return best;
 }
 
+// Helper to print a benchmark result.
+static void print_result(const char* label, double best, uint64_t ops, double exact_best) {
+  double dps = double(ops) / best;
+  std::cout << label << ":\n";
+  std::cout << "  total_time : " << best << " s\n";
+  std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
+            << " M cloud-dists/s\n";
+  std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
+            << " ns / cloud-dist\n";
+  if (exact_best > 0) {
+    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact_best / best) << "x\n";
+  }
+}
+
 // ---------------------------
 // Core runner given concrete DB/Q sets
 // ---------------------------
@@ -196,6 +209,11 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
             << std::setprecision(2) << queries.average_size() << "\n";
   std::cout << "pq_block=" << pq_block << "  fs_block=" << fs_block << "  rbits=" << rbits
             << "  dist=" << (Metric ? "L2" : "IP") << "  reps=" << reps << "\n";
+#ifdef __AVX512F__
+  std::cout << "AVX-512: enabled (VNNI GEMM + FastScan + RaBitQ)\n";
+#else
+  std::cout << "AVX-512: NOT available (only Exact + PQ + TurboQuant)\n";
+#endif
 
   // ---------------------------
   // Train + Encode quantized DBs
@@ -215,7 +233,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto pq_db = pq_model.encode(db);
   double pq_encode_s = t.sec();
 
-  // FastScan
+#ifdef __AVX512F__
+  // FastScan (requires AVX-512)
   MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
   t.start();
   fs_model.train(db, fs_block);
@@ -225,7 +244,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto fs_db = fs_model.encode(db);
   double fs_encode_s = t.sec();
 
-  // RaBitQ
+  // RaBitQ (requires AVX-512)
   MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
   t.start();
   rq_model.train(db, rbits);
@@ -234,6 +253,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   t.start();
   auto rq_db = rq_model.encode(db);
   double rq_encode_s = t.sec();
+#endif  // __AVX512F__
 
   // TurboQuant
   MultiVecQuantizer<one_to_many_turboquant::Model<Metric>, Metric> tq_model;
@@ -249,85 +269,50 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
   std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
   std::cout << "PQ(K=16) total   : " << (pq_train_s + pq_encode_s) << " s\n";
+#ifdef __AVX512F__
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
   std::cout << "FastScan encode  : " << fs_encode_s << " s\n";
   std::cout << "FastScan total   : " << (fs_train_s + fs_encode_s) << " s\n";
   std::cout << "RaBitQ train   : " << rq_train_s << " s\n";
   std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
   std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
+#endif
   std::cout << "TurboQuant train : " << tq_train_s << " s\n";
   std::cout << "TurboQuant encode: " << tq_encode_s << " s\n";
   std::cout << "TurboQuant total : " << (tq_train_s + tq_encode_s) << " s\n";
 
   // ---------------------------
   // Benchmark: distances to ALL clouds
-  // ops = (#query_clouds) * (#db_clouds)
   // ---------------------------
   const uint64_t ops = uint64_t(db.size()) * uint64_t(queries.size());
   std::vector<std::pair<uint32_t, float>> results(db.size());
   volatile double sink = 0.0;
 
   std::cout << "\n=== All-cloud distance time (Qclouds * Nclouds) ===\n";
-  double exact;
 
-  {
-    double best = bench_exact_all(db, queries, results, reps, sink);
-    double dps = double(ops) / best;
-    exact = best;
-    std::cout << "Exact (PointCloudSet::distances):\n";
-    std::cout << "  total_time : " << best << " s\n";
-    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
-              << " M cloud-dists/s\n";
-    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
-              << " ns / cloud-dist\n";
-  }
+  double exact_best = bench_exact_all(db, queries, results, reps, sink);
+  print_result("Exact (PointCloudSet::distances)", exact_best, ops, 0);
 
   {
     double best = bench_quant_all(pq_model, pq_db, queries, results, reps, sink);
-    double dps = double(ops) / best;
-    std::cout << "PQ(K=16) (wrapper::distances_all):\n";
-    std::cout << "  total_time : " << best << " s\n";
-    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
-              << " M cloud-dists/s\n";
-    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
-              << " ns / cloud-dist\n";
-    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
+    print_result("PQ(K=16) (wrapper::distances_all)", best, ops, exact_best);
   }
 
+#ifdef __AVX512F__
   {
     double best = bench_quant_all(fs_model, fs_db, queries, results, reps, sink);
-    double dps = double(ops) / best;
-    std::cout << "FastScan(K=16) (wrapper::distances_all):\n";
-    std::cout << "  total_time : " << best << " s\n";
-    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
-              << " M cloud-dists/s\n";
-    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
-              << " ns / cloud-dist\n";
-    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
+    print_result("FastScan(K=16) (wrapper::distances_all)", best, ops, exact_best);
   }
 
   {
     double best = bench_quant_all(rq_model, rq_db, queries, results, reps, sink);
-    double dps = double(ops) / best;
-    std::cout << "RaBitQ (wrapper::distances_all):\n";
-    std::cout << "  total_time : " << best << " s\n";
-    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
-              << " M cloud-dists/s\n";
-    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
-              << " ns / cloud-dist\n";
-    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
+    print_result("RaBitQ (wrapper::distances_all)", best, ops, exact_best);
   }
+#endif  // __AVX512F__
 
   {
     double best = bench_quant_all(tq_model, tq_db, queries, results, reps, sink);
-    double dps = double(ops) / best;
-    std::cout << "TurboQuant (wrapper::distances_all):\n";
-    std::cout << "  total_time : " << best << " s\n";
-    std::cout << "  throughput : " << std::fixed << std::setprecision(3) << (dps / 1e6)
-              << " M cloud-dists/s\n";
-    std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
-              << " ns / cloud-dist\n";
-    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact / best) << "x\n";
+    print_result("TurboQuant (wrapper::distances_all)", best, ops, exact_best);
   }
 
   std::cout << "\n(sink=" << sink << ")\n";

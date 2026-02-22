@@ -10,13 +10,9 @@ build --cxxopt=-DHOMEGROWN   # use the homegrown scheduler
 # build --cxxopt=-DPARLAY_USE_STD_ALLOC # TODO: Try removing this
 build --cxxopt=-pthread      # necessary for homegrown scheduler
 build --cxxopt=-march=native
-# AVX for RaBitQ
-build --cxxopt=-mavx512f
-build --cxxopt=-mavx512vpopcntdq
-# AVX for FastScan
-build --cxxopt=-mavx512bw
-build --cxxopt=-mavx512dq
-build --cxxopt=-mavx512vl
+# AVX-512 flags are handled automatically by -march=native.
+# On Intel (Ice Lake+), this enables avx512f/bw/vl/vnni/vpopcntdq.
+# On AMD (Zen 3), AVX-512 is not available and code is compiled without it.
 
 build --cxxopt=-fvisibility=hidden
 build --cxxopt=-fvisibility-inlines-hidden
