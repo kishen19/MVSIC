@@ -107,7 +107,7 @@ class Quantized_Query_Point_Cloud {
     float total;
     if constexpr (std::is_same_v<QuantizedQueryVec,
                                   byte_turboquant::Quantized_Query<Metric>>) {
-      total = byte_turboquant::chamfer_byte_tq_gemm<Metric>(
+      total = byte_turboquant::chamfer_byte_tq_gemm_512<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
     } else {

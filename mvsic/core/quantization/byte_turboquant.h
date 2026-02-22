@@ -148,7 +148,198 @@ inline float Quantized_Point<Metric>::distance(
 }
 
 // =========================================================================
-// AVX2 GEMM Chamfer kernel (fused: load → maddubs → accumulate)
+// AVX-512 GEMM Chamfer kernel (dpbusd: 16 points per __m512i)
+// =========================================================================
+// Loads two consecutive 8-point groups into 512-bit registers and uses
+// vpdpbusd (VNNI) or emulated maddubs for maximum throughput.
+
+#ifdef __AVX512F__
+
+static constexpr size_t kByteTq512Points = 16;  // int32 lanes in __m512i
+static constexpr size_t kByteTq512Mq = 4;
+
+// AVX-512 dpbusd: native VNNI or emulated.
+inline __m512i byte_tq_dpbusd_512(__m512i acc, __m512i a_unsigned, __m512i b_signed) {
+#ifdef __AVX512VNNI__
+  return _mm512_dpbusd_epi32(acc, a_unsigned, b_signed);
+#else
+  const __m512i prod16 = _mm512_maddubs_epi16(a_unsigned, b_signed);
+  const __m512i prod32 = _mm512_madd_epi16(prod16, _mm512_set1_epi16(1));
+  return _mm512_add_epi32(acc, prod32);
+#endif
+}
+
+// Epilogue: bias correct, float post-transform, update running min (16 points).
+template<bool Metric>
+inline void byte_tq_epilogue_512(
+    __m512i acc, int32_t q_byte_sum, float q_nsf, float q_sqn,
+    const float* norms16, const float* sqn16,
+    __m512& running_min) {
+  const __m512i bias = _mm512_set1_epi32(128 * q_byte_sum);
+  const __m512i corrected = _mm512_sub_epi32(acc, bias);
+
+  __m512 fdot = _mm512_cvtepi32_ps(corrected);
+  const __m512 norm = _mm512_loadu_ps(norms16);
+  const __m512 nsf = _mm512_set1_ps(q_nsf);
+
+  __m512 neg_dot = _mm512_mul_ps(fdot, norm);
+  neg_dot = _mm512_mul_ps(neg_dot, nsf);
+  neg_dot = _mm512_sub_ps(_mm512_setzero_ps(), neg_dot);
+
+  __m512 dist;
+  if constexpr (Metric) {
+    const __m512 sqn_v = _mm512_loadu_ps(sqn16);
+    const __m512 sqn_q = _mm512_set1_ps(q_sqn);
+    dist = _mm512_add_ps(sqn_v, _mm512_add_ps(
+        _mm512_add_ps(neg_dot, neg_dot), sqn_q));
+  } else {
+    dist = neg_dot;
+  }
+
+  running_min = _mm512_min_ps(running_min, dist);
+}
+
+template<bool Metric>
+inline float chamfer_byte_tq_gemm_512(
+    const Quantized_Query<Metric>* const* query_ptrs,
+    size_t num_queries,
+    const uint8_t* strip_data,
+    const float* norms,
+    const float* squared_norms,
+    size_t strip_stride,
+    size_t n_strips,
+    size_t num_bytes_per_point,
+    size_t cloud_size) {
+
+  const size_t padded_dim = num_bytes_per_point;
+  const size_t total_tiles = (padded_dim + 3) / 4;
+  const size_t group8_bytes = total_tiles * 32;         // bytes per 8-pt group
+  const size_t n_groups16 = (cloud_size + kByteTq512Points - 1) / kByteTq512Points;
+
+  // Step 1: query byte sums.
+  thread_local std::vector<int32_t> all_q_byte_sums;
+  all_q_byte_sums.resize(num_queries);
+  for (size_t qi = 0; qi < num_queries; ++qi) {
+    int32_t bsum = 0;
+    for (size_t d = 0; d < padded_dim; ++d)
+      bsum += static_cast<int32_t>(query_ptrs[qi]->query_data[d]);
+    all_q_byte_sums[qi] = bsum;
+  }
+
+  // Step 2: pad norms.
+  const size_t padded_pts = n_groups16 * kByteTq512Points;
+  thread_local std::vector<float> padded_norms;
+  thread_local std::vector<float> padded_sqn;
+  padded_norms.resize(padded_pts);
+  std::memcpy(padded_norms.data(), norms, cloud_size * sizeof(float));
+  std::memset(padded_norms.data() + cloud_size, 0,
+              (padded_pts - cloud_size) * sizeof(float));
+  if constexpr (Metric) {
+    padded_sqn.resize(padded_pts);
+    std::memcpy(padded_sqn.data(), squared_norms, cloud_size * sizeof(float));
+    std::memset(padded_sqn.data() + cloud_size, 0,
+                (padded_pts - cloud_size) * sizeof(float));
+  }
+
+  // Step 3: Score.
+  float total_chamfer = 0.0f;
+  size_t qi = 0;
+
+  for (; qi + kByteTq512Mq <= num_queries; qi += kByteTq512Mq) {
+    __m512 mins[kByteTq512Mq];
+    for (size_t q = 0; q < kByteTq512Mq; ++q)
+      mins[q] = _mm512_set1_ps(std::numeric_limits<float>::max());
+
+    for (size_t g16 = 0; g16 < n_groups16; ++g16) {
+      const size_t point_start = g16 * kByteTq512Points;
+      const size_t strip = point_start / 64;
+      const size_t group8_lo = (point_start % 64) / 8;  // first 8-pt group in strip
+      const uint8_t* base_lo = strip_data + strip * strip_stride +
+                                group8_lo * group8_bytes;
+      const uint8_t* base_hi = base_lo + group8_bytes;   // next 8-pt group
+
+      __m512i acc[kByteTq512Mq];
+      for (size_t q = 0; q < kByteTq512Mq; ++q)
+        acc[q] = _mm512_setzero_si512();
+
+      for (size_t t = 0; t < total_tiles; ++t) {
+        // Load two 32-byte tiles → one 64-byte __m512i (16 points).
+        const __m256i lo = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(base_lo + t * 32));
+        const __m256i hi = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(base_hi + t * 32));
+        const __m512i tile = _mm512_inserti64x4(
+            _mm512_castsi256_si512(lo), hi, 1);
+
+        for (size_t q = 0; q < kByteTq512Mq; ++q) {
+          const __m512i qv = _mm512_set1_epi32(
+              reinterpret_cast<const int32_t*>(
+                  query_ptrs[qi + q]->query_data.data())[t]);
+          acc[q] = byte_tq_dpbusd_512(acc[q], tile, qv);
+        }
+      }
+
+      for (size_t q = 0; q < kByteTq512Mq; ++q) {
+        byte_tq_epilogue_512<Metric>(
+            acc[q], all_q_byte_sums[qi + q],
+            query_ptrs[qi + q]->norm_scaling_factor,
+            query_ptrs[qi + q]->unquantized_squared_norm,
+            padded_norms.data() + g16 * kByteTq512Points,
+            padded_sqn.data() + g16 * kByteTq512Points,
+            mins[q]);
+      }
+    }
+
+    for (size_t q = 0; q < kByteTq512Mq; ++q)
+      total_chamfer += _mm512_reduce_min_ps(mins[q]);
+  }
+
+  // Tail: 1 query at a time.
+  for (; qi < num_queries; ++qi) {
+    __m512 running_min = _mm512_set1_ps(std::numeric_limits<float>::max());
+    const int32_t bsum = all_q_byte_sums[qi];
+    const int8_t* qdata = query_ptrs[qi]->query_data.data();
+
+    for (size_t g16 = 0; g16 < n_groups16; ++g16) {
+      const size_t point_start = g16 * kByteTq512Points;
+      const size_t strip = point_start / 64;
+      const size_t group8_lo = (point_start % 64) / 8;
+      const uint8_t* base_lo = strip_data + strip * strip_stride +
+                                group8_lo * group8_bytes;
+      const uint8_t* base_hi = base_lo + group8_bytes;
+
+      __m512i acc = _mm512_setzero_si512();
+      for (size_t t = 0; t < total_tiles; ++t) {
+        const __m256i lo = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(base_lo + t * 32));
+        const __m256i hi = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(base_hi + t * 32));
+        const __m512i tile = _mm512_inserti64x4(
+            _mm512_castsi256_si512(lo), hi, 1);
+        const __m512i qv = _mm512_set1_epi32(
+            reinterpret_cast<const int32_t*>(qdata)[t]);
+        acc = byte_tq_dpbusd_512(acc, tile, qv);
+      }
+
+      byte_tq_epilogue_512<Metric>(
+          acc, bsum,
+          query_ptrs[qi]->norm_scaling_factor,
+          query_ptrs[qi]->unquantized_squared_norm,
+          padded_norms.data() + g16 * kByteTq512Points,
+          padded_sqn.data() + g16 * kByteTq512Points,
+          running_min);
+    }
+
+    total_chamfer += _mm512_reduce_min_ps(running_min);
+  }
+
+  return total_chamfer;
+}
+
+#endif  // __AVX512F__
+
+// =========================================================================
+// AVX2 GEMM Chamfer kernel (maddubs: 8 points per __m256i, fallback)
 // =========================================================================
 // DB is stored as uint8 (biased +128) in pre-interleaved tile layout.
 // Each tile = 4 dims × 8 points = 32 bytes, already in maddubs order.
