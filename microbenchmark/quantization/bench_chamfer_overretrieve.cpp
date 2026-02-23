@@ -50,6 +50,8 @@
 #include <utility>
 #include <vector>
 
+#include <Eigen/Dense>
+
 #include "parlay/parallel.h"
 
 #include "mvsic/core/quantization/fastscan.h"
@@ -92,6 +94,309 @@ static void fill_random_point_cloud_set(PC& pcs, uint64_t seed, bool l2_normaliz
         v[j] *= inv;
     }
   });
+}
+
+// --------------- PCA helpers ---------------
+
+// Compute PCA projection matrix from the flattened DB vectors.
+// Returns {W (D x pca_dim), mean (D)}.
+template<typename ChPoint>
+static std::pair<Eigen::MatrixXf, Eigen::VectorXf>
+compute_pca(const PointCloudSet<ChPoint>& pcs, uint32_t pca_dim) {
+  const uint32_t D = pcs.get_dims();
+  const size_t N = pcs.total_size();
+  pca_dim = std::min(pca_dim, D);
+
+  // Map all vectors into an Eigen matrix (N x D).
+  Eigen::MatrixXf X(N, D);
+  const float* base = pcs.data();
+  for (size_t i = 0; i < N; ++i)
+    for (uint32_t j = 0; j < D; ++j)
+      X(i, j) = base[i * D + j];
+
+  // Center.
+  Eigen::VectorXf mean = X.colwise().mean();          // (D,)
+  X.rowwise() -= mean.transpose();
+
+  // Covariance-based PCA (D x D covariance, D is typically 128).
+  Eigen::MatrixXf cov = (X.transpose() * X) / float(N); // (D x D)
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXf> eig(cov);
+  // Eigenvalues are ascending; take the last pca_dim columns.
+  Eigen::MatrixXf W = eig.eigenvectors().rightCols(pca_dim); // (D x pca_dim)
+
+  std::cout << "PCA: " << D << "d -> " << pca_dim << "d  (" << N << " training vectors)\n";
+  return {W, mean};
+}
+
+// Project a PointCloudSet through PCA, returning a new set with dim=pca_dim.
+template<typename ChPoint>
+static PointCloudSet<ChPoint>
+project_pcs(const PointCloudSet<ChPoint>& pcs, const Eigen::MatrixXf& W,
+            const Eigen::VectorXf& mean, uint32_t pca_dim) {
+  const uint32_t D_in  = pcs.get_dims();
+  const size_t Nclouds = pcs.size();
+
+  // Build offsets in the projected space (in float counts, not byte counts).
+  std::vector<size_t> new_offsets(Nclouds + 1);
+  new_offsets[0] = 0;
+  for (size_t i = 0; i < Nclouds; ++i)
+    new_offsets[i + 1] = new_offsets[i] + size_t(pcs.get_size(i)) * pca_dim;
+
+  const size_t total_coords = new_offsets[Nclouds];
+  std::vector<float> proj_vals(total_coords);
+
+  // Project every vector: v_proj = (v - mean)^T * W
+  parlay::parallel_for(0, Nclouds, [&](size_t ci) {
+    const uint32_t K_ci = pcs.get_size(ci);
+    const float* src = pcs.data(ci);
+    float* dst = proj_vals.data() + new_offsets[ci];
+    Eigen::Map<const Eigen::MatrixXf> Vsrc(src, K_ci, D_in);  // row-major natural
+    // Manually center + project row by row (avoids temp allocation).
+    for (uint32_t r = 0; r < K_ci; ++r) {
+      Eigen::Map<const Eigen::VectorXf> v(src + size_t(r) * D_in, D_in);
+      Eigen::Map<Eigen::VectorXf> out(dst + size_t(r) * pca_dim, pca_dim);
+      out.noalias() = W.transpose() * (v - mean);
+    }
+  });
+
+  // Build ids.
+  std::vector<uint32_t> new_ids(Nclouds);
+  for (size_t i = 0; i < Nclouds; ++i) new_ids[i] = pcs.get_id(i);
+
+  return PointCloudSet<ChPoint>(static_cast<uint32_t>(Nclouds), pca_dim,
+                                proj_vals.data(), new_offsets.data(), new_ids.data());
+}
+
+// --------------- Low-bit TurboQuant (scalar, quality-only) ---------------
+// Reuses TQ rotation+normalization but quantizes each coordinate to fewer bits.
+// 1-bit: sign only (2 centroids: ±0.7979). Storage: D/8 bytes.
+// 2-bit: sign + 2 magnitude levels (4 centroids). Storage: D/4 bytes.
+
+// Optimal Lloyd-Max codebook for N(0,1), 1-bit (2 levels):
+//   Centroids: ±E[|X|] = ±0.7978845608 (≈0.7979)
+//   Boundary: 0
+static constexpr float k1BitCentroid = 0.7978845608f;
+
+// Optimal Lloyd-Max codebook for N(0,1), 2-bit (4 levels):
+//   Boundaries: 0, 0.9816 (and negatives by symmetry)
+//   Centroids: ±0.4528, ±1.5104
+static constexpr float k2BitBoundary = 0.9816f;
+static constexpr std::array<float, 4> k2BitCentroids = {
+    0.4528f, 1.5104f, -0.4528f, -1.5104f};
+
+// Encoded DB for low-bit TQ: one entry per vector.
+struct LowBitTQ_Vec {
+  std::vector<uint8_t> packed_codes;  // bit-packed codes
+  float norm_scaling_factor = 0.0f;
+  float unquantized_squared_norm = 0.0f;
+};
+
+// Encoded query for low-bit TQ.
+struct LowBitTQ_Query {
+  std::vector<float> rotated;  // rotated+normalized+scaled float coordinates
+  float squared_norm = 0.0f;
+};
+
+// Encode a single float-vector into 1-bit codes.
+// Returns the encoded vector struct.
+template<typename TQModel>
+inline LowBitTQ_Vec encode_1bit(
+    const TQModel& model,
+    const float* p, std::vector<float>& ws) {
+  LowBitTQ_Vec out;
+  const size_t pdim = model.padded_dim;
+  ws.resize(pdim);
+
+  // rotate
+  model.rotator->rotate(p, ws.data());
+
+  // compute norm
+  float sqr_norm = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  out.unquantized_squared_norm = sqr_norm;
+  if (sqr_norm == 0.0f) {
+    out.packed_codes.resize((pdim + 7) / 8, 0);
+    out.norm_scaling_factor = 0.0f;
+    return out;
+  }
+
+  // normalize and scale
+  const float norm = std::sqrt(sqr_norm);
+  const float inv_norm = 1.0f / norm;
+  const float had_scale = std::sqrt(static_cast<float>(pdim));
+  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+
+  // quantize: sign only
+  const size_t nbytes = (pdim + 7) / 8;
+  out.packed_codes.resize(nbytes, 0);
+  float q_sqr = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) {
+    if (ws[i] >= 0.0f)
+      out.packed_codes[i / 8] |= (1u << (i % 8));
+    // quantized centroid magnitude is k1BitCentroid for all dims
+    q_sqr += k1BitCentroid * k1BitCentroid;
+  }
+
+  out.norm_scaling_factor = norm / std::sqrt(q_sqr);
+  return out;
+}
+
+// Encode a single float-vector into 2-bit codes.
+template<typename TQModel>
+inline LowBitTQ_Vec encode_2bit(
+    const TQModel& model,
+    const float* p, std::vector<float>& ws) {
+  LowBitTQ_Vec out;
+  const size_t pdim = model.padded_dim;
+  ws.resize(pdim);
+
+  model.rotator->rotate(p, ws.data());
+
+  float sqr_norm = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  out.unquantized_squared_norm = sqr_norm;
+  if (sqr_norm == 0.0f) {
+    out.packed_codes.resize((pdim + 3) / 4, 0);
+    out.norm_scaling_factor = 0.0f;
+    return out;
+  }
+
+  const float norm = std::sqrt(sqr_norm);
+  const float inv_norm = 1.0f / norm;
+  const float had_scale = std::sqrt(static_cast<float>(pdim));
+  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+
+  // quantize: 2-bit (4 levels)
+  // Code layout: 0 = +small, 1 = +large, 2 = -small, 3 = -large
+  const size_t nbytes = (pdim + 3) / 4;
+  out.packed_codes.resize(nbytes, 0);
+  float q_sqr = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) {
+    float x = ws[i];
+    float ax = std::abs(x);
+    uint8_t code;
+    if (x >= 0.0f) {
+      code = (ax < k2BitBoundary) ? 0 : 1;
+    } else {
+      code = (ax < k2BitBoundary) ? 2 : 3;
+    }
+    q_sqr += k2BitCentroids[code] * k2BitCentroids[code];
+    out.packed_codes[i / 4] |= (code << (2 * (i % 4)));
+  }
+
+  out.norm_scaling_factor = norm / std::sqrt(q_sqr);
+  return out;
+}
+
+// Prepare query for low-bit TQ (just store rotated+normalized+scaled floats).
+template<typename TQModel>
+inline LowBitTQ_Query prepare_lowbit_query(
+    const TQModel& model,
+    const float* qptr) {
+  LowBitTQ_Query qq;
+  const size_t pdim = model.padded_dim;
+  qq.rotated.resize(pdim);
+
+  model.rotator->rotate(qptr, qq.rotated.data());
+
+  float sqr_norm = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) sqr_norm += qq.rotated[i] * qq.rotated[i];
+  qq.squared_norm = sqr_norm;
+
+  if (sqr_norm == 0.0f) return qq;
+
+  const float norm = std::sqrt(sqr_norm);
+  const float inv_norm = 1.0f / norm;
+  const float had_scale = std::sqrt(static_cast<float>(pdim));
+  for (size_t i = 0; i < pdim; ++i) qq.rotated[i] *= inv_norm * had_scale;
+
+  return qq;
+}
+
+// Scalar distance: 1-bit encoded point vs float query.
+inline float distance_1bit(
+    const LowBitTQ_Vec& db_pt, const LowBitTQ_Query& qq, size_t pdim, bool metric) {
+  // IP = sum_i (centroid_i * q_rot_i) * nsf_db
+  // centroid_i = ±k1BitCentroid (sign from bit)
+  float dot = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) {
+    bool positive = (db_pt.packed_codes[i / 8] >> (i % 8)) & 1;
+    float c = positive ? k1BitCentroid : -k1BitCentroid;
+    dot += c * qq.rotated[i];
+  }
+
+  // Post-transform (same as TQ):
+  // neg_ip = -(dot * nsf_db) ... but we also need nsf_query.
+  // However, the query here is float (not quantized); its "nsf" = norm / sqrt(q_rot_sq_norm).
+  // q_rot_sq_norm = sum(q_rot_i^2). After normalizing by inv_norm * had_scale:
+  //   q_rot ∝ 1/norm * sqrt(pdim), so sum(q_rot^2) = pdim.
+  //   Actually no — sq_norm of the scaled rotated = pdim (since unit-norm after normalize,
+  //   then scaled by sqrt(pdim)).
+  // So effectively nsf_query = norm / sqrt(pdim). But we compute dot with the scaled
+  // q_rot directly, so the dot is already in the "int" centroids * float query scale.
+  // Actually: the analogy to TQ is:
+  //   true_ip ≈ dot_quantized * nsf_db * nsf_query
+  // where nsf_query normalizes the query quantization. For float query, there's no
+  // query quantization error. The dot we computed is:
+  //   dot = sum( centroid_i * q_rot_i )  where q_rot is normalized+scaled
+  // In TQ language: centroid is the "int" centroid value (float scale), q_rot is the float.
+  // The true IP ≈ dot * nsf_db * nsf_query_float.
+  // nsf_query_float = query_norm / sqrt(sum_i q_rot_i^2) = query_norm / sqrt(pdim).
+  // But sum(q_rot_i^2) = pdim exactly (for unit-norm input).
+
+  float query_norm = std::sqrt(qq.squared_norm);
+  float nsf_query = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
+
+  float neg_ip = -(dot * db_pt.norm_scaling_factor * nsf_query);
+
+  if (metric) {
+    return db_pt.unquantized_squared_norm + 2.0f * neg_ip + qq.squared_norm;
+  }
+  return neg_ip;
+}
+
+// Scalar distance: 2-bit encoded point vs float query.
+inline float distance_2bit(
+    const LowBitTQ_Vec& db_pt, const LowBitTQ_Query& qq, size_t pdim, bool metric) {
+  float dot = 0.0f;
+  for (size_t i = 0; i < pdim; ++i) {
+    uint8_t code = (db_pt.packed_codes[i / 4] >> (2 * (i % 4))) & 0x3;
+    dot += k2BitCentroids[code] * qq.rotated[i];
+  }
+
+  float query_norm = std::sqrt(qq.squared_norm);
+  float nsf_query = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
+
+  float neg_ip = -(dot * db_pt.norm_scaling_factor * nsf_query);
+
+  if (metric) {
+    return db_pt.unquantized_squared_norm + 2.0f * neg_ip + qq.squared_norm;
+  }
+  return neg_ip;
+}
+
+// Chamfer distance using low-bit TQ.
+// db_vecs: pre-encoded DB cloud vectors (jagged, indexed by cloud_offsets).
+template<typename ChPoint>
+static float lowbit_chamfer(
+    const std::vector<LowBitTQ_Vec>& db_vecs,
+    size_t db_start, size_t db_count,
+    const std::vector<LowBitTQ_Query>& q_vecs,
+    size_t q_start, size_t q_count,
+    size_t pdim, bool metric,
+    bool use_2bit) {
+  float total = 0.0f;
+  for (size_t qi = 0; qi < q_count; ++qi) {
+    float best = std::numeric_limits<float>::max();
+    for (size_t di = 0; di < db_count; ++di) {
+      float d = use_2bit
+          ? distance_2bit(db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric)
+          : distance_1bit(db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric);
+      if (d < best) best = d;
+    }
+    total += best;
+  }
+  return total / static_cast<float>(q_count);
 }
 
 static std::vector<uint32_t> default_K_grid(uint32_t Kmax) {
@@ -165,7 +470,8 @@ static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(co
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t pq_k, uint32_t fs_block, uint32_t rbits,
-                         uint32_t Kmax, float rec99, const char* gt_file = nullptr) {
+                         uint32_t Kmax, float rec99, uint32_t pca_dim = 40,
+                         const char* gt_file = nullptr) {
   constexpr bool Metric = ChPoint::is_metric();
 
   const uint32_t D = db.get_dims();
@@ -222,6 +528,35 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   btq_model.train(db);
   auto btq_db = btq_model.encode(db);
 
+  // PCA: fit on DB, project both DB and queries.
+  auto [pca_W, pca_mean] = compute_pca(db, pca_dim);
+  auto pca_db = project_pcs(db, pca_W, pca_mean, pca_dim);
+  auto pca_queries = project_pcs(queries, pca_W, pca_mean, pca_dim);
+
+  // Low-bit TQ: encode all DB and query vectors (flattened).
+  // We access the inner TQ model to get the rotator.
+  const auto& tq_inner = tq_model.vec_model;
+  const size_t pdim = tq_inner.padded_dim;
+
+  // Encode all DB vectors (flattened).
+  const size_t total_db_vecs = db.total_size();
+  std::vector<LowBitTQ_Vec> db_1bit(total_db_vecs), db_2bit(total_db_vecs);
+  {
+    std::cout << "Encoding DB for 1-bit and 2-bit TQ (" << total_db_vecs << " vecs)..." << std::endl;
+    parlay::parallel_for(0, total_db_vecs, [&](size_t vi) {
+      static thread_local std::vector<float> ws;
+      const float* p = db.data() + vi * D;
+      db_1bit[vi] = encode_1bit(tq_inner, p, ws);
+      db_2bit[vi] = encode_2bit(tq_inner, p, ws);
+    });
+  }
+
+  // Build per-cloud offsets into the flattened vector.
+  std::vector<size_t> db_cloud_starts(Nclouds + 1);
+  db_cloud_starts[0] = 0;
+  for (size_t i = 0; i < Nclouds; ++i)
+    db_cloud_starts[i + 1] = db_cloud_starts[i] + db.get_size(i);
+
   std::vector<std::pair<uint32_t, float>> exact_scores(Nclouds);
   std::vector<std::pair<uint32_t, float>> approx_scores(Nclouds);
 
@@ -231,17 +566,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     gt_data = load_ground_truth(gt_file, Qclouds, Kmax);
   }
 
-  enum Method {
-    PQ = 0,
-    FASTSCAN = 1,
-    RABITQ = 2,
-    TURBOQUANT_4BIT = 3,
-    BYTETQ = 4,
-    TQ_SCALAR = 5,
-    NUM_METHODS = 6
-  };
-  const char* method_names[NUM_METHODS] = {"PQ",     "FastScan", "RaBitQ", "TurboQuant-4bit",
-                                           "ByteTQ", "TQ-Scalar"};
+  enum Method { PQ = 0, FASTSCAN = 1, RABITQ = 2, TURBOQUANT_4BIT = 3, BYTETQ = 4, TQ_SCALAR = 5, PCA_METHOD = 6, TQ_1BIT = 7, TQ_2BIT = 8, NUM_METHODS = 9 };
+  std::string pca_label = "PCA-" + std::to_string(pca_dim) + "d";
+  const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant-4bit", "ByteTQ", "TQ-Scalar",
+                                           pca_label.c_str(), "TQ-1bit", "TQ-2bit"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
@@ -314,13 +642,47 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     std::cout << "Running TQ scalar." << std::endl;
     // TQ-Scalar: same encoding as TQ4 but using per-point scalar distance
     // instead of VNNI GEMM batch distance. Isolates GEMM kernel issues.
+//    {
+//      auto qq = tq_model.quantize_query(queries[qi]);
+//      parlay::parallel_for(0, Nclouds, [&](size_t cid) {
+//        float d = qq.distance_perpoint(tq_db[cid]);
+//        approx_scores[cid] = {static_cast<uint32_t>(cid), d};
+//      });
+//      eval_method(TQ_SCALAR);
+//    }
+
+    // PCA: exact Chamfer distance in reduced dimensionality.
     {
-      auto qq = tq_model.quantize_query(queries[qi]);
+      pca_db.distances(pca_queries[qi], approx_scores.data());
+      eval_method(PCA_METHOD);
+    }
+
+    // Low-bit TQ: encode query cloud, compute chamfer distances.
+    {
+      const auto& qcloud = queries[qi];
+      const size_t nq = qcloud.size();
+      std::vector<LowBitTQ_Query> q_lowbit(nq);
+      for (size_t v = 0; v < nq; ++v) {
+        q_lowbit[v] = prepare_lowbit_query(tq_inner, qcloud.data(v));
+      }
+
+      // 1-bit chamfer distance to each DB cloud.
       parlay::parallel_for(0, Nclouds, [&](size_t cid) {
-        float d = qq.distance_perpoint(tq_db[cid]);
+        float d = lowbit_chamfer<ChPoint>(
+            db_1bit, db_cloud_starts[cid], db.get_size(cid),
+            q_lowbit, 0, nq, pdim, Metric, /*use_2bit=*/false);
         approx_scores[cid] = {static_cast<uint32_t>(cid), d};
       });
-      eval_method(TQ_SCALAR);
+      eval_method(TQ_1BIT);
+
+      // 2-bit chamfer distance to each DB cloud.
+      parlay::parallel_for(0, Nclouds, [&](size_t cid) {
+        float d = lowbit_chamfer<ChPoint>(
+            db_2bit, db_cloud_starts[cid], db.get_size(cid),
+            q_lowbit, 0, nq, pdim, Metric, /*use_2bit=*/true);
+        approx_scores[cid] = {static_cast<uint32_t>(cid), d};
+      });
+      eval_method(TQ_2BIT);
     }
   }
 
@@ -344,7 +706,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
                      uint64_t seed_q, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
-                     uint32_t rbits, uint32_t Kmax, float rec99) {
+                     uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -358,12 +720,13 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
   return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99,
-                                /*gt_file=*/nullptr);
+                                pca_dim, /*gt_file=*/nullptr);
 }
 
 template<typename ChPoint>
 static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
-                     uint32_t rbits, uint32_t Kmax, float rec99, const char* gt_file) {
+                     uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim,
+                     const char* gt_file) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -387,7 +750,8 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99, gt_file);
+  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99,
+                                pca_dim, gt_file);
 }
 
 int main(int argc, char** argv) {
@@ -395,7 +759,7 @@ int main(int argc, char** argv) {
                 "[-i <dbFile>] [-q <qFile>] [-mm] [-gt <gtFile>] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-pq_block <b>] [-pq_k <k>] [-fs_block <b>] [-rbits <b>] "
-                "[-Kmax <k>] [-rec99 <f>]");
+                "[-Kmax <k>] [-rec99 <f>] [-pca_dim <d>]");
 
   std::string df = P.getOptionValue("-dist_func", "L2");
   uint32_t pq_block = static_cast<uint32_t>(P.getOptionIntValue("-pq_block", 8));
@@ -404,6 +768,7 @@ int main(int argc, char** argv) {
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
   uint32_t Kmax = static_cast<uint32_t>(P.getOptionIntValue("-Kmax", 100));
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
+  uint32_t pca_dim = static_cast<uint32_t>(P.getOptionIntValue("-pca_dim", 40));
   const char* gt_file = P.getOptionValue("-gt");
 
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
@@ -413,8 +778,8 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (df == "IP" || df == "ip")
-      return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, gt_file);
-    return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, gt_file);
+      return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim, gt_file);
+    return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim, gt_file);
   }
 
   uint32_t N_db = static_cast<uint32_t>(P.getOptionIntValue("-N_db", 20000));
@@ -428,9 +793,9 @@ int main(int argc, char** argv) {
   if (char* s = P.getOptionValue("-seed_q")) seed_q = static_cast<uint64_t>(std::stoull(s));
 
   if (df == "IP" || df == "ip") {
-    return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
-                                      rbits, Kmax, rec99);
+    return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k,
+                                      fs_block, rbits, Kmax, rec99, pca_dim);
   }
   return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
-                                    rbits, Kmax, rec99);
+                                    rbits, Kmax, rec99, pca_dim);
 }
