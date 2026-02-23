@@ -167,216 +167,14 @@ project_pcs(const PointCloudSet<ChPoint>& pcs, const Eigen::MatrixXf& W,
                                 proj_vals.data(), new_offsets.data(), new_ids.data());
 }
 
-// --------------- Low-bit TurboQuant (scalar, quality-only) ---------------
-// Reuses TQ rotation+normalization but quantizes each coordinate to fewer bits.
-// 1-bit: sign only (2 centroids: ±0.7979). Storage: D/8 bytes.
-// 2-bit: sign + 2 magnitude levels (4 centroids). Storage: D/4 bytes.
+// Low-bit TurboQuant: shared header for 1-bit and 2-bit quality methods.
+#include "mvsic/core/quantization/low_bit_turboquant.h"
 
-// Optimal Lloyd-Max codebook for N(0,1), 1-bit (2 levels):
-//   Centroids: ±E[|X|] = ±0.7978845608 (≈0.7979)
-//   Boundary: 0
-static constexpr float k1BitCentroid = 0.7978845608f;
-
-// Optimal Lloyd-Max codebook for N(0,1), 2-bit (4 levels):
-//   Boundaries: 0, 0.9816 (and negatives by symmetry)
-//   Centroids: ±0.4528, ±1.5104
-static constexpr float k2BitBoundary = 0.9816f;
-static constexpr std::array<float, 4> k2BitCentroids = {
-    0.4528f, 1.5104f, -0.4528f, -1.5104f};
-
-// Encoded DB for low-bit TQ: one entry per vector.
-struct LowBitTQ_Vec {
-  std::vector<uint8_t> packed_codes;  // bit-packed codes
-  float norm_scaling_factor = 0.0f;
-  float unquantized_squared_norm = 0.0f;
-};
-
-// Encoded query for low-bit TQ.
-struct LowBitTQ_Query {
-  std::vector<float> rotated;  // rotated+normalized+scaled float coordinates
-  float squared_norm = 0.0f;
-};
-
-// Encode a single float-vector into 1-bit codes.
-// Returns the encoded vector struct.
-template<typename TQModel>
-inline LowBitTQ_Vec encode_1bit(
-    const TQModel& model,
-    const float* p, std::vector<float>& ws) {
-  LowBitTQ_Vec out;
-  const size_t pdim = model.padded_dim;
-  ws.resize(pdim);
-
-  // rotate
-  model.rotator->rotate(p, ws.data());
-
-  // compute norm
-  float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
-  out.unquantized_squared_norm = sqr_norm;
-  if (sqr_norm == 0.0f) {
-    out.packed_codes.resize((pdim + 7) / 8, 0);
-    out.norm_scaling_factor = 0.0f;
-    return out;
-  }
-
-  // normalize and scale
-  const float norm = std::sqrt(sqr_norm);
-  const float inv_norm = 1.0f / norm;
-  const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
-
-  // quantize: sign only
-  const size_t nbytes = (pdim + 7) / 8;
-  out.packed_codes.resize(nbytes, 0);
-  float q_sqr = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) {
-    if (ws[i] >= 0.0f)
-      out.packed_codes[i / 8] |= (1u << (i % 8));
-    // quantized centroid magnitude is k1BitCentroid for all dims
-    q_sqr += k1BitCentroid * k1BitCentroid;
-  }
-
-  out.norm_scaling_factor = norm / std::sqrt(q_sqr);
-  return out;
-}
-
-// Encode a single float-vector into 2-bit codes.
-template<typename TQModel>
-inline LowBitTQ_Vec encode_2bit(
-    const TQModel& model,
-    const float* p, std::vector<float>& ws) {
-  LowBitTQ_Vec out;
-  const size_t pdim = model.padded_dim;
-  ws.resize(pdim);
-
-  model.rotator->rotate(p, ws.data());
-
-  float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
-  out.unquantized_squared_norm = sqr_norm;
-  if (sqr_norm == 0.0f) {
-    out.packed_codes.resize((pdim + 3) / 4, 0);
-    out.norm_scaling_factor = 0.0f;
-    return out;
-  }
-
-  const float norm = std::sqrt(sqr_norm);
-  const float inv_norm = 1.0f / norm;
-  const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
-
-  // quantize: 2-bit (4 levels)
-  // Code layout: 0 = +small, 1 = +large, 2 = -small, 3 = -large
-  const size_t nbytes = (pdim + 3) / 4;
-  out.packed_codes.resize(nbytes, 0);
-  float q_sqr = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) {
-    float x = ws[i];
-    float ax = std::abs(x);
-    uint8_t code;
-    if (x >= 0.0f) {
-      code = (ax < k2BitBoundary) ? 0 : 1;
-    } else {
-      code = (ax < k2BitBoundary) ? 2 : 3;
-    }
-    q_sqr += k2BitCentroids[code] * k2BitCentroids[code];
-    out.packed_codes[i / 4] |= (code << (2 * (i % 4)));
-  }
-
-  out.norm_scaling_factor = norm / std::sqrt(q_sqr);
-  return out;
-}
-
-// Prepare query for low-bit TQ (just store rotated+normalized+scaled floats).
-template<typename TQModel>
-inline LowBitTQ_Query prepare_lowbit_query(
-    const TQModel& model,
-    const float* qptr) {
-  LowBitTQ_Query qq;
-  const size_t pdim = model.padded_dim;
-  qq.rotated.resize(pdim);
-
-  model.rotator->rotate(qptr, qq.rotated.data());
-
-  float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += qq.rotated[i] * qq.rotated[i];
-  qq.squared_norm = sqr_norm;
-
-  if (sqr_norm == 0.0f) return qq;
-
-  const float norm = std::sqrt(sqr_norm);
-  const float inv_norm = 1.0f / norm;
-  const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) qq.rotated[i] *= inv_norm * had_scale;
-
-  return qq;
-}
-
-// Scalar distance: 1-bit encoded point vs float query.
-inline float distance_1bit(
-    const LowBitTQ_Vec& db_pt, const LowBitTQ_Query& qq, size_t pdim, bool metric) {
-  // IP = sum_i (centroid_i * q_rot_i) * nsf_db
-  // centroid_i = ±k1BitCentroid (sign from bit)
-  float dot = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) {
-    bool positive = (db_pt.packed_codes[i / 8] >> (i % 8)) & 1;
-    float c = positive ? k1BitCentroid : -k1BitCentroid;
-    dot += c * qq.rotated[i];
-  }
-
-  // Post-transform (same as TQ):
-  // neg_ip = -(dot * nsf_db) ... but we also need nsf_query.
-  // However, the query here is float (not quantized); its "nsf" = norm / sqrt(q_rot_sq_norm).
-  // q_rot_sq_norm = sum(q_rot_i^2). After normalizing by inv_norm * had_scale:
-  //   q_rot ∝ 1/norm * sqrt(pdim), so sum(q_rot^2) = pdim.
-  //   Actually no — sq_norm of the scaled rotated = pdim (since unit-norm after normalize,
-  //   then scaled by sqrt(pdim)).
-  // So effectively nsf_query = norm / sqrt(pdim). But we compute dot with the scaled
-  // q_rot directly, so the dot is already in the "int" centroids * float query scale.
-  // Actually: the analogy to TQ is:
-  //   true_ip ≈ dot_quantized * nsf_db * nsf_query
-  // where nsf_query normalizes the query quantization. For float query, there's no
-  // query quantization error. The dot we computed is:
-  //   dot = sum( centroid_i * q_rot_i )  where q_rot is normalized+scaled
-  // In TQ language: centroid is the "int" centroid value (float scale), q_rot is the float.
-  // The true IP ≈ dot * nsf_db * nsf_query_float.
-  // nsf_query_float = query_norm / sqrt(sum_i q_rot_i^2) = query_norm / sqrt(pdim).
-  // But sum(q_rot_i^2) = pdim exactly (for unit-norm input).
-
-  float query_norm = std::sqrt(qq.squared_norm);
-  float nsf_query = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
-
-  float neg_ip = -(dot * db_pt.norm_scaling_factor * nsf_query);
-
-  if (metric) {
-    return db_pt.unquantized_squared_norm + 2.0f * neg_ip + qq.squared_norm;
-  }
-  return neg_ip;
-}
-
-// Scalar distance: 2-bit encoded point vs float query.
-inline float distance_2bit(
-    const LowBitTQ_Vec& db_pt, const LowBitTQ_Query& qq, size_t pdim, bool metric) {
-  float dot = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) {
-    uint8_t code = (db_pt.packed_codes[i / 4] >> (2 * (i % 4))) & 0x3;
-    dot += k2BitCentroids[code] * qq.rotated[i];
-  }
-
-  float query_norm = std::sqrt(qq.squared_norm);
-  float nsf_query = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
-
-  float neg_ip = -(dot * db_pt.norm_scaling_factor * nsf_query);
-
-  if (metric) {
-    return db_pt.unquantized_squared_norm + 2.0f * neg_ip + qq.squared_norm;
-  }
-  return neg_ip;
-}
+using LowBitTQ_Vec = mvsic::low_bit_turboquant::EncodedVec;
+using LowBitTQ_Query = mvsic::low_bit_turboquant::PreparedQuery;
 
 // Chamfer distance using low-bit TQ.
-// db_vecs: pre-encoded DB cloud vectors (jagged, indexed by cloud_offsets).
+// db_vecs: pre-encoded flat vector array, indexed by cloud_offsets.
 template<typename ChPoint>
 static float lowbit_chamfer(
     const std::vector<LowBitTQ_Vec>& db_vecs,
@@ -390,14 +188,15 @@ static float lowbit_chamfer(
     float best = std::numeric_limits<float>::max();
     for (size_t di = 0; di < db_count; ++di) {
       float d = use_2bit
-          ? distance_2bit(db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric)
-          : distance_1bit(db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric);
+          ? mvsic::low_bit_turboquant::distance_2bit(db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric)
+          : mvsic::low_bit_turboquant::distance_1bit(db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric);
       if (d < best) best = d;
     }
     total += best;
   }
   return total / static_cast<float>(q_count);
 }
+
 
 static std::vector<uint32_t> default_K_grid(uint32_t Kmax) {
   std::vector<uint32_t> ks = {1, 5, 10, 20, 50, 100};
@@ -546,8 +345,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     parlay::parallel_for(0, total_db_vecs, [&](size_t vi) {
       static thread_local std::vector<float> ws;
       const float* p = db.data() + vi * D;
-      db_1bit[vi] = encode_1bit(tq_inner, p, ws);
-      db_2bit[vi] = encode_2bit(tq_inner, p, ws);
+      db_1bit[vi] = mvsic::low_bit_turboquant::encode_1bit(tq_inner, p, ws);
+      db_2bit[vi] = mvsic::low_bit_turboquant::encode_2bit(tq_inner, p, ws);
     });
   }
 
@@ -663,7 +462,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       const size_t nq = qcloud.size();
       std::vector<LowBitTQ_Query> q_lowbit(nq);
       for (size_t v = 0; v < nq; ++v) {
-        q_lowbit[v] = prepare_lowbit_query(tq_inner, qcloud.data(v));
+        q_lowbit[v] = mvsic::low_bit_turboquant::prepare_query(tq_inner, qcloud.data(v));
       }
 
       // 1-bit chamfer distance to each DB cloud.

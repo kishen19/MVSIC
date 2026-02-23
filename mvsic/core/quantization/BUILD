@@ -57,6 +57,11 @@ cc_library(
 )
 
 cc_library(
+    name = "low_bit_turboquant",
+    hdrs = ["low_bit_turboquant.h"],
+)
+
+cc_library(
     name = "scann",
     hdrs = ["scann.h"],
     deps = [

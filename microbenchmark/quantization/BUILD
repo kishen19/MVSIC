@@ -42,6 +42,7 @@ cc_binary(
     deps = [
         "//mvsic/core/quantization:byte_turboquant",
         "//mvsic/core/quantization:fastscan",
+        "//mvsic/core/quantization:low_bit_turboquant",
         "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
@@ -98,6 +99,7 @@ cc_binary(
     deps = [
         "//mvsic/core:stats",
         "//mvsic/core/quantization:byte_turboquant",
+        "//mvsic/core/quantization:low_bit_turboquant",
         "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/types:ip_point",
