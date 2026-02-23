@@ -52,9 +52,18 @@ static constexpr std::array<float, 8> kSquaredCentroidsMag = {
     0.00413358f, 0.03732943f, 0.10520603f, 0.21032069f,
     0.35407575f, 0.53961036f, 0.76803890f, 1.04275720f};
 
+// Squared int8 centroids for norm_scaling_factor computation.
+// Must match the scale used in the scoring kernel (kTurboQuantCentroidsInt8).
+// Values from reference implementation.
+static constexpr std::array<float, 8> kSquaredCentroidsInt8 = {
+    35.66f, 320.92f, 951.87f, 1917.61f,
+    3332.04f, 5571.56f, 9128.44f, 15975.76f};
+
+// Reference boundaries: midpoints between abs(int8 centroids), scaled to
+// match ~N(0,1) coordinate distribution after unnormalized Hadamard rotation.
 static constexpr std::array<float, 7> kBoundaries = {
-    0.12875060f, 0.39148653f, 0.66481236f, 0.94876383f,
-    1.25821375f, 1.62382795f, 2.09153930f};
+    0.2581972f, 0.5271527f, 0.806866f, 1.097338f,
+    1.430843f, 1.839655f, 2.399083f};
 
 static constexpr float kValueCap = 3.91724f;
 static constexpr size_t kStripSize = 64;
@@ -1336,14 +1345,17 @@ class Model {
     }
   }
 
- private:
+ public:  // encode_single is public for debugging.
   // Encode a single point into per-point contiguous bytes.
   // Returns {squared_norm, norm_scaling_factor}.
+  // Order: rotate → normalize → scale(√d) → quantize (matches tq_reference).
   std::pair<float, float> encode_single(
       const float* p, uint8_t* output,
       std::vector<float>& ws) const {
+    // Step 1: rotate (handles dim → padded_dim padding internally).
     rotator->rotate(p, ws.data());
 
+    // Step 2: compute norm of rotated vector.
     float sqr_norm = 0.0f;
     for (size_t i = 0; i < padded_dim; ++i)
       sqr_norm += ws[i] * ws[i];
@@ -1353,15 +1365,23 @@ class Model {
       return {0.0f, 0.0f};
     }
 
+    // Step 3: normalize to unit norm.
     const float norm = std::sqrt(sqr_norm);
     const float inv_norm = 1.0f / norm;
     for (size_t i = 0; i < padded_dim; ++i)
-      ws[i] = ws[i] * signs[i] * inv_norm;
+      ws[i] *= inv_norm;
 
+    // Step 4: scale by √padded_dim to match reference coordinate distribution.
+    // Our rotation is norm-preserving (coords ~N(0, 1/√d) for unit-norm input);
+    // the reference boundaries are calibrated for ~N(0,1) (unnormalized Hadamard).
+    const float hadamard_scale = std::sqrt(static_cast<float>(padded_dim));
+    for (size_t i = 0; i < padded_dim; ++i) ws[i] *= hadamard_scale;
+
+    // Step 5: quantize with int8-scale squared centroids for NSF.
     float q_sqr_norm = 0.0f;
     for (size_t i = 0; i < padded_dim; ++i) {
       uint8_t code = internal::FourBitEncoding(ws[i]);
-      q_sqr_norm += internal::kSquaredCentroidsMag[code & 7];
+      q_sqr_norm += internal::kSquaredCentroidsInt8[code & 7];
       if (i % 2 == 0)
         output[i / 2] = code;
       else
@@ -1508,6 +1528,7 @@ class Model {
   }
 
   // ---- Quantize query ----
+  // Order: rotate → normalize → scale(√d) → clamp → int8 (matches tq_reference).
   Quantized_Query<Metric> quantize_query(const float* qptr) const {
     if (!rotator) return Quantized_Query<Metric>();
 
@@ -1518,9 +1539,11 @@ class Model {
     // NON-deinterleaved: query_data[i] = int8 for dimension i.
     qq.query_data.resize(padded_dim, 0);
 
+    // Step 1: rotate (handles dim → padded_dim padding internally).
     std::vector<float> q_rot(padded_dim);
     rotator->rotate(qptr, q_rot.data());
 
+    // Step 2: compute norm of rotated vector.
     float sqr_norm = 0.0f;
     for (size_t i = 0; i < padded_dim; ++i)
       sqr_norm += q_rot[i] * q_rot[i];
@@ -1531,11 +1554,19 @@ class Model {
       return qq;
     }
 
+    // Step 3: normalize to unit norm.
     const float norm = std::sqrt(sqr_norm);
     const float inv_norm = 1.0f / norm;
     for (size_t i = 0; i < padded_dim; ++i)
-      q_rot[i] = std::clamp(q_rot[i] * signs[i] * inv_norm,
-                             -internal::kValueCap, internal::kValueCap);
+      q_rot[i] *= inv_norm;
+
+    // Step 4: scale by √padded_dim to match reference coordinate distribution.
+    const float hadamard_scale = std::sqrt(static_cast<float>(padded_dim));
+    for (size_t i = 0; i < padded_dim; ++i) q_rot[i] *= hadamard_scale;
+
+    // Step 5: clamp + int8 quantize.
+    for (size_t i = 0; i < padded_dim; ++i)
+      q_rot[i] = std::clamp(q_rot[i], -internal::kValueCap, internal::kValueCap);
 
     float max_value = 0.0f;
     for (size_t i = 0; i < padded_dim; ++i)

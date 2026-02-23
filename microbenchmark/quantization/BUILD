@@ -105,3 +105,20 @@ cc_binary(
         "//mvsic/core/quantization:one_to_many_turboquant",
     ],
 )
+
+cc_binary(
+    name = "measure_stretch_tq",
+    srcs = ["measure_stretch_tq.cpp"],
+    deps = [
+        "//mvsic/core/quantization:one_to_many_turboquant",
+        "//mvsic/core/quantization:byte_turboquant",
+        "//mvsic/core/quantization:rabitq",
+        "//mvsic/core:stats",
+        "//mvsic/core/types:l2_point",
+        "//mvsic/core/types:ip_point",
+        "//mvsic/core/types:point_range",
+        "//mvsic/core/utils:parse_command_line",
+        "@eigen",
+        "@parlaylib//parlay:primitives",
+    ],
+)

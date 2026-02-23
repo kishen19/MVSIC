@@ -226,6 +226,94 @@ static void verify_quant(const char* label, const QModel& model, const EncSet& q
   }
 }
 
+// -------------------------------------------------------------------
+// Brute-force quality: use model's encode_single + quantize_query
+// directly, then compare per-vector dot products against exact.
+// -------------------------------------------------------------------
+template<bool Metric>
+static void brute_force_quality_check(
+    const char* label,
+    const one_to_many_turboquant::Model<Metric>& tq,
+    const float* db_vecs, const float* q_vecs,
+    size_t n_db, size_t n_q, size_t D) {
+  using namespace mvsic::one_to_many_turboquant::internal;
+
+  const size_t padded_dim = tq.padded_dim;
+  const size_t num_bytes = tq.num_bytes_per_datapoint;
+
+  std::cout << "\n=== Brute-force TQ quality: " << label << " ===\n";
+  std::cout << "  D=" << D << " padded_dim=" << padded_dim << "\n";
+
+  size_t n_check_db = std::min(n_db, size_t(20));
+  size_t n_check_q  = std::min(n_q, size_t(10));
+
+  // Encode DB vectors.
+  std::vector<std::vector<uint8_t>> db_codes(n_check_db);
+  std::vector<float> db_nsf(n_check_db), db_sqn(n_check_db);
+  std::vector<float> ws(padded_dim);
+  for (size_t i = 0; i < n_check_db; ++i) {
+    db_codes[i].resize(num_bytes, 0);
+    std::vector<float> padded(padded_dim, 0.0f);
+    for (size_t d = 0; d < D; ++d) padded[d] = db_vecs[i * D + d];
+    auto [sqn, nsf] = tq.encode_single(padded.data(), db_codes[i].data(), ws);
+    db_nsf[i] = nsf;  db_sqn[i] = sqn;
+  }
+
+  // Quantize query vectors.
+  struct QInfo { std::vector<int8_t> data; float nsf, sqn; };
+  std::vector<QInfo> q_info(n_check_q);
+  for (size_t i = 0; i < n_check_q; ++i) {
+    std::vector<float> padded(padded_dim, 0.0f);
+    for (size_t d = 0; d < D; ++d) padded[d] = q_vecs[i * D + d];
+    auto qq = tq.quantize_query(padded.data());
+    q_info[i].data.resize(padded_dim);
+    for (size_t d = 0; d < padded_dim; ++d) q_info[i].data[d] = qq.query_data[d];
+    q_info[i].nsf = qq.norm_scaling_factor;
+    q_info[i].sqn = qq.unquantized_squared_norm;
+  }
+
+  // Compare.
+  double total_rel = 0, max_rel = 0;
+  size_t n_pairs = 0, n_bad = 0;
+
+  for (size_t qi = 0; qi < n_check_q; ++qi) {
+    for (size_t di = 0; di < n_check_db; ++di) {
+      float exact = 0;
+      for (size_t d = 0; d < D; ++d) exact += q_vecs[qi*D+d] * db_vecs[di*D+d];
+
+      int32_t tq_int = 0;
+      for (size_t j = 0; j < num_bytes; ++j) {
+        uint8_t b = db_codes[di][j];
+        tq_int += int32_t(kTurboQuantCentroidsInt8[b & 0xF]) * int32_t(q_info[qi].data[2*j]);
+        if (2*j+1 < padded_dim)
+          tq_int += int32_t(kTurboQuantCentroidsInt8[b >> 4]) * int32_t(q_info[qi].data[2*j+1]);
+      }
+      float tq_approx = float(tq_int) * db_nsf[di] * q_info[qi].nsf;
+
+      float denom = std::max(std::fabs(exact), 1e-8f);
+      float rel = std::fabs(tq_approx - exact) / denom;
+      total_rel += rel;
+      if (rel > max_rel) max_rel = rel;
+      if (rel > 0.5) ++n_bad;
+
+      if (n_pairs < 10) {
+        std::cout << "  q=" << qi << " db=" << di
+                  << "  exact=" << std::setw(10) << std::setprecision(5) << exact
+                  << "  tq=" << std::setw(10) << tq_approx
+                  << "  ratio=" << std::setw(8) << std::setprecision(4)
+                  << (std::fabs(exact) > 1e-8f ? tq_approx / exact : 0.f)
+                  << "  nsf_db=" << std::setprecision(6) << db_nsf[di]
+                  << "  nsf_q=" << q_info[qi].nsf
+                  << "\n";
+      }
+      ++n_pairs;
+    }
+  }
+
+  std::cout << "  mean_rel=" << std::setprecision(4) << (total_rel/n_pairs)
+            << "  max_rel=" << max_rel << "  bad(>50%)=" << n_bad << "/" << n_pairs << "\n";
+}
+
 // Helper to print a benchmark result.
 static void print_result(const char* label, double best, uint64_t ops, double exact_best) {
   double dps = double(ops) / best;
@@ -402,6 +490,17 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     // Limit to first 20 query clouds × first 100 DB clouds for speed.
     verify_quant("TurboQuant-4bit", tq_model, tq_db, queries, 20, 100);
     verify_quant("ByteTQ-int8", btq_model, btq_db, queries, 20, 100);
+
+    // Brute-force per-vector quality check.
+    // Uses the first N raw float vectors from DB and queries.
+    const float* db_data = reinterpret_cast<const float*>(db.data());
+    const float* q_data = reinterpret_cast<const float*>(queries.data());
+    brute_force_quality_check<Metric>(
+        "TurboQuant-4bit", tq_model.vec_model,
+        db_data, q_data,
+        std::min(db.total_size(), size_t(50)),
+        std::min(queries.total_size(), size_t(20)),
+        D);
   }
 
   std::cout << "\n(sink=" << sink << ")\n";

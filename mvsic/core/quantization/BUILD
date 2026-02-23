@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -142,3 +142,14 @@ cc_library(
 #         "@parlaylib//parlay:parallel",
 #     ],
 # )
+
+cc_test(
+    name = "one_to_many_turboquant_test",
+    srcs = ["one_to_many_turboquant_test.cpp"],
+    copts = ["-march=native"],
+    deps = [
+        ":one_to_many_turboquant",
+        "@googletest//:gtest_main",
+        "@parlaylib//parlay:parallel",
+    ],
+)
