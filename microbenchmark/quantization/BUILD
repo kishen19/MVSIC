@@ -99,6 +99,7 @@ cc_binary(
     deps = [
         "//mvsic/core:stats",
         "//mvsic/core/quantization:byte_turboquant",
+        "//mvsic/core/quantization:centered_turboquant",
         "//mvsic/core/quantization:low_bit_turboquant",
         "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:rabitq",

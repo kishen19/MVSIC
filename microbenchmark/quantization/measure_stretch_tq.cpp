@@ -32,6 +32,7 @@
 #include "mvsic/core/quantization/one_to_many_turboquant.h"
 #include "mvsic/core/quantization/byte_turboquant.h"
 #include "mvsic/core/quantization/low_bit_turboquant.h"
+#include "mvsic/core/quantization/centered_turboquant.h"
 #include "mvsic/core/stats.h"
 
 using namespace mvsic;
@@ -352,6 +353,108 @@ void run_benchmark(commandLine& P) {
         n_q, n_b, gt, k, kps, "TQ-2bit");
   }
 
+  // ==== Centered TQ (1-bit, 2-bit, 4-bit) ====
+  // Train the centered model once (shared across bit depths).
+  bool need_ctq = (method == "CTQ1" || method == "CTQ2" || method == "CTQ4" || method == "All");
+  one_to_many_turboquant::Model<Metric> ctq_tq_model;
+  mvsic::centered_turboquant::CenteredModel ctq_cm;
+  size_t ctq_pdim = 0;
+  if (need_ctq) {
+    std::cout << "\n--- Training centered TQ model ---" << std::endl;
+    parlay::internal::timer t; t.start();
+    ctq_tq_model.train(base);
+    ctq_cm = mvsic::centered_turboquant::train_centered(ctq_tq_model, base);
+    ctq_pdim = ctq_cm.padded_dim;
+    std::cout << "  train (centered): " << t.stop() << "s, mean_sq_norm=" << ctq_cm.mean_sq_norm << std::endl;
+  }
+
+  // ==== CTQ-1bit ====
+  if (method == "CTQ1" || method == "All") {
+    std::cout << "\n--- CTQ-1bit (centered) ---" << std::endl;
+    parlay::internal::timer t; t.start();
+
+    std::vector<mvsic::centered_turboquant::EncodedVec> enc(n_b);
+    parlay::parallel_for(0, n_b, [&](size_t i) {
+      static thread_local std::vector<float> ws;
+      enc[i] = mvsic::centered_turboquant::encode_1bit_centered(
+          ctq_tq_model, ctq_cm,
+          reinterpret_cast<const float*>(base.location(i)), ws);
+    });
+
+    std::vector<mvsic::centered_turboquant::PreparedQuery> pqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) {
+      pqs[i] = mvsic::centered_turboquant::prepare_query_centered(
+          ctq_tq_model, ctq_cm,
+          reinterpret_cast<const float*>(queries.location(i)));
+    });
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    recall_curve(
+        [&](size_t qi, size_t j) {
+          return mvsic::centered_turboquant::distance_1bit_centered(
+              enc[j], pqs[qi], ctq_pdim, Metric);
+        },
+        n_q, n_b, gt, k, kps, "CTQ-1bit");
+  }
+
+  // ==== CTQ-2bit ====
+  if (method == "CTQ2" || method == "All") {
+    std::cout << "\n--- CTQ-2bit (centered) ---" << std::endl;
+    parlay::internal::timer t; t.start();
+
+    std::vector<mvsic::centered_turboquant::EncodedVec> enc(n_b);
+    parlay::parallel_for(0, n_b, [&](size_t i) {
+      static thread_local std::vector<float> ws;
+      enc[i] = mvsic::centered_turboquant::encode_2bit_centered(
+          ctq_tq_model, ctq_cm,
+          reinterpret_cast<const float*>(base.location(i)), ws);
+    });
+
+    std::vector<mvsic::centered_turboquant::PreparedQuery> pqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) {
+      pqs[i] = mvsic::centered_turboquant::prepare_query_centered(
+          ctq_tq_model, ctq_cm,
+          reinterpret_cast<const float*>(queries.location(i)));
+    });
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    recall_curve(
+        [&](size_t qi, size_t j) {
+          return mvsic::centered_turboquant::distance_2bit_centered(
+              enc[j], pqs[qi], ctq_pdim, Metric);
+        },
+        n_q, n_b, gt, k, kps, "CTQ-2bit");
+  }
+
+  // ==== CTQ-4bit ====
+  if (method == "CTQ4" || method == "All") {
+    std::cout << "\n--- CTQ-4bit (centered) ---" << std::endl;
+    parlay::internal::timer t; t.start();
+
+    std::vector<mvsic::centered_turboquant::EncodedVec> enc(n_b);
+    parlay::parallel_for(0, n_b, [&](size_t i) {
+      static thread_local std::vector<float> ws;
+      enc[i] = mvsic::centered_turboquant::encode_4bit_centered(
+          ctq_tq_model, ctq_cm,
+          reinterpret_cast<const float*>(base.location(i)), ws);
+    });
+
+    std::vector<mvsic::centered_turboquant::PreparedQuery> pqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) {
+      pqs[i] = mvsic::centered_turboquant::prepare_query_centered(
+          ctq_tq_model, ctq_cm,
+          reinterpret_cast<const float*>(queries.location(i)));
+    });
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    recall_curve(
+        [&](size_t qi, size_t j) {
+          return mvsic::centered_turboquant::distance_4bit_centered(
+              enc[j], pqs[qi], ctq_pdim, Metric);
+        },
+        n_q, n_b, gt, k, kps, "CTQ-4bit");
+  }
+
   // ==== ScalarRef: faithful copy of tq_reference/turboquant.h ====
   // Replicates the EXACT algorithm from the user's working implementation.
   // Order: rotate → normalize → scale(√padded_dim) → quantize.
@@ -516,13 +619,15 @@ void run_benchmark(commandLine& P) {
         n_q, n_b, gt, k, kps, "ScalarRef-TQ4 (tq_reference copy)");
   }
 
+
   if (method != "TQ4" && method != "RabitQ" &&
       method != "TQ1" && method != "TQ2" &&
+      method != "CTQ1" && method != "CTQ2" && method != "CTQ4" &&
       method != "ScalarRef" && method != "All") {
-    std::cerr << "Unknown method: " << method << " (TQ4|RabitQ|TQ1|TQ2|ScalarRef|All)" << std::endl;
+    std::cerr << "Unknown method: " << method
+              << " (TQ4|RabitQ|TQ1|TQ2|CTQ1|CTQ2|CTQ4|ScalarRef|All)" << std::endl;
   }
 }
-
 int main(int argc, char* argv[]) {
   commandLine P(argc, argv,
       "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "

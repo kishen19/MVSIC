@@ -62,6 +62,14 @@ cc_library(
 )
 
 cc_library(
+    name = "centered_turboquant",
+    hdrs = ["centered_turboquant.h"],
+    deps = [
+        ":one_to_many_turboquant",
+    ],
+)
+
+cc_library(
     name = "scann",
     hdrs = ["scann.h"],
     deps = [
