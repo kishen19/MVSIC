@@ -13,6 +13,14 @@ build --cxxopt=-march=native
 # AVX-512 flags are handled automatically by -march=native.
 # On Intel (Ice Lake+), this enables avx512f/bw/vl/vnni/vpopcntdq.
 # On AMD (Zen 3), AVX-512 is not available and code is compiled without it.
+#
+# For AVX2-only builds (no AVX-512), use:  bazel build --config=avx2 ...
+# Uses x86-64-v3 (Haswell-level: AVX, AVX2, FMA; no AVX-512). x86-64-v2 does not include AVX.
+build:avx2 --cxxopt=-march=x86-64-v3
+#
+# For AVX-512 without VNNI (e.g. Skylake-X), use:  bazel build --config=avx512_no_vnni ...
+# Enables AVX-512F/BW/VL/DQ; VNNI (vpdpbusd) is not enabled (Ice Lake+).
+build:avx512_no_vnni --cxxopt=-march=skylake-avx512
 
 build --cxxopt=-fvisibility=hidden
 build --cxxopt=-fvisibility-inlines-hidden
