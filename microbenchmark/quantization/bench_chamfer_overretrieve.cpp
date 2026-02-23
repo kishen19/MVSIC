@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -118,10 +119,52 @@ static size_t min_M_for_recall(const std::vector<uint32_t>& approx_ranked_ids,
   return approx_ranked_ids.size();
 }
 
+// Load pre-computed ground truth from binary file produced by compute_ground_truth.
+// File format: int k_gt (header), then for each query k_gt pairs of (float dist, uint32_t id)
+// sorted by ascending distance.
+// Returns per-query sorted (id, dist) pairs.
+static std::vector<std::vector<std::pair<uint32_t, float>>>
+load_ground_truth(const char* path, size_t num_queries, uint32_t Kmax) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) {
+    std::cerr << "ERROR: cannot open ground truth file: " << path << "\n";
+    std::exit(1);
+  }
+
+  int k_gt = 0;
+  in.read(reinterpret_cast<char*>(&k_gt), sizeof(int));
+  if (k_gt < static_cast<int>(Kmax)) {
+    std::cerr << "ERROR: ground truth k (" << k_gt
+              << ") < Kmax (" << Kmax << "); not enough neighbors.\n";
+    std::exit(1);
+  }
+
+  std::vector<std::vector<std::pair<uint32_t, float>>> gt(num_queries);
+  for (size_t qi = 0; qi < num_queries; ++qi) {
+    gt[qi].resize(k_gt);
+    for (int j = 0; j < k_gt; ++j) {
+      float dist;
+      uint32_t id;
+      in.read(reinterpret_cast<char*>(&dist), sizeof(float));
+      in.read(reinterpret_cast<char*>(&id), sizeof(uint32_t));
+      gt[qi][j] = {id, dist};
+    }
+  }
+
+  if (!in) {
+    std::cerr << "ERROR: ground truth file too short for " << num_queries << " queries.\n";
+    std::exit(1);
+  }
+
+  std::cout << "Loaded ground truth from " << path
+            << " (k_gt=" << k_gt << ", queries=" << num_queries << ")\n";
+  return gt;
+}
+
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t pq_k, uint32_t fs_block, uint32_t rbits,
-                         uint32_t Kmax, float rec99) {
+                         uint32_t Kmax, float rec99, const char* gt_file = nullptr) {
   constexpr bool Metric = ChPoint::is_metric();
 
   const uint32_t D = db.get_dims();
@@ -151,6 +194,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "Kgrid: ";
   for (auto k : Kgrid) std::cout << k << " ";
   std::cout << "\n";
+  if (gt_file) std::cout << "Ground truth: " << gt_file << "\n";
   std::cout << "Recall target: " << rec99 << "\n";
 
   // Train + Encode quantized DBs (same as bench_chamfer_pq_fastscan).
@@ -179,25 +223,38 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::vector<std::pair<uint32_t, float>> exact_scores(Nclouds);
   std::vector<std::pair<uint32_t, float>> approx_scores(Nclouds);
 
-  enum Method { PQ = 0, FASTSCAN = 1, RABITQ = 2, TURBOQUANT_4BIT = 3, BYTETQ = 4, NUM_METHODS = 5 };
-  const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant-4bit", "ByteTQ"};
+  // Optionally load pre-computed ground truth.
+  std::vector<std::vector<std::pair<uint32_t, float>>> gt_data;
+  if (gt_file) {
+    gt_data = load_ground_truth(gt_file, Qclouds, Kmax);
+  }
+
+  enum Method { PQ = 0, FASTSCAN = 1, RABITQ = 2, TURBOQUANT_4BIT = 3, BYTETQ = 4, TQ_SCALAR = 5, NUM_METHODS = 6 };
+  const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant-4bit", "ByteTQ", "TQ-Scalar"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) {
     return static_cast<size_t>(m) * Kgrid.size() + k_i;
   };
 
+  std::cout << "Outer iterations: " << Qclouds << std::endl;
   for (size_t qi = 0; qi < Qclouds; ++qi) {
-    db.distances(queries[qi], exact_scores.data());
-    std::sort(exact_scores.begin(), exact_scores.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
+    if (gt_file) {
+      // Use pre-computed ground truth (already sorted by ascending distance).
+    } else {
+      db.distances(queries[qi], exact_scores.data());
+      std::sort(exact_scores.begin(), exact_scores.end(),
+                [](const auto& a, const auto& b) { return a.second < b.second; });
+    }
+
+    const auto& sorted_exact = gt_file ? gt_data[qi] : exact_scores;
 
     std::vector<std::unordered_set<uint32_t>> exact_sets;
     exact_sets.reserve(Kgrid.size());
     for (uint32_t K : Kgrid) {
       std::unordered_set<uint32_t> s;
       s.reserve(static_cast<size_t>(K) * 2);
-      for (uint32_t j = 0; j < K; ++j) s.insert(exact_scores[j].first);
+      for (uint32_t j = 0; j < K; ++j) s.insert(sorted_exact[j].first);
       exact_sets.emplace_back(std::move(s));
     }
 
@@ -216,35 +273,50 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       }
     };
 
-    {
-      auto qq = pq_model.quantize_query(queries[qi]);
-      pq_db.distances_all(qq, approx_scores.data());
-      eval_method(PQ);
-    }
-    {
-      auto qq = fs_model.quantize_query(queries[qi]);
-      fs_db.distances_all(qq, approx_scores.data());
-      eval_method(FASTSCAN);
-    }
-    {
-      auto qq = rq_model.quantize_query(queries[qi]);
-      rq_db.distances_all(qq, approx_scores.data());
-      eval_method(RABITQ);
-    }
+//    {
+//      auto qq = pq_model.quantize_query(queries[qi]);
+//      pq_db.distances_all(qq, approx_scores.data());
+//      eval_method(PQ);
+//    }
+//    {
+//      auto qq = fs_model.quantize_query(queries[qi]);
+//      fs_db.distances_all(qq, approx_scores.data());
+//      eval_method(FASTSCAN);
+//    }
+//    {
+//      auto qq = rq_model.quantize_query(queries[qi]);
+//      rq_db.distances_all(qq, approx_scores.data());
+//      eval_method(RABITQ);
+//    }
+
     {
       auto qq = tq_model.quantize_query(queries[qi]);
       tq_db.distances_all(qq, approx_scores.data());
       eval_method(TURBOQUANT_4BIT);
     }
+//    {
+//      auto qq = btq_model.quantize_query(queries[qi]);
+//      btq_db.distances_all(qq, approx_scores.data());
+//      eval_method(BYTETQ);
+//    }
+
+    std::cout << "Running TQ scalar." << std::endl;
+    // TQ-Scalar: same encoding as TQ4 but using per-point scalar distance
+    // instead of VNNI GEMM batch distance. Isolates GEMM kernel issues.
     {
-      auto qq = btq_model.quantize_query(queries[qi]);
-      btq_db.distances_all(qq, approx_scores.data());
-      eval_method(BYTETQ);
+      auto qq = tq_model.quantize_query(queries[qi]);
+      parlay::parallel_for(0, Nclouds, [&](size_t cid) {
+        float d = qq.distance_perpoint(tq_db[cid]);
+        approx_scores[cid] = {static_cast<uint32_t>(cid), d};
+      });
+      eval_method(TQ_SCALAR);
     }
+
   }
 
   std::cout << "\n=== Number of candidates (M) to reach recall@K ===\n";
   std::cout << "Averages over Q=" << Qclouds << " query clouds.\n";
+
 
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
     std::cout << "\n" << method_names[meth] << ":\n";
@@ -276,12 +348,13 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
   fill_random_point_cloud_set(queries, seed_q, l2_normalize_vectors);
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99);
+  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99,
+                                /*gt_file=*/nullptr);
 }
 
 template<typename ChPoint>
 static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
-                     uint32_t rbits, uint32_t Kmax, float rec99) {
+                     uint32_t rbits, uint32_t Kmax, float rec99, const char* gt_file) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -297,17 +370,21 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
 
   bool mm = P.getOption("-mm");
   auto db = PC(dbFile, mm);
-  auto queries = PC(qFile, /*is_mmap=*/false);
+  // auto queries = PC(qFile, /*is_mmap=*/false);
+  auto queries_full = PC(qFile, /*is_mmap=*/false);
+  auto sample = parlay::delayed_tabulate(100, [&](size_t i) { return queries_full[i]; });
+  auto queries = PC(sample, queries_full.get_dims());
+
 
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99);
+  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99, gt_file);
 }
 
 int main(int argc, char** argv) {
   commandLine P(argc, argv,
-                "[-i <dbFile>] [-q <qFile>] [-mm] "
+                "[-i <dbFile>] [-q <qFile>] [-mm] [-gt <gtFile>] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-pq_block <b>] [-pq_k <k>] [-fs_block <b>] [-rbits <b>] "
                 "[-Kmax <k>] [-rec99 <f>]");
@@ -319,6 +396,7 @@ int main(int argc, char** argv) {
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
   uint32_t Kmax = static_cast<uint32_t>(P.getOptionIntValue("-Kmax", 100));
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
+  const char* gt_file = P.getOptionValue("-gt");
 
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
   if (file_mode) {
@@ -327,8 +405,8 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (df == "IP" || df == "ip")
-      return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99);
-    return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99);
+      return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, gt_file);
+    return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, gt_file);
   }
 
   uint32_t N_db = static_cast<uint32_t>(P.getOptionIntValue("-N_db", 20000));

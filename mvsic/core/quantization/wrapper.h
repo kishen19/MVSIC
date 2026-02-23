@@ -92,8 +92,9 @@ class Quantized_Query_Point_Cloud {
     const size_t start = cloud.start_idx;
 
     const size_t strip_idx = start / 64;
+    const size_t lane_offset = start % 64;
     const size_t strip_stride = db->stride;
-    const size_t n_strips = (cloud_size + 63) / 64;
+    const size_t n_strips = (lane_offset + cloud_size + 63) / 64;
 
     const uint8_t* strip_data = db->packed_codes.data() +
                                 strip_idx * strip_stride;
@@ -113,7 +114,7 @@ class Quantized_Query_Point_Cloud {
     } else {
       total = one_to_many_turboquant::chamfer_vnni_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
-          db->num_bytes_per_datapoint, cloud_size);
+          db->num_bytes_per_datapoint, cloud_size, lane_offset);
     }
 
     return total / static_cast<float>(num_q);
@@ -135,8 +136,9 @@ class Quantized_Query_Point_Cloud {
     const size_t start = cloud.start_idx;
 
     const size_t strip_idx = start / 64;
+    const size_t lane_offset = start % 64;
     const size_t strip_stride = db->stride;
-    const size_t n_strips = (cloud_size + 63) / 64;
+    const size_t n_strips = (lane_offset + cloud_size + 63) / 64;
 
     const uint8_t* strip_data = db->packed_codes.data() +
                                 strip_idx * strip_stride;
@@ -157,7 +159,7 @@ class Quantized_Query_Point_Cloud {
     } else {
       total = one_to_many_turboquant::chamfer_avx2_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
-          db->num_bytes_per_datapoint, cloud_size);
+          db->num_bytes_per_datapoint, cloud_size, lane_offset);
     }
 
     return total / static_cast<float>(num_q);

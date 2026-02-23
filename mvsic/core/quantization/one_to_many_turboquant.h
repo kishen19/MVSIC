@@ -662,7 +662,8 @@ inline float chamfer_vnni_gemm(
     size_t strip_stride,
     size_t n_strips,
     size_t num_bytes_per_point,
-    size_t cloud_size) {
+    size_t cloud_size,
+    size_t lane_offset = 0) {
 
   const size_t decoded_dim = 2 * num_bytes_per_point;
   const size_t padded_dim = (decoded_dim + 3) & ~3;
@@ -688,22 +689,47 @@ inline float chamfer_vnni_gemm(
   }
 
   // Step 2: Decode DB cloud to block-transposed panels (all at once).
+  // lane_offset accounts for the cloud's start position within the first strip.
   thread_local std::vector<uint8_t> panels;
   panels.resize(n_panels * panel_bytes + 64);
   std::memset(panels.data(), 0x80, panels.size());
   uint8_t* panels_aligned = reinterpret_cast<uint8_t*>(
       (reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
 
+  // Temp buffer for gathering bytes when a panel crosses a strip boundary.
+  thread_local std::vector<uint8_t> gather_buf;
+
   for (size_t p = 0; p < n_panels; ++p) {
-    const size_t point_start = p * kVnniPoints;
-    const size_t strip = point_start / 64;
-    const size_t base_lane = point_start % 64;
-    decode_strip_to_panel_simd(
-        strip_data + strip * strip_stride,
-        base_lane,
-        num_bytes_per_point,
-        total_tiles,
-        panels_aligned + p * panel_bytes);
+    const size_t abs_point = lane_offset + p * kVnniPoints;
+    const size_t strip = abs_point / 64;
+    const size_t base_lane = abs_point % 64;
+
+    if (base_lane + kVnniPoints <= 64) {
+      // Panel fits within one strip — fast SIMD path.
+      decode_strip_to_panel_simd(
+          strip_data + strip * strip_stride,
+          base_lane,
+          num_bytes_per_point,
+          total_tiles,
+          panels_aligned + p * panel_bytes);
+    } else {
+      // Panel crosses strip boundary — gather from two strips.
+      const size_t in_this = 64 - base_lane;
+      const size_t in_next = kVnniPoints - in_this;
+      gather_buf.resize(num_bytes_per_point * 64);
+      const uint8_t* s0 = strip_data + strip * strip_stride;
+      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
+      for (size_t j = 0; j < num_bytes_per_point; ++j) {
+        std::memcpy(gather_buf.data() + j * 64,
+                    s0 + j * 64 + base_lane, in_this);
+        std::memcpy(gather_buf.data() + j * 64 + in_this,
+                    s1 + j * 64, in_next);
+      }
+      decode_strip_to_panel_simd(
+          gather_buf.data(), 0,
+          num_bytes_per_point, total_tiles,
+          panels_aligned + p * panel_bytes);
+    }
   }
 
   // Step 3: Pad norm arrays (thread_local, dynamic — no 1024 limit).
@@ -1001,7 +1027,8 @@ inline float chamfer_avx2_gemm(
     size_t strip_stride,
     size_t n_strips,
     size_t num_bytes_per_point,
-    size_t cloud_size) {
+    size_t cloud_size,
+    size_t lane_offset = 0) {
 
   const size_t decoded_dim = 2 * num_bytes_per_point;
   const size_t padded_dim = (decoded_dim + 3) & ~3;
@@ -1026,20 +1053,42 @@ inline float chamfer_avx2_gemm(
   }
 
   // Step 2: Decode DB to 16-point panels (reuses SSE decode function).
+  // lane_offset accounts for the cloud's start position within the first strip.
   thread_local std::vector<uint8_t> panels;
   panels.resize(n_panels * panel_bytes + 64);
   std::memset(panels.data(), 0x80, panels.size());
   uint8_t* panels_aligned = reinterpret_cast<uint8_t*>(
       (reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
 
+  thread_local std::vector<uint8_t> gather_buf;
+
   for (size_t p = 0; p < n_panels; ++p) {
-    const size_t point_start = p * kVnniPoints;
-    const size_t strip = point_start / 64;
-    const size_t base_lane = point_start % 64;
-    decode_strip_to_panel_simd(
-        strip_data + strip * strip_stride,
-        base_lane, num_bytes_per_point, total_tiles,
-        panels_aligned + p * panel_bytes);
+    const size_t abs_point = lane_offset + p * kVnniPoints;
+    const size_t strip = abs_point / 64;
+    const size_t base_lane = abs_point % 64;
+
+    if (base_lane + kVnniPoints <= 64) {
+      decode_strip_to_panel_simd(
+          strip_data + strip * strip_stride,
+          base_lane, num_bytes_per_point, total_tiles,
+          panels_aligned + p * panel_bytes);
+    } else {
+      const size_t in_this = 64 - base_lane;
+      const size_t in_next = kVnniPoints - in_this;
+      gather_buf.resize(num_bytes_per_point * 64);
+      const uint8_t* s0 = strip_data + strip * strip_stride;
+      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
+      for (size_t j = 0; j < num_bytes_per_point; ++j) {
+        std::memcpy(gather_buf.data() + j * 64,
+                    s0 + j * 64 + base_lane, in_this);
+        std::memcpy(gather_buf.data() + j * 64 + in_this,
+                    s1 + j * 64, in_next);
+      }
+      decode_strip_to_panel_simd(
+          gather_buf.data(), 0,
+          num_bytes_per_point, total_tiles,
+          panels_aligned + p * panel_bytes);
+    }
   }
 
   // Step 3: Pad norm arrays.
