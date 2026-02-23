@@ -75,8 +75,8 @@ class Quantized_Query_Point_Cloud {
   template<typename T, typename = void>
   struct has_batch_distances_t : std::false_type {};
   template<typename T>
-  struct has_batch_distances_t<T, std::void_t<decltype(T::has_batch_distances)>>
-      : std::bool_constant<T::has_batch_distances> {};
+  struct has_batch_distances_t<T, std::void_t<decltype(T::has_batch_distances)>> :
+      std::bool_constant<T::has_batch_distances> {};
 
 #ifdef __AVX512F__
   // Batch Chamfer: VNNI GEMM scoring (or byte TQ AVX2 GEMM).
@@ -96,8 +96,7 @@ class Quantized_Query_Point_Cloud {
     const size_t strip_stride = db->stride;
     const size_t n_strips = (lane_offset + cloud_size + 63) / 64;
 
-    const uint8_t* strip_data = db->packed_codes.data() +
-                                strip_idx * strip_stride;
+    const uint8_t* strip_data = db->packed_codes.data() + strip_idx * strip_stride;
     const float* norms = db->norm_scaling_factors.data() + start;
     const float* sqn = db->unquantized_squared_norms.data() + start;
 
@@ -106,8 +105,7 @@ class Quantized_Query_Point_Cloud {
       qptrs[i] = &vec_queries[i];
 
     float total;
-    if constexpr (std::is_same_v<QuantizedQueryVec,
-                                  byte_turboquant::Quantized_Query<Metric>>) {
+    if constexpr (std::is_same_v<QuantizedQueryVec, byte_turboquant::Quantized_Query<Metric>>) {
       total = byte_turboquant::chamfer_byte_tq_gemm_512<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
@@ -140,8 +138,7 @@ class Quantized_Query_Point_Cloud {
     const size_t strip_stride = db->stride;
     const size_t n_strips = (lane_offset + cloud_size + 63) / 64;
 
-    const uint8_t* strip_data = db->packed_codes.data() +
-                                strip_idx * strip_stride;
+    const uint8_t* strip_data = db->packed_codes.data() + strip_idx * strip_stride;
     const float* norms = db->norm_scaling_factors.data() + start;
     const float* sqn = db->unquantized_squared_norms.data() + start;
 
@@ -151,8 +148,7 @@ class Quantized_Query_Point_Cloud {
 
     float total;
     // Detect byte_turboquant types at compile time.
-    if constexpr (std::is_same_v<QuantizedQueryVec,
-                                  byte_turboquant::Quantized_Query<Metric>>) {
+    if constexpr (std::is_same_v<QuantizedQueryVec, byte_turboquant::Quantized_Query<Metric>>) {
       total = byte_turboquant::chamfer_byte_tq_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
@@ -207,7 +203,9 @@ class Quantized_Query_Point_Cloud {
     return {this->distance(cloud), vec_queries.size()};
   }
 
-  static constexpr bool is_metric() { return Metric; }
+  static constexpr bool is_metric() {
+    return Metric;
+  }
 };
 
 // ---------------------------------------------------------
@@ -254,12 +252,11 @@ class Quantized_Point_Cloud_Set {
                    std::pair<uint32_t, float>* results) const {
 
     if constexpr (EncRange::is_fastscan) {
+#if defined(__AVX512F__) || defined(__AVX2__)
+      using RunningMinV = typename EncRange::RunningMinVType;
       parlay::parallel_for(0, n, [&](size_t i) {
         const uint32_t cloud_id = indices[i];
-
         const size_t start = offsets[cloud_id];
-
-        // True (unpadded) cloud size in *vectors* if available; else fall back to padded.
         size_t cloud_size = 0;
         if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
           cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
@@ -267,7 +264,6 @@ class Quantized_Point_Cloud_Set {
           const size_t end_padded = offsets[cloud_id + 1];
           cloud_size = (end_padded > start) ? (end_padded - start) : 0;
         }
-
         const size_t num_q = q_query.vec_queries.size();
         if (num_q == 0) {
           results[i] = {cloud_id, 0.0f};
@@ -277,124 +273,104 @@ class Quantized_Point_Cloud_Set {
           results[i] = {cloud_id, std::numeric_limits<float>::max()};
           return;
         }
-
         const size_t true_end = start + cloud_size;
-
         const size_t strip_stride = static_cast<size_t>(vec_db.num_blocks) * 32;
-
         const size_t strip0 = start / 64;
         const int lane0 = static_cast<int>(start % 64);
-
         const size_t strip1 = true_end / 64;
-        const int lane1 = static_cast<int>(true_end % 64);  // if 0 => ends on strip boundary
-
+        const int lane1 = static_cast<int>(true_end % 64);
         auto strip_ptr = [&](size_t s) -> const uint8_t* {
           return &vec_db.packed_codes[s * strip_stride];
         };
-
         float total_chamfer = 0.0f;
-
-        // If the cloud covers only full strips and is strip-aligned, we can do a pure running-min
-        // scan.
         const bool fully_aligned_full =
-            (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);  // at least 1 strip
+            (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
 
         for (const auto& q_vec : q_query.vec_queries) {
           float min_d = std::numeric_limits<float>::max();
-
-          // A) entirely within one strip (rare for fastscan since starts align, but safe)
           if (strip0 == strip1) {
             const int hi = (lane1 == 0) ? 64 : lane1;
             min_d = vec_db.scan_64_chunk_min_masked(q_vec, strip_ptr(strip0), lane0, hi);
             total_chamfer += min_d;
             continue;
           }
-
-          // B) aligned + exact full strips
           if (fully_aligned_full) {
             const size_t first_full = strip0;
             const size_t last_full = strip1 - 1;
-
-            __m512i min0 = _mm512_set1_epi16(0xFFFF);
-            __m512i min1 = _mm512_set1_epi16(0xFFFF);
-            __m512i min2 = _mm512_set1_epi16(0xFFFF);
-            __m512i min3 = _mm512_set1_epi16(0xFFFF);
-
+            RunningMinV min0 = RunningMinV::max();
+            RunningMinV min1 = RunningMinV::max();
+            RunningMinV min2 = RunningMinV::max();
+            RunningMinV min3 = RunningMinV::max();
             size_t s = first_full;
-
             for (; s + 3 <= last_full; s += 4) {
               const uint8_t* p0 = strip_ptr(s);
-              min0 = vec_db.scan_64_running_min(q_vec, p0, min0);
-              min1 = vec_db.scan_64_running_min(q_vec, p0 + strip_stride, min1);
-              min2 = vec_db.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
-              min3 = vec_db.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
+              vec_db.scan_64_running_min(q_vec, p0, min0);
+              vec_db.scan_64_running_min(q_vec, p0 + strip_stride, min1);
+              vec_db.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
+              vec_db.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
             }
-
-            __m512i combined =
-                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
-
+            RunningMinV combined;
+#ifdef __AVX512F__
+            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v), _mm512_min_epu16(min2.v, min3.v));
+#else
+            combined.lo = _mm256_min_epu16(_mm256_min_epu16(min0.lo, min1.lo), _mm256_min_epu16(min2.lo, min3.lo));
+            combined.hi = _mm256_min_epu16(_mm256_min_epu16(min0.hi, min1.hi), _mm256_min_epu16(min2.hi, min3.hi));
+#endif
             for (; s <= last_full; ++s) {
-              combined = vec_db.scan_64_running_min(q_vec, strip_ptr(s), combined);
+              vec_db.scan_64_running_min(q_vec, strip_ptr(s), combined);
             }
-
             min_d = vec_db.reduce_running_min(q_vec, combined);
             total_chamfer += min_d;
             continue;
           }
-
-          // C) general (possibly partial first/last strip): masked on ends + running-min on full
-          // middle strips
-
-          // First strip (masked)
           {
             const float d0 = vec_db.scan_64_chunk_min_masked(q_vec, strip_ptr(strip0), lane0, 64);
             if (d0 < min_d) min_d = d0;
           }
-
           const size_t first_full = strip0 + 1;
           const size_t last_full = strip1 - 1;
-
-          // Middle full strips
           if (first_full <= last_full) {
-            __m512i min0 = _mm512_set1_epi16(0xFFFF);
-            __m512i min1 = _mm512_set1_epi16(0xFFFF);
-            __m512i min2 = _mm512_set1_epi16(0xFFFF);
-            __m512i min3 = _mm512_set1_epi16(0xFFFF);
-
+            RunningMinV min0 = RunningMinV::max();
+            RunningMinV min1 = RunningMinV::max();
+            RunningMinV min2 = RunningMinV::max();
+            RunningMinV min3 = RunningMinV::max();
             size_t s = first_full;
-
             for (; s + 3 <= last_full; s += 4) {
               const uint8_t* p0 = strip_ptr(s);
-              min0 = vec_db.scan_64_running_min(q_vec, p0, min0);
-              min1 = vec_db.scan_64_running_min(q_vec, p0 + strip_stride, min1);
-              min2 = vec_db.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
-              min3 = vec_db.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
+              vec_db.scan_64_running_min(q_vec, p0, min0);
+              vec_db.scan_64_running_min(q_vec, p0 + strip_stride, min1);
+              vec_db.scan_64_running_min(q_vec, p0 + 2 * strip_stride, min2);
+              vec_db.scan_64_running_min(q_vec, p0 + 3 * strip_stride, min3);
             }
-
-            __m512i combined =
-                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
-
+            RunningMinV combined;
+#ifdef __AVX512F__
+            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v), _mm512_min_epu16(min2.v, min3.v));
+#else
+            combined.lo = _mm256_min_epu16(_mm256_min_epu16(min0.lo, min1.lo), _mm256_min_epu16(min2.lo, min3.lo));
+            combined.hi = _mm256_min_epu16(_mm256_min_epu16(min0.hi, min1.hi), _mm256_min_epu16(min2.hi, min3.hi));
+#endif
             for (; s <= last_full; ++s) {
-              combined = vec_db.scan_64_running_min(q_vec, strip_ptr(s), combined);
+              vec_db.scan_64_running_min(q_vec, strip_ptr(s), combined);
             }
-
             const float d_full = vec_db.reduce_running_min(q_vec, combined);
             if (d_full < min_d) min_d = d_full;
           }
-
-          // Last strip (masked), only if partial
           if (lane1 != 0) {
             const float d1 = vec_db.scan_64_chunk_min_masked(q_vec, strip_ptr(strip1), 0, lane1);
             if (d1 < min_d) min_d = d1;
           }
-
           total_chamfer += min_d;
         }
-
         results[i] = {cloud_id, total_chamfer / static_cast<float>(num_q)};
       });
-
       return q_query.vec_queries.size();
+#else
+      parlay::parallel_for(0, n, [&](size_t i) {
+        uint32_t cloud_id = indices[i];
+        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+      });
+      return q_query.vec_queries.size();
+#endif
     } else {
       parlay::parallel_for(0, n, [&](size_t i) {
         uint32_t cloud_id = indices[i];
@@ -410,11 +386,11 @@ class Quantized_Point_Cloud_Set {
     const size_t num_q = q_query.vec_queries.size();
 
     if constexpr (EncRange::is_fastscan) {
-#ifdef __AVX512F__
+      // FastScan strip kernel (VNNI/AVX-512/AVX2 via EncRange::RunningMinVType).
+#if defined(__AVX512F__) || defined(__AVX2__)
+      using RunningMinV = typename EncRange::RunningMinVType;
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         const uint32_t cloud_id = static_cast<uint32_t>(cid);
-
-        // True (unpadded) cloud size in vectors if available; else fall back to padded.
         const size_t start = offsets[cloud_id];
         size_t cloud_size = 0;
         if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
@@ -423,7 +399,6 @@ class Quantized_Point_Cloud_Set {
           const size_t end_padded = offsets[cloud_id + 1];
           cloud_size = (end_padded > start) ? (end_padded - start) : 0;
         }
-
         if (num_q == 0) {
           results[cid] = {cloud_id, 0.0f};
           return;
@@ -432,30 +407,20 @@ class Quantized_Point_Cloud_Set {
           results[cid] = {cloud_id, std::numeric_limits<float>::max()};
           return;
         }
-
         const size_t true_end = start + cloud_size;
-
         const size_t strip_stride = static_cast<size_t>(vec_db.num_blocks) * 32;
-
         const size_t strip0 = start / 64;
         const int lane0 = static_cast<int>(start % 64);
-
         const size_t strip1 = true_end / 64;
         const int lane1 = static_cast<int>(true_end % 64);
-
         auto strip_ptr = [&](size_t s) -> const uint8_t* {
           return &vec_db.packed_codes[s * strip_stride];
         };
-
         float total = 0.0f;
-
-        // Fast path: fully aligned + exact full strips
         const bool fully_aligned_full = (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
 
         for (const auto& qv : q_query.vec_queries) {
           float min_d = std::numeric_limits<float>::max();
-
-          // All in one strip
           if (strip0 == strip1) {
             const int hi = (lane1 == 0) ? 64 : lane1;
             min_d = vec_db.scan_64_chunk_min_masked(qv, strip_ptr(strip0), lane0, hi);
@@ -466,92 +431,82 @@ class Quantized_Point_Cloud_Set {
           if (fully_aligned_full) {
             const size_t first_full = strip0;
             const size_t last_full = strip1 - 1;
-
-            __m512i min0 = _mm512_set1_epi16(0xFFFF);
-            __m512i min1 = _mm512_set1_epi16(0xFFFF);
-            __m512i min2 = _mm512_set1_epi16(0xFFFF);
-            __m512i min3 = _mm512_set1_epi16(0xFFFF);
-
+            RunningMinV min0 = RunningMinV::max();
+            RunningMinV min1 = RunningMinV::max();
+            RunningMinV min2 = RunningMinV::max();
+            RunningMinV min3 = RunningMinV::max();
             size_t s = first_full;
-
             for (; s + 3 <= last_full; s += 4) {
               const uint8_t* p0 = strip_ptr(s);
-              min0 = vec_db.scan_64_running_min(qv, p0, min0);
-              min1 = vec_db.scan_64_running_min(qv, p0 + strip_stride, min1);
-              min2 = vec_db.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
-              min3 = vec_db.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
+              vec_db.scan_64_running_min(qv, p0, min0);
+              vec_db.scan_64_running_min(qv, p0 + strip_stride, min1);
+              vec_db.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
+              vec_db.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
             }
-
-            __m512i combined =
-                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
-
+            RunningMinV combined;
+#ifdef __AVX512F__
+            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v),
+                                          _mm512_min_epu16(min2.v, min3.v));
+#else
+            combined.lo = _mm256_min_epu16(_mm256_min_epu16(min0.lo, min1.lo), _mm256_min_epu16(min2.lo, min3.lo));
+            combined.hi = _mm256_min_epu16(_mm256_min_epu16(min0.hi, min1.hi), _mm256_min_epu16(min2.hi, min3.hi));
+#endif
             for (; s <= last_full; ++s) {
-              combined = vec_db.scan_64_running_min(qv, strip_ptr(s), combined);
+              vec_db.scan_64_running_min(qv, strip_ptr(s), combined);
             }
-
             min_d = vec_db.reduce_running_min(qv, combined);
             total += min_d;
             continue;
           }
 
-          // General case: masked ends + running-min middle strips
-
-          // First strip (masked)
           {
             const float d0 = vec_db.scan_64_chunk_min_masked(qv, strip_ptr(strip0), lane0, 64);
             if (d0 < min_d) min_d = d0;
           }
-
           const size_t first_full = strip0 + 1;
           const size_t last_full = strip1 - 1;
-
           if (first_full <= last_full) {
-            __m512i min0 = _mm512_set1_epi16(0xFFFF);
-            __m512i min1 = _mm512_set1_epi16(0xFFFF);
-            __m512i min2 = _mm512_set1_epi16(0xFFFF);
-            __m512i min3 = _mm512_set1_epi16(0xFFFF);
-
+            RunningMinV min0 = RunningMinV::max();
+            RunningMinV min1 = RunningMinV::max();
+            RunningMinV min2 = RunningMinV::max();
+            RunningMinV min3 = RunningMinV::max();
             size_t s = first_full;
-
             for (; s + 3 <= last_full; s += 4) {
               const uint8_t* p0 = strip_ptr(s);
-              min0 = vec_db.scan_64_running_min(qv, p0, min0);
-              min1 = vec_db.scan_64_running_min(qv, p0 + strip_stride, min1);
-              min2 = vec_db.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
-              min3 = vec_db.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
+              vec_db.scan_64_running_min(qv, p0, min0);
+              vec_db.scan_64_running_min(qv, p0 + strip_stride, min1);
+              vec_db.scan_64_running_min(qv, p0 + 2 * strip_stride, min2);
+              vec_db.scan_64_running_min(qv, p0 + 3 * strip_stride, min3);
             }
-
-            __m512i combined =
-                _mm512_min_epu16(_mm512_min_epu16(min0, min1), _mm512_min_epu16(min2, min3));
-
+            RunningMinV combined;
+#ifdef __AVX512F__
+            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v),
+                                          _mm512_min_epu16(min2.v, min3.v));
+#else
+            combined.lo = _mm256_min_epu16(_mm256_min_epu16(min0.lo, min1.lo), _mm256_min_epu16(min2.lo, min3.lo));
+            combined.hi = _mm256_min_epu16(_mm256_min_epu16(min0.hi, min1.hi), _mm256_min_epu16(min2.hi, min3.hi));
+#endif
             for (; s <= last_full; ++s) {
-              combined = vec_db.scan_64_running_min(qv, strip_ptr(s), combined);
+              vec_db.scan_64_running_min(qv, strip_ptr(s), combined);
             }
-
             const float d_full = vec_db.reduce_running_min(qv, combined);
             if (d_full < min_d) min_d = d_full;
           }
-
-          // Last strip (masked) if partial
           if (lane1 != 0) {
             const float d1 = vec_db.scan_64_chunk_min_masked(qv, strip_ptr(strip1), 0, lane1);
             if (d1 < min_d) min_d = d1;
           }
-
           total += min_d;
         }
-
         results[cid] = {cloud_id, total / float(num_q)};
       });
-
       return num_q;
 #else
-      // AVX-512 not available — fall through to per-cloud scalar path.
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
       });
       return num_q;
-#endif  // __AVX512F__
+#endif
     } else {
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
@@ -561,7 +516,9 @@ class Quantized_Point_Cloud_Set {
   }
 
   // TODO: fix this
-  inline size_t get_dist_cmps() const { return 0; }
+  inline size_t get_dist_cmps() const {
+    return 0;
+  }
 
   void save(std::ofstream& out) const {
     out.write(reinterpret_cast<const char*>(&n_clouds), sizeof(n_clouds));

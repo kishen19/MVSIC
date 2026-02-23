@@ -1,7 +1,7 @@
 // bench_chamfer_overretrieve.cpp
 //
-// Quality microbenchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant-4bit vs ByteTQ.
-// Reports average overretrieval (%) needed to achieve target recall@K (e.g. 90%, 95%).
+// Quality microbenchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant-4bit vs
+// ByteTQ. Reports average overretrieval (%) needed to achieve target recall@K (e.g. 90%, 95%).
 //
 // For each query cloud:
 //  1) Brute-force exact distances to ALL db clouds; obtain exact top-K ids.
@@ -123,8 +123,9 @@ static size_t min_M_for_recall(const std::vector<uint32_t>& approx_ranked_ids,
 // File format: int k_gt (header), then for each query k_gt pairs of (float dist, uint32_t id)
 // sorted by ascending distance.
 // Returns per-query sorted (id, dist) pairs.
-static std::vector<std::vector<std::pair<uint32_t, float>>>
-load_ground_truth(const char* path, size_t num_queries, uint32_t Kmax) {
+static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(const char* path,
+                                                                              size_t num_queries,
+                                                                              uint32_t Kmax) {
   std::ifstream in(path, std::ios::binary);
   if (!in.is_open()) {
     std::cerr << "ERROR: cannot open ground truth file: " << path << "\n";
@@ -134,8 +135,8 @@ load_ground_truth(const char* path, size_t num_queries, uint32_t Kmax) {
   int k_gt = 0;
   in.read(reinterpret_cast<char*>(&k_gt), sizeof(int));
   if (k_gt < static_cast<int>(Kmax)) {
-    std::cerr << "ERROR: ground truth k (" << k_gt
-              << ") < Kmax (" << Kmax << "); not enough neighbors.\n";
+    std::cerr << "ERROR: ground truth k (" << k_gt << ") < Kmax (" << Kmax
+              << "); not enough neighbors.\n";
     std::exit(1);
   }
 
@@ -156,8 +157,8 @@ load_ground_truth(const char* path, size_t num_queries, uint32_t Kmax) {
     std::exit(1);
   }
 
-  std::cout << "Loaded ground truth from " << path
-            << " (k_gt=" << k_gt << ", queries=" << num_queries << ")\n";
+  std::cout << "Loaded ground truth from " << path << " (k_gt=" << k_gt
+            << ", queries=" << num_queries << ")\n";
   return gt;
 }
 
@@ -192,7 +193,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "pq_block=" << pq_block << " fs_block=" << fs_block << " rbits=" << rbits
             << " dist=" << (Metric ? "L2" : "IP") << "\n";
   std::cout << "Kgrid: ";
-  for (auto k : Kgrid) std::cout << k << " ";
+  for (auto k : Kgrid)
+    std::cout << k << " ";
   std::cout << "\n";
   if (gt_file) std::cout << "Ground truth: " << gt_file << "\n";
   std::cout << "Recall target: " << rec99 << "\n";
@@ -229,13 +231,20 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     gt_data = load_ground_truth(gt_file, Qclouds, Kmax);
   }
 
-  enum Method { PQ = 0, FASTSCAN = 1, RABITQ = 2, TURBOQUANT_4BIT = 3, BYTETQ = 4, TQ_SCALAR = 5, NUM_METHODS = 6 };
-  const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant-4bit", "ByteTQ", "TQ-Scalar"};
+  enum Method {
+    PQ = 0,
+    FASTSCAN = 1,
+    RABITQ = 2,
+    TURBOQUANT_4BIT = 3,
+    BYTETQ = 4,
+    TQ_SCALAR = 5,
+    NUM_METHODS = 6
+  };
+  const char* method_names[NUM_METHODS] = {"PQ",     "FastScan", "RaBitQ", "TurboQuant-4bit",
+                                           "ByteTQ", "TQ-Scalar"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
-  auto idx2 = [&](Method m, size_t k_i) {
-    return static_cast<size_t>(m) * Kgrid.size() + k_i;
-  };
+  auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
 
   std::cout << "Outer iterations: " << Qclouds << std::endl;
   for (size_t qi = 0; qi < Qclouds; ++qi) {
@@ -254,7 +263,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     for (uint32_t K : Kgrid) {
       std::unordered_set<uint32_t> s;
       s.reserve(static_cast<size_t>(K) * 2);
-      for (uint32_t j = 0; j < K; ++j) s.insert(sorted_exact[j].first);
+      for (uint32_t j = 0; j < K; ++j)
+        s.insert(sorted_exact[j].first);
       exact_sets.emplace_back(std::move(s));
     }
 
@@ -263,7 +273,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
                 [](const auto& a, const auto& b) { return a.second < b.second; });
       std::vector<uint32_t> approx_ids;
       approx_ids.reserve(Nclouds);
-      for (const auto& p : approx_scores) approx_ids.push_back(p.first);
+      for (const auto& p : approx_scores)
+        approx_ids.push_back(p.first);
 
       for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
         const size_t K = static_cast<size_t>(Kgrid[k_i]);
@@ -273,32 +284,32 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       }
     };
 
-//    {
-//      auto qq = pq_model.quantize_query(queries[qi]);
-//      pq_db.distances_all(qq, approx_scores.data());
-//      eval_method(PQ);
-//    }
-//    {
-//      auto qq = fs_model.quantize_query(queries[qi]);
-//      fs_db.distances_all(qq, approx_scores.data());
-//      eval_method(FASTSCAN);
-//    }
-//    {
-//      auto qq = rq_model.quantize_query(queries[qi]);
-//      rq_db.distances_all(qq, approx_scores.data());
-//      eval_method(RABITQ);
-//    }
+    {
+      auto qq = pq_model.quantize_query(queries[qi]);
+      pq_db.distances_all(qq, approx_scores.data());
+      eval_method(PQ);
+    }
+    {
+      auto qq = fs_model.quantize_query(queries[qi]);
+      fs_db.distances_all(qq, approx_scores.data());
+      eval_method(FASTSCAN);
+    }
+    {
+      auto qq = rq_model.quantize_query(queries[qi]);
+      rq_db.distances_all(qq, approx_scores.data());
+      eval_method(RABITQ);
+    }
 
     {
       auto qq = tq_model.quantize_query(queries[qi]);
       tq_db.distances_all(qq, approx_scores.data());
       eval_method(TURBOQUANT_4BIT);
     }
-//    {
-//      auto qq = btq_model.quantize_query(queries[qi]);
-//      btq_db.distances_all(qq, approx_scores.data());
-//      eval_method(BYTETQ);
-//    }
+    {
+      auto qq = btq_model.quantize_query(queries[qi]);
+      btq_db.distances_all(qq, approx_scores.data());
+      eval_method(BYTETQ);
+    }
 
     std::cout << "Running TQ scalar." << std::endl;
     // TQ-Scalar: same encoding as TQ4 but using per-point scalar distance
@@ -311,19 +322,17 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       });
       eval_method(TQ_SCALAR);
     }
-
   }
 
   std::cout << "\n=== Number of candidates (M) to reach recall@K ===\n";
   std::cout << "Averages over Q=" << Qclouds << " query clouds.\n";
 
-
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
     std::cout << "\n" << method_names[meth] << ":\n";
     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
       const uint32_t K = Kgrid[k_i];
-      const double avg_M = sum_M[idx2(static_cast<Method>(meth), k_i)] /
-                           std::max<size_t>(1, Qclouds);
+      const double avg_M =
+          sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Qclouds);
       std::cout << "  K=" << std::setw(4) << K << "  rec" << int(rec99 * 100 + 0.5f)
                 << "%: " << std::setw(10) << std::fixed << std::setprecision(1) << avg_M << "\n";
     }
@@ -375,7 +384,6 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
   auto sample = parlay::delayed_tabulate(100, [&](size_t i) { return queries_full[i]; });
   auto queries = PC(sample, queries_full.get_dims());
 
-
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
@@ -420,8 +428,8 @@ int main(int argc, char** argv) {
   if (char* s = P.getOptionValue("-seed_q")) seed_q = static_cast<uint64_t>(std::stoull(s));
 
   if (df == "IP" || df == "ip") {
-    return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k,
-                                      fs_block, rbits, Kmax, rec99);
+    return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
+                                      rbits, Kmax, rec99);
   }
   return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
                                     rbits, Kmax, rec99);

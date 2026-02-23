@@ -4,8 +4,8 @@
 // Measures time for "query cloud -> ALL db clouds" using distances_all() for quantized,
 // and PointCloudSet::distances() for exact.
 //
-// FastScan / RaBitQ require AVX-512. On non-AVX512 machines, only Exact, PQ,
-// and TurboQuant are benchmarked.
+// FastScan runs on AVX-512 (VNNI) or AVX2. RaBitQ requires AVX-512.
+// On non-AVX512 machines, Exact, PQ, FastScan (AVX2), and TurboQuant are benchmarked.
 //
 // Threads:
 //   PARLAY_NUM_THREADS=16 bazel run //path/to:bench -- [args]
@@ -48,9 +48,9 @@
 #include "parlay/primitives.h"
 
 #ifdef __AVX512F__
-#include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/rabitq.h"
 #endif  // __AVX512F__
+#include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/one_to_many_turboquant.h"
@@ -170,8 +170,7 @@ static double bench_quant_all(const QModel& model, const EncSet& qdb, const PCSe
 // For each query cloud × each DB cloud, computes distance both ways and checks.
 template<typename QModel, typename EncSet, typename PCSet>
 static void verify_quant(const char* label, const QModel& model, const EncSet& qdb,
-                         const PCSet& queries,
-                         size_t max_q_clouds = 0, size_t max_db_clouds = 0) {
+                         const PCSet& queries, size_t max_q_clouds = 0, size_t max_db_clouds = 0) {
   const size_t nq = queries.size();
   const size_t ndb = qdb.n_clouds;
   if (max_q_clouds == 0 || max_q_clouds > nq) max_q_clouds = nq;
@@ -206,9 +205,9 @@ static void verify_quant(const char* label, const QModel& model, const EncSet& q
 
       if (rel_err > 1e-4f && abs_err > 1e-3f) {
         if (n_mismatches < 10) {
-          std::cout << "  MISMATCH q=" << qi << " db=" << di
-                    << " gemm=" << d_gemm << " scalar=" << d_scalar
-                    << " rel_err=" << rel_err << " abs_err=" << abs_err << "\n";
+          std::cout << "  MISMATCH q=" << qi << " db=" << di << " gemm=" << d_gemm
+                    << " scalar=" << d_scalar << " rel_err=" << rel_err << " abs_err=" << abs_err
+                    << "\n";
         }
         ++n_mismatches;
       }
@@ -231,11 +230,10 @@ static void verify_quant(const char* label, const QModel& model, const EncSet& q
 // directly, then compare per-vector dot products against exact.
 // -------------------------------------------------------------------
 template<bool Metric>
-static void brute_force_quality_check(
-    const char* label,
-    const one_to_many_turboquant::Model<Metric>& tq,
-    const float* db_vecs, const float* q_vecs,
-    size_t n_db, size_t n_q, size_t D) {
+static void brute_force_quality_check(const char* label,
+                                      const one_to_many_turboquant::Model<Metric>& tq,
+                                      const float* db_vecs, const float* q_vecs, size_t n_db,
+                                      size_t n_q, size_t D) {
   using namespace mvsic::one_to_many_turboquant::internal;
 
   const size_t padded_dim = tq.padded_dim;
@@ -245,7 +243,7 @@ static void brute_force_quality_check(
   std::cout << "  D=" << D << " padded_dim=" << padded_dim << "\n";
 
   size_t n_check_db = std::min(n_db, size_t(20));
-  size_t n_check_q  = std::min(n_q, size_t(10));
+  size_t n_check_q = std::min(n_q, size_t(10));
 
   // Encode DB vectors.
   std::vector<std::vector<uint8_t>> db_codes(n_check_db);
@@ -254,20 +252,27 @@ static void brute_force_quality_check(
   for (size_t i = 0; i < n_check_db; ++i) {
     db_codes[i].resize(num_bytes, 0);
     std::vector<float> padded(padded_dim, 0.0f);
-    for (size_t d = 0; d < D; ++d) padded[d] = db_vecs[i * D + d];
+    for (size_t d = 0; d < D; ++d)
+      padded[d] = db_vecs[i * D + d];
     auto [sqn, nsf] = tq.encode_single(padded.data(), db_codes[i].data(), ws);
-    db_nsf[i] = nsf;  db_sqn[i] = sqn;
+    db_nsf[i] = nsf;
+    db_sqn[i] = sqn;
   }
 
   // Quantize query vectors.
-  struct QInfo { std::vector<int8_t> data; float nsf, sqn; };
+  struct QInfo {
+    std::vector<int8_t> data;
+    float nsf, sqn;
+  };
   std::vector<QInfo> q_info(n_check_q);
   for (size_t i = 0; i < n_check_q; ++i) {
     std::vector<float> padded(padded_dim, 0.0f);
-    for (size_t d = 0; d < D; ++d) padded[d] = q_vecs[i * D + d];
+    for (size_t d = 0; d < D; ++d)
+      padded[d] = q_vecs[i * D + d];
     auto qq = tq.quantize_query(padded.data());
     q_info[i].data.resize(padded_dim);
-    for (size_t d = 0; d < padded_dim; ++d) q_info[i].data[d] = qq.query_data[d];
+    for (size_t d = 0; d < padded_dim; ++d)
+      q_info[i].data[d] = qq.query_data[d];
     q_info[i].nsf = qq.norm_scaling_factor;
     q_info[i].sqn = qq.unquantized_squared_norm;
   }
@@ -279,14 +284,15 @@ static void brute_force_quality_check(
   for (size_t qi = 0; qi < n_check_q; ++qi) {
     for (size_t di = 0; di < n_check_db; ++di) {
       float exact = 0;
-      for (size_t d = 0; d < D; ++d) exact += q_vecs[qi*D+d] * db_vecs[di*D+d];
+      for (size_t d = 0; d < D; ++d)
+        exact += q_vecs[qi * D + d] * db_vecs[di * D + d];
 
       int32_t tq_int = 0;
       for (size_t j = 0; j < num_bytes; ++j) {
         uint8_t b = db_codes[di][j];
-        tq_int += int32_t(kTurboQuantCentroidsInt8[b & 0xF]) * int32_t(q_info[qi].data[2*j]);
-        if (2*j+1 < padded_dim)
-          tq_int += int32_t(kTurboQuantCentroidsInt8[b >> 4]) * int32_t(q_info[qi].data[2*j+1]);
+        tq_int += int32_t(kTurboQuantCentroidsInt8[b & 0xF]) * int32_t(q_info[qi].data[2 * j]);
+        if (2 * j + 1 < padded_dim)
+          tq_int += int32_t(kTurboQuantCentroidsInt8[b >> 4]) * int32_t(q_info[qi].data[2 * j + 1]);
       }
       float tq_approx = float(tq_int) * db_nsf[di] * q_info[qi].nsf;
 
@@ -297,20 +303,18 @@ static void brute_force_quality_check(
       if (rel > 0.5) ++n_bad;
 
       if (n_pairs < 10) {
-        std::cout << "  q=" << qi << " db=" << di
-                  << "  exact=" << std::setw(10) << std::setprecision(5) << exact
-                  << "  tq=" << std::setw(10) << tq_approx
+        std::cout << "  q=" << qi << " db=" << di << "  exact=" << std::setw(10)
+                  << std::setprecision(5) << exact << "  tq=" << std::setw(10) << tq_approx
                   << "  ratio=" << std::setw(8) << std::setprecision(4)
                   << (std::fabs(exact) > 1e-8f ? tq_approx / exact : 0.f)
                   << "  nsf_db=" << std::setprecision(6) << db_nsf[di]
-                  << "  nsf_q=" << q_info[qi].nsf
-                  << "\n";
+                  << "  nsf_q=" << q_info[qi].nsf << "\n";
       }
       ++n_pairs;
     }
   }
 
-  std::cout << "  mean_rel=" << std::setprecision(4) << (total_rel/n_pairs)
+  std::cout << "  mean_rel=" << std::setprecision(4) << (total_rel / n_pairs)
             << "  max_rel=" << max_rel << "  bad(>50%)=" << n_bad << "/" << n_pairs << "\n";
 }
 
@@ -324,7 +328,8 @@ static void print_result(const char* label, double best, uint64_t ops, double ex
   std::cout << "  latency    : " << std::fixed << std::setprecision(3) << ns_per_op(best, ops)
             << " ns / cloud-dist\n";
   if (exact_best > 0) {
-    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact_best / best) << "x\n";
+    std::cout << "  speedup: " << std::fixed << std::setprecision(2) << (exact_best / best)
+              << "x\n";
   }
 }
 
@@ -361,8 +366,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
             << "  dist=" << (Metric ? "L2" : "IP") << "  reps=" << reps << "\n";
 #ifdef __AVX512F__
   std::cout << "AVX-512: enabled (VNNI GEMM + FastScan + RaBitQ)\n";
+#elif defined(__AVX2__)
+  std::cout << "AVX-512: NOT available; AVX2: enabled (FastScan)\n";
 #else
-  std::cout << "AVX-512: NOT available (only Exact + PQ + TurboQuant)\n";
+  std::cout << "AVX-512/AVX2: NOT available (only Exact + PQ + TurboQuant)\n";
 #endif
 
   // ---------------------------
@@ -384,16 +391,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double pq_encode_s = t.sec();
 
 #ifdef __AVX512F__
-  // FastScan (requires AVX-512)
-  MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
-  t.start();
-  fs_model.train(db, fs_block);
-  double fs_train_s = t.sec();
-
-  t.start();
-  auto fs_db = fs_model.encode(db);
-  double fs_encode_s = t.sec();
-
   // RaBitQ (requires AVX-512)
   MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
   t.start();
@@ -404,6 +401,18 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto rq_db = rq_model.encode(db);
   double rq_encode_s = t.sec();
 #endif  // __AVX512F__
+
+#if defined(__AVX512F__) || defined(__AVX2__)
+  // FastScan (VNNI when AVX-512, AVX2 fallback)
+  MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
+  t.start();
+  fs_model.train(db, fs_block);
+  double fs_train_s = t.sec();
+
+  t.start();
+  auto fs_db = fs_model.encode(db);
+  double fs_encode_s = t.sec();
+#endif
 
   // TurboQuant (4-bit)
   MultiVecQuantizer<one_to_many_turboquant::Model<Metric>, Metric> tq_model;
@@ -437,6 +446,11 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
   std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
 #endif
+#if defined(__AVX512F__) || defined(__AVX2__)
+  std::cout << "FastScan train   : " << fs_train_s << " s\n";
+  std::cout << "FastScan encode  : " << fs_encode_s << " s\n";
+  std::cout << "FastScan total   : " << (fs_train_s + fs_encode_s) << " s\n";
+#endif
   std::cout << "TurboQuant train : " << tq_train_s << " s\n";
   std::cout << "TurboQuant encode: " << tq_encode_s << " s\n";
   std::cout << "TurboQuant total : " << (tq_train_s + tq_encode_s) << " s\n";
@@ -461,12 +475,14 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     print_result("PQ(K=16) (wrapper::distances_all)", best, ops, exact_best);
   }
 
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(__AVX2__)
   {
     double best = bench_quant_all(fs_model, fs_db, queries, results, reps, sink);
     print_result("FastScan(K=16) (wrapper::distances_all)", best, ops, exact_best);
   }
+#endif
 
+#ifdef __AVX512F__
   {
     double best = bench_quant_all(rq_model, rq_db, queries, results, reps, sink);
     print_result("RaBitQ (wrapper::distances_all)", best, ops, exact_best);
@@ -495,12 +511,9 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     // Uses the first N raw float vectors from DB and queries.
     const float* db_data = reinterpret_cast<const float*>(db.data());
     const float* q_data = reinterpret_cast<const float*>(queries.data());
-    brute_force_quality_check<Metric>(
-        "TurboQuant-4bit", tq_model.vec_model,
-        db_data, q_data,
-        std::min(db.total_size(), size_t(50)),
-        std::min(queries.total_size(), size_t(20)),
-        D);
+    brute_force_quality_check<Metric>("TurboQuant-4bit", tq_model.vec_model, db_data, q_data,
+                                      std::min(db.total_size(), size_t(50)),
+                                      std::min(queries.total_size(), size_t(20)), D);
   }
 
   std::cout << "\n(sink=" << sink << ")\n";
@@ -534,8 +547,8 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 // File mode
 // ---------------------------
 template<typename ChPoint>
-static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint32_t rbits,
-                     int reps, bool verify) {
+static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint32_t rbits, int reps,
+                     bool verify) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
