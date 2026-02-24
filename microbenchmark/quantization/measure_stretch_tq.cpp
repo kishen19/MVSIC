@@ -18,6 +18,8 @@
 #include <atomic>
 #include <random>
 #include <numeric>
+#include <fstream>
+#include <filesystem>
 
 #include <Eigen/Dense>
 
@@ -238,19 +240,52 @@ void run_benchmark(commandLine& P) {
   }
   PR& queries = queries_obj;
 
-  // Ground truth.
+  // Ground truth: auto-cache to /tmp.
   parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> gt;
+  const size_t n_q = queries.size(), n_b = base.size(), D = queries.get_dims();
+
+  // Build a deterministic cache path from dataset basename + query/base counts + metric.
+  auto make_gt_cache_path = [&]() -> std::string {
+    std::string base_name = std::filesystem::path(inFile).stem().string();
+    return "/tmp/gt_cache_" + base_name + "_q" + std::to_string(n_q) +
+           "_n" + std::to_string(n_b) + "_" + (Metric ? "L2" : "IP") + ".bin";
+  };
+
   if (gtFile != "") {
     std::cout << "Loading GT from " << gtFile << "..." << std::endl;
-    gt = ReadGT(gtFile, queries.size());
+    gt = ReadGT(gtFile, n_q);
   } else {
-    std::cout << "Computing exact k-NN..." << std::endl;
-    parlay::internal::timer tt; tt.start();
-    gt = compute_ground_truth<Point, Metric>(queries, base, std::max(k, (size_t)100));
-    std::cout << "GT: " << tt.stop() << "s" << std::endl;
+    std::string cache_path = make_gt_cache_path();
+    if (std::filesystem::exists(cache_path)) {
+      std::cout << "Loading cached GT from " << cache_path << "..." << std::endl;
+      gt = ReadGT(cache_path, n_q);
+    } else {
+      std::cout << "Computing exact k-NN..." << std::endl;
+      parlay::internal::timer tt; tt.start();
+      gt = compute_ground_truth<Point, Metric>(queries, base, std::max(k, (size_t)100));
+      std::cout << "GT: " << tt.stop() << "s" << std::endl;
+
+      // Save to cache.
+      size_t gt_k = gt.size() > 0 ? gt[0].size() : 0;
+      std::ofstream out(cache_path, std::ios::binary);
+      if (out.is_open()) {
+        int32_t nn = static_cast<int32_t>(gt_k);
+        out.write(reinterpret_cast<const char*>(&nn), sizeof(nn));
+        for (size_t i = 0; i < n_q; ++i) {
+          // ReadGT expects pair<float, uint32_t> on disk, flipped to <uint32_t, float> on read.
+          for (size_t j = 0; j < gt_k; ++j) {
+            float dist = gt[i][j].second;
+            uint32_t id = gt[i][j].first;
+            out.write(reinterpret_cast<const char*>(&dist), sizeof(dist));
+            out.write(reinterpret_cast<const char*>(&id), sizeof(id));
+          }
+        }
+        out.close();
+        std::cout << "  cached GT to " << cache_path << " (" << n_q << " queries, k=" << gt_k << ")" << std::endl;
+      }
+    }
   }
 
-  const size_t n_q = queries.size(), n_b = base.size(), D = queries.get_dims();
   std::cout << "\nN=" << n_b << " Q=" << n_q << " D=" << D
             << " dist=" << (Metric ? "L2" : "IP") << " k=" << k << std::endl;
 
