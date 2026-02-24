@@ -50,11 +50,13 @@
 #ifdef __AVX512F__
 #include "mvsic/core/quantization/rabitq.h"
 #endif  // __AVX512F__
+#if defined(__AVX512F__) || defined(__AVX2__)
+#include "mvsic/core/quantization/other_methods/rabitq_fast.h"
+#endif
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
-#include "mvsic/core/quantization/turboquant.h"
-#include "mvsic/core/quantization/one_to_many_turboquant.h"
-#include "mvsic/core/quantization/byte_turboquant.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -230,11 +232,10 @@ static void verify_quant(const char* label, const QModel& model, const EncSet& q
 // directly, then compare per-vector dot products against exact.
 // -------------------------------------------------------------------
 template<bool Metric>
-static void brute_force_quality_check(const char* label,
-                                      const one_to_many_turboquant::Model<Metric>& tq,
+static void brute_force_quality_check(const char* label, const turboquant_4bit::Model<Metric>& tq,
                                       const float* db_vecs, const float* q_vecs, size_t n_db,
                                       size_t n_q, size_t D) {
-  using namespace mvsic::one_to_many_turboquant::internal;
+  using namespace mvsic::turboquant_4bit::internal;
 
   const size_t padded_dim = tq.padded_dim;
   const size_t num_bytes = tq.num_bytes_per_datapoint;
@@ -403,6 +404,18 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 #endif  // __AVX512F__
 
 #if defined(__AVX512F__) || defined(__AVX2__)
+  // RaBitQ-fast (AVX2 FastScan-style kernel)
+  MultiVecQuantizer<rabitq_fast::Model<Metric>, Metric> rq_fast_model;
+  t.start();
+  rq_fast_model.train(db, rbits);
+  double rq_fast_train_s = t.sec();
+
+  t.start();
+  auto rq_fast_db = rq_fast_model.encode(db);
+  double rq_fast_encode_s = t.sec();
+#endif
+
+#if defined(__AVX512F__) || defined(__AVX2__)
   // FastScan (VNNI when AVX-512, AVX2 fallback)
   MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
   t.start();
@@ -415,7 +428,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 #endif
 
   // TurboQuant (4-bit)
-  MultiVecQuantizer<one_to_many_turboquant::Model<Metric>, Metric> tq_model;
+  MultiVecQuantizer<turboquant_4bit::Model<Metric>, Metric> tq_model;
   t.start();
   tq_model.train(db);
   double tq_train_s = t.sec();
@@ -425,7 +438,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double tq_encode_s = t.sec();
 
   // Byte TurboQuant (int8)
-  MultiVecQuantizer<byte_turboquant::Model<Metric>, Metric> btq_model;
+  MultiVecQuantizer<turboquant_byte::Model<Metric>, Metric> btq_model;
   t.start();
   btq_model.train(db);
   double btq_train_s = t.sec();
@@ -445,6 +458,11 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "RaBitQ train   : " << rq_train_s << " s\n";
   std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
   std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
+#endif
+#if defined(__AVX512F__) || defined(__AVX2__)
+  std::cout << "RaBitQ-fast train   : " << rq_fast_train_s << " s\n";
+  std::cout << "RaBitQ-fast encode  : " << rq_fast_encode_s << " s\n";
+  std::cout << "RaBitQ-fast total   : " << (rq_fast_train_s + rq_fast_encode_s) << " s\n";
 #endif
 #if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
@@ -488,6 +506,13 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     print_result("RaBitQ (wrapper::distances_all)", best, ops, exact_best);
   }
 #endif  // __AVX512F__
+
+#if defined(__AVX512F__) || defined(__AVX2__)
+  {
+    double best = bench_quant_all(rq_fast_model, rq_fast_db, queries, results, reps, sink);
+    print_result("RaBitQ-fast (wrapper::distances_all)", best, ops, exact_best);
+  }
+#endif
 
   {
     double best = bench_quant_all(tq_model, tq_db, queries, results, reps, sink);

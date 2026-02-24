@@ -1,18 +1,6 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "pq",
-    hdrs = ["pq.h"],
-    deps = [
-        "//mvsic/core/utils:kmeans_util",
-        "@eigen",
-        "@parlayann//algorithms/utils:point_range",
-        "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:primitives",
-    ],
-)
 
 cc_library(
     name = "fastscan",
@@ -27,55 +15,12 @@ cc_library(
 )
 
 cc_library(
-    name = "turboquant",
-    hdrs = ["turboquant.h"],
+    name = "pq",
+    hdrs = ["pq.h"],
     deps = [
-        "@eigen",
-        "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:sequence",
-    ],
-)
-
-cc_library(
-    name = "one_to_many_turboquant",
-    hdrs = ["one_to_many_turboquant.h"],
-    deps = [
-        "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:sequence",
-        "@rabitq//:rabitqlib",
-    ],
-)
-
-cc_library(
-    name = "byte_turboquant",
-    hdrs = ["byte_turboquant.h"],
-    deps = [
-        "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:sequence",
-        "@rabitq//:rabitqlib",
-    ],
-)
-
-cc_library(
-    name = "low_bit_turboquant",
-    hdrs = ["low_bit_turboquant.h"],
-)
-
-cc_library(
-    name = "centered_turboquant",
-    hdrs = ["centered_turboquant.h"],
-    deps = [
-        ":one_to_many_turboquant",
-    ],
-)
-
-cc_library(
-    name = "scann",
-    hdrs = ["scann.h"],
-    deps = [
-        ":pq",
         "//mvsic/core/utils:kmeans_util",
         "@eigen",
+        "@parlayann//algorithms/utils:point_range",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",
     ],
@@ -84,11 +29,6 @@ cc_library(
 cc_library(
     name = "rabitq",
     hdrs = ["rabitq.h"],
-    # ENABLE AVX512 FLAGS HERE
-    copts = [
-        "-mavx512f",
-        "-mavx512vpopcntdq",
-    ],
     deps = [
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",
@@ -97,21 +37,46 @@ cc_library(
 )
 
 cc_library(
-    name = "wrapper",
-    hdrs = ["wrapper.h"],
+    name = "turboquant_4bit",
+    hdrs = ["turboquant_4bit.h"],
     deps = [
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
     ],
 )
 
-cc_test(
-    name = "one_to_many_turboquant_test",
-    srcs = ["one_to_many_turboquant_test.cpp"],
-    copts = ["-march=native"],
+cc_library(
+    name = "turboquant_low_bit",
+    hdrs = ["turboquant_low_bit.h"],
+    deps = [],
+)
+
+cc_library(
+    name = "turboquant_byte",
+    hdrs = ["turboquant_byte.h"],
     deps = [
-        ":one_to_many_turboquant",
-        "@googletest//:gtest_main",
         "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
+
+cc_library(
+    name = "turboquant_centered",
+    hdrs = ["turboquant_centered.h"],
+    deps = [
+        ":turboquant_4bit",
+    ],
+)
+
+cc_library(
+    name = "wrapper",
+    hdrs = ["wrapper.h"],
+    deps = [
+        ":turboquant_4bit",
+        ":turboquant_byte",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
     ],
 )

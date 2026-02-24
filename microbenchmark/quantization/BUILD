@@ -10,7 +10,9 @@ cc_binary(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:turboquant",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_byte",
+        "//mvsic/core/quantization/other_methods:rabitq_sym",
         "@eigen",
         "@parlaylib//parlay:primitives",
     ],
@@ -20,13 +22,13 @@ cc_binary(
     name = "bench_chamfer_pq_fastscan",
     srcs = ["bench_chamfer_pq_fastscan.cpp"],
     deps = [
-        "//mvsic/core/quantization:byte_turboquant",
         "//mvsic/core/quantization:fastscan",
-        "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:turboquant",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_byte",
         "//mvsic/core/quantization:wrapper",
+        "//mvsic/core/quantization/other_methods:rabitq_fast",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
@@ -40,13 +42,14 @@ cc_binary(
     name = "bench_chamfer_overretrieve",
     srcs = ["bench_chamfer_overretrieve.cpp"],
     deps = [
-        "//mvsic/core/quantization:byte_turboquant",
         "//mvsic/core/quantization:fastscan",
-        "//mvsic/core/quantization:low_bit_turboquant",
-        "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_byte",
+        "//mvsic/core/quantization:turboquant_low_bit",
         "//mvsic/core/quantization:wrapper",
+        "//mvsic/core/quantization/other_methods:rabitq_fast",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
@@ -64,7 +67,7 @@ cc_binary(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:turboquant",
+        "//mvsic/core/quantization/other_methods:turboquant_naive",
         "//mvsic/core/utils:parse_command_line",
         "@eigen",
         "@parlaylib//parlay:primitives",
@@ -72,24 +75,19 @@ cc_binary(
 )
 
 cc_binary(
-    name = "bench_one_to_many_turboquant",
-    srcs = ["bench_one_to_many_turboquant.cc"],
-    copts = [
-        "-mavx512f",
-        "-mavx512bw",
-        "-mavx512vl",
-    ],
+    name = "bench_turboquant_4bit",
+    srcs = ["bench_turboquant_4bit.cpp"],
     deps = [
-        "//mvsic/core/quantization:one_to_many_turboquant",
+        "//mvsic/core/quantization:turboquant_4bit",
         "@google_benchmark//:benchmark_main",
     ],
 )
 
 cc_binary(
     name = "test_vnni_chamfer",
-    srcs = ["test_vnni_chamfer.cc"],
+    srcs = ["test_vnni_chamfer.cpp"],
     deps = [
-        "//mvsic/core/quantization:one_to_many_turboquant",
+        "//mvsic/core/quantization:turboquant_4bit",
     ],
 )
 
@@ -98,11 +96,11 @@ cc_binary(
     srcs = ["measure_stretch_tq.cpp"],
     deps = [
         "//mvsic/core:stats",
-        "//mvsic/core/quantization:byte_turboquant",
-        "//mvsic/core/quantization:centered_turboquant",
-        "//mvsic/core/quantization:low_bit_turboquant",
-        "//mvsic/core/quantization:one_to_many_turboquant",
         "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_byte",
+        "//mvsic/core/quantization:turboquant_centered",
+        "//mvsic/core/quantization:turboquant_low_bit",
         "//mvsic/core/types:ip_point",
         "//mvsic/core/types:l2_point",
         "//mvsic/core/types:point_range",

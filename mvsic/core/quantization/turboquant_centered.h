@@ -23,13 +23,13 @@
 #include <limits>
 #include <vector>
 
-#include "mvsic/core/quantization/one_to_many_turboquant.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
 
 namespace mvsic {
-namespace centered_turboquant {
+namespace turboquant_centered {
 
 // =========================================================================
-// Codebook constants (same as low_bit_turboquant.h + TQ 4-bit)
+// Codebook constants (same as turboquant_low_bit.h + TQ 4-bit)
 // =========================================================================
 
 // 1-bit: ±E[|X|] for N(0,1).
@@ -37,8 +37,7 @@ static constexpr float k1BitCentroid = 0.7978845608f;
 
 // 2-bit: optimal 4-level Lloyd-Max for N(0,1).
 static constexpr float k2BitBoundary = 0.9816f;
-static constexpr std::array<float, 4> k2BitCentroids = {
-    0.4528f, 1.5104f, -0.4528f, -1.5104f};
+static constexpr std::array<float, 4> k2BitCentroids = {0.4528f, 1.5104f, -0.4528f, -1.5104f};
 
 // 4-bit: use TQ's FourBitEncoding for bucket assignment (same boundaries),
 // but with proper Lloyd-Max reconstruction centroids E[X | X ∈ bucket]
@@ -50,10 +49,8 @@ static constexpr std::array<float, 4> k2BitCentroids = {
 // Centroids computed as E[X | a ≤ X < b] = (φ(a) − φ(b)) / (Φ(b) − Φ(a))
 // for the standard normal distribution.
 static constexpr std::array<float, 16> k4BitCentroidsFloat = {
-    0.1309f, 0.3900f, 0.6583f, 0.9583f,
-    1.2488f, 1.5256f, 2.1894f, 2.7494f,
-    -0.1309f, -0.3900f, -0.6583f, -0.9583f,
-    -1.2488f, -1.5256f, -2.1894f, -2.7494f};
+    0.1309f,  0.3900f,  0.6583f,  0.9583f,  1.2488f,  1.5256f,  2.1894f,  2.7494f,
+    -0.1309f, -0.3900f, -0.6583f, -0.9583f, -1.2488f, -1.5256f, -2.1894f, -2.7494f};
 
 // =========================================================================
 // Centered model: per-dimension mean in scaled rotated space
@@ -62,14 +59,13 @@ static constexpr std::array<float, 16> k4BitCentroidsFloat = {
 struct CenteredModel {
   std::vector<float> mean_scaled;  // μ_i, length = padded_dim
   size_t padded_dim = 0;
-  float mean_sq_norm = 0.0f;      // ||μ||², precomputed
+  float mean_sq_norm = 0.0f;  // ||μ||², precomputed
 };
 
 // Train: compute per-dimension mean of scaled rotated coordinates.
 // Samples up to 50k points for efficiency.
 template<typename TQModel, typename PointRange>
-inline CenteredModel train_centered(
-    const TQModel& tq_model, const PointRange& data) {
+inline CenteredModel train_centered(const TQModel& tq_model, const PointRange& data) {
   CenteredModel cm;
   cm.padded_dim = tq_model.padded_dim;
   const size_t pdim = cm.padded_dim;
@@ -88,7 +84,8 @@ inline CenteredModel train_centered(
 
     // Normalize + scale.
     float sqr_norm = 0.0f;
-    for (size_t j = 0; j < pdim; ++j) sqr_norm += ws[j] * ws[j];
+    for (size_t j = 0; j < pdim; ++j)
+      sqr_norm += ws[j] * ws[j];
     if (sqr_norm == 0.0f) continue;
     float inv_norm = 1.0f / std::sqrt(sqr_norm);
     float had_scale = std::sqrt(static_cast<float>(pdim));
@@ -117,9 +114,9 @@ struct EncodedVec {
 };
 
 struct PreparedQuery {
-  std::vector<float> scaled;       // q_scaled (NOT centered)
-  float squared_norm = 0.0f;       // ||q_orig||²
-  float dot_mean_query = 0.0f;     // <μ, q_scaled>, precomputed
+  std::vector<float> scaled;    // q_scaled (NOT centered)
+  float squared_norm = 0.0f;    // ||q_orig||²
+  float dot_mean_query = 0.0f;  // <μ, q_scaled>, precomputed
 };
 
 // =========================================================================
@@ -128,9 +125,8 @@ struct PreparedQuery {
 
 // Encode a single vector into 1-bit centered codes.
 template<typename TQModel>
-inline EncodedVec encode_1bit_centered(
-    const TQModel& model, const CenteredModel& cm,
-    const float* p, std::vector<float>& ws) {
+inline EncodedVec encode_1bit_centered(const TQModel& model, const CenteredModel& cm,
+                                       const float* p, std::vector<float>& ws) {
   EncodedVec out;
   const size_t pdim = cm.padded_dim;
   ws.resize(pdim);
@@ -140,7 +136,8 @@ inline EncodedVec encode_1bit_centered(
 
   // Compute norm.
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += ws[i] * ws[i];
   out.unquantized_squared_norm = sqr_norm;
   if (sqr_norm == 0.0f) {
     out.packed_codes.resize((pdim + 7) / 8, 0);
@@ -151,10 +148,12 @@ inline EncodedVec encode_1bit_centered(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] *= inv_norm * had_scale;
 
   // Subtract mean → residual.
-  for (size_t i = 0; i < pdim; ++i) ws[i] -= cm.mean_scaled[i];
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] -= cm.mean_scaled[i];
 
   // Quantize residual: sign only.
   const size_t nbytes = (pdim + 7) / 8;
@@ -162,8 +161,7 @@ inline EncodedVec encode_1bit_centered(
   float recon_sq = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
     float centroid = (ws[i] >= 0.0f) ? k1BitCentroid : -k1BitCentroid;
-    if (ws[i] >= 0.0f)
-      out.packed_codes[i / 8] |= (1u << (i % 8));
+    if (ws[i] >= 0.0f) out.packed_codes[i / 8] |= (1u << (i % 8));
     // Reconstruction = centroid + μ_i.
     float recon_i = centroid + cm.mean_scaled[i];
     recon_sq += recon_i * recon_i;
@@ -175,9 +173,8 @@ inline EncodedVec encode_1bit_centered(
 
 // Encode a single vector into 2-bit centered codes.
 template<typename TQModel>
-inline EncodedVec encode_2bit_centered(
-    const TQModel& model, const CenteredModel& cm,
-    const float* p, std::vector<float>& ws) {
+inline EncodedVec encode_2bit_centered(const TQModel& model, const CenteredModel& cm,
+                                       const float* p, std::vector<float>& ws) {
   EncodedVec out;
   const size_t pdim = cm.padded_dim;
   ws.resize(pdim);
@@ -185,7 +182,8 @@ inline EncodedVec encode_2bit_centered(
   model.rotator->rotate(p, ws.data());
 
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += ws[i] * ws[i];
   out.unquantized_squared_norm = sqr_norm;
   if (sqr_norm == 0.0f) {
     out.packed_codes.resize((pdim + 3) / 4, 0);
@@ -195,10 +193,12 @@ inline EncodedVec encode_2bit_centered(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] *= inv_norm * had_scale;
 
   // Subtract mean → residual.
-  for (size_t i = 0; i < pdim; ++i) ws[i] -= cm.mean_scaled[i];
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] -= cm.mean_scaled[i];
 
   // Quantize residual: 2-bit (4 levels).
   const size_t nbytes = (pdim + 3) / 4;
@@ -225,9 +225,8 @@ inline EncodedVec encode_2bit_centered(
 
 // Encode a single vector into 4-bit centered codes.
 template<typename TQModel>
-inline EncodedVec encode_4bit_centered(
-    const TQModel& model, const CenteredModel& cm,
-    const float* p, std::vector<float>& ws) {
+inline EncodedVec encode_4bit_centered(const TQModel& model, const CenteredModel& cm,
+                                       const float* p, std::vector<float>& ws) {
   EncodedVec out;
   const size_t pdim = cm.padded_dim;
   ws.resize(pdim);
@@ -235,7 +234,8 @@ inline EncodedVec encode_4bit_centered(
   model.rotator->rotate(p, ws.data());
 
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += ws[i] * ws[i];
   out.unquantized_squared_norm = sqr_norm;
   if (sqr_norm == 0.0f) {
     out.packed_codes.resize(pdim / 2, 0);
@@ -245,17 +245,19 @@ inline EncodedVec encode_4bit_centered(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] *= inv_norm * had_scale;
 
   // Subtract mean → residual.
-  for (size_t i = 0; i < pdim; ++i) ws[i] -= cm.mean_scaled[i];
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] -= cm.mean_scaled[i];
 
   // Quantize residual: 4-bit using TQ's codebook.
   const size_t nbytes = pdim / 2;
   out.packed_codes.resize(nbytes, 0);
   float recon_sq = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
-    uint8_t code = one_to_many_turboquant::internal::FourBitEncoding(ws[i]);
+    uint8_t code = turboquant_4bit::internal::FourBitEncoding(ws[i]);
     float centroid = k4BitCentroidsFloat[code];
     float recon_i = centroid + cm.mean_scaled[i];
     recon_sq += recon_i * recon_i;
@@ -274,9 +276,8 @@ inline EncodedVec encode_4bit_centered(
 // =========================================================================
 
 template<typename TQModel>
-inline PreparedQuery prepare_query_centered(
-    const TQModel& model, const CenteredModel& cm,
-    const float* qptr) {
+inline PreparedQuery prepare_query_centered(const TQModel& model, const CenteredModel& cm,
+                                            const float* qptr) {
   PreparedQuery qq;
   const size_t pdim = cm.padded_dim;
   qq.scaled.resize(pdim);
@@ -284,7 +285,8 @@ inline PreparedQuery prepare_query_centered(
   model.rotator->rotate(qptr, qq.scaled.data());
 
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += qq.scaled[i] * qq.scaled[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += qq.scaled[i] * qq.scaled[i];
   qq.squared_norm = sqr_norm;
 
   if (sqr_norm == 0.0f) {
@@ -296,7 +298,8 @@ inline PreparedQuery prepare_query_centered(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) qq.scaled[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    qq.scaled[i] *= inv_norm * had_scale;
 
   // Precompute <μ, q_scaled> — same for all DB points.
   float dot_mu_q = 0.0f;
@@ -312,9 +315,8 @@ inline PreparedQuery prepare_query_centered(
 // =========================================================================
 
 // 1-bit centered distance.
-inline float distance_1bit_centered(
-    const EncodedVec& db_pt, const PreparedQuery& qq,
-    size_t pdim, bool metric) {
+inline float distance_1bit_centered(const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim,
+                                    bool metric) {
   // dot(centroid_residual, q_scaled):
   float dot_codes = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
@@ -328,8 +330,7 @@ inline float distance_1bit_centered(
 
   // NSFs.
   float query_norm = std::sqrt(qq.squared_norm);
-  float nsf_q = (query_norm > 0.0f)
-      ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
+  float nsf_q = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
 
   float neg_ip = -(dot_full * db_pt.norm_scaling_factor * nsf_q);
 
@@ -340,9 +341,8 @@ inline float distance_1bit_centered(
 }
 
 // 2-bit centered distance.
-inline float distance_2bit_centered(
-    const EncodedVec& db_pt, const PreparedQuery& qq,
-    size_t pdim, bool metric) {
+inline float distance_2bit_centered(const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim,
+                                    bool metric) {
   float dot_codes = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
     uint8_t code = (db_pt.packed_codes[i / 4] >> (2 * (i % 4))) & 0x3;
@@ -352,8 +352,7 @@ inline float distance_2bit_centered(
   float dot_full = dot_codes + qq.dot_mean_query;
 
   float query_norm = std::sqrt(qq.squared_norm);
-  float nsf_q = (query_norm > 0.0f)
-      ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
+  float nsf_q = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
 
   float neg_ip = -(dot_full * db_pt.norm_scaling_factor * nsf_q);
 
@@ -364,28 +363,22 @@ inline float distance_2bit_centered(
 }
 
 // 4-bit centered distance.
-inline float distance_4bit_centered(
-    const EncodedVec& db_pt, const PreparedQuery& qq,
-    size_t pdim, bool metric) {
+inline float distance_4bit_centered(const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim,
+                                    bool metric) {
   float dot_codes = 0.0f;
   const size_t nbytes = pdim / 2;
   for (size_t j = 0; j < nbytes; ++j) {
     const uint8_t byte = db_pt.packed_codes[j];
     const uint8_t b_even = byte & 0xF;
     const uint8_t b_odd = byte >> 4;
-    dot_codes +=
-        k4BitCentroidsFloat[b_even] *
-        qq.scaled[2 * j];
-    dot_codes +=
-        k4BitCentroidsFloat[b_odd] *
-        qq.scaled[2 * j + 1];
+    dot_codes += k4BitCentroidsFloat[b_even] * qq.scaled[2 * j];
+    dot_codes += k4BitCentroidsFloat[b_odd] * qq.scaled[2 * j + 1];
   }
 
   float dot_full = dot_codes + qq.dot_mean_query;
 
   float query_norm = std::sqrt(qq.squared_norm);
-  float nsf_q = (query_norm > 0.0f)
-      ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
+  float nsf_q = (query_norm > 0.0f) ? query_norm / std::sqrt(static_cast<float>(pdim)) : 0.0f;
 
   float neg_ip = -(dot_full * db_pt.norm_scaling_factor * nsf_q);
 
@@ -395,5 +388,5 @@ inline float distance_4bit_centered(
   return neg_ip;
 }
 
-}  // namespace centered_turboquant
+}  // namespace turboquant_centered
 }  // namespace mvsic

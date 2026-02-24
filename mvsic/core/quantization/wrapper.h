@@ -14,6 +14,8 @@
 
 #include "parlay/parallel.h"
 #include "parlay/sequence.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_byte.h"
 
 namespace mvsic {
 
@@ -105,12 +107,12 @@ class Quantized_Query_Point_Cloud {
       qptrs[i] = &vec_queries[i];
 
     float total;
-    if constexpr (std::is_same_v<QuantizedQueryVec, byte_turboquant::Quantized_Query<Metric>>) {
-      total = byte_turboquant::chamfer_byte_tq_gemm_512<Metric>(
+    if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
+      total = turboquant_byte::chamfer_byte_tq_gemm_512<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
     } else {
-      total = one_to_many_turboquant::chamfer_vnni_gemm<Metric>(
+      total = turboquant_4bit::chamfer_vnni_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size, lane_offset);
     }
@@ -121,7 +123,7 @@ class Quantized_Query_Point_Cloud {
 
 #if !defined(__AVX512F__) && defined(__AVX2__)
   // Batch Chamfer: AVX2 GEMM scoring.
-  // Dispatches to byte_turboquant or one_to_many_turboquant GEMM.
+  // Dispatches to turboquant_byte or turboquant_4bit GEMM.
   template<typename QuantizedPointCloud>
   float distance_batch(const QuantizedPointCloud& cloud) const {
     const size_t num_q = vec_queries.size();
@@ -147,13 +149,13 @@ class Quantized_Query_Point_Cloud {
       qptrs[i] = &vec_queries[i];
 
     float total;
-    // Detect byte_turboquant types at compile time.
-    if constexpr (std::is_same_v<QuantizedQueryVec, byte_turboquant::Quantized_Query<Metric>>) {
-      total = byte_turboquant::chamfer_byte_tq_gemm<Metric>(
+    // Detect turboquant_byte types at compile time.
+    if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
+      total = turboquant_byte::chamfer_byte_tq_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
     } else {
-      total = one_to_many_turboquant::chamfer_avx2_gemm<Metric>(
+      total = turboquant_4bit::chamfer_avx2_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size, lane_offset);
     }
@@ -207,6 +209,20 @@ class Quantized_Query_Point_Cloud {
     return Metric;
   }
 };
+
+// Trait: EncRange has is_rabitq_fast (rabitq_fast uses it; others do not).
+template<typename EncRange, typename = void>
+struct has_rabitq_fast_t : std::false_type {};
+template<typename EncRange>
+struct has_rabitq_fast_t<EncRange, std::void_t<decltype(EncRange::is_rabitq_fast)>> :
+    std::bool_constant<EncRange::is_rabitq_fast> {};
+
+// Trait: EncRange has is_tq_fast (turboquant_4bit_fast uses it).
+template<typename EncRange, typename = void>
+struct has_tq_fast_t : std::false_type {};
+template<typename EncRange>
+struct has_tq_fast_t<EncRange, std::void_t<decltype(EncRange::is_tq_fast)>> :
+    std::bool_constant<EncRange::is_tq_fast> {};
 
 // ---------------------------------------------------------
 // Quantized Point Cloud Set (encoded DB + offsets + distances)
@@ -283,8 +299,7 @@ class Quantized_Point_Cloud_Set {
           return &vec_db.packed_codes[s * strip_stride];
         };
         float total_chamfer = 0.0f;
-        const bool fully_aligned_full =
-            (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
+        const bool fully_aligned_full = (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
 
         for (const auto& q_vec : q_query.vec_queries) {
           float min_d = std::numeric_limits<float>::max();
@@ -311,7 +326,8 @@ class Quantized_Point_Cloud_Set {
             }
             RunningMinV combined;
 #ifdef __AVX512F__
-            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v), _mm512_min_epu16(min2.v, min3.v));
+            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v),
+                                          _mm512_min_epu16(min2.v, min3.v));
 #else
             combined.lo = _mm256_min_epu16(_mm256_min_epu16(min0.lo, min1.lo), _mm256_min_epu16(min2.lo, min3.lo));
             combined.hi = _mm256_min_epu16(_mm256_min_epu16(min0.hi, min1.hi), _mm256_min_epu16(min2.hi, min3.hi));
@@ -344,7 +360,8 @@ class Quantized_Point_Cloud_Set {
             }
             RunningMinV combined;
 #ifdef __AVX512F__
-            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v), _mm512_min_epu16(min2.v, min3.v));
+            combined.v = _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v),
+                                          _mm512_min_epu16(min2.v, min3.v));
 #else
             combined.lo = _mm256_min_epu16(_mm256_min_epu16(min0.lo, min1.lo), _mm256_min_epu16(min2.lo, min3.lo));
             combined.hi = _mm256_min_epu16(_mm256_min_epu16(min0.hi, min1.hi), _mm256_min_epu16(min2.hi, min3.hi));
@@ -499,6 +516,83 @@ class Quantized_Point_Cloud_Set {
           total += min_d;
         }
         results[cid] = {cloud_id, total / float(num_q)};
+      });
+      return num_q;
+#else
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+      });
+      return num_q;
+#endif
+    } else if constexpr (has_rabitq_fast_t<EncRange>::value) {
+      // RaBitQ-fast: per-cloud slice + SIMD block kernel (AVX2 / AVX-512 VNNI when available).
+#if defined(__AVX2__) ||                                                                           \
+    (defined(__AVX512BITALG__) && defined(__AVX512VNNI__) && defined(__AVX512VL__))
+      static thread_local std::vector<float> rq_fast_tmp;
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        const uint32_t cloud_id = static_cast<uint32_t>(cid);
+        const size_t start = offsets[cloud_id];
+        size_t cloud_size = 0;
+        if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
+          cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
+        } else {
+          const size_t end_padded = offsets[cloud_id + 1];
+          cloud_size = (end_padded > start) ? (end_padded - start) : 0;
+        }
+        if (num_q == 0) {
+          results[cid] = {cloud_id, 0.0f};
+          return;
+        }
+        if (cloud_size == 0) {
+          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
+          return;
+        }
+        rq_fast_tmp.resize(cloud_size);
+        float total = 0.0f;
+        for (const auto& qv : q_query.vec_queries) {
+          qv.distances_slice(vec_db, start, cloud_size, rq_fast_tmp.data());
+          float min_d = *std::min_element(rq_fast_tmp.begin(), rq_fast_tmp.begin() + cloud_size);
+          total += min_d;
+        }
+        results[cid] = {cloud_id, total / static_cast<float>(num_q)};
+      });
+      return num_q;
+#else
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+      });
+      return num_q;
+#endif
+    } else if constexpr (has_tq_fast_t<EncRange>::value) {
+      // TurboQuant-fast: per-cloud slice + AVX2 32-point block kernel (interleaved layout).
+#if defined(__AVX2__)
+      static thread_local std::vector<float> tq_fast_tmp;
+      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
+        const uint32_t cloud_id = static_cast<uint32_t>(cid);
+        const size_t start = offsets[cloud_id];
+        size_t cloud_size = 0;
+        if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
+          cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
+        } else {
+          const size_t end_padded = offsets[cloud_id + 1];
+          cloud_size = (end_padded > start) ? (end_padded - start) : 0;
+        }
+        if (num_q == 0) {
+          results[cid] = {cloud_id, 0.0f};
+          return;
+        }
+        if (cloud_size == 0) {
+          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
+          return;
+        }
+        tq_fast_tmp.resize(cloud_size);
+        float total = 0.0f;
+        for (const auto& qv : q_query.vec_queries) {
+          qv.distances_slice(vec_db, start, cloud_size, tq_fast_tmp.data());
+          float min_d = *std::min_element(tq_fast_tmp.begin(), tq_fast_tmp.begin() + cloud_size);
+          total += min_d;
+        }
+        results[cid] = {cloud_id, total / static_cast<float>(num_q)};
       });
       return num_q;
 #else

@@ -31,10 +31,10 @@
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/utils/parse_command_line.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/one_to_many_turboquant.h"
-#include "mvsic/core/quantization/byte_turboquant.h"
-#include "mvsic/core/quantization/low_bit_turboquant.h"
-#include "mvsic/core/quantization/centered_turboquant.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_byte.h"
+#include "mvsic/core/quantization/turboquant_low_bit.h"
+#include "mvsic/core/quantization/turboquant_centered.h"
 #include "mvsic/core/stats.h"
 
 using namespace mvsic;
@@ -42,8 +42,7 @@ using namespace mvsic;
 // ---- Ground truth: blocked Eigen GEMM (from measure_stretch.cpp) ----
 template<typename Point, bool Metric>
 parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_truth(
-    const PointRange<float, Point>& queries,
-    const PointRange<float, Point>& base_points,
+    const PointRange<float, Point>& queries, const PointRange<float, Point>& base_points,
     size_t k) {
   const size_t n_q = queries.size();
   const size_t n_b = base_points.size();
@@ -62,8 +61,8 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_tr
 
     using RowMatrix = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     using S = Eigen::Stride<Eigen::Dynamic, 1>;
-    Eigen::Map<const RowMatrix, 0, S> Q(
-        reinterpret_cast<const float*>(queries.location(sq)), nq_block, D, S(aligned_q, 1));
+    Eigen::Map<const RowMatrix, 0, S> Q(reinterpret_cast<const float*>(queries.location(sq)),
+                                        nq_block, D, S(aligned_q, 1));
 
     Eigen::VectorXf Qn;
     if constexpr (Metric) Qn = Q.rowwise().squaredNorm();
@@ -74,8 +73,8 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_tr
       size_t sb = bb * BB, eb = std::min(sb + BB, n_b);
       Eigen::Index nb_block = eb - sb;
 
-      Eigen::Map<const RowMatrix, 0, S> B(
-          reinterpret_cast<const float*>(base_points.location(sb)), nb_block, D, S(aligned_b, 1));
+      Eigen::Map<const RowMatrix, 0, S> B(reinterpret_cast<const float*>(base_points.location(sb)),
+                                          nb_block, D, S(aligned_b, 1));
 
       Eigen::MatrixXf Dist = Q * B.transpose();
       if constexpr (Metric) {
@@ -92,8 +91,12 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_tr
         for (Eigen::Index j = 0; j < nb_block; ++j) {
           float d = Dist(i, j);
           uint32_t id = static_cast<uint32_t>(sb + j);
-          if (h.size() < k) h.push({d, id});
-          else if (d < h.top().first) { h.pop(); h.push({d, id}); }
+          if (h.size() < k)
+            h.push({d, id});
+          else if (d < h.top().first) {
+            h.pop();
+            h.push({d, id});
+          }
         }
       }
     }
@@ -114,10 +117,10 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_tr
 // ---- Subset wrapper for dataset-as-query ----
 template<typename PR>
 struct PointRangeSubsetWrapper {
-    const PR& pr;
-    const std::vector<size_t>& idxs;
-    size_t size() const { return idxs.size(); }
-    auto operator[](size_t i) const { return pr[static_cast<long>(idxs[i])]; }
+  const PR& pr;
+  const std::vector<size_t>& idxs;
+  size_t size() const { return idxs.size(); }
+  auto operator[](size_t i) const { return pr[static_cast<long>(idxs[i])]; }
 };
 
 // ---- Generate k' schedule (geometric progression) ----
@@ -137,16 +140,13 @@ std::vector<size_t> make_k_primes(size_t k, size_t n_base, size_t max_k_prime, d
 
 // ---- Recall curve: generic over distance function ----
 template<typename DistFn>
-void recall_curve(
-    DistFn&& dist_fn,
-    size_t n_q, size_t n_b,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
-    size_t k,
-    const std::vector<size_t>& k_primes,
-    const std::string& label) {
+void recall_curve(DistFn&& dist_fn, size_t n_q, size_t n_b,
+                  const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+                  size_t k, const std::vector<size_t>& k_primes, const std::string& label) {
 
   std::vector<std::atomic<size_t>> tc(k_primes.size());
-  for (auto& x : tc) x = 0;
+  for (auto& x : tc)
+    x = 0;
   size_t lim = k_primes.back();
 
   parlay::parallel_for(0, n_q, [&](size_t qi) {
@@ -168,7 +168,10 @@ void recall_curve(
     for (size_t r = 0; r < lim && ki < k_primes.size(); ++r) {
       uint32_t rid = dists[r].second;
       for (size_t g = 0; g < ak; ++g) {
-        if (gt[qi][g].first == rid) { ++cc; break; }
+        if (gt[qi][g].first == rid) {
+          ++cc;
+          break;
+        }
       }
       while (ki < k_primes.size() && r + 1 == k_primes[ki]) {
         tc[ki].fetch_add(cc, std::memory_order_relaxed);
@@ -182,8 +185,8 @@ void recall_curve(
   std::cout << "----------------------------------------" << std::endl;
   for (size_t i = 0; i < k_primes.size(); ++i) {
     double rec = (double)tc[i] / (double)(n_q * k);
-    std::cout << std::setw(10) << k_primes[i]
-              << std::setw(15) << std::fixed << std::setprecision(4) << rec << std::endl;
+    std::cout << std::setw(10) << k_primes[i] << std::setw(15) << std::fixed << std::setprecision(4)
+              << rec << std::endl;
   }
 }
 
@@ -225,7 +228,10 @@ void run_benchmark(commandLine& P) {
     q_idx.assign(all.begin(), all.begin() + nq);
     PointRangeSubsetWrapper<PR> w{base, q_idx};
     queries_obj = PR(w, base.get_dims());
-    if (gtFile != "") { std::cout << "WARNING: ignoring -gt with -dataset_as_query\n"; gtFile = ""; }
+    if (gtFile != "") {
+      std::cout << "WARNING: ignoring -gt with -dataset_as_query\n";
+      gtFile = "";
+    }
   } else {
     std::cout << "Loading queries from " << qFile << "..." << std::endl;
     queries_obj = PR(qFile);
@@ -247,8 +253,8 @@ void run_benchmark(commandLine& P) {
   // Build a deterministic cache path from dataset basename + query/base counts + metric.
   auto make_gt_cache_path = [&]() -> std::string {
     std::string base_name = std::filesystem::path(inFile).stem().string();
-    return "/tmp/gt_cache_" + base_name + "_q" + std::to_string(n_q) +
-           "_n" + std::to_string(n_b) + "_" + (Metric ? "L2" : "IP") + ".bin";
+    return "/tmp/gt_cache_" + base_name + "_q" + std::to_string(n_q) + "_n" + std::to_string(n_b) +
+           "_" + (Metric ? "L2" : "IP") + ".bin";
   };
 
   if (gtFile != "") {
@@ -261,7 +267,8 @@ void run_benchmark(commandLine& P) {
       gt = ReadGT(cache_path, n_q);
     } else {
       std::cout << "Computing exact k-NN..." << std::endl;
-      parlay::internal::timer tt; tt.start();
+      parlay::internal::timer tt;
+      tt.start();
       gt = compute_ground_truth<Point, Metric>(queries, base, std::max(k, (size_t)100));
       std::cout << "GT: " << tt.stop() << "s" << std::endl;
 
@@ -281,29 +288,29 @@ void run_benchmark(commandLine& P) {
           }
         }
         out.close();
-        std::cout << "  cached GT to " << cache_path << " (" << n_q << " queries, k=" << gt_k << ")" << std::endl;
+        std::cout << "  cached GT to " << cache_path << " (" << n_q << " queries, k=" << gt_k << ")"
+                  << std::endl;
       }
     }
   }
 
-  std::cout << "\nN=" << n_b << " Q=" << n_q << " D=" << D
-            << " dist=" << (Metric ? "L2" : "IP") << " k=" << k << std::endl;
+  std::cout << "\nN=" << n_b << " Q=" << n_q << " D=" << D << " dist=" << (Metric ? "L2" : "IP")
+            << " k=" << k << std::endl;
 
   auto kps = make_k_primes(k, n_b, max_kp, growth);
 
   // ==== TurboQuant-4bit ====
   if (method == "TQ4" || method == "All") {
     std::cout << "\n--- TurboQuant-4bit ---" << std::endl;
-    parlay::internal::timer t; t.start();
-    one_to_many_turboquant::Model<Metric> model;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_4bit::Model<Metric> model;
     model.train(base);
     auto enc = model.encode(base);
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
-    std::vector<one_to_many_turboquant::Quantized_Query<Metric>> qqs(n_q);
-    parlay::parallel_for(0, n_q, [&](size_t i) {
-      qqs[i] = model.quantize_query(queries[i]);
-    });
+    std::vector<turboquant_4bit::Quantized_Query<Metric>> qqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
 
     recall_curve(
         [&](size_t qi, size_t j) {
@@ -313,12 +320,11 @@ void run_benchmark(commandLine& P) {
         n_q, n_b, gt, k, kps, "TurboQuant-4bit");
   }
 
-
-
   // ==== RaBitQ ====
   if (method == "RabitQ" || method == "All") {
     std::cout << "\n--- RaBitQ-" << rbits << "bit ---" << std::endl;
-    parlay::internal::timer t; t.start();
+    parlay::internal::timer t;
+    t.start();
     rabitq::Model<Metric> model;
     model.train(base, rbits);
     auto enc = model.encode(base);
@@ -343,28 +349,31 @@ void run_benchmark(commandLine& P) {
   // ==== TQ-1bit ====
   if (method == "TQ1" || method == "All") {
     std::cout << "\n--- TQ-1bit ---" << std::endl;
-    parlay::internal::timer t; t.start();
-    one_to_many_turboquant::Model<Metric> model;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_4bit::Model<Metric> model;
     model.train(base);
     const size_t pdim = model.padded_dim;
 
     // Encode base points.
-    std::vector<mvsic::low_bit_turboquant::EncodedVec> enc_1bit(n_b);
+    std::vector<mvsic::turboquant_low_bit::EncodedVec> enc_1bit(n_b);
     parlay::parallel_for(0, n_b, [&](size_t i) {
       static thread_local std::vector<float> ws;
-      enc_1bit[i] = mvsic::low_bit_turboquant::encode_1bit(model, reinterpret_cast<const float*>(base.location(i)), ws);
+      enc_1bit[i] = mvsic::turboquant_low_bit::encode_1bit(
+          model, reinterpret_cast<const float*>(base.location(i)), ws);
     });
 
     // Prepare queries.
-    std::vector<mvsic::low_bit_turboquant::PreparedQuery> pqs_1bit(n_q);
+    std::vector<mvsic::turboquant_low_bit::PreparedQuery> pqs_1bit(n_q);
     parlay::parallel_for(0, n_q, [&](size_t i) {
-      pqs_1bit[i] = mvsic::low_bit_turboquant::prepare_query(model, reinterpret_cast<const float*>(queries.location(i)));
+      pqs_1bit[i] = mvsic::turboquant_low_bit::prepare_query(
+          model, reinterpret_cast<const float*>(queries.location(i)));
     });
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
     recall_curve(
         [&](size_t qi, size_t j) {
-          return mvsic::low_bit_turboquant::distance_1bit(enc_1bit[j], pqs_1bit[qi], pdim, Metric);
+          return mvsic::turboquant_low_bit::distance_1bit(enc_1bit[j], pqs_1bit[qi], pdim, Metric);
         },
         n_q, n_b, gt, k, kps, "TQ-1bit");
   }
@@ -372,28 +381,31 @@ void run_benchmark(commandLine& P) {
   // ==== TQ-2bit ====
   if (method == "TQ2" || method == "All") {
     std::cout << "\n--- TQ-2bit ---" << std::endl;
-    parlay::internal::timer t; t.start();
-    one_to_many_turboquant::Model<Metric> model;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_4bit::Model<Metric> model;
     model.train(base);
     const size_t pdim = model.padded_dim;
 
     // Encode base points.
-    std::vector<mvsic::low_bit_turboquant::EncodedVec> enc_2bit(n_b);
+    std::vector<mvsic::turboquant_low_bit::EncodedVec> enc_2bit(n_b);
     parlay::parallel_for(0, n_b, [&](size_t i) {
       static thread_local std::vector<float> ws;
-      enc_2bit[i] = mvsic::low_bit_turboquant::encode_2bit(model, reinterpret_cast<const float*>(base.location(i)), ws);
+      enc_2bit[i] = mvsic::turboquant_low_bit::encode_2bit(
+          model, reinterpret_cast<const float*>(base.location(i)), ws);
     });
 
     // Prepare queries.
-    std::vector<mvsic::low_bit_turboquant::PreparedQuery> pqs_2bit(n_q);
+    std::vector<mvsic::turboquant_low_bit::PreparedQuery> pqs_2bit(n_q);
     parlay::parallel_for(0, n_q, [&](size_t i) {
-      pqs_2bit[i] = mvsic::low_bit_turboquant::prepare_query(model, reinterpret_cast<const float*>(queries.location(i)));
+      pqs_2bit[i] = mvsic::turboquant_low_bit::prepare_query(
+          model, reinterpret_cast<const float*>(queries.location(i)));
     });
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
     recall_curve(
         [&](size_t qi, size_t j) {
-          return mvsic::low_bit_turboquant::distance_2bit(enc_2bit[j], pqs_2bit[qi], pdim, Metric);
+          return mvsic::turboquant_low_bit::distance_2bit(enc_2bit[j], pqs_2bit[qi], pdim, Metric);
         },
         n_q, n_b, gt, k, kps, "TQ-2bit");
   }
@@ -401,43 +413,44 @@ void run_benchmark(commandLine& P) {
   // ==== Centered TQ (1-bit, 2-bit, 4-bit) ====
   // Train the centered model once (shared across bit depths).
   bool need_ctq = (method == "CTQ1" || method == "CTQ2" || method == "CTQ4" || method == "All");
-  one_to_many_turboquant::Model<Metric> ctq_tq_model;
-  mvsic::centered_turboquant::CenteredModel ctq_cm;
+  turboquant_4bit::Model<Metric> ctq_tq_model;
+  mvsic::turboquant_centered::CenteredModel ctq_cm;
   size_t ctq_pdim = 0;
   if (need_ctq) {
     std::cout << "\n--- Training centered TQ model ---" << std::endl;
-    parlay::internal::timer t; t.start();
+    parlay::internal::timer t;
+    t.start();
     ctq_tq_model.train(base);
-    ctq_cm = mvsic::centered_turboquant::train_centered(ctq_tq_model, base);
+    ctq_cm = mvsic::turboquant_centered::train_centered(ctq_tq_model, base);
     ctq_pdim = ctq_cm.padded_dim;
-    std::cout << "  train (centered): " << t.stop() << "s, mean_sq_norm=" << ctq_cm.mean_sq_norm << std::endl;
+    std::cout << "  train (centered): " << t.stop() << "s, mean_sq_norm=" << ctq_cm.mean_sq_norm
+              << std::endl;
   }
 
   // ==== CTQ-1bit ====
   if (method == "CTQ1" || method == "All") {
     std::cout << "\n--- CTQ-1bit (centered) ---" << std::endl;
-    parlay::internal::timer t; t.start();
+    parlay::internal::timer t;
+    t.start();
 
-    std::vector<mvsic::centered_turboquant::EncodedVec> enc(n_b);
+    std::vector<mvsic::turboquant_centered::EncodedVec> enc(n_b);
     parlay::parallel_for(0, n_b, [&](size_t i) {
       static thread_local std::vector<float> ws;
-      enc[i] = mvsic::centered_turboquant::encode_1bit_centered(
-          ctq_tq_model, ctq_cm,
-          reinterpret_cast<const float*>(base.location(i)), ws);
+      enc[i] = mvsic::turboquant_centered::encode_1bit_centered(
+          ctq_tq_model, ctq_cm, reinterpret_cast<const float*>(base.location(i)), ws);
     });
 
-    std::vector<mvsic::centered_turboquant::PreparedQuery> pqs(n_q);
+    std::vector<mvsic::turboquant_centered::PreparedQuery> pqs(n_q);
     parlay::parallel_for(0, n_q, [&](size_t i) {
-      pqs[i] = mvsic::centered_turboquant::prepare_query_centered(
-          ctq_tq_model, ctq_cm,
-          reinterpret_cast<const float*>(queries.location(i)));
+      pqs[i] = mvsic::turboquant_centered::prepare_query_centered(
+          ctq_tq_model, ctq_cm, reinterpret_cast<const float*>(queries.location(i)));
     });
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
     recall_curve(
         [&](size_t qi, size_t j) {
-          return mvsic::centered_turboquant::distance_1bit_centered(
-              enc[j], pqs[qi], ctq_pdim, Metric);
+          return mvsic::turboquant_centered::distance_1bit_centered(enc[j], pqs[qi], ctq_pdim,
+                                                                    Metric);
         },
         n_q, n_b, gt, k, kps, "CTQ-1bit");
   }
@@ -445,28 +458,27 @@ void run_benchmark(commandLine& P) {
   // ==== CTQ-2bit ====
   if (method == "CTQ2" || method == "All") {
     std::cout << "\n--- CTQ-2bit (centered) ---" << std::endl;
-    parlay::internal::timer t; t.start();
+    parlay::internal::timer t;
+    t.start();
 
-    std::vector<mvsic::centered_turboquant::EncodedVec> enc(n_b);
+    std::vector<mvsic::turboquant_centered::EncodedVec> enc(n_b);
     parlay::parallel_for(0, n_b, [&](size_t i) {
       static thread_local std::vector<float> ws;
-      enc[i] = mvsic::centered_turboquant::encode_2bit_centered(
-          ctq_tq_model, ctq_cm,
-          reinterpret_cast<const float*>(base.location(i)), ws);
+      enc[i] = mvsic::turboquant_centered::encode_2bit_centered(
+          ctq_tq_model, ctq_cm, reinterpret_cast<const float*>(base.location(i)), ws);
     });
 
-    std::vector<mvsic::centered_turboquant::PreparedQuery> pqs(n_q);
+    std::vector<mvsic::turboquant_centered::PreparedQuery> pqs(n_q);
     parlay::parallel_for(0, n_q, [&](size_t i) {
-      pqs[i] = mvsic::centered_turboquant::prepare_query_centered(
-          ctq_tq_model, ctq_cm,
-          reinterpret_cast<const float*>(queries.location(i)));
+      pqs[i] = mvsic::turboquant_centered::prepare_query_centered(
+          ctq_tq_model, ctq_cm, reinterpret_cast<const float*>(queries.location(i)));
     });
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
     recall_curve(
         [&](size_t qi, size_t j) {
-          return mvsic::centered_turboquant::distance_2bit_centered(
-              enc[j], pqs[qi], ctq_pdim, Metric);
+          return mvsic::turboquant_centered::distance_2bit_centered(enc[j], pqs[qi], ctq_pdim,
+                                                                    Metric);
         },
         n_q, n_b, gt, k, kps, "CTQ-2bit");
   }
@@ -474,28 +486,27 @@ void run_benchmark(commandLine& P) {
   // ==== CTQ-4bit ====
   if (method == "CTQ4" || method == "All") {
     std::cout << "\n--- CTQ-4bit (centered) ---" << std::endl;
-    parlay::internal::timer t; t.start();
+    parlay::internal::timer t;
+    t.start();
 
-    std::vector<mvsic::centered_turboquant::EncodedVec> enc(n_b);
+    std::vector<mvsic::turboquant_centered::EncodedVec> enc(n_b);
     parlay::parallel_for(0, n_b, [&](size_t i) {
       static thread_local std::vector<float> ws;
-      enc[i] = mvsic::centered_turboquant::encode_4bit_centered(
-          ctq_tq_model, ctq_cm,
-          reinterpret_cast<const float*>(base.location(i)), ws);
+      enc[i] = mvsic::turboquant_centered::encode_4bit_centered(
+          ctq_tq_model, ctq_cm, reinterpret_cast<const float*>(base.location(i)), ws);
     });
 
-    std::vector<mvsic::centered_turboquant::PreparedQuery> pqs(n_q);
+    std::vector<mvsic::turboquant_centered::PreparedQuery> pqs(n_q);
     parlay::parallel_for(0, n_q, [&](size_t i) {
-      pqs[i] = mvsic::centered_turboquant::prepare_query_centered(
-          ctq_tq_model, ctq_cm,
-          reinterpret_cast<const float*>(queries.location(i)));
+      pqs[i] = mvsic::turboquant_centered::prepare_query_centered(
+          ctq_tq_model, ctq_cm, reinterpret_cast<const float*>(queries.location(i)));
     });
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
     recall_curve(
         [&](size_t qi, size_t j) {
-          return mvsic::centered_turboquant::distance_4bit_centered(
-              enc[j], pqs[qi], ctq_pdim, Metric);
+          return mvsic::turboquant_centered::distance_4bit_centered(enc[j], pqs[qi], ctq_pdim,
+                                                                    Metric);
         },
         n_q, n_b, gt, k, kps, "CTQ-4bit");
   }
@@ -509,20 +520,18 @@ void run_benchmark(commandLine& P) {
     std::cout << "\n--- ScalarRef-TQ4 (tq_reference copy) ---" << std::endl;
 
     // ---- Constants (from tq_reference/turboquant.h) ----
-    constexpr std::array<int8_t, 16> kCentroidsInt8 = {
-        6, 18, 31, 44, 58, 75, 96, 127,
-        -6, -18, -31, -44, -58, -75, -96, -127};
-    constexpr std::array<float, 8> kSqCentroids = {
-        35.66f, 320.92f, 951.87f, 1917.61f,
-        3332.04f, 5571.56f, 9128.44f, 15975.76f};
-    constexpr std::array<float, 7> kBounds = {
-        0.2581972f, 0.5271527f, 0.806866f, 1.097338f,
-        1.430843f, 1.839655f, 2.399083f};
+    constexpr std::array<int8_t, 16> kCentroidsInt8 = {6,  18,  31,  44,  58,  75,  96,  127,
+                                                       -6, -18, -31, -44, -58, -75, -96, -127};
+    constexpr std::array<float, 8> kSqCentroids = {35.66f,   320.92f,  951.87f,  1917.61f,
+                                                   3332.04f, 5571.56f, 9128.44f, 15975.76f};
+    constexpr std::array<float, 7> kBounds = {0.2581972f, 0.5271527f, 0.806866f, 1.097338f,
+                                              1.430843f,  1.839655f,  2.399083f};
     constexpr float kValCap = 3.91724f;
 
     auto find_bucket = [&](float abs_x) -> uint8_t {
       uint8_t idx = kBounds.size();
-      while (idx > 0 && abs_x < kBounds[idx - 1]) --idx;
+      while (idx > 0 && abs_x < kBounds[idx - 1])
+        --idx;
       return idx;
     };
     auto four_bit_encode = [&](float x) -> uint8_t {
@@ -530,8 +539,9 @@ void run_benchmark(commandLine& P) {
     };
 
     // ---- Train rotator (using our FhtKacRotator, same as TQ4) ----
-    parlay::internal::timer t; t.start();
-    one_to_many_turboquant::Model<Metric> model;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_4bit::Model<Metric> model;
     model.train(base);
     const size_t pdim = model.padded_dim;
     const size_t mdim = model.dim;
@@ -539,7 +549,11 @@ void run_benchmark(commandLine& P) {
     const float hadamard_scale = std::sqrt(static_cast<float>(pdim));
 
     // ---- Encode base points: rotate → normalize → scale(√d) → quantize ----
-    struct RefPt { std::vector<uint8_t> codes; float nsf; float sqn; };
+    struct RefPt {
+      std::vector<uint8_t> codes;
+      float nsf;
+      float sqn;
+    };
     std::vector<RefPt> ref_pts(n_b);
 
     parlay::parallel_for(0, n_b, [&](size_t i) {
@@ -549,7 +563,8 @@ void run_benchmark(commandLine& P) {
       // Copy point data (dim elements only).
       std::vector<float> fpoint(mdim);
       auto pt = base[i];
-      for (size_t d = 0; d < mdim; ++d) fpoint[d] = static_cast<float>(pt[d]);
+      for (size_t d = 0; d < mdim; ++d)
+        fpoint[d] = static_cast<float>(pt[d]);
 
       // Step 1: Rotate into rot_buf.
       std::vector<float> rot(pdim);
@@ -557,21 +572,23 @@ void run_benchmark(commandLine& P) {
 
       // Step 2: Compute norm of rotated vector.
       float norm_sq = 0.0f;
-      for (size_t d = 0; d < pdim; ++d) norm_sq += rot[d] * rot[d];
+      for (size_t d = 0; d < pdim; ++d)
+        norm_sq += rot[d] * rot[d];
       rp.sqn = norm_sq;
       float norm = std::sqrt(norm_sq);
 
       // Step 3: Normalize to unit norm.
       if (norm > 1e-9f) {
         float inv = 1.0f / norm;
-        for (size_t d = 0; d < pdim; ++d) rot[d] *= inv;
+        for (size_t d = 0; d < pdim; ++d)
+          rot[d] *= inv;
       }
 
       // Step 4: Scale by sqrt(padded_dim), then quantize.
       float qsn = 0.0f;
       for (size_t b = 0; b < stride; ++b) {
-        float val0 = rot[2*b] * hadamard_scale;
-        float val1 = rot[2*b + 1] * hadamard_scale;
+        float val0 = rot[2 * b] * hadamard_scale;
+        float val1 = rot[2 * b + 1] * hadamard_scale;
         uint8_t code0 = four_bit_encode(val0);
         uint8_t code1 = four_bit_encode(val1);
         rp.codes[b] = (code0 & 0x0F) | ((code1 << 4) & 0xF0);
@@ -584,7 +601,11 @@ void run_benchmark(commandLine& P) {
     });
 
     // ---- Encode queries: rotate → normalize → scale(√d) → clamp → int8 ----
-    struct RefQ { std::vector<int8_t> even, odd; float nsf; float sqn; };
+    struct RefQ {
+      std::vector<int8_t> even, odd;
+      float nsf;
+      float sqn;
+    };
     std::vector<RefQ> ref_qs(n_q);
 
     parlay::parallel_for(0, n_q, [&](size_t i) {
@@ -595,7 +616,8 @@ void run_benchmark(commandLine& P) {
       // Copy query data.
       std::vector<float> fq(mdim);
       auto pt = queries[i];
-      for (size_t d = 0; d < mdim; ++d) fq[d] = static_cast<float>(pt[d]);
+      for (size_t d = 0; d < mdim; ++d)
+        fq[d] = static_cast<float>(pt[d]);
 
       // Step 1: Rotate.
       std::vector<float> rot(pdim);
@@ -603,18 +625,21 @@ void run_benchmark(commandLine& P) {
 
       // Step 2: Compute norm.
       float norm_sq = 0.0f;
-      for (size_t d = 0; d < pdim; ++d) norm_sq += rot[d] * rot[d];
+      for (size_t d = 0; d < pdim; ++d)
+        norm_sq += rot[d] * rot[d];
       rq.sqn = norm_sq;
       float norm = std::sqrt(norm_sq);
 
       // Step 3: Normalize to unit norm.
       if (norm > 1e-9f) {
         float inv = 1.0f / norm;
-        for (size_t d = 0; d < pdim; ++d) rot[d] *= inv;
+        for (size_t d = 0; d < pdim; ++d)
+          rot[d] *= inv;
       }
 
       // Step 4: Scale by sqrt(padded_dim).
-      for (size_t d = 0; d < pdim; ++d) rot[d] *= hadamard_scale;
+      for (size_t d = 0; d < pdim; ++d)
+        rot[d] *= hadamard_scale;
 
       // Step 5: Clamp + find max abs.
       float max_abs = 0.0f;
@@ -627,8 +652,8 @@ void run_benchmark(commandLine& P) {
       float sf = (max_abs > 1e-9f) ? (127.0f / max_abs) : 0.0f;
       float qn_sq = 0.0f;
       for (size_t b = 0; b < stride; ++b) {
-        float v_even = rot[2*b];
-        float v_odd  = rot[2*b + 1];
+        float v_even = rot[2 * b];
+        float v_odd = rot[2 * b + 1];
         int8_t ie = int8_t(std::max(-127.0f, std::min(127.0f, std::round(v_even * sf))));
         int8_t io = int8_t(std::max(-127.0f, std::min(127.0f, std::round(v_odd * sf))));
         rq.even[b] = ie;
@@ -647,7 +672,7 @@ void run_benchmark(commandLine& P) {
           int32_t dot = 0;
           const auto& codes = ref_pts[j].codes;
           const auto& q_even = ref_qs[qi].even;
-          const auto& q_odd  = ref_qs[qi].odd;
+          const auto& q_odd = ref_qs[qi].odd;
           for (size_t b = 0; b < stride; ++b) {
             uint8_t byte = codes[b];
             int8_t c0 = kCentroidsInt8[byte & 0x0F];
@@ -657,32 +682,35 @@ void run_benchmark(commandLine& P) {
           }
           float neg_dp = -float(dot) * ref_pts[j].nsf * ref_qs[qi].nsf;
           if constexpr (Metric)
-            return ref_pts[j].sqn + 2*neg_dp + ref_qs[qi].sqn;
+            return ref_pts[j].sqn + 2 * neg_dp + ref_qs[qi].sqn;
           else
             return neg_dp;
         },
         n_q, n_b, gt, k, kps, "ScalarRef-TQ4 (tq_reference copy)");
   }
 
-
-  if (method != "TQ4" && method != "RabitQ" &&
-      method != "TQ1" && method != "TQ2" &&
-      method != "CTQ1" && method != "CTQ2" && method != "CTQ4" &&
-      method != "ScalarRef" && method != "All") {
+  if (method != "TQ4" && method != "RabitQ" && method != "TQ1" && method != "TQ2" &&
+      method != "CTQ1" && method != "CTQ2" && method != "CTQ4" && method != "ScalarRef" &&
+      method != "All") {
     std::cerr << "Unknown method: " << method
               << " (TQ4|RabitQ|TQ1|TQ2|CTQ1|CTQ2|CTQ4|ScalarRef|All)" << std::endl;
   }
 }
 int main(int argc, char* argv[]) {
   commandLine P(argc, argv,
-      "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
-      "[-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|All] "
-      "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>]");
+                "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
+                "[-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|All] "
+                "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
-  if (df == "L2")      run_benchmark<L2_Point<float>, true>(P);
-  else if (df == "IP")  run_benchmark<IP_Point<float>, false>(P);
-  else { std::cerr << "Unknown dist_func: " << df << std::endl; return 1; }
+  if (df == "L2")
+    run_benchmark<L2_Point<float>, true>(P);
+  else if (df == "IP")
+    run_benchmark<IP_Point<float>, false>(P);
+  else {
+    std::cerr << "Unknown dist_func: " << df << std::endl;
+    return 1;
+  }
 
   return 0;
 }

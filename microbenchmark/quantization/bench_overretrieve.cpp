@@ -49,7 +49,7 @@
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/other_methods/turboquant_naive.h"
 
 #include "mvsic/core/utils/parse_command_line.h"
 
@@ -148,7 +148,8 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   std::cout << "pq_block=" << pq_block << " pq_k=" << pq_k << " fs_block=" << fs_block
             << " rbits=" << rbits << " dist=" << (Metric ? "L2" : "IP") << "\n";
   std::cout << "Kgrid: ";
-  for (auto k : Kgrid) std::cout << k << " ";
+  for (auto k : Kgrid)
+    std::cout << k << " ";
   std::cout << "\n";
   std::cout << "Recall target: " << rec99 << "\n";
 
@@ -167,7 +168,7 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   rq_model.train(db, rbits);
   auto rq_db = rq_model.encode(db);
 
-  turboquant::Model<Metric> tq_model;
+  turboquant_naive::Model<Metric> tq_model;
   tq_model.train(db);
   auto tq_db = tq_model.encode(db);
 
@@ -179,9 +180,7 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   const char* method_names[NUM_METHODS] = {"PQ", "FastScan", "RaBitQ", "TurboQuant"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
-  auto idx2 = [&](Method m, size_t k_i) {
-    return static_cast<size_t>(m) * Kgrid.size() + k_i;
-  };
+  auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
 
   // Compute exact distances using efanna2e distance functions
   efanna2e::DistanceInnerProduct distfunc_ip;
@@ -210,7 +209,8 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
     for (uint32_t K : Kgrid) {
       std::unordered_set<uint32_t> s;
       s.reserve(static_cast<size_t>(K) * 2);
-      for (uint32_t j = 0; j < K && j < N; ++j) s.insert(exact_scores[j].first);
+      for (uint32_t j = 0; j < K && j < N; ++j)
+        s.insert(exact_scores[j].first);
       exact_sets.emplace_back(std::move(s));
     }
 
@@ -219,7 +219,8 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
                 [](const auto& a, const auto& b) { return a.second < b.second; });
       std::vector<uint32_t> approx_ids;
       approx_ids.reserve(N);
-      for (const auto& p : approx_scores) approx_ids.push_back(p.first);
+      for (const auto& p : approx_scores)
+        approx_ids.push_back(p.first);
 
       for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
         const size_t K = static_cast<size_t>(Kgrid[k_i]);

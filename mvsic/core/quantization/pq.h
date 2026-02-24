@@ -21,9 +21,10 @@ namespace mvsic {
 namespace pq {
 
 // ---------------------------------------------------------
-// Distance Kernel
+// Distance Kernels
 // ---------------------------------------------------------
-inline float distance_generic(const float* lut, const uint8_t* codes, uint32_t m, uint32_t K) {
+inline float distance_generic_float(const float* lut, const uint8_t* codes, uint32_t m,
+                                    uint32_t K) {
   float dist = 0.0f;
   const float* lp = lut;
 #pragma GCC unroll 16
@@ -32,6 +33,19 @@ inline float distance_generic(const float* lut, const uint8_t* codes, uint32_t m
     lp += K;
   }
   return dist;
+}
+
+// Integer LUT: accumulate uint8 lookups, then decode with min_val and scale (FastScan-style).
+inline float distance_generic_int(const uint8_t* int_lut, const uint8_t* codes, uint32_t m,
+                                  uint32_t K, float min_val, float scale) {
+  uint32_t acc = 0;
+  const uint8_t* lp = int_lut;
+#pragma GCC unroll 16
+  for (uint32_t b = 0; b < m; ++b) {
+    acc += static_cast<uint32_t>(lp[codes[b]]);
+    lp += K;
+  }
+  return min_val * static_cast<float>(m) + scale * static_cast<float>(acc);
 }
 
 // ---------------------------------------------------------
@@ -47,21 +61,41 @@ class Quantized_Query {
  public:
   using distanceType = float;
 
-  std::vector<float> lut;  // [m * K]
-  uint32_t num_blocks;     // m
-  uint32_t K;              // clusters per block
+  // Scalar-quantized LUT (FastScan-style): 8-bit per entry, decode = min_val*m + scale*sum.
+  alignas(64) std::vector<uint8_t> int_lut;  // [m * K]
+  float min_val = 0.0f;
+  float scale = 1.0f;
+  uint32_t num_blocks = 0;
+  uint32_t K = 0;
 
-  Quantized_Query() : num_blocks(0), K(0) {}
+  Quantized_Query() = default;
   Quantized_Query(uint32_t m, uint32_t k) : num_blocks(m), K(k) {
-    lut.resize(static_cast<size_t>(m) * static_cast<size_t>(K));
+    int_lut.resize(static_cast<size_t>(m) * static_cast<size_t>(K));
+  }
+
+  // Build int_lut from float LUT (min/max over all entries, scale = range/255).
+  void set_lut_from_float(const float* float_lut, size_t size) {
+    if (size == 0) return;
+    float g_min = float_lut[0];
+    float g_max = float_lut[0];
+    for (size_t i = 1; i < size; ++i) {
+      g_min = std::min(g_min, float_lut[i]);
+      g_max = std::max(g_max, float_lut[i]);
+    }
+    min_val = g_min;
+    const float range = g_max - g_min;
+    scale = (range > 1e-9f) ? (range / 255.0f) : 1e-9f;
+    for (size_t i = 0; i < size; ++i) {
+      float v = (float_lut[i] - g_min) / scale;
+      int_lut[i] = static_cast<uint8_t>(std::clamp(static_cast<int>(v + 0.5f), 0, 255));
+    }
   }
 
   inline float distance(const Quantized_Point<Metric>& p) const {
-    return distance_generic(lut.data(), p.code_ptr, num_blocks, K);
+    return distance_generic_int(int_lut.data(), p.code_ptr, num_blocks, K, min_val, scale);
   }
 
   // Compute distances to every encoded vector in an encoded range.
-  // out must point to at least db.size() floats.
   template<typename EncRange>
   void distances_all(const EncRange& db, float* out) const {
     const size_t N = static_cast<size_t>(db.size());
@@ -69,7 +103,8 @@ class Quantized_Query {
     const size_t stride = static_cast<size_t>(num_blocks);
 
     parlay::parallel_for(0, N, [&](size_t i) {
-      out[i] = distance_generic(lut.data(), base + i * stride, num_blocks, K);
+      out[i] = distance_generic_int(int_lut.data(), base + i * stride, num_blocks, K, min_val,
+                                    scale);
     });
   }
 };
@@ -316,10 +351,11 @@ class Model {
     return enc;
   }
 
-  // LUT for a single query vector
+  // LUT for a single query vector (build float LUT, then scalar-quantize to 8-bit).
   template<typename PointTy>
   Quantized_Query<Metric> quantize_query(const PointTy& query) const {
     Quantized_Query<Metric> qq(num_blocks, num_clusters_per_block);
+    std::vector<float> float_lut(static_cast<size_t>(num_blocks) * num_clusters_per_block);
 
     Eigen::VectorXf q_sub(static_cast<Eigen::Index>(dim_per_block));
     Eigen::VectorXf dot_products(static_cast<Eigen::Index>(num_clusters_per_block));
@@ -332,24 +368,28 @@ class Model {
 
       dot_products.noalias() = codebooks[b] * q_sub;
 
-      Eigen::Map<Eigen::VectorXf> lut_segment(
-          qq.lut.data() + static_cast<size_t>(b) * num_clusters_per_block,
-          static_cast<Eigen::Index>(num_clusters_per_block));
+      float* lut_segment = float_lut.data() + static_cast<size_t>(b) * num_clusters_per_block;
 
       if constexpr (Metric) {
         const float q_sq = q_sub.squaredNorm();
-        lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products);
-        lut_segment.array() += q_sq;
+        for (uint32_t c = 0; c < num_clusters_per_block; ++c) {
+          lut_segment[c] = codebook_norms[b][static_cast<Eigen::Index>(c)] -
+                           2.0f * dot_products[static_cast<Eigen::Index>(c)] + q_sq;
+        }
       } else {
-        lut_segment.noalias() = -dot_products;
+        for (uint32_t c = 0; c < num_clusters_per_block; ++c) {
+          lut_segment[c] = -dot_products[static_cast<Eigen::Index>(c)];
+        }
       }
     }
 
+    qq.set_lut_from_float(float_lut.data(), float_lut.size());
     return qq;
   }
 
   Quantized_Query<Metric> quantize_query(const float* qptr) const {
     Quantized_Query<Metric> qq(num_blocks, num_clusters_per_block);
+    std::vector<float> float_lut(static_cast<size_t>(num_blocks) * num_clusters_per_block);
 
     Eigen::VectorXf dot_products(static_cast<Eigen::Index>(num_clusters_per_block));
 
@@ -358,35 +398,41 @@ class Model {
       Eigen::Map<const Eigen::VectorXf> q_map(sub, static_cast<Eigen::Index>(dim_per_block));
       dot_products.noalias() = codebooks[b] * q_map;
 
-      Eigen::Map<Eigen::VectorXf> lut_segment(
-          qq.lut.data() + static_cast<size_t>(b) * num_clusters_per_block,
-          static_cast<Eigen::Index>(num_clusters_per_block));
+      float* lut_segment = float_lut.data() + static_cast<size_t>(b) * num_clusters_per_block;
 
       if constexpr (Metric) {
         const float q_sq = q_map.squaredNorm();
-        lut_segment.noalias() = codebook_norms[b] - (2.0f * dot_products);
-        lut_segment.array() += q_sq;
+        for (uint32_t c = 0; c < num_clusters_per_block; ++c) {
+          lut_segment[c] = codebook_norms[b][static_cast<Eigen::Index>(c)] -
+                           2.0f * dot_products[static_cast<Eigen::Index>(c)] + q_sq;
+        }
       } else {
-        lut_segment.noalias() = -dot_products;
+        for (uint32_t c = 0; c < num_clusters_per_block; ++c) {
+          lut_segment[c] = -dot_products[static_cast<Eigen::Index>(c)];
+        }
       }
     }
 
+    qq.set_lut_from_float(float_lut.data(), float_lut.size());
     return qq;
   }
 
-  // Batch LUT building for multiple queries
+  // Batch LUT building for multiple queries (float LUT then scalar-quantize each).
   template<typename PointCloudTy>
   void quantize_query_batch(const PointCloudTy& query_cloud,
                             parlay::sequence<Quantized_Query<Metric>>& out_luts) const {
     const uint32_t num_q = query_cloud.size();
     const uint32_t dims = query_cloud.get_dims();
-    const float* base = query_cloud.data();  // contiguous [num_q * dims]
+    const float* base = query_cloud.data();
 
     out_luts.clear();
     out_luts.reserve(num_q);
     for (uint32_t i = 0; i < num_q; ++i) {
       out_luts.emplace_back(num_blocks, num_clusters_per_block);
     }
+
+    const size_t lut_size = static_cast<size_t>(num_blocks) * num_clusters_per_block;
+    std::vector<float> float_luts(num_q * lut_size);
 
     using RowMajorMat = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     RowMajorMat Q_sub(static_cast<Eigen::Index>(num_q), static_cast<Eigen::Index>(dim_per_block));
@@ -396,7 +442,6 @@ class Model {
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
       const uint32_t offset = b * static_cast<uint32_t>(dim_per_block);
-
       for (uint32_t i = 0; i < num_q; ++i) {
         const float* row_ptr = base + static_cast<size_t>(i) * dims + offset;
         std::memcpy(&Q_sub(static_cast<Eigen::Index>(i), 0), row_ptr,
@@ -409,20 +454,24 @@ class Model {
 
       dot_products.noalias() = codebooks[b] * Q_sub.transpose();
 
-      const size_t lut_block_base = static_cast<size_t>(b) * num_clusters_per_block;
       for (uint32_t i = 0; i < num_q; ++i) {
-        float* lut_ptr = out_luts[i].lut.data() + lut_block_base;
-        Eigen::Map<Eigen::VectorXf> lut_segment(lut_ptr,
-                                                static_cast<Eigen::Index>(num_clusters_per_block));
-
+        float* lut_ptr = float_luts.data() + i * lut_size + static_cast<size_t>(b) * num_clusters_per_block;
+        const Eigen::Index col = static_cast<Eigen::Index>(i);
         if constexpr (Metric) {
-          lut_segment.noalias() =
-              codebook_norms[b] - (2.0f * dot_products.col(static_cast<Eigen::Index>(i)));
-          lut_segment.array() += q_sq[static_cast<Eigen::Index>(i)];
+          for (uint32_t c = 0; c < num_clusters_per_block; ++c) {
+            lut_ptr[c] = codebook_norms[b][static_cast<Eigen::Index>(c)] -
+                         2.0f * dot_products(c, col) + q_sq[col];
+          }
         } else {
-          lut_segment.noalias() = -dot_products.col(static_cast<Eigen::Index>(i));
+          for (uint32_t c = 0; c < num_clusters_per_block; ++c) {
+            lut_ptr[c] = -dot_products(c, col);
+          }
         }
       }
+    }
+
+    for (uint32_t i = 0; i < num_q; ++i) {
+      out_luts[i].set_lut_from_float(float_luts.data() + i * lut_size, lut_size);
     }
   }
 

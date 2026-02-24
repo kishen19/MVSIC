@@ -13,10 +13,10 @@
 #include <random>
 #include <vector>
 
-#include "mvsic/core/quantization/one_to_many_turboquant.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
 
 namespace mvsic {
-namespace one_to_many_turboquant {
+namespace turboquant_4bit {
 namespace {
 
 struct FlatPointRange {
@@ -33,11 +33,9 @@ struct FlatPointRange {
 // Scalar reference: compute Chamfer distance by extracting per-point bytes
 // from strip layout and computing int8 dot products directly.
 template<bool Metric>
-float scalar_chamfer_reference(
-    const Quantized_Query<Metric>* const* query_ptrs,
-    size_t num_queries,
-    const Quantized_Point_Range<FlatPointRange, Metric>& encoded,
-    size_t cloud_size) {
+float scalar_chamfer_reference(const Quantized_Query<Metric>* const* query_ptrs, size_t num_queries,
+                               const Quantized_Point_Range<FlatPointRange, Metric>& encoded,
+                               size_t cloud_size) {
 
   const size_t num_bytes = encoded.num_bytes_per_datapoint;
   const size_t strip_stride = encoded.stride;
@@ -54,25 +52,20 @@ float scalar_chamfer_reference(
 
       int32_t dot = 0;
       for (size_t j = 0; j < num_bytes; ++j) {
-        const uint8_t byte =
-            encoded.packed_codes[strip * strip_stride + j * 64 + lane];
+        const uint8_t byte = encoded.packed_codes[strip * strip_stride + j * 64 + lane];
         const uint8_t b_even = byte & 0xF;
         const uint8_t b_odd = byte >> 4;
-        dot += static_cast<int32_t>(
-                   internal::kTurboQuantCentroidsInt8[b_even]) *
-               qq.query_data[2 * j];
-        dot += static_cast<int32_t>(
-                   internal::kTurboQuantCentroidsInt8[b_odd]) *
+        dot +=
+            static_cast<int32_t>(internal::kTurboQuantCentroidsInt8[b_even]) * qq.query_data[2 * j];
+        dot += static_cast<int32_t>(internal::kTurboQuantCentroidsInt8[b_odd]) *
                qq.query_data[2 * j + 1];
       }
 
-      float neg_dot = -static_cast<float>(dot) *
-                      encoded.norm_scaling_factors[pi] *
-                      qq.norm_scaling_factor;
+      float neg_dot =
+          -static_cast<float>(dot) * encoded.norm_scaling_factors[pi] * qq.norm_scaling_factor;
       float dist;
       if constexpr (Metric) {
-        dist = encoded.unquantized_squared_norms[pi] + 2.0f * neg_dot +
-               qq.unquantized_squared_norm;
+        dist = encoded.unquantized_squared_norms[pi] + 2.0f * neg_dot + qq.unquantized_squared_norm;
       } else {
         dist = neg_dot;
       }
@@ -95,7 +88,8 @@ bool run_test(size_t dim, size_t cloud_size, size_t num_queries, int seed) {
   std::normal_distribution<float> dist(0.0f, scale);
 
   FlatPointRange data(cloud_size, dim);
-  for (float& x : data.data_) x = dist(gen);
+  for (float& x : data.data_)
+    x = dist(gen);
 
   // Train model and encode.
   Model<Metric> model;
@@ -106,29 +100,26 @@ bool run_test(size_t dim, size_t cloud_size, size_t num_queries, int seed) {
   std::vector<Quantized_Query<Metric>> queries;
   std::vector<float> qvec(dim);
   for (size_t i = 0; i < num_queries; ++i) {
-    for (size_t d = 0; d < dim; ++d) qvec[d] = dist(gen);
+    for (size_t d = 0; d < dim; ++d)
+      qvec[d] = dist(gen);
     queries.push_back(model.quantize_query(qvec.data()));
   }
 
   // Build query pointer array.
   std::vector<const Quantized_Query<Metric>*> qptrs(num_queries);
-  for (size_t i = 0; i < num_queries; ++i) qptrs[i] = &queries[i];
+  for (size_t i = 0; i < num_queries; ++i)
+    qptrs[i] = &queries[i];
 
   // Compute VNNI GEMM Chamfer.
   const size_t n_strips = (cloud_size + 63) / 64;
   float vnni_result = chamfer_vnni_gemm<Metric>(
-      qptrs.data(), num_queries,
-      encoded.packed_codes.data(),
-      encoded.norm_scaling_factors.data(),
-      encoded.unquantized_squared_norms.data(),
-      encoded.stride,
-      n_strips,
-      encoded.num_bytes_per_datapoint,
-      cloud_size);
+      qptrs.data(), num_queries, encoded.packed_codes.data(), encoded.norm_scaling_factors.data(),
+      encoded.unquantized_squared_norms.data(), encoded.stride, n_strips,
+      encoded.num_bytes_per_datapoint, cloud_size);
 
   // Compute scalar reference.
-  float scalar_result = scalar_chamfer_reference<Metric>(
-      qptrs.data(), num_queries, encoded, cloud_size);
+  float scalar_result =
+      scalar_chamfer_reference<Metric>(qptrs.data(), num_queries, encoded, cloud_size);
 
   // Compare.
   float diff = std::abs(vnni_result - scalar_result);
@@ -139,19 +130,18 @@ bool run_test(size_t dim, size_t cloud_size, size_t num_queries, int seed) {
 
   std::printf("  dim=%-4zu  N=%-4zu  Nq=%-3zu  %-2s  vnni=%.6f  scalar=%.6f  "
               "rel_err=%.2e  %s\n",
-              dim, cloud_size, num_queries, metric_name,
-              vnni_result, scalar_result, rel_err,
+              dim, cloud_size, num_queries, metric_name, vnni_result, scalar_result, rel_err,
               pass ? "PASS" : "FAIL");
 
   return pass;
 }
 
 }  // namespace
-}  // namespace one_to_many_turboquant
+}  // namespace turboquant_4bit
 }  // namespace mvsic
 
 int main() {
-  using namespace mvsic::one_to_many_turboquant;
+  using namespace mvsic::turboquant_4bit;
 
   std::printf("=== VNNI GEMM Chamfer Correctness Test ===\n\n");
 

@@ -1,6 +1,6 @@
 #pragma once
 
-// low_bit_turboquant.h
+// turboquant_low_bit.h
 //
 // 1-bit and 2-bit TurboQuant quantization for quality investigation.
 // Reuses the same Hadamard rotation + normalization as 4-bit TQ, but uses
@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace mvsic {
-namespace low_bit_turboquant {
+namespace turboquant_low_bit {
 
 // =========================================================================
 // Constants: optimal Lloyd-Max codebooks for N(0,1)
@@ -33,8 +33,7 @@ static constexpr float k1BitCentroid = 0.7978845608f;
 //   Centroids: ±0.4528 (inner), ±1.5104 (outer)
 //   Boundary between inner/outer: |x| = 0.9816
 static constexpr float k2BitBoundary = 0.9816f;
-static constexpr std::array<float, 4> k2BitCentroids = {
-    0.4528f, 1.5104f, -0.4528f, -1.5104f};
+static constexpr std::array<float, 4> k2BitCentroids = {0.4528f, 1.5104f, -0.4528f, -1.5104f};
 // Code layout: 0 = +small, 1 = +large, 2 = -small, 3 = -large
 
 // =========================================================================
@@ -60,9 +59,7 @@ struct PreparedQuery {
 
 // Encode a single float-vector into 1-bit codes.
 template<typename TQModel>
-inline EncodedVec encode_1bit(
-    const TQModel& model,
-    const float* p, std::vector<float>& ws) {
+inline EncodedVec encode_1bit(const TQModel& model, const float* p, std::vector<float>& ws) {
   EncodedVec out;
   const size_t pdim = model.padded_dim;
   ws.resize(pdim);
@@ -72,7 +69,8 @@ inline EncodedVec encode_1bit(
 
   // Step 2: Compute norm.
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += ws[i] * ws[i];
   out.unquantized_squared_norm = sqr_norm;
   if (sqr_norm == 0.0f) {
     out.packed_codes.resize((pdim + 7) / 8, 0);
@@ -84,15 +82,15 @@ inline EncodedVec encode_1bit(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] *= inv_norm * had_scale;
 
   // Step 4: Quantize — sign only.
   const size_t nbytes = (pdim + 7) / 8;
   out.packed_codes.resize(nbytes, 0);
   float q_sqr = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
-    if (ws[i] >= 0.0f)
-      out.packed_codes[i / 8] |= (1u << (i % 8));
+    if (ws[i] >= 0.0f) out.packed_codes[i / 8] |= (1u << (i % 8));
     q_sqr += k1BitCentroid * k1BitCentroid;
   }
 
@@ -102,9 +100,7 @@ inline EncodedVec encode_1bit(
 
 // Encode a single float-vector into 2-bit codes.
 template<typename TQModel>
-inline EncodedVec encode_2bit(
-    const TQModel& model,
-    const float* p, std::vector<float>& ws) {
+inline EncodedVec encode_2bit(const TQModel& model, const float* p, std::vector<float>& ws) {
   EncodedVec out;
   const size_t pdim = model.padded_dim;
   ws.resize(pdim);
@@ -112,7 +108,8 @@ inline EncodedVec encode_2bit(
   model.rotator->rotate(p, ws.data());
 
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += ws[i] * ws[i];
   out.unquantized_squared_norm = sqr_norm;
   if (sqr_norm == 0.0f) {
     out.packed_codes.resize((pdim + 3) / 4, 0);
@@ -123,7 +120,8 @@ inline EncodedVec encode_2bit(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) ws[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    ws[i] *= inv_norm * had_scale;
 
   // Quantize: 2-bit (4 levels).
   const size_t nbytes = (pdim + 3) / 4;
@@ -152,9 +150,7 @@ inline EncodedVec encode_2bit(
 
 // Prepare a query vector: rotate + normalize + scale (kept as float).
 template<typename TQModel>
-inline PreparedQuery prepare_query(
-    const TQModel& model,
-    const float* qptr) {
+inline PreparedQuery prepare_query(const TQModel& model, const float* qptr) {
   PreparedQuery qq;
   const size_t pdim = model.padded_dim;
   qq.rotated.resize(pdim);
@@ -162,7 +158,8 @@ inline PreparedQuery prepare_query(
   model.rotator->rotate(qptr, qq.rotated.data());
 
   float sqr_norm = 0.0f;
-  for (size_t i = 0; i < pdim; ++i) sqr_norm += qq.rotated[i] * qq.rotated[i];
+  for (size_t i = 0; i < pdim; ++i)
+    sqr_norm += qq.rotated[i] * qq.rotated[i];
   qq.squared_norm = sqr_norm;
 
   if (sqr_norm == 0.0f) return qq;
@@ -170,7 +167,8 @@ inline PreparedQuery prepare_query(
   const float norm = std::sqrt(sqr_norm);
   const float inv_norm = 1.0f / norm;
   const float had_scale = std::sqrt(static_cast<float>(pdim));
-  for (size_t i = 0; i < pdim; ++i) qq.rotated[i] *= inv_norm * had_scale;
+  for (size_t i = 0; i < pdim; ++i)
+    qq.rotated[i] *= inv_norm * had_scale;
 
   return qq;
 }
@@ -180,8 +178,8 @@ inline PreparedQuery prepare_query(
 // =========================================================================
 
 // Scalar distance: 1-bit encoded point vs float query.
-inline float distance_1bit(
-    const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim, bool metric) {
+inline float distance_1bit(const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim,
+                           bool metric) {
   float dot = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
     bool positive = (db_pt.packed_codes[i / 8] >> (i % 8)) & 1;
@@ -202,8 +200,8 @@ inline float distance_1bit(
 }
 
 // Scalar distance: 2-bit encoded point vs float query.
-inline float distance_2bit(
-    const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim, bool metric) {
+inline float distance_2bit(const EncodedVec& db_pt, const PreparedQuery& qq, size_t pdim,
+                           bool metric) {
   float dot = 0.0f;
   for (size_t i = 0; i < pdim; ++i) {
     uint8_t code = (db_pt.packed_codes[i / 4] >> (2 * (i % 4))) & 0x3;
@@ -221,5 +219,5 @@ inline float distance_2bit(
   return neg_ip;
 }
 
-}  // namespace low_bit_turboquant
+}  // namespace turboquant_low_bit
 }  // namespace mvsic

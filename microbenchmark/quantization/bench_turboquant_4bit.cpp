@@ -1,6 +1,6 @@
-// one_to_many_turboquant_benchmark.cc
+// turboquant_4bit_benchmark.cc
 //
-// Microbenchmark for the strip-based one_to_many_turboquant kernel.
+// Microbenchmark for the strip-based turboquant_4bit kernel.
 
 #include <algorithm>
 #include <cmath>
@@ -10,17 +10,16 @@
 #include <vector>
 
 #include "benchmark/benchmark.h"
-#include "mvsic/core/quantization/one_to_many_turboquant.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
 
 namespace mvsic {
-namespace one_to_many_turboquant {
+namespace turboquant_4bit {
 namespace {
 
 constexpr int kNumDatapoints = 1000000;
 constexpr int kNumQueries = 1000;
 constexpr int kNumDatapointsScored = 1000;
-constexpr int kDimensionalities[] = {64, 96, 100, 128, 256, 512,
-                                     768, 1536, 3072, 4096, 8192};
+constexpr int kDimensionalities[] = {64, 96, 100, 128, 256, 512, 768, 1536, 3072, 4096, 8192};
 
 struct FlatPointRange {
   std::vector<float> data_;
@@ -43,11 +42,9 @@ struct CachedState {
 };
 
 template<bool Metric>
-CachedState<Metric>* GetCachedState(size_t dimensionality,
-                                     size_t num_datapoints) {
+CachedState<Metric>* GetCachedState(size_t dimensionality, size_t num_datapoints) {
   static CachedState<Metric> cache;
-  if (cache.dimensionality == dimensionality &&
-      cache.num_datapoints == num_datapoints)
+  if (cache.dimensionality == dimensionality && cache.num_datapoints == num_datapoints)
     return &cache;
 
   FlatPointRange data(num_datapoints, dimensionality);
@@ -55,7 +52,8 @@ CachedState<Metric>* GetCachedState(size_t dimensionality,
     const float scale = 1.0f / std::sqrt(static_cast<float>(dimensionality));
     std::mt19937_64 gen(42);
     std::normal_distribution<float> dist(0.0f, scale);
-    for (float& x : data.data_) x = dist(gen);
+    for (float& x : data.data_)
+      x = dist(gen);
   }
 
   cache.model.train(data);
@@ -68,7 +66,8 @@ CachedState<Metric>* GetCachedState(size_t dimensionality,
     std::normal_distribution<float> dist(0.0f, scale);
     std::vector<float> q(dimensionality);
     for (int i = 0; i < kNumQueries; ++i) {
-      for (size_t d = 0; d < dimensionality; ++d) q[d] = dist(gen);
+      for (size_t d = 0; d < dimensionality; ++d)
+        q[d] = dist(gen);
       cache.queries.push_back(cache.model.quantize_query(q.data()));
     }
   }
@@ -106,9 +105,8 @@ void BM_StripBatch(benchmark::State& state) {
 
   for (auto _ : state) {
     for (int q = 0; q < num_queries; ++q) {
-      queries[q].distances_contiguous(
-          strip_data, norms, sqn, strip_stride,
-          num_datapoints_scored, scores.data());
+      queries[q].distances_contiguous(strip_data, norms, sqn, strip_stride, num_datapoints_scored,
+                                      scores.data());
     }
     benchmark::DoNotOptimize(scores.data());
     benchmark::ClobberMemory();
@@ -116,14 +114,12 @@ void BM_StripBatch(benchmark::State& state) {
 
   const size_t items_per_iter = num_queries * num_datapoints_scored;
   const size_t nb = encoded.num_bytes_per_datapoint;
-  const size_t bytes_per_item = nb + sizeof(float) +
-                                (Metric ? sizeof(float) : 0);
+  const size_t bytes_per_item = nb + sizeof(float) + (Metric ? sizeof(float) : 0);
   state.SetBytesProcessed(state.iterations() * items_per_iter * bytes_per_item);
   state.SetItemsProcessed(state.iterations() * items_per_iter);
   state.counters["ns/dp"] = benchmark::Counter(
       static_cast<double>(items_per_iter),
-      benchmark::Counter::kIsIterationInvariantRate |
-          benchmark::Counter::kInvert,
+      benchmark::Counter::kIsIterationInvariantRate | benchmark::Counter::kInvert,
       benchmark::Counter::kIs1000);
 }
 
@@ -132,16 +128,11 @@ void CustomArguments(::benchmark::Benchmark* b) {
     b->Args({dim, kNumDatapoints, kNumQueries, kNumDatapointsScored});
 }
 
-BENCHMARK(BM_StripBatch<false>)
-    ->Apply(CustomArguments)
-    ->Name("BM_Strip_IP");
-BENCHMARK(BM_StripBatch<true>)
-    ->Apply(CustomArguments)
-    ->Name("BM_Strip_L2");
+BENCHMARK(BM_StripBatch<false>)->Apply(CustomArguments)->Name("BM_Strip_IP");
+BENCHMARK(BM_StripBatch<true>)->Apply(CustomArguments)->Name("BM_Strip_L2");
 
 }  // namespace
-}  // namespace one_to_many_turboquant
+}  // namespace turboquant_4bit
 }  // namespace mvsic
 
 BENCHMARK_MAIN();
-

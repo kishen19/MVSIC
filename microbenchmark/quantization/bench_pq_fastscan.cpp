@@ -5,7 +5,8 @@
 //   2) PQ with K=16 using Quantized_Query::distances_all (parlay-parallel inside)
 //   3) FastScan (K=16) using Quantized_Query::distances_all (parlay-parallel inside)
 //   4) RaBitQ using Quantized_Query::distances_all (parlay-parallel inside)
-//   5) TurboQuant (8-bit scalar per dim) using Quantized_Query::distances_all (parlay-parallel inside)
+//   5) TurboQuant (8-bit scalar per dim) using Quantized_Query::distances_all (parlay-parallel
+//   inside)
 //
 // Usage (Bazel):
 //   PARLAY_NUM_THREADS=16 bazel run -c opt //:bench_pq_fastscan -- [N] [Q] [D] [pq_block]
@@ -41,7 +42,9 @@
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/other_methods/rabitq_sym.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_byte.h"
 
 #if !defined(__AVX512F__)
 #warning "AVX-512 not enabled by compiler flags; fastscan benchmarks will be skipped."
@@ -191,6 +194,43 @@ static inline float scan_all_queries_distances_all_serial(const EncRange& db, co
   return float(total);
 }
 
+// OneToManyTurboQuant: use distances_contiguous (no distances_all in header).
+template<typename TQEnc, typename TQQueryVec>
+static inline float scan_all_queries_one_to_many_tq_serial(const TQEnc& enc, const TQQueryVec& qvec,
+                                                           size_t Q, float* scratch, size_t N,
+                                                           parlay::sequence<double>& per_q_sum) {
+  for (size_t qi = 0; qi < Q; ++qi) {
+    qvec[qi].distances_contiguous(enc.packed_codes.data(), enc.norm_scaling_factors.data(),
+                                  enc.unquantized_squared_norms.data(), enc.stride, N, scratch);
+    double s = 0.0;
+    for (size_t i = 0; i < N; ++i)
+      s += double(scratch[i]);
+    per_q_sum[qi] = s;
+  }
+  double total = 0.0;
+  for (size_t i = 0; i < Q; ++i)
+    total += per_q_sum[i];
+  return float(total);
+}
+
+// ByteTurboQuant: no batch API; per-query loop over db points.
+template<typename BTQEnc, typename BTQQueryVec>
+static inline float scan_all_queries_byte_tq_serial(const BTQEnc& enc, const BTQQueryVec& qvec,
+                                                    size_t Q, float* scratch, size_t N,
+                                                    parlay::sequence<double>& per_q_sum) {
+  for (size_t qi = 0; qi < Q; ++qi) {
+    parlay::parallel_for(0, N, [&](size_t i) { scratch[i] = qvec[qi].distance(enc[i]); });
+    double s = 0.0;
+    for (size_t i = 0; i < N; ++i)
+      s += double(scratch[i]);
+    per_q_sum[qi] = s;
+  }
+  double total = 0.0;
+  for (size_t i = 0; i < Q; ++i)
+    total += per_q_sum[i];
+  return float(total);
+}
+
 // ---------------------------
 // Benchmark runner
 // ---------------------------
@@ -242,14 +282,13 @@ int main(int argc, char** argv) {
   double pq_build_s = t.sec();
 
   // ---------------------------
-  // Build FastScan model + encode
+  // Build FastScan model + encode (AVX-512 / AVX2 / VNNI)
   // ---------------------------
   double fs_build_s = 0.0;
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__)
   t.start();
   mvsic::fastscan::Model<Metric> fs_model;
   fs_model.train(db, fs_block);
-  // assumes you added encode(db) overload for "single cloud"
   auto fs = fs_model.encode(db);
   fs_build_s = t.sec();
 #endif
@@ -264,24 +303,43 @@ int main(int argc, char** argv) {
   double rq_build_s = t.sec();
 
   // ---------------------------
-  // Build TurboQuant model + encode
+  // Build turboquant_4bit (4-bit TQ) model + encode
   // ---------------------------
   t.start();
-  mvsic::turboquant::Model<Metric> tq_model;
+  mvsic::turboquant_4bit::Model<Metric> tq_model;
   tq_model.train(db);
   auto tq = tq_model.encode(db);
   double tq_build_s = t.sec();
 
+  // ---------------------------
+  // Build turboquant_byte (int8) model + encode
+  // ---------------------------
+  t.start();
+  mvsic::turboquant_byte::Model<Metric> btq_model;
+  btq_model.train(db);
+  auto btq = btq_model.encode(db);
+  double btq_build_s = t.sec();
+
+  // ---------------------------
+  // Build RaBitQ-PipNN (4-bit symmetric) model + encode
+  // ---------------------------
+  t.start();
+  mvsic::rabitq_sym::Model<Metric, 4> rqp_model;
+  rqp_model.train(db);
+  auto rqp = rqp_model.encode(db);
+  double rqp_build_s = t.sec();
+
   std::cout << "\n=== Build / Encode time ===\n";
   std::cout << "PQ(K=16):        " << pq_build_s << " s\n";
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan(K=16):  " << fs_build_s << " s\n";
 #else
-  std::cout << "FastScan(K=16):  (skipped, no AVX512)\n";
+  std::cout << "FastScan(K=16):  (skipped, no AVX512/AVX2)\n";
 #endif
   std::cout << "RaBitQ(bits=" << rbits << "): " << rq_build_s << " s\n";
-  std::cerr << "bench: before TurboQuant build cout\n";
-  std::cout << "TurboQuant:      " << tq_build_s << " s\n";
+  std::cout << "RaBitQ-PipNN(4b): " << rqp_build_s << " s\n";
+  std::cout << "OneToManyTurboQuant(4b): " << tq_build_s << " s\n";
+  std::cout << "ByteTurboQuant(int8): " << btq_build_s << " s\n";
   std::cout << "Exact (float IP): (no build)\n";
 
   // ---------------------------
@@ -290,7 +348,7 @@ int main(int argc, char** argv) {
   std::vector<mvsic::pq::Quantized_Query<Metric>> pq_q;
   pq_q.reserve(Q);
 
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__)
   std::vector<mvsic::fastscan::Quantized_Query<Metric>> fs_q;
   fs_q.reserve(Q);
 #endif
@@ -298,8 +356,14 @@ int main(int argc, char** argv) {
   std::vector<mvsic::rabitq::Quantized_Query<Metric>> rq_q;
   rq_q.reserve(Q);
 
-  std::vector<mvsic::turboquant::Quantized_Query<Metric>> tq_q;
+  std::vector<mvsic::turboquant_4bit::Quantized_Query<Metric>> tq_q;
   tq_q.reserve(Q);
+
+  std::vector<mvsic::turboquant_byte::Quantized_Query<Metric>> btq_q;
+  btq_q.reserve(Q);
+
+  std::vector<mvsic::rabitq_sym::Quantized_Query<Metric, 4>> rqp_q;
+  rqp_q.reserve(Q);
 
   t.start();
   for (size_t i = 0; i < Q; ++i) {
@@ -307,7 +371,7 @@ int main(int argc, char** argv) {
   }
   double pq_lut_s = t.sec();
 
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__)
   t.start();
   for (size_t i = 0; i < Q; ++i) {
     fs_q.push_back(fs_model.quantize_query(queries.data() + i * size_t(D)));
@@ -327,15 +391,32 @@ int main(int argc, char** argv) {
   }
   double tq_lut_s = t.sec();
 
+  t.start();
+  for (size_t i = 0; i < Q; ++i) {
+    btq_q.push_back(btq_model.quantize_query(queries.data() + i * size_t(D)));
+  }
+  double btq_lut_s = t.sec();
+
+  t.start();
+  for (size_t i = 0; i < Q; ++i) {
+    rqp_q.push_back(rqp_model.quantize_query(queries.data() + i * size_t(D)));
+  }
+  double rqp_lut_s = t.sec();
+
   std::cout << "\n=== Query LUT time (Q=" << Q << ") ===\n";
   std::cout << "PQ(K=16):        " << pq_lut_s << " s  (" << (pq_lut_s * 1e6 / Q) << " us/query)\n";
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan(K=16):  " << fs_lut_s << " s  (" << (fs_lut_s * 1e6 / Q) << " us/query)\n";
 #else
-  std::cout << "FastScan(K=16):  (skipped, no AVX512)\n";
+  std::cout << "FastScan(K=16):  (skipped, no AVX512/AVX2)\n";
 #endif
   std::cout << "RaBitQ:          " << rq_lut_s << " s  (" << (rq_lut_s * 1e6 / Q) << " us/query)\n";
-  std::cout << "TurboQuant:      " << tq_lut_s << " s  (" << (tq_lut_s * 1e6 / Q) << " us/query)\n";
+  std::cout << "RaBitQ-PipNN:    " << rqp_lut_s << " s  (" << (rqp_lut_s * 1e6 / Q)
+            << " us/query)\n";
+  std::cout << "OneToManyTurboQuant: " << tq_lut_s << " s  (" << (tq_lut_s * 1e6 / Q)
+            << " us/query)\n";
+  std::cout << "ByteTurboQuant:  " << btq_lut_s << " s  (" << (btq_lut_s * 1e6 / Q)
+            << " us/query)\n";
   std::cout << "Exact (float IP): (no LUT)\n";
 
   // ---------------------------
@@ -346,11 +427,13 @@ int main(int argc, char** argv) {
   // scratch buffers for distances_all()
   std::vector<float> pq_out(N);
   std::vector<float> rq_out(N);
+  std::vector<float> rqp_out(N);
   std::vector<float> tq_out(N);
+  std::vector<float> btq_out(N);
 
-#if defined(__AVX512F__)
-  const size_t fs_N_total = static_cast<size_t>(fs.size());  // may include padding
-  std::vector<float> fs_out(std::max(fs_N_total, N));        // ensure >= N
+#if defined(__AVX512F__) || defined(__AVX2__)
+  const size_t fs_N_total = static_cast<size_t>(fs.size());
+  std::vector<float> fs_out(std::max(fs_N_total, N));
 #endif
 
   // Warmup (avoid cold-start effects)
@@ -361,7 +444,7 @@ int main(int argc, char** argv) {
     for (size_t j = 0; j < N; ++j)
       sink += pq_out[j];
 
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__AVX2__)
     fs_q[i].distances_all(fs, fs_out.data());
     for (size_t j = 0; j < N; ++j)
       sink += fs_out[j];
@@ -371,9 +454,18 @@ int main(int argc, char** argv) {
     for (size_t j = 0; j < N; ++j)
       sink += rq_out[j];
 
-    tq_q[i].distances_all(tq, tq_out.data());
+    rqp_q[i].distances_all(rqp, rqp_out.data());
+    for (size_t j = 0; j < N; ++j)
+      sink += rqp_out[j];
+
+    tq_q[i].distances_contiguous(tq.packed_codes.data(), tq.norm_scaling_factors.data(),
+                                 tq.unquantized_squared_norms.data(), tq.stride, N, tq_out.data());
     for (size_t j = 0; j < N; ++j)
       sink += tq_out[j];
+
+    parlay::parallel_for(0, N, [&](size_t j) { btq_out[j] = btq_q[i].distance(btq[j]); });
+    for (size_t j = 0; j < N; ++j)
+      sink += btq_out[j];
   }
 
   parlay::sequence<double> per_q_sum(Q, 0.0);
@@ -413,8 +505,8 @@ int main(int argc, char** argv) {
     print_scan_stats("PQ distances_all K=16", best, num_dists, Q);
   }
 
-  // FastScan
-#if defined(__AVX512F__)
+  // FastScan (AVX-512 / AVX2 / VNNI)
+#if defined(__AVX512F__) || defined(__AVX2__)
   {
     double best = 1e100;
     float acc = 0.0f;
@@ -426,10 +518,10 @@ int main(int argc, char** argv) {
       acc = local;
     }
     sink += acc;
-    print_scan_stats("FastScan distances_all K=16 (AVX-512)", best, num_dists, Q);
+    print_scan_stats("FastScan distances_all K=16 (AVX2/VNNI)", best, num_dists, Q);
   }
 #else
-  std::cout << "FastScan K=16 (AVX-512): (skipped, no AVX512)\n";
+  std::cout << "FastScan K=16: (skipped, no AVX512/AVX2)\n";
 #endif
 
   // RaBitQ
@@ -447,19 +539,51 @@ int main(int argc, char** argv) {
     print_scan_stats("RaBitQ distances_all", best, num_dists, Q);
   }
 
-  // TurboQuant
+  // RaBitQ-PipNN (4-bit symmetric)
   {
     double best = 1e100;
     float acc = 0.0f;
     for (int r = 0; r < REPS; ++r) {
       t.start();
-      float local = scan_all_queries_distances_all_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
+      float local =
+          scan_all_queries_distances_all_serial(rqp, rqp_q, Q, rqp_out.data(), N, per_q_sum);
       double s = t.sec();
       best = std::min(best, s);
       acc = local;
     }
     sink += acc;
-    print_scan_stats("TurboQuant distances_all", best, num_dists, Q);
+    print_scan_stats("RaBitQ-PipNN distances_all (4b sym)", best, num_dists, Q);
+  }
+
+  // OneToManyTurboQuant (4-bit) — uses distances_contiguous
+  {
+    double best = 1e100;
+    float acc = 0.0f;
+    for (int r = 0; r < REPS; ++r) {
+      t.start();
+      float local =
+          scan_all_queries_one_to_many_tq_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
+      double s = t.sec();
+      best = std::min(best, s);
+      acc = local;
+    }
+    sink += acc;
+    print_scan_stats("OneToManyTurboQuant distances_contiguous (4b)", best, num_dists, Q);
+  }
+
+  // ByteTurboQuant (int8) — per-point distance
+  {
+    double best = 1e100;
+    float acc = 0.0f;
+    for (int r = 0; r < REPS; ++r) {
+      t.start();
+      float local = scan_all_queries_byte_tq_serial(btq, btq_q, Q, btq_out.data(), N, per_q_sum);
+      double s = t.sec();
+      best = std::min(best, s);
+      acc = local;
+    }
+    sink += acc;
+    print_scan_stats("ByteTurboQuant per-point (int8)", best, num_dists, Q);
   }
 
   // ---------------------------
@@ -485,10 +609,10 @@ int main(int argc, char** argv) {
   }
   if (check_count > 0) {
     pq_mean_ae /= static_cast<double>(check_count);
-    std::cout << "\n=== Correctness (PQ vs exact IP, sample " << check_queries << " q x " << check_db
-              << " db) ===\n";
-    std::cout << "PQ max |approx - exact|: " << pq_max_ae << "  mean |approx - exact|: " << pq_mean_ae
-              << "\n";
+    std::cout << "\n=== Correctness (PQ vs exact IP, sample " << check_queries << " q x "
+              << check_db << " db) ===\n";
+    std::cout << "PQ max |approx - exact|: " << pq_max_ae
+              << "  mean |approx - exact|: " << pq_mean_ae << "\n";
   }
 
   std::cout << "\n(sink=" << sink << ")\n";

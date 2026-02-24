@@ -45,6 +45,19 @@ python3 -m pip install -r requirements.txt
 
 ## I/O Format
 
+MVSIC uses a specific binary format for storing point cloud datasets to enable efficient loading and memory mapping. The file is structured as follows:
+
+| Type    | Name                | Size                                           | Description                                                                                             |
+| :------ | :------------------ | :--------------------------------------------- | :------------------------------------------------------------------------------------------------------ |
+| `size_t`  | `dimension`         | `sizeof(size_t)`                               | The dimension of each vector in the point clouds.                                                       |
+| `size_t`  | `num_point_clouds`  | `sizeof(size_t)`                               | The total number of point clouds in the dataset.                                                        |
+| `size_t`  | `num_total_vectors` | `sizeof(size_t)`                               | The total number of individual vectors across all point clouds.                                         |
+| `float[]` | `vectors`           | `num_total_vectors * dimension * sizeof(float)`  | A flat array containing the concatenated vector data for all point clouds.                              |
+| `size_t`  | `num_offsets`       | `sizeof(size_t)`                               | The number of offsets, which should be `num_point_clouds + 1`.                                          |
+| `size_t[]`| `offsets`           | `num_offsets * sizeof(size_t)`                 | An array of offsets indicating the starting position of each point cloud's data in the `vectors` array. |
+
+The data for the i-th point cloud (0-indexed) is located in the `vectors` array from index `offsets[i]` up to (but not including) `offsets[i+1]`. The number of vectors in the i-th point cloud is `(offsets[i+1] - offsets[i]) / dimension`.
+
 
 ## Usage Examples
 
