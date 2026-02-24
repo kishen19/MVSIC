@@ -197,11 +197,12 @@ void run_benchmark(commandLine& P) {
   size_t max_kp = P.getOptionLongValue("-max_k_prime", 20000);
   double growth = P.getOptionDoubleValue("-k_growth", 2.0);
   uint32_t rbits = P.getOptionIntValue("-rabitq_bits", 8);
+  size_t num_query = P.getOptionLongValue("-num_query", 0);
 
   if (!inFile || (!qFile && !dataset_as_query)) {
     std::cerr << "Usage: measure_stretch_tq -i <base> [-q <queries> | -dataset_as_query]\n"
               << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|All]\n"
-              << "  [-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>]\n";
+              << "  [-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-num_query <N>]\n";
     return;
   }
 
@@ -214,6 +215,7 @@ void run_benchmark(commandLine& P) {
   std::vector<size_t> q_idx;
   if (dataset_as_query) {
     size_t nq = std::min((size_t)1000, base.size());
+    if (num_query > 0) nq = std::min(nq, num_query);
     std::vector<size_t> all(base.size());
     std::iota(all.begin(), all.end(), 0);
     std::mt19937 rng(42);
@@ -225,6 +227,14 @@ void run_benchmark(commandLine& P) {
   } else {
     std::cout << "Loading queries from " << qFile << "..." << std::endl;
     queries_obj = PR(qFile);
+    if (num_query > 0 && num_query < queries_obj.size()) {
+      std::vector<size_t> idx(num_query);
+      std::iota(idx.begin(), idx.end(), 0);
+      PointRangeSubsetWrapper<PR> w{queries_obj, idx};
+      PR trimmed(w, queries_obj.get_dims());
+      queries_obj = std::move(trimmed);
+      std::cout << "  using first " << num_query << " queries" << std::endl;
+    }
   }
   PR& queries = queries_obj;
 
