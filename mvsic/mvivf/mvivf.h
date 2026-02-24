@@ -17,6 +17,7 @@
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/fastscan.h"
+#include "mvsic/core/quantization/turboquant_4bit.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 namespace mvsic {
@@ -44,16 +45,19 @@ class IndexMVIVF : public Index<metric> {
   using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
   using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
   using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
+  using TQ4_Enc = turboquant_4bit::Quantized_Point_Range<FlatRange, metric>;
 
   using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
   using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
   using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set>;
+  using TQ4_Set = Quantized_Point_Cloud_Set<TQ4_Enc, metric>;
+  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ4_Set>;
 
   using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
   using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
   using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model>;
+  using TQ4_Model = MultiVecQuantizer<turboquant_4bit::Model<metric>, metric>;
+  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ4_Model>;
 
   // helper for decltype
   template<class M, class Q>
@@ -61,7 +65,8 @@ class IndexMVIVF : public Index<metric> {
   using PQ_Q = QQueryT<PQ_Model, ChPoint>;
   using FS_Q = QQueryT<FS_Model, ChPoint>;
   using RQ_Q = QQueryT<RQ_Model, ChPoint>;
-  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q>;
+  using TQ4_Q = QQueryT<TQ4_Model, ChPoint>;
+  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q, TQ4_Q>;
 
   using QT = IndexParams::QuantizerType;
 
@@ -136,6 +141,11 @@ class IndexMVIVF : public Index<metric> {
           node->quantized_data = m.encode(node->data);
           break;
         }
+        case QT::TurboQuant4Bit: {
+          auto &m = std::get<TQ4_Model>(quantizer);
+          node->quantized_data = m.encode(node->data);
+          break;
+        }
         case QT::None:
         default: node->quantized_data = std::monostate{}; break;
       }
@@ -166,6 +176,11 @@ class IndexMVIVF : public Index<metric> {
               }
               case QT::RaBitQ: {
                 auto &m = std::get<RQ_Model>(quantizer);
+                child->quantized_data = m.encode(child->data);
+                break;
+              }
+              case QT::TurboQuant4Bit: {
+                auto &m = std::get<TQ4_Model>(quantizer);
                 child->quantized_data = m.encode(child->data);
                 break;
               }
@@ -202,6 +217,11 @@ class IndexMVIVF : public Index<metric> {
       case QT::RaBitQ: {
         quantizer.template emplace<RQ_Model>();
         std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
+        break;
+      }
+      case QT::TurboQuant4Bit: {
+        quantizer.template emplace<TQ4_Model>();
+        std::get<TQ4_Model>(quantizer).train(points);
         break;
       }
       default: quantizer = std::monostate{}; break;
@@ -272,6 +292,12 @@ class IndexMVIVF : public Index<metric> {
           case QT::RaBitQ: {
             auto &q_query = std::get<RQ_Q>(q_query_var);
             auto &qleaf = std::get<RQ_Set>(current_node->quantized_data);
+            qleaf.distances_all(q_query, child_dists.data());
+            break;
+          }
+          case QT::TurboQuant4Bit: {
+            auto &q_query = std::get<TQ4_Q>(q_query_var);
+            auto &qleaf = std::get<TQ4_Set>(current_node->quantized_data);
             qleaf.distances_all(q_query, child_dists.data());
             break;
           }
@@ -364,6 +390,11 @@ class IndexMVIVF : public Index<metric> {
         q_query_var = m.quantize_query(query);
         break;
       }
+      case QT::TurboQuant4Bit: {
+        auto &m = std::get<TQ4_Model>(quantizer);
+        q_query_var = m.quantize_query(query);
+        break;
+      }
       case QT::PQ: {
         auto &m = std::get<PQ_Model>(quantizer);
         q_query_var = m.quantize_query(query);
@@ -414,6 +445,21 @@ class IndexMVIVF : public Index<metric> {
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t *leaf = probe_list[i].second;
           auto &qleaf = std::get<RQ_Set>(leaf->quantized_data);
+          qleaf.distances_all(q_query, &visited[offsets[i]]);
+          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
+            visited[offsets[i] + j].first = leaf->data.get_id(j);
+          });
+        });
+        t_distances = t.stop();
+        t.reset();
+        break;
+      }
+      case QT::TurboQuant4Bit: {
+        t.start();
+        auto &q_query = std::get<TQ4_Q>(q_query_var);
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t *leaf = probe_list[i].second;
+          auto &qleaf = std::get<TQ4_Set>(leaf->quantized_data);
           qleaf.distances_all(q_query, &visited[offsets[i]]);
           parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
             visited[offsets[i] + j].first = leaf->data.get_id(j);
@@ -604,6 +650,7 @@ class IndexMVIVF : public Index<metric> {
       case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
       case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
       case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
+      case QT::TurboQuant4Bit: std::get<TQ4_Model>(quantizer).save(outfile); break;
       case QT::None:
       default:
         // nothing
@@ -669,6 +716,10 @@ class IndexMVIVF : public Index<metric> {
       case QT::RaBitQ:
         quantizer.template emplace<RQ_Model>();
         std::get<RQ_Model>(quantizer).load(infile);
+        break;
+      case QT::TurboQuant4Bit:
+        quantizer.template emplace<TQ4_Model>();
+        std::get<TQ4_Model>(quantizer).load(infile);
         break;
       case QT::None:
       default: quantizer = std::monostate{}; break;
@@ -748,6 +799,11 @@ class IndexMVIVF : public Index<metric> {
               }
               case QT::RaBitQ: {
                 auto &m = std::get<RQ_Model>(quantizer);
+                node->quantized_data = m.encode(node->data);
+                break;
+              }
+              case QT::TurboQuant4Bit: {
+                auto &m = std::get<TQ4_Model>(quantizer);
                 node->quantized_data = m.encode(node->data);
                 break;
               }

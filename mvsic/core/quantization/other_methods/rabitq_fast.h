@@ -207,9 +207,14 @@ class Quantized_Point_Range {
   parlay::sequence<char> bin_data;
   parlay::sequence<char> ex_data;
 
+  // Legacy interleaved layout (no longer used for scoring, kept for compatibility).
   static constexpr size_t BLOCK_SIZE = 32;
   size_t num_blocks = 0;
   parlay::sequence<char> interleaved_bin_data;
+
+  // FastScan-compatible batch layout: concatenation of BatchDataMap blocks (32 vectors per block).
+  size_t n_batches = 0;
+  parlay::sequence<char> batch_data;
 
   Quantized_Point_Range() = default;
 
@@ -290,6 +295,7 @@ class Quantized_Query {
 
   std::vector<float> q_rot_storage;
   rabitqlib::SplitSingleQuery<float> q_obj;
+  std::unique_ptr<rabitqlib::SplitBatchQuery<float>> q_batch;
 
   float (*ip_func)(const float*, const uint8_t*, size_t) = nullptr;
 
@@ -312,20 +318,30 @@ class Quantized_Query {
       ip_func = rabitqlib::select_excode_ipfunc(ex_bits);
     }
 
+    float norm_for_batch = 0.0f;
+    float ip_for_batch = 0.0f;
+
     if constexpr (Metric) {
       float dist_sq = rabitqlib::euclidean_sqr(q_rot_storage.data(), c_rot, padded_dim);
-      float norm = std::sqrt(dist_sq);
-      q_obj.set_g_add(norm);
-      g_add = norm * norm;
-      g_error = norm;
+      norm_for_batch = std::sqrt(dist_sq);
+      q_obj.set_g_add(norm_for_batch);
+      g_add = norm_for_batch * norm_for_batch;
+      g_error = norm_for_batch;
     } else {
-      float ip = rabitqlib::dot_product(q_rot_storage.data(), c_rot, padded_dim);
-      q_obj.set_g_add(ip);
-      g_add = ip;
+      float dist_sq = rabitqlib::euclidean_sqr(q_rot_storage.data(), c_rot, padded_dim);
+      norm_for_batch = std::sqrt(dist_sq);
+      ip_for_batch = rabitqlib::dot_product(q_rot_storage.data(), c_rot, padded_dim);
+      q_obj.set_g_add(ip_for_batch);
+      g_add = ip_for_batch;
       g_error = 0.0f;
     }
 
-    decompose_into_planes();
+    bool use_hacc = true;
+    q_batch = std::make_unique<rabitqlib::SplitBatchQuery<float>>(
+        q_rot_storage.data(), padded_dim_, ex_bits_,
+        Metric ? rabitqlib::METRIC_L2 : rabitqlib::METRIC_IP,
+        use_hacc);
+    q_batch->set_g_add(norm_for_batch, ip_for_batch);
   }
 
   void decompose_into_planes() {
@@ -368,20 +384,30 @@ class Quantized_Query {
   void distances_all(const EncRange& db, float* out) const {
     const size_t n = static_cast<size_t>(db.size());
     if (n == 0) return;
+#if defined(__AVX2__) || defined(__AVX512BW__)
+    if (q_batch && db.batch_data.size() > 0 && db.n_batches > 0) {
+      constexpr size_t BS = rabitqlib::fastscan::kBatchSize;  // 32
+      const size_t batch_bytes = rabitqlib::BatchDataMap<float>::data_bytes(padded_dim);
+      const char* batch_base = db.batch_data.data();
 
-#if defined(__AVX2__) || (defined(__AVX512BITALG__) && defined(__AVX512VNNI__) && defined(__AVX512VL__))
-    if (db.interleaved_bin_data.size() > 0) {
-      parlay::parallel_for(0, db.num_blocks, [&](size_t b) {
-        const char* block_ptr =
-            db.interleaved_bin_data.data() + (b * EncRange::BLOCK_SIZE * db.bin_stride);
-        float block_out[32];
-        fastscan_compute_block_simd(block_ptr, q_plane_0.data(), q_plane_1.data(), q_plane_2.data(),
-                                    q_plane_3.data(), db.bin_stride, block_out, g_add, g_error);
-        const size_t base = b * EncRange::BLOCK_SIZE;
-        const size_t items = std::min(EncRange::BLOCK_SIZE, n - base);
-        for (size_t v = 0; v < items; ++v)
-          out[base + v] = block_out[v];
-      });
+      for (size_t b = 0; b < db.n_batches; ++b) {
+        const size_t base = b * BS;
+        const size_t count = std::min(BS, n - base);
+        if (count == 0) break;
+
+        const char* batch_ptr = batch_base + b * batch_bytes;
+        float est_dist[BS];
+        float low_dist[BS];
+        float ip_x0_qr[BS];
+
+        rabitqlib::split_batch_estdist(
+            batch_ptr, *q_batch, padded_dim,
+            est_dist, low_dist, ip_x0_qr,
+            /*use_hacc=*/true);
+
+        for (size_t i = 0; i < count; ++i)
+          out[base + i] = est_dist[i];
+      }
       return;
     }
 #endif
@@ -399,28 +425,41 @@ class Quantized_Query {
   template<typename EncRange>
   void distances_slice(const EncRange& db, size_t start, size_t n, float* out) const {
     if (n == 0) return;
-    constexpr size_t kBlockSize = EncRange::BLOCK_SIZE;
-    const size_t bin_stride = db.bin_stride;
-    const size_t ex_stride = db.ex_stride;
     const char* bin_base = db.bin_data.data();
     const char* ex_base =
         (db.ex_bits > 0 && db.ex_stride > 0 && db.ex_data.size() > 0) ? db.ex_data.data() : nullptr;
+#if defined(__AVX2__) || defined(__AVX512BW__)
+    if (q_batch && db.batch_data.size() > 0 && db.n_batches > 0) {
+      constexpr size_t BS = rabitqlib::fastscan::kBatchSize;
+      const size_t batch_bytes = rabitqlib::BatchDataMap<float>::data_bytes(padded_dim);
+      const char* batch_base = db.batch_data.data();
 
-#if defined(__AVX2__) || (defined(__AVX512BITALG__) && defined(__AVX512VNNI__) && defined(__AVX512VL__))
-    if (db.interleaved_bin_data.size() > 0) {
-      const size_t first_block = start / kBlockSize;
-      const size_t last_block = (start + n - 1) / kBlockSize;
-      for (size_t b = first_block; b <= last_block; ++b) {
-        float block_out[32];
-        const char* block_ptr =
-            db.interleaved_bin_data.data() + (b * kBlockSize * bin_stride);
-        fastscan_compute_block_simd(block_ptr, q_plane_0.data(), q_plane_1.data(), q_plane_2.data(),
-                                    q_plane_3.data(), bin_stride, block_out, g_add, g_error);
-        const size_t base = b * kBlockSize;
-        for (size_t v = 0; v < kBlockSize; ++v) {
-          const size_t global = base + v;
-          if (global >= start && global < start + n)
-            out[global - start] = block_out[v];
+      const size_t end = start + n;
+      const size_t first_block = start / BS;
+      const size_t last_block  = (end + BS - 1) / BS;
+
+      for (size_t b = first_block; b < last_block; ++b) {
+        if (b >= db.n_batches) break;
+        const size_t block_base = b * BS;
+        const size_t block_start = std::max(block_base, start);
+        const size_t block_end = std::min(block_base + BS, end);
+        if (block_start >= block_end) continue;
+
+        const char* batch_ptr = batch_base + b * batch_bytes;
+        float est_dist[BS];
+        float low_dist[BS];
+        float ip_x0_qr[BS];
+
+        rabitqlib::split_batch_estdist(
+            batch_ptr, *q_batch, padded_dim,
+            est_dist, low_dist, ip_x0_qr,
+            /*use_hacc=*/true);
+
+        for (size_t v = 0; v < BS; ++v) {
+          const size_t global = block_base + v;
+          if (global < start || global >= end) continue;
+          if (global >= static_cast<size_t>(db.size())) break;
+          out[global - start] = est_dist[v];
         }
       }
       return;
@@ -428,8 +467,8 @@ class Quantized_Query {
 #endif
 
     for (size_t i = 0; i < n; ++i) {
-      out[i] = distance_raw(bin_base + (start + i) * bin_stride,
-                           ex_base ? (ex_base + (start + i) * ex_stride) : nullptr);
+      out[i] = distance_raw(bin_base + (start + i) * db.bin_stride,
+                           ex_base ? (ex_base + (start + i) * db.ex_stride) : nullptr);
     }
   }
 };
@@ -516,6 +555,7 @@ class Model {
       }
     };
 
+    // Scalar RaBitQ encoding (per-point), used as a fallback and for compatibility.
     parlay::parallel_for(0, enc.n, [&](size_t i) {
       static thread_local EncodingWorkspace ws;
       ws.ensure_size(padded_dim);
@@ -529,6 +569,29 @@ class Model {
     });
 
     enc.build_interleaved_layout();
+
+    // FastScan-compatible batch encoding using rabitqlib's one_bit_batch_code.
+    constexpr size_t BS = rabitqlib::fastscan::kBatchSize;  // 32
+    enc.n_batches = (enc.n + BS - 1) / BS;
+    const size_t batch_bytes = rabitqlib::BatchDataMap<float>::data_bytes(padded_dim);
+    enc.batch_data.resize(enc.n_batches * batch_bytes);
+
+    parlay::parallel_for(0, enc.n_batches, [&](size_t b) {
+      const size_t base = b * BS;
+      const size_t count = std::min(BS, enc.n - base);
+      if (count == 0) return;
+
+      std::vector<float> tmp(count * padded_dim);
+      for (size_t i = 0; i < count; ++i) {
+        const float* p = reinterpret_cast<const float*>(data.location(base + i));
+        rotator->rotate(p, tmp.data() + i * padded_dim);
+      }
+
+      char* batch_ptr = enc.batch_data.data() + b * batch_bytes;
+      rabitqlib::quant::quantize_one_batch(
+          tmp.data(), centroid_rot.data(), count, padded_dim, batch_ptr, m_type);
+    });
+
     return enc;
   }
 

@@ -12,6 +12,7 @@ cc_library(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:turboquant_4bit",
         "//mvsic/core/quantization:wrapper",
         "//mvsic/core/utils:util",
         "@com_google_absl//absl/container:btree",

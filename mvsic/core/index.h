@@ -21,7 +21,7 @@ class Index {
   using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
   // Embedding dimension
   uint32_t d = 0;
-  /* ------------------------------Build Functions------------------------------ */
+
   // Builds the index given PointCloudSet object.
   virtual void build(const PointCloudSet<ChPoint>& points) {}
   // Builds the index given raw data.
@@ -29,7 +29,7 @@ class Index {
     PointCloudSet<ChPoint> points(n, d, data, offsets, ids);
     build(points);
   }
-  /* ------------------------------Search Functions----------------------------- */
+
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
   virtual std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> search(
@@ -38,6 +38,7 @@ class Index {
     auto [results, dist_cmps, timings] = search_with_stats(query, points, search_params);
     return std::make_pair(results, dist_cmps);
   }
+
   // Returns the top-k point clouds for each of the query point clouds
   // Default: runs search in parallel for each query
   virtual std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t>
@@ -52,6 +53,7 @@ class Index {
     });
     return std::make_pair(pred, parlay::reduce(cmps));
   }
+
   // Returns some running time stats, specific to the index type
   // NOTE: Has to be defined by every index.
   virtual std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
@@ -103,12 +105,11 @@ class Index {
     return num_cmps;
   }
 
-  /* -----------------------------Load/Save Functions-------------------------- */
   // Write the index to a file in disk
   virtual void save(const std::string& filename) {}
   // Read the index from a file in disk
   virtual void load(const std::string& filename, const PointCloudSet<ChPoint>& points) {}
-  /* ------------------------------Helper Functions------------------------------ */
+
   // Only valid for MVIVF
   virtual size_t mean_cluster_size() const noexcept {
     std::cout << "mean_cluster_size() not implemented for this index type" << std::endl;
@@ -123,8 +124,5 @@ class Index {
     return 0;
   }
 };
-
-// template struct Index<true>;   // Instantiates for L2 metric (metric = true)
-// template struct Index<false>;  // Instantiates for MIPS      (metric = false)
 
 }  // namespace mvsic
