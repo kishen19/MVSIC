@@ -292,16 +292,17 @@ def _interpolate_qps_at_recall(df, recall_col, qps_col, target_recall):
 
 def generate_qps_at_recall_analysis(dataset_config, k, results_to_plot, experiment_name, affix=""):
     """
-    Calculates estimated QPS at 90% recall levels for both QPS_seq and QPS_par,
-    and saves to a CSV file.
+    Calculates estimated QPS at target recall levels (90%, 95%, 99%) for both
+    QPS_seq and QPS_par, and saves to separate CSV files (one per target recall).
     """
     dataset_name = dataset_config["name"]
     base_results_dir = dataset_config["results"]
-    target_recall = 0.90  # Focus on 90%
+    target_recalls = [0.90, 0.95, 0.99]
 
-    print(f"--- Generating QPS @ 90% Recall analysis for: {dataset_name} (k={k}) ---")
+    print(f"--- Generating QPS @ {{90,95,99}}% Recall analysis for: {dataset_name} (k={k}) ---")
 
-    analysis_results = []
+    # One results list per target recall.
+    analysis_results = {tr: [] for tr in target_recalls}
 
     for entry in results_to_plot:
         method, build_name = entry[0], entry[1]
@@ -324,7 +325,7 @@ def generate_qps_at_recall_analysis(dataset_config, k, results_to_plot, experime
 
         if not all_data_frames:
             continue
-        
+
         full_df = pd.concat(all_data_frames, ignore_index=True)
 
         # Index build time from build_stats.json (if present)
@@ -338,55 +339,45 @@ def generate_qps_at_recall_analysis(dataset_config, k, results_to_plot, experime
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        row_data = {"Method": label, "build_time_sec": build_time_sec}
-        
-        for recall_col in ["recall_1_k", "recall_k_k"]:
-            for y_col in ["QPS_seq", "QPS_par"]:
-                col_name = f"{y_col}_at_{int(target_recall*100)}_{recall_col}"
-                row_data[col_name] = np.nan
+        for target_recall in target_recalls:
+            row_data = {"Method": label, "build_time_sec": build_time_sec}
 
-                if recall_col not in full_df.columns or y_col not in full_df.columns:
-                    continue
+            for recall_col in ["recall_1_k", "recall_k_k"]:
+                for y_col in ["QPS_seq", "QPS_par"]:
+                    col_name = f"{y_col}_at_{int(target_recall*100)}_{recall_col}"
+                    row_data[col_name] = np.nan
 
-                pareto_df = calculate_pareto(full_df, recall_col, y_col)
-                if pareto_df.empty:
-                    continue
-                
-                qps_val = _interpolate_qps_at_recall(pareto_df, recall_col, y_col, target_recall)
-                row_data[col_name] = qps_val
-        
-        analysis_results.append(row_data)
+                    if recall_col not in full_df.columns or y_col not in full_df.columns:
+                        continue
 
-    if not analysis_results:
-        print("No data found for QPS @ Recall analysis.")
-        return
+                    pareto_df = calculate_pareto(full_df, recall_col, y_col)
+                    if pareto_df.empty:
+                        continue
 
-    results_df = pd.DataFrame(analysis_results)
+                    qps_val = _interpolate_qps_at_recall(pareto_df, recall_col, y_col, target_recall)
+                    row_data[col_name] = qps_val
 
-    # QPS columns (exclude 'Method' and 'build_time_sec') for which we add a slowdown multiplier
-    qps_cols = [c for c in results_df.columns if c not in ("Method", "build_time_sec") and "QPS" in c]
-    best_per_col = results_df[qps_cols].max(skipna=True)
+            analysis_results[target_recall].append(row_data)
 
-    # Build new column order: Method, build_time_sec, then each QPS column and its multiplier
-    new_cols = ["Method", "build_time_sec"]
-    for c in qps_cols:
-        new_cols.append(c)
-        mult_col = f"{c}_mult"
-        # multiplier = best / value (1.0 for best, >1 for slower)
-        results_df[mult_col] = np.where(
-            results_df[c].notna() & (results_df[c] > 0),
-            best_per_col[c] / results_df[c],
-            np.nan,
-        )
-        new_cols.append(mult_col)
-    results_df = results_df[new_cols]
-
+    # Write one CSV per target recall. Missing values remain empty in the CSV.
     out_dir = f"./results/{experiment_name}"
     os.makedirs(out_dir, exist_ok=True)
-    out_file = os.path.join(out_dir, f"{_join_affixes(affix)}_{dataset_name}_k={k}_qps_at_90_recall.csv")
 
-    print(f"Saving QPS @ 90% Recall analysis to: {out_file}")
-    results_df.to_csv(out_file, index=False, float_format="%.2f")
+    any_written = False
+    for target_recall, rows in analysis_results.items():
+        if not rows:
+            continue
+        results_df = pd.DataFrame(rows)
+        pct = int(target_recall * 100)
+        out_file = os.path.join(
+            out_dir, f"{_join_affixes(affix)}_{dataset_name}_k={k}_qps_at_{pct}_recall.csv"
+        )
+        print(f"Saving QPS @ {pct}% Recall analysis to: {out_file}")
+        results_df.to_csv(out_file, index=False, float_format="%.2f")
+        any_written = True
+
+    if not any_written:
+        print("No data found for QPS @ Recall analysis.")
 
 
 
