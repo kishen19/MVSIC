@@ -1,10 +1,11 @@
 #pragma once
 
+#include <algorithm>
+#include <functional>
+#include <optional>
 #include <queue>
 #include <set>
-#include <optional>
 #include <vector>
-#include <algorithm>
 
 // #include "absl/container/btree_set.h"
 
@@ -542,8 +543,94 @@ class IndexMVIVF : public Index<metric> {
     return std::make_tuple(final_results, dist_cmps, timings);
   }
 
+  // Stats from a single tree traversal (number of nodes, leaves, sizes, height).
+  struct TreeStats {
+    size_t num_internal_nodes = 0;
+    size_t num_leaves = 0;
+    double avg_leaf_size = 0.0;           // average number of point clouds per leaf
+    double avg_internal_node_size = 0.0;  // average number of children (centers) per internal node
+    size_t total_point_clouds_internal = 0;  // sum over internal nodes of node->data.size()
+    size_t height = 0;
+  };
+
+  // Fills TreeStats by traversing the k-means tree. Call after build() or load().
+  TreeStats get_tree_stats() const {
+    TreeStats s;
+    if (root == nullptr) return s;
+
+    size_t leaf_size_sum = 0;
+    size_t internal_size_sum = 0;
+
+    std::function<void(const node_t *, size_t)> visit = [&](const node_t *node, size_t depth) {
+      if (node->children.empty()) {
+        s.num_leaves++;
+        leaf_size_sum += node->get_size();
+        if (depth + 1 > s.height) s.height = depth + 1;  // number of levels (matches get_height())
+      } else {
+        s.num_internal_nodes++;
+        size_t n = node->get_size();
+        s.total_point_clouds_internal += n;
+        internal_size_sum += n;
+        for (const node_t *child : node->children)
+          visit(child, depth + 1);
+      }
+    };
+
+    visit(root, 0);
+    if (s.num_leaves > 0) s.avg_leaf_size = static_cast<double>(leaf_size_sum) / s.num_leaves;
+    if (s.num_internal_nodes > 0) {
+      s.avg_internal_node_size = static_cast<double>(internal_size_sum) / s.num_internal_nodes;
+    }
+    return s;
+  }
+
+  // Returns a flat clustering of the database points based on the current tree leaves.
+  //
+  // The output is a sequence `leaf_of_point` such that:
+  //   - `leaf_of_point[id]` is the (0-based) leaf index containing point with global id `id`.
+  //   - Leaf indices are assigned in depth-first order over the tree.
+  //
+  // Assumes that point ids are 0..N-1 and match the ids stored in the leaf PointCloudSets.
+  parlay::sequence<uint32_t> get_flat_clustering() const {
+    parlay::sequence<uint32_t> empty;
+    if (root == nullptr) return empty;
+
+    std::vector<std::pair<uint32_t, uint32_t>> assignments;
+    assignments.reserve(1024);
+    size_t max_id = 0;
+    size_t leaf_idx = 0;
+
+    std::function<void(const node_t *)> visit = [&](const node_t *node) {
+      if (node->children.empty()) {
+        size_t n = node->data.size();
+        for (size_t j = 0; j < n; ++j) {
+          uint32_t id = node->data.get_id(j);
+          assignments.emplace_back(id, static_cast<uint32_t>(leaf_idx));
+          if (id > max_id) max_id = id;
+        }
+        ++leaf_idx;
+      } else {
+        for (const node_t *child : node->children) {
+          if (child != nullptr) visit(child);
+        }
+      }
+    };
+
+    visit(root);
+    if (assignments.empty()) return empty;
+
+    parlay::sequence<uint32_t> leaf_of_point(max_id + 1);
+    parlay::parallel_for(0, leaf_of_point.size(), [&](size_t i) { leaf_of_point[i] = UINT32_MAX; });
+
+    parlay::parallel_for(0, assignments.size(), [&](size_t i) {
+      auto [pid, lid] = assignments[i];
+      leaf_of_point[pid] = lid;
+    });
+
+    return leaf_of_point;
+  }
+
   // Traversing the k-means tree: returns the height of the tree
-  // TODO: get more stats about the tree
   size_t traverse_tree(node_t *node, parlay::sequence<node_t *> &ind_to_node,
                        std::unordered_map<node_t *, size_t> &node_to_ind,
                        parlay::sequence<size_t> &center_offsets,

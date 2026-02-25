@@ -5,6 +5,7 @@
 #include "algorithms/utils/mips_point.h"
 #include "algorithms/utils/point_range.h"
 #include "lloyds/kmeans.h"
+#include "lloyds_weighted/kmeans_weighted.h"
 
 namespace mvsic {
 
@@ -40,6 +41,47 @@ auto kmeans_subsample(const parlay::sequence<parlay::sequence<float>>& data, uin
   //   final_centers[i] = std::move(center);
   // });
   // return final_centers;
+  return centers;
+}
+
+// Runs weighted kmeans on a subsample of size max_points_per_centroid*k.
+// `weights` provides a per-point weight for each row in `data`.
+// When max_points_per_centroid * k < n, both data and weights are subsampled
+// using the same random indices.
+template<bool metric>
+auto kmeans_weighted_subsample(const parlay::sequence<parlay::sequence<float>>& data,
+                               const parlay::sequence<float>& weights, uint32_t k,
+                               uint32_t max_points_per_centroid, bool verbose = false) {
+  using PointTy =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<PointTy>;
+  size_t n = data.size();
+  size_t dims = data[0].size();
+  if (weights.size() != n) {
+    std::cerr << "[kmeans_weighted_subsample] Error: weights.size() != data.size()." << std::endl;
+    abort();
+  }
+
+  Range centers;
+  if (max_points_per_centroid * k >= n) {
+    Range data_range(data, dims);
+    centers = kmeans_weighted<float, PointTy>(data_range, weights, k, "UniformlyRandom", "Pairwise",
+                                              10, verbose);
+  } else {
+    const size_t m = static_cast<size_t>(max_points_per_centroid) * static_cast<size_t>(k);
+    auto sampled_points = parlay::delayed_tabulate(m, [&](size_t i) {
+      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+      return data[id];
+    });
+    parlay::sequence<float> sampled_weights(m);
+    parlay::parallel_for(0, m, [&](size_t i) {
+      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+      sampled_weights[i] = weights[id];
+    });
+    Range sampled_data_range(sampled_points, dims);
+    centers = kmeans_weighted<float, PointTy>(sampled_data_range, sampled_weights, k,
+                                              "UniformlyRandom", "Pairwise", 10, verbose);
+  }
   return centers;
 }
 

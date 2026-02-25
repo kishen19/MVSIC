@@ -21,6 +21,7 @@ cc_library(
     hdrs = ["kmeans_util.h"],
     deps = [
         "@kmeans//lloyds:kmeans",
+        "@kmeans//lloyds_weighted:kmeans_weighted",
         "@parlayann//algorithms/utils:euclidian_point",
         "@parlayann//algorithms/utils:mips_point",
         "@parlayann//algorithms/utils:point_range",

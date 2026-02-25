@@ -204,9 +204,46 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
       if (s >= data.size()) {
         centers.set_point_cloud(i, data);
       } else {
-        auto new_centers = kmeans_subsample<metric>(
-            data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
-        centers.set_point_cloud(i, new_centers);
+        if (params.use_weighted_inner_kmeans) {
+          // Build per-vector weights so each point cloud contributes total weight 1.
+          const size_t num_docs = grouped[i].size();
+          auto sizes = parlay::delayed_seq<size_t>(
+              num_docs, [&](size_t j) { return static_cast<size_t>(points.get_size(grouped[i][j].second)); });
+          parlay::sequence<size_t> offsets;
+          size_t total_vecs;
+          std::tie(offsets, total_vecs) = parlay::scan(sizes);
+
+          if (total_vecs != data.size()) {
+            std::cerr << "[MVClustering] Error: total_vecs != data.size() in weighted inner k-means."
+                      << std::endl;
+            abort();
+          }
+
+          parlay::sequence<float> weights(total_vecs);
+          parlay::parallel_for(0, num_docs, [&](size_t j) {
+            uint32_t doc_id = grouped[i][j].second;
+            uint32_t doc_size = points.get_size(doc_id);
+            if (doc_size == 0) return;
+            float w = 1.0f / static_cast<float>(doc_size);
+            size_t start = offsets[j];
+            for (uint32_t t = 0; t < doc_size; ++t) {
+              weights[start + t] = w;
+            }
+          });
+          if (weights.size() != data.size()) {
+            std::cerr << "[MVClustering] Error: weights.size() != data.size() in "
+                         "weighted inner k-means."
+                      << std::endl;
+            abort();
+          }
+          auto new_centers = kmeans_weighted_subsample<metric>(
+              data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+          centers.set_point_cloud(i, new_centers);
+        } else {
+          auto new_centers = kmeans_subsample<metric>(
+              data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+          centers.set_point_cloud(i, new_centers);
+        }
       }
     });
     // Sample from input for empty clusters
@@ -221,9 +258,29 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
         if (s >= data.size()) {
           centers.set_point_cloud(i, data);
         } else {
-          auto new_centers = kmeans_subsample<metric>(
-              data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
-          centers.set_point_cloud(i, new_centers);
+          if (params.use_weighted_inner_kmeans) {
+            // For a single doc, all vectors get the same weight 1 / |doc|.
+            parlay::sequence<float> weights;
+            uint32_t doc_size = points.get_size(id[0]);
+            if (doc_size > 0) {
+              float w = 1.0f / static_cast<float>(doc_size);
+              weights = parlay::sequence<float>(data.size(), w);
+            }
+            if (weights.size() != data.size()) {
+              std::cerr << "[MVClustering] Error: weights.size() != data.size() in "
+                           "weighted inner k-means (empty cluster)."
+                        << std::endl;
+              abort();
+            }
+            auto new_centers = kmeans_weighted_subsample<metric>(
+                data, weights, s, params.max_points_per_centroid_inner_kmeans,
+                params.verbose >= 3);
+            centers.set_point_cloud(i, new_centers);
+          } else {
+            auto new_centers = kmeans_subsample<metric>(
+                data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+            centers.set_point_cloud(i, new_centers);
+          }
         }
       });
       params.seed += (k - grouped.size());

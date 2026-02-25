@@ -40,6 +40,7 @@ void bench(mvsic::commandLine &P) {
   uint32_t niters = P.getOptionIntValue("-niters", 5);
   uint32_t max_point_clouds_per_cluster = P.getOptionIntValue("-mpcc", 0);
   uint32_t max_points_per_centroid_inner_kmeans = P.getOptionIntValue("-mpcik", 20);
+  bool use_weighted_inner_kmeans = P.getOption("-wgh_kmeans");
 
   // Flat params
   bool is_flat = P.getOption("-flat");
@@ -77,14 +78,16 @@ void bench(mvsic::commandLine &P) {
   if (is_flat) {
     index_params = IndexParams::mvivf_flat(
         k_per_level, compress_input, verbose, niters, max_point_clouds_per_cluster,
-        max_points_per_centroid_inner_kmeans, "Random", 0, false, 0, pq_method_t, block_size,
-        num_clusters_per_block, num_points_per_cluster, rabitq_bits, quantize_centers);
+        max_points_per_centroid_inner_kmeans, "Random", 0, use_weighted_inner_kmeans, 0,
+        pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
+        quantize_centers);
     search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else {
     index_params = IndexParams::mvivf(
         k_per_level, max_leaf_size, compress_input, verbose, niters, max_point_clouds_per_cluster,
-        max_points_per_centroid_inner_kmeans, "Random", 0, false, 0, pq_method_t, block_size,
-        num_clusters_per_block, num_points_per_cluster, rabitq_bits, quantize_centers);
+        max_points_per_centroid_inner_kmeans, "Random", 0, use_weighted_inner_kmeans, 0,
+        pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
+        quantize_centers);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 

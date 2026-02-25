@@ -25,14 +25,15 @@ int main(int argc, char* argv[]) {
                        "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                        "[-data_type <tp>] [-dist_func <dist_func>]"
                        "[-seed <algorithm>] [-iters <num_iters>]"
-                       "[-lb <bool>]");
+                       "[-mpcc <max_point_clouds_per_cluster>]"
+                       "[-use_weighted_inner_kmeans] [-v <verbose>] [-gt <gtFile>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
   size_t k = P.getOptionLongValue("-k", 10);
   size_t s = P.getOptionLongValue("-s", 0);
   // auto seeding = P.getOptionValue("-seed", "Random");
   size_t iters = P.getOptionLongValue("-iters", 5);
   size_t max_point_clouds_per_cluster = P.getOptionLongValue("-mpcc", 0);
-  // bool lb = P.getOption("-lb");
+  bool use_weighted_inner_kmeans = P.getOption("-use_weighted_inner_kmeans");
   int verbose = P.getOptionIntValue("-v", 0);
 
   // MVClusteringParams params(iters, seeding, os_rate, verbose, lb);
@@ -40,7 +41,7 @@ int main(int argc, char* argv[]) {
   if (df == "L2") {
     auto points = mvsic::PointCloudSet<mvsic::ChamferL2_Point>(P.getOptionValue("-i"));
     mvsic::MVClustering<true> clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster, 20,
-                                   verbose);
+                                   verbose, "Random", 0, use_weighted_inner_kmeans);
     clus.train(points);
     clustering = clus.cluster_ids;
   } else if (df == "IP") {
@@ -49,7 +50,7 @@ int main(int argc, char* argv[]) {
     std::cout << points.get_dims() << " dimensions per point cloud." << std::endl;
     std::cout << points.average_size() << " average number of points per point cloud." << std::endl;
     mvsic::MVClustering<false> clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster,
-                                    20, verbose);
+                                    20, verbose, "Random", 0, use_weighted_inner_kmeans);
     clus.train(points);
     clustering = clus.cluster_ids;
   }
