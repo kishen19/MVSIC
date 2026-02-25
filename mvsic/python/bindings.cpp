@@ -39,6 +39,7 @@ PYBIND11_MODULE(mvsic, m) {
       .value("PQ", mvsic::IndexParams::QuantizerType::PQ)
       .value("RaBitQ", mvsic::IndexParams::QuantizerType::RaBitQ)
       .value("FastScan", mvsic::IndexParams::QuantizerType::FastScan)
+      .value("TurboQuant4Bit", mvsic::IndexParams::QuantizerType::TurboQuant4Bit)
       .export_values();
 
   py::class_<mvsic::IndexParams::fde_config>(m, "fde_config")
@@ -267,6 +268,40 @@ PYBIND11_MODULE(mvsic, m) {
 
   BIND_INDEX(IndexMVIVFL2, ChamferL2_Point, "IndexMVIVFL2")
   BIND_INDEX(IndexMVIVFIP, ChamferIP_Point, "IndexMVIVFIP")
+
+  // MVIVF-only: tree stats as module function (avoids re-opening class which can
+  // trigger "object with that name is already defined" in some pybind11 builds).
+  m.def(
+      "get_mvivf_tree_stats",
+      [](mvsic::IndexMVIVFL2& index) {
+        auto s = index.get_tree_stats();
+        py::dict d;
+        d["num_internal_nodes"] = s.num_internal_nodes;
+        d["num_leaves"] = s.num_leaves;
+        d["avg_leaf_size"] = s.avg_leaf_size;
+        d["avg_internal_node_size"] = s.avg_internal_node_size;
+        d["total_point_clouds_internal"] = s.total_point_clouds_internal;
+        d["height"] = s.height;
+        return d;
+      },
+      py::arg("index"),
+      "Returns tree stats for an MVIVF L2 index.");
+  m.def(
+      "get_mvivf_tree_stats",
+      [](mvsic::IndexMVIVFIP& index) {
+        auto s = index.get_tree_stats();
+        py::dict d;
+        d["num_internal_nodes"] = s.num_internal_nodes;
+        d["num_leaves"] = s.num_leaves;
+        d["avg_leaf_size"] = s.avg_leaf_size;
+        d["avg_internal_node_size"] = s.avg_internal_node_size;
+        d["total_point_clouds_internal"] = s.total_point_clouds_internal;
+        d["height"] = s.height;
+        return d;
+      },
+      py::arg("index"),
+      "Returns tree stats for an MVIVF IP index.");
+
   BIND_INDEX(IndexMVIVFFlatL2, ChamferL2_Point, "IndexMVIVFFlatL2")
   BIND_INDEX(IndexMVIVFFlatIP, ChamferIP_Point, "IndexMVIVFFlatIP")
   BIND_INDEX(IndexMUVERAL2, ChamferL2_Point, "IndexMUVERAL2")

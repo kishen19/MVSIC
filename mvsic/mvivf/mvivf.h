@@ -88,6 +88,10 @@ class IndexMVIVF : public Index<metric> {
   IndexParams params;
   node_t *root = nullptr;  // Root of the k-means tree
 
+  std::vector<node_t *> leaves_flat;    // Flat list of leaves for large-nprobes search
+  PointCloudSet<ChPoint> leaf_centers;  // One representative center per leaf
+  QuantSet leaf_centers_quant;          // Quantized centers for flat search (when enabled)
+
   // Quantizer Storage
   QuantModel quantizer = std::monostate{};
   QT active_quantizer = QT::None;
@@ -230,6 +234,57 @@ class IndexMVIVF : public Index<metric> {
 
     // Recursively build k-means tree
     recursive_build(root, points);
+
+    // Build flat leaf index and leaf centers for optional flat-leaf search
+    leaves_flat.clear();
+    leaf_centers_quant = std::monostate{};
+    if (root) {
+      std::vector<ChPoint> center_points;
+      std::function<void(node_t *, node_t *, size_t)> visit = [&](node_t *node, node_t *parent,
+                                                                  size_t child_idx) {
+        if (node->children.empty()) {
+          leaves_flat.push_back(node);
+          auto &centers_pc = parent->data;
+          center_points.push_back(centers_pc[child_idx]);
+        } else {
+          for (size_t i = 0; i < node->children.size(); ++i) {
+            visit(node->children[i], node, i);
+          }
+        }
+      };
+      visit(root, nullptr, 0);
+
+      if (!center_points.empty()) {
+        leaf_centers = PointCloudSet<ChPoint>(center_points, d);
+
+        if (params.quantize_centers && active_quantizer != QT::None) {
+          switch (active_quantizer) {
+            case QT::PQ: {
+              auto &m = std::get<PQ_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::FastScan: {
+              auto &m = std::get<FS_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::RaBitQ: {
+              auto &m = std::get<RQ_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::TurboQuant4Bit: {
+              auto &m = std::get<TQ4_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::None:
+            default: leaf_centers_quant = std::monostate{}; break;
+          }
+        }
+      }
+    }
   }
 
   // Output type of Greedy Search
@@ -246,8 +301,11 @@ class IndexMVIVF : public Index<metric> {
     auto less = [](const score_node &a, const score_node &b) {
       return a.first < b.first || (a.first == b.first && a.second < b.second);
     };
+    // Modifying this doesn't affect performance significantly, as beam management is not the
+    // bottleneck.
     const size_t beam_length = 2 * nprobes;
     parlay::internal::timer t;
+    double num_chamfer_cmps = 0.0;
     double t_dists = 0.0;
     double t_beam = 0.0;
     double t_rest = 0.0;
@@ -285,6 +343,7 @@ class IndexMVIVF : public Index<metric> {
       if (children.empty()) continue;
       // Compute distances to children
       child_dists.resize(children.size());
+      num_chamfer_cmps += children.size();
       if (!params.quantize_centers) {
         auto &centers = current_node->data;
         dist_cmps += centers.distances(query, child_dists.data());
@@ -361,8 +420,88 @@ class IndexMVIVF : public Index<metric> {
 
     GreedySearchResult out;
     out.dist_cmps = dist_cmps;
-    out.timings = {t_dists, t_beam, t_rest};
+    out.timings = {num_chamfer_cmps, t_dists, t_beam, t_rest};
     out.probe_list = std::move(top_probes);
+    return out;
+  }
+
+  // Flat leaf scoring: score all leaves by distance to a precomputed representative center and
+  // pick the best nprobes leaves.
+  GreedySearchResult flat_leaf_search(const ChPoint &query, const QuantQuery &q_query_var,
+                                      size_t nprobes) const {
+    using score_node = std::pair<float, node_t *>;
+    GreedySearchResult out;
+    if (leaves_flat.empty() || leaf_centers.size() == 0 || nprobes == 0) {
+      return out;
+    }
+
+    const size_t L = leaf_centers.size();
+    const size_t use_nprobes = std::min(nprobes, L);
+
+    parlay::internal::timer t;
+    double num_chamfer_cmps = 0.0;
+    double t_dists = 0.0;
+    double t_rest = 0.0;
+
+    t.start();
+    auto centers_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
+    auto scores = parlay::sequence<score_node>::uninitialized(L);
+
+    if (!params.quantize_centers || active_quantizer == QT::None) {
+      // Exact Chamfer distance to the representative centers.
+      leaf_centers.distances(query, centers_dists.data());
+      num_chamfer_cmps = static_cast<double>(L);
+    } else {
+      switch (active_quantizer) {
+        case QT::RaBitQ: {
+          auto &q_query = std::get<RQ_Q>(q_query_var);
+          auto &qcent = std::get<RQ_Set>(leaf_centers_quant);
+          qcent.distances_all(q_query, centers_dists.data());
+          break;
+        }
+        case QT::TurboQuant4Bit: {
+          auto &q_query = std::get<TQ4_Q>(q_query_var);
+          auto &qcent = std::get<TQ4_Set>(leaf_centers_quant);
+          qcent.distances_all(q_query, centers_dists.data());
+          break;
+        }
+        case QT::PQ: {
+          auto &q_query = std::get<PQ_Q>(q_query_var);
+          auto &qcent = std::get<PQ_Set>(leaf_centers_quant);
+          qcent.distances_all(q_query, centers_dists.data());
+          break;
+        }
+        case QT::FastScan: {
+          auto &q_query = std::get<FS_Q>(q_query_var);
+          auto &qcent = std::get<FS_Set>(leaf_centers_quant);
+          qcent.distances_all(q_query, centers_dists.data());
+          break;
+        }
+        case QT::None:
+        default:
+          std::cerr << "Error: Invalid quantizer type in flat leaf search." << std::endl;
+          abort();
+      }
+    }
+    parlay::parallel_for(0, L, [&](size_t i) {
+      scores[i] = {centers_dists[i].second, leaves_flat[i]};
+    });
+    t_dists += t.stop();
+    t.reset();
+
+    // Select top-nprobes leaves.
+    t.start();
+    if (use_nprobes < L) {
+      std::nth_element(scores.begin(), scores.begin() + use_nprobes, scores.end(),
+                       [](const score_node &a, const score_node &b) { return a.first < b.first; });
+      scores.resize(use_nprobes);
+    }
+    t_rest += t.stop();
+    t.reset();
+
+    out.probe_list = std::move(scores);
+    out.dist_cmps = 0;  // we only counted center distances as num_chamfer_cmps
+    out.timings = {num_chamfer_cmps, t_dists, /*t_beam=*/0.0, t_rest};
     return out;
   }
 
@@ -418,12 +557,17 @@ class IndexMVIVF : public Index<metric> {
     // -------------------------
     // Step 1: Greedy search
     // -------------------------
-    auto gs = greedy_search(query, q_query_var, nprobes);
+    GreedySearchResult gs;
+    const size_t num_leaves = leaves_flat.size();
+    const double alpha = 0.5;  // heuristic threshold
+    bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+    if (use_flat) {
+      gs = flat_leaf_search(query, q_query_var, nprobes);
+    } else {
+      gs = greedy_search(query, q_query_var, nprobes);
+    }
     auto probe_list = std::move(gs.probe_list);
     dist_cmps += gs.dist_cmps;
-    for (double time : gs.timings) {
-      timings.push_back(time);
-    }
     nprobes = std::min(nprobes, probe_list.size());
 
     // -------------------------
@@ -520,6 +664,10 @@ class IndexMVIVF : public Index<metric> {
     t_rest += t.stop();
     t.reset();
 
+    timings.push_back(total_size);
+    for (double time : gs.timings) {
+      timings.push_back(time);
+    }
     timings.push_back(t_quantize);
     timings.push_back(t_distances);
     timings.push_back(t_rest);
@@ -862,6 +1010,57 @@ class IndexMVIVF : public Index<metric> {
       });
     });
     root = ind_to_node[0];
+
+    // Rebuild flat leaf index and leaf centers
+    leaves_flat.clear();
+    leaf_centers_quant = std::monostate{};
+    if (root) {
+      std::vector<ChPoint> center_points;
+      std::function<void(node_t *, node_t *, size_t)> visit = [&](node_t *node, node_t *parent,
+                                                                  size_t child_idx) {
+        if (node->children.empty()) {
+          leaves_flat.push_back(node);
+          auto &centers_pc = parent->data;
+          center_points.push_back(centers_pc[child_idx]);
+        } else {
+          for (size_t i = 0; i < node->children.size(); ++i) {
+            visit(node->children[i], node, i);
+          }
+        }
+      };
+      visit(root, nullptr, 0);
+
+      if (!center_points.empty()) {
+        leaf_centers = PointCloudSet<ChPoint>(center_points, d);
+
+        if (params.quantize_centers && active_quantizer != QT::None) {
+          switch (active_quantizer) {
+            case QT::PQ: {
+              auto &m = std::get<PQ_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::FastScan: {
+              auto &m = std::get<FS_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::RaBitQ: {
+              auto &m = std::get<RQ_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::TurboQuant4Bit: {
+              auto &m = std::get<TQ4_Model>(quantizer);
+              leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::None:
+            default: leaf_centers_quant = std::monostate{}; break;
+          }
+        }
+      }
+    }
 
     // Re-encode nodes (since we only saved the model)
     if (active_quantizer != QT::None) {

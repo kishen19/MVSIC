@@ -181,6 +181,7 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                             }
                             if index_name == 'mvivf':
                                 build_stats['kmeans_tree_height'] = index.get_height()
+                                build_stats.update(mvsic.get_mvivf_tree_stats(index))
                             stats_path = os.path.join(index_dir, 'build_stats.json')
                             with open(stats_path, 'w') as f:
                                 json.dump(build_stats, f, indent=2)
