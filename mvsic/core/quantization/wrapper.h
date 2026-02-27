@@ -415,6 +415,18 @@ class Quantized_Point_Cloud_Set {
     } else if constexpr (has_tqpq_fast_t<EncRange>::value) {
 #if defined(__AVX512F__)
       const size_t num_q = q_query.vec_queries.size();
+
+      // Precompute per-query scalars once: beta (with 2.0 baked in for L2) and squared norms.
+      std::vector<float> beta_all(num_q);
+      std::vector<float> sqn_all(num_q);
+      for (size_t qi = 0; qi < num_q; ++qi) {
+        const auto& qv = q_query.vec_queries[qi];
+        float base_beta = (qv.norm_scaling_factor * qv.lut_int8_scale) /
+                          turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+        beta_all[qi] = Metric ? (2.0f * base_beta) : base_beta;
+        sqn_all[qi] = qv.unquantized_squared_norm;
+      }
+
       parlay::parallel_for(0, n, [&](size_t i) {
         const uint32_t cloud_id = indices[i];
         const size_t start = offsets[cloud_id];
@@ -456,10 +468,8 @@ class Quantized_Point_Cloud_Set {
           float beta_q[kQBatch];
           float sqn_q[kQBatch];
           for (size_t qi = 0; qi < qb; ++qi) {
-            float base_beta = (qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale) /
-                              turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
-            beta_q[qi] = Metric ? (2.0f * base_beta) : base_beta;
-            sqn_q[qi] = qv_arr[qi].unquantized_squared_norm;
+            beta_q[qi] = beta_all[q0 + qi];
+            sqn_q[qi] = sqn_all[q0 + qi];
           }
 
           float min_q[kQBatch];
@@ -759,7 +769,20 @@ class Quantized_Point_Cloud_Set {
     } else if constexpr (has_tqpq_fast_t<EncRange>::value) {
       // TQ-PQ: strip-interleaved layout (like FastScan), but scoring uses per-query LUTs.
 #if defined(__AVX512F__)
+      const size_t num_q = q_query.vec_queries.size();
       const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
+
+      // Precompute per-query scalars once: beta (with 2.0 baked in for L2) and squared norms.
+      std::vector<float> beta_all(num_q);
+      std::vector<float> sqn_all(num_q);
+      for (size_t qi = 0; qi < num_q; ++qi) {
+        const auto& qv = q_query.vec_queries[qi];
+        float base_beta = (qv.norm_scaling_factor * qv.lut_int8_scale) /
+                          turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+        beta_all[qi] = Metric ? (2.0f * base_beta) : base_beta;
+        sqn_all[qi] = qv.unquantized_squared_norm;
+      }
+
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         const uint32_t cloud_id = static_cast<uint32_t>(cid);
         const size_t start = offsets[cloud_id];
@@ -803,12 +826,8 @@ class Quantized_Point_Cloud_Set {
           float beta_q[kQBatch];
           float sqn_q[kQBatch];
           for (size_t qi = 0; qi < qb; ++qi) {
-            // Combine NSF, LUT int8 scale, and centroid int8 scale once.
-            float base_beta = (qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale) /
-                              turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
-            // Pre-bake the 2.0 factor for L2 so the inner loop can use a single FMA.
-            beta_q[qi] = Metric ? (2.0f * base_beta) : base_beta;
-            sqn_q[qi] = qv_arr[qi].unquantized_squared_norm;
+            beta_q[qi] = beta_all[q0 + qi];
+            sqn_q[qi] = sqn_all[q0 + qi];
           }
 
           float min_q[kQBatch];
