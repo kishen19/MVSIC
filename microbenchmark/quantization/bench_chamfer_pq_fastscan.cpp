@@ -1,6 +1,7 @@
 // bench_chamfer_pq_fastscan.cpp
 //
 // Point-cloud benchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant
+// (4-bit, byte) vs TurboQuant PQ (K=16, various block sizes).
 // Measures time for "query cloud -> ALL db clouds" using distances_all() for quantized,
 // and PointCloudSet::distances() for exact.
 //
@@ -50,12 +51,10 @@
 #ifdef __AVX512F__
 #include "mvsic/core/quantization/rabitq.h"
 #endif  // __AVX512F__
-#if defined(__AVX512F__) || defined(__AVX2__)
-#include "mvsic/core/quantization/other_methods/rabitq_fast.h"
-#endif
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/wrapper.h"
 
@@ -334,6 +333,31 @@ static void print_result(const char* label, double best, uint64_t ops, double ex
   }
 }
 
+struct BenchRow {
+  std::string name;
+  double best_s = 0.0;
+};
+
+static void print_bench_table(const std::vector<BenchRow>& rows, uint64_t ops, double exact_best) {
+  if (rows.empty()) return;
+  std::cout << "\n=== Summary (All-cloud distances) ===\n";
+  std::cout << std::left << std::setw(28) << "Method" << std::right << std::setw(12) << "time [s]"
+            << std::setw(14) << "M dists/s" << std::setw(14) << "ns / dist" << std::setw(12)
+            << "speedup\n";
+  std::cout << std::string(28 + 12 + 14 * 3 + 12, '-') << "\n";
+  for (const auto& r : rows) {
+    const double t = r.best_s;
+    const double dps = double(ops) / t;
+    const double ns = ns_per_op(t, ops);
+    const double speedup = (exact_best > 0.0) ? (exact_best / t) : 0.0;
+    std::cout << std::left << std::setw(28) << r.name << std::right << std::setw(12) << std::fixed
+              << std::setprecision(4) << t << std::setw(14) << std::setprecision(3) << (dps / 1e6)
+              << std::setw(14) << std::setprecision(1) << ns << std::setw(12)
+              << std::setprecision(2) << speedup << "\n";
+  }
+  std::cout << "\n";
+}
+
 // ---------------------------
 // Core runner given concrete DB/Q sets
 // ---------------------------
@@ -404,18 +428,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 #endif  // __AVX512F__
 
 #if defined(__AVX512F__) || defined(__AVX2__)
-  // RaBitQ-fast (AVX2 FastScan-style kernel)
-  MultiVecQuantizer<rabitq_fast::Model<Metric>, Metric> rq_fast_model;
-  t.start();
-  rq_fast_model.train(db, rbits);
-  double rq_fast_train_s = t.sec();
-
-  t.start();
-  auto rq_fast_db = rq_fast_model.encode(db);
-  double rq_fast_encode_s = t.sec();
-#endif
-
-#if defined(__AVX512F__) || defined(__AVX2__)
   // FastScan (VNNI when AVX-512, AVX2 fallback)
   MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
   t.start();
@@ -447,6 +459,40 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto btq_db = btq_model.encode(db);
   double btq_encode_s = t.sec();
 
+  // TurboQuant PQ 4-bit (B=1/2/4/8)
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 4>, Metric> tqpq4_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 8>, Metric> tqpq8_model;
+
+  t.start();
+  tqpq1_model.train(db);
+  double tqpq1_train_s = t.sec();
+  t.start();
+  auto tqpq1_db = tqpq1_model.encode(db);
+  double tqpq1_encode_s = t.sec();
+
+  t.start();
+  tqpq2_model.train(db);
+  double tqpq2_train_s = t.sec();
+  t.start();
+  auto tqpq2_db = tqpq2_model.encode(db);
+  double tqpq2_encode_s = t.sec();
+
+  t.start();
+  tqpq4_model.train(db);
+  double tqpq4_train_s = t.sec();
+  t.start();
+  auto tqpq4_db = tqpq4_model.encode(db);
+  double tqpq4_encode_s = t.sec();
+
+  t.start();
+  tqpq8_model.train(db);
+  double tqpq8_train_s = t.sec();
+  t.start();
+  auto tqpq8_db = tqpq8_model.encode(db);
+  double tqpq8_encode_s = t.sec();
+
   std::cout << "\n=== Train / Encode ===\n";
   std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
   std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
@@ -460,11 +506,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
 #endif
 #if defined(__AVX512F__) || defined(__AVX2__)
-  std::cout << "RaBitQ-fast train   : " << rq_fast_train_s << " s\n";
-  std::cout << "RaBitQ-fast encode  : " << rq_fast_encode_s << " s\n";
-  std::cout << "RaBitQ-fast total   : " << (rq_fast_train_s + rq_fast_encode_s) << " s\n";
-#endif
-#if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
   std::cout << "FastScan encode  : " << fs_encode_s << " s\n";
   std::cout << "FastScan total   : " << (fs_train_s + fs_encode_s) << " s\n";
@@ -475,6 +516,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "ByteTQ train     : " << btq_train_s << " s\n";
   std::cout << "ByteTQ encode    : " << btq_encode_s << " s\n";
   std::cout << "ByteTQ total     : " << (btq_train_s + btq_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=1)   : " << (tqpq1_train_s + tqpq1_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=2)   : " << (tqpq2_train_s + tqpq2_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=4)   : " << (tqpq4_train_s + tqpq4_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=8)   : " << (tqpq8_train_s + tqpq8_encode_s) << " s\n";
 
   // ---------------------------
   // Benchmark: distances to ALL clouds
@@ -484,19 +529,23 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   volatile double sink = 0.0;
 
   std::cout << "\n=== All-cloud distance time (Qclouds * Nclouds) ===\n";
+  std::vector<BenchRow> summary;
 
   double exact_best = bench_exact_all(db, queries, results, reps, sink);
   print_result("Exact (PointCloudSet::distances)", exact_best, ops, 0);
+  summary.push_back({"Exact", exact_best});
 
   {
     double best = bench_quant_all(pq_model, pq_db, queries, results, reps, sink);
     print_result("PQ(K=16) (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"PQ (K=16)", best});
   }
 
 #if defined(__AVX512F__) || defined(__AVX2__)
   {
     double best = bench_quant_all(fs_model, fs_db, queries, results, reps, sink);
     print_result("FastScan(K=16) (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"FastScan (K=16)", best});
   }
 #endif
 
@@ -504,25 +553,44 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   {
     double best = bench_quant_all(rq_model, rq_db, queries, results, reps, sink);
     print_result("RaBitQ (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"RaBitQ", best});
   }
 #endif  // __AVX512F__
-
-#if defined(__AVX512F__) || defined(__AVX2__)
-  {
-    double best = bench_quant_all(rq_fast_model, rq_fast_db, queries, results, reps, sink);
-    print_result("RaBitQ-fast (wrapper::distances_all)", best, ops, exact_best);
-  }
-#endif
 
   {
     double best = bench_quant_all(tq_model, tq_db, queries, results, reps, sink);
     print_result("TurboQuant-4bit (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"TQ-4bit (K=16)", best});
   }
 
   {
     double best = bench_quant_all(btq_model, btq_db, queries, results, reps, sink);
     print_result("ByteTQ-int8 (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"Byte TQ", best});
   }
+
+  {
+    double best = bench_quant_all(tqpq1_model, tqpq1_db, queries, results, reps, sink);
+    print_result("TQ-PQ(K=16,B=1) (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"TQ-PQ (B=1)", best});
+  }
+  {
+    double best = bench_quant_all(tqpq2_model, tqpq2_db, queries, results, reps, sink);
+    print_result("TQ-PQ(K=16,B=2) (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"TQ-PQ (B=2)", best});
+  }
+  {
+    double best = bench_quant_all(tqpq4_model, tqpq4_db, queries, results, reps, sink);
+    print_result("TQ-PQ(K=16,B=4) (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"TQ-PQ (B=4)", best});
+  }
+  {
+    double best = bench_quant_all(tqpq8_model, tqpq8_db, queries, results, reps, sink);
+    print_result("TQ-PQ(K=16,B=8) (wrapper::distances_all)", best, ops, exact_best);
+    summary.push_back({"TQ-PQ (B=8)", best});
+  }
+
+  print_bench_table(summary, ops, exact_best);
 
   // ---------------------------
   // Verification (if requested)
@@ -605,7 +673,7 @@ int main(int argc, char** argv) {
                 "[-verify]");
 
   // Common
-  std::string df = P.getOptionValue("-dist_func", "L2");
+  std::string df = P.getOptionValue("-dist_func", "IP");
   uint32_t pq_block = static_cast<uint32_t>(P.getOptionIntValue("-pq_block", 8));
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));

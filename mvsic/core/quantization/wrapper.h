@@ -15,9 +15,27 @@
 #include "parlay/parallel.h"
 #include "parlay/sequence.h"
 #include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
 
 namespace mvsic {
+
+// Trait: query supports fast distances_slice over an EncRange (used for TQ-PQ).
+template<typename QueryVec, typename EncRange, typename = void>
+struct has_distances_slice_t : std::false_type {};
+template<typename QueryVec, typename EncRange>
+struct has_distances_slice_t<
+    QueryVec, EncRange,
+    std::void_t<decltype(std::declval<const QueryVec&>().distances_slice(
+        std::declval<const EncRange&>(), size_t{}, size_t{}, static_cast<float*>(nullptr)))>> :
+    std::true_type {};
+
+// Trait: EncRange advertises a TQ-PQ fast strip layout.
+template<typename EncRange, typename = void>
+struct has_tqpq_fast_t : std::false_type {};
+template<typename EncRange>
+struct has_tqpq_fast_t<EncRange, std::void_t<decltype(EncRange::is_tqpq_fast)>> :
+    std::bool_constant<EncRange::is_tqpq_fast> {};
 
 // ---------------------------------------------------------
 // Helper: Flatten PointCloudSet into a PointRange-like view
@@ -106,18 +124,29 @@ class Quantized_Query_Point_Cloud {
     for (size_t i = 0; i < num_q; ++i)
       qptrs[i] = &vec_queries[i];
 
-    float total;
-    if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
-      total = turboquant_byte::chamfer_byte_tq_gemm_512<Metric>(
+    // TQ-PQ path: use query's fast slice distances, then reduce to Chamfer.
+    using EncRangeT = std::remove_reference_t<decltype(*db)>;
+    if constexpr (has_distances_slice_t<QuantizedQueryVec, EncRangeT>::value) {
+      static thread_local std::vector<float> tmp;
+      tmp.resize(cloud_size);
+      float total = 0.0f;
+      for (const auto& qv : vec_queries) {
+        qv.distances_slice(*db, start, cloud_size, tmp.data());
+        float min_d = *std::min_element(tmp.begin(), tmp.begin() + cloud_size);
+        total += min_d;
+      }
+      return total / static_cast<float>(num_q);
+    } else if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
+      const float total = turboquant_byte::chamfer_byte_tq_gemm_512<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
+      return total / static_cast<float>(num_q);
     } else {
-      total = turboquant_4bit::chamfer_vnni_gemm<Metric>(
+      const float total = turboquant_4bit::chamfer_vnni_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size, lane_offset);
+      return total / static_cast<float>(num_q);
     }
-
-    return total / static_cast<float>(num_q);
   }
 #endif  // __AVX512F__
 
@@ -148,19 +177,28 @@ class Quantized_Query_Point_Cloud {
     for (size_t i = 0; i < num_q; ++i)
       qptrs[i] = &vec_queries[i];
 
-    float total;
-    // Detect turboquant_byte types at compile time.
-    if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
-      total = turboquant_byte::chamfer_byte_tq_gemm<Metric>(
+    using EncRangeT = std::remove_reference_t<decltype(*db)>;
+    if constexpr (has_distances_slice_t<QuantizedQueryVec, EncRangeT>::value) {
+      static thread_local std::vector<float> tmp;
+      tmp.resize(cloud_size);
+      float total = 0.0f;
+      for (const auto& qv : vec_queries) {
+        qv.distances_slice(*db, start, cloud_size, tmp.data());
+        float min_d = *std::min_element(tmp.begin(), tmp.begin() + cloud_size);
+        total += min_d;
+      }
+      return total / static_cast<float>(num_q);
+    } else if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
+      const float total = turboquant_byte::chamfer_byte_tq_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
+      return total / static_cast<float>(num_q);
     } else {
-      total = turboquant_4bit::chamfer_avx2_gemm<Metric>(
+      const float total = turboquant_4bit::chamfer_avx2_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size, lane_offset);
+      return total / static_cast<float>(num_q);
     }
-
-    return total / static_cast<float>(num_q);
   }
 #endif  // !__AVX512F__ && __AVX2__
 
@@ -209,20 +247,6 @@ class Quantized_Query_Point_Cloud {
     return Metric;
   }
 };
-
-// Trait: EncRange has is_rabitq_fast (rabitq_fast uses it; others do not).
-template<typename EncRange, typename = void>
-struct has_rabitq_fast_t : std::false_type {};
-template<typename EncRange>
-struct has_rabitq_fast_t<EncRange, std::void_t<decltype(EncRange::is_rabitq_fast)>> :
-    std::bool_constant<EncRange::is_rabitq_fast> {};
-
-// Trait: EncRange has is_tq_fast (turboquant_4bit_fast uses it).
-template<typename EncRange, typename = void>
-struct has_tq_fast_t : std::false_type {};
-template<typename EncRange>
-struct has_tq_fast_t<EncRange, std::void_t<decltype(EncRange::is_tq_fast)>> :
-    std::bool_constant<EncRange::is_tq_fast> {};
 
 // ---------------------------------------------------------
 // Quantized Point Cloud Set (encoded DB + offsets + distances)
@@ -388,6 +412,141 @@ class Quantized_Point_Cloud_Set {
       });
       return q_query.vec_queries.size();
 #endif
+    } else if constexpr (has_tqpq_fast_t<EncRange>::value) {
+#if defined(__AVX512F__)
+      const size_t num_q = q_query.vec_queries.size();
+      parlay::parallel_for(0, n, [&](size_t i) {
+        const uint32_t cloud_id = indices[i];
+        const size_t start = offsets[cloud_id];
+        const size_t end = offsets[cloud_id + 1];
+        const size_t cloud_size = (end > start) ? (end - start) : 0;
+
+        if (num_q == 0) {
+          results[i] = {cloud_id, 0.0f};
+          return;
+        }
+        if (cloud_size == 0) {
+          results[i] = {cloud_id, std::numeric_limits<float>::max()};
+          return;
+        }
+
+        const size_t true_end = start + cloud_size;
+        const size_t strip_stride = vec_db.stride;
+        const size_t strip0 = start / 64;
+        const int lane0 = static_cast<int>(start % 64);
+        const size_t strip1 = true_end / 64;
+        const int lane1 = static_cast<int>(true_end % 64);
+
+        const uint8_t* base_codes = vec_db.packed_codes.data();
+        const float* base_norms = vec_db.norm_scaling_factors.data();
+        const float* base_sqn = vec_db.unquantized_squared_norms.data();
+
+        auto strip_ptr = [&](size_t s) -> const uint8_t* {
+          return &base_codes[s * strip_stride];
+        };
+        auto norms_ptr = [&](size_t s) -> const float* { return base_norms + s * 64; };
+        auto sqn_ptr = [&](size_t s) -> const float* { return base_sqn + s * 64; };
+
+        constexpr size_t kQBatch = 8;
+        float total = 0.0f;
+
+        for (size_t q0 = 0; q0 < num_q; q0 += kQBatch) {
+          const size_t qb = std::min(kQBatch, num_q - q0);
+          const auto* qv_arr = q_query.vec_queries.data() + q0;
+
+          float beta_q[kQBatch];
+          float sqn_q[kQBatch];
+          for (size_t qi = 0; qi < qb; ++qi) {
+            beta_q[qi] = qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale;
+            sqn_q[qi] = qv_arr[qi].unquantized_squared_norm;
+          }
+
+          float min_q[kQBatch];
+          for (size_t qi = 0; qi < qb; ++qi) min_q[qi] = std::numeric_limits<float>::max();
+
+          const __m256i low_mask = _mm256_set1_epi8(0x0F);
+          const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
+
+          auto scan_strip_masked = [&](size_t s, int lo, int hi) {
+            const uint8_t* codes_ptr = strip_ptr(s);
+            const float* ns = norms_ptr(s);
+            const float* sq = sqn_ptr(s);
+
+            __m512i acc_even[kQBatch];
+            __m512i acc_odd[kQBatch];
+            for (size_t qi = 0; qi < qb; ++qi) {
+              acc_even[qi] = _mm512_setzero_si512();
+              acc_odd[qi] = _mm512_setzero_si512();
+            }
+
+            for (size_t b = 0; b < nb; ++b) {
+              const __m256i packed =
+                  _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+              codes_ptr += 32;
+
+              const __m256i codes_even = _mm256_and_si256(packed, low_mask);
+              const __m256i codes_odd =
+                  _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+
+              for (size_t qi = 0; qi < qb; ++qi) {
+                const __m128i lut128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(
+                    &qv_arr[qi].lut_int8[b * 16]));
+                const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
+                const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
+                const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
+                acc_even[qi] = _mm512_add_epi16(acc_even[qi], _mm512_cvtepi8_epi16(scores_even_i8));
+                acc_odd[qi] = _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
+              }
+            }
+
+            alignas(64) int16_t raw_even[kQBatch][32];
+            alignas(64) int16_t raw_odd[kQBatch][32];
+            for (size_t qi = 0; qi < qb; ++qi) {
+              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even[qi]), acc_even[qi]);
+              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd[qi]), acc_odd[qi]);
+            }
+
+            for (int lane = lo; lane < hi; ++lane) {
+              const int pair = lane >> 1;
+              const bool even = ((lane & 1) == 0);
+              const float alpha_x = ns[lane];
+              const float sq_x = sq[lane];
+              for (size_t qi = 0; qi < qb; ++qi) {
+                const int16_t s8 = even ? raw_even[qi][pair] : raw_odd[qi][pair];
+                const float dot = alpha_x * beta_q[qi] * static_cast<float>(s8);
+                float dist;
+                if constexpr (Metric) {
+                  dist = sq_x + sqn_q[qi] - 2.0f * dot;
+                } else {
+                  dist = -dot;
+                }
+                if (dist < min_q[qi]) min_q[qi] = dist;
+              }
+            }
+          };
+
+          if (strip0 == strip1) {
+            const int hi = (lane1 == 0) ? 64 : lane1;
+            scan_strip_masked(strip0, lane0, hi);
+          } else {
+            scan_strip_masked(strip0, lane0, 64);
+            for (size_t s = strip0 + 1; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
+          }
+
+          for (size_t qi = 0; qi < qb; ++qi) total += min_q[qi];
+        }
+
+        results[i] = {cloud_id, total / static_cast<float>(num_q)};
+      });
+      return q_query.vec_queries.size();
+#else
+      parlay::parallel_for(0, n, [&](size_t i) {
+        const uint32_t cloud_id = indices[i];
+        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+      });
+      return q_query.vec_queries.size();
+#endif
     } else {
       parlay::parallel_for(0, n, [&](size_t i) {
         uint32_t cloud_id = indices[i];
@@ -524,21 +683,15 @@ class Quantized_Point_Cloud_Set {
       });
       return num_q;
 #endif
-    } else if constexpr (has_rabitq_fast_t<EncRange>::value) {
-      // RaBitQ-fast: per-cloud slice + SIMD block kernel (AVX2 / AVX-512 VNNI when available).
-#if defined(__AVX2__) ||                                                                           \
-    (defined(__AVX512BITALG__) && defined(__AVX512VNNI__) && defined(__AVX512VL__))
-      static thread_local std::vector<float> rq_fast_tmp;
+    } else if constexpr (has_tqpq_fast_t<EncRange>::value) {
+      // TQ-PQ: strip-interleaved layout (like FastScan), but scoring uses per-query LUTs.
+#if defined(__AVX512F__)
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         const uint32_t cloud_id = static_cast<uint32_t>(cid);
         const size_t start = offsets[cloud_id];
-        size_t cloud_size = 0;
-        if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
-          cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
-        } else {
-          const size_t end_padded = offsets[cloud_id + 1];
-          cloud_size = (end_padded > start) ? (end_padded - start) : 0;
-        }
+        const size_t end = offsets[cloud_id + 1];
+        const size_t cloud_size = (end > start) ? (end - start) : 0;
+
         if (num_q == 0) {
           results[cid] = {cloud_id, 0.0f};
           return;
@@ -547,52 +700,119 @@ class Quantized_Point_Cloud_Set {
           results[cid] = {cloud_id, std::numeric_limits<float>::max()};
           return;
         }
-        rq_fast_tmp.resize(cloud_size);
+
+        const size_t true_end = start + cloud_size;
+        const size_t strip_stride = vec_db.stride;
+        const size_t strip0 = start / 64;
+        const int lane0 = static_cast<int>(start % 64);
+        const size_t strip1 = true_end / 64;
+        const int lane1 = static_cast<int>(true_end % 64);
+
+        const uint8_t* base_codes = vec_db.packed_codes.data();
+        const float* base_norms = vec_db.norm_scaling_factors.data();
+        const float* base_sqn = vec_db.unquantized_squared_norms.data();
+
+        auto strip_ptr = [&](size_t s) -> const uint8_t* {
+          return &base_codes[s * strip_stride];
+        };
+        auto norms_ptr = [&](size_t s) -> const float* { return base_norms + s * 64; };
+        auto sqn_ptr = [&](size_t s) -> const float* { return base_sqn + s * 64; };
+
+        // Process query vectors in batches to reuse code loads.
+        constexpr size_t kQBatch = 8;
         float total = 0.0f;
-        for (const auto& qv : q_query.vec_queries) {
-          qv.distances_slice(vec_db, start, cloud_size, rq_fast_tmp.data());
-          float min_d = *std::min_element(rq_fast_tmp.begin(), rq_fast_tmp.begin() + cloud_size);
-          total += min_d;
+        const float inv_num_q = 1.0f / static_cast<float>(num_q);
+
+        for (size_t q0 = 0; q0 < num_q; q0 += kQBatch) {
+          const size_t qb = std::min(kQBatch, num_q - q0);
+          const auto* qv_arr = q_query.vec_queries.data() + q0;
+
+          float beta_q[kQBatch];
+          float sqn_q[kQBatch];
+          for (size_t qi = 0; qi < qb; ++qi) {
+            // Combine NSF, LUT int8 scale, and centroid int8 scale once.
+            beta_q[qi] = (qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale) /
+                         turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+            sqn_q[qi] = qv_arr[qi].unquantized_squared_norm;
+          }
+
+          float min_q[kQBatch];
+          for (size_t qi = 0; qi < qb; ++qi) min_q[qi] = std::numeric_limits<float>::max();
+
+          const __m256i low_mask = _mm256_set1_epi8(0x0F);
+          const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
+
+          auto scan_strip_masked = [&](size_t s, int lo, int hi) {
+            const uint8_t* codes_ptr = strip_ptr(s);
+            const float* ns = norms_ptr(s);
+            const float* sq = sqn_ptr(s);
+
+            __m512i acc_even[kQBatch];
+            __m512i acc_odd[kQBatch];
+            for (size_t qi = 0; qi < qb; ++qi) {
+              acc_even[qi] = _mm512_setzero_si512();
+              acc_odd[qi] = _mm512_setzero_si512();
+            }
+
+            for (size_t b = 0; b < nb; ++b) {
+              const __m256i packed =
+                  _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+              codes_ptr += 32;
+
+              const __m256i codes_even = _mm256_and_si256(packed, low_mask);
+              const __m256i codes_odd =
+                  _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+
+              for (size_t qi = 0; qi < qb; ++qi) {
+                const __m128i lut128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(
+                    &qv_arr[qi].lut_int8[b * 16]));
+                const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
+                const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
+                const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
+                acc_even[qi] = _mm512_add_epi16(acc_even[qi], _mm512_cvtepi8_epi16(scores_even_i8));
+                acc_odd[qi] = _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
+              }
+            }
+
+            alignas(64) int16_t raw_even[kQBatch][32];
+            alignas(64) int16_t raw_odd[kQBatch][32];
+            for (size_t qi = 0; qi < qb; ++qi) {
+              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even[qi]), acc_even[qi]);
+              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd[qi]), acc_odd[qi]);
+            }
+
+            for (int lane = lo; lane < hi; ++lane) {
+              const int pair = lane >> 1;
+              const bool even = ((lane & 1) == 0);
+              const float alpha_x = ns[lane];
+              const float sq_x = sq[lane];
+              for (size_t qi = 0; qi < qb; ++qi) {
+                const int16_t s8 = even ? raw_even[qi][pair] : raw_odd[qi][pair];
+                const float dot = alpha_x * beta_q[qi] * static_cast<float>(s8);
+                float dist;
+                if constexpr (Metric) {
+                  dist = sq_x + sqn_q[qi] - 2.0f * dot;
+                } else {
+                  dist = -dot;
+                }
+                if (dist < min_q[qi]) min_q[qi] = dist;
+              }
+            }
+          };
+
+          if (strip0 == strip1) {
+            const int hi = (lane1 == 0) ? 64 : lane1;
+            scan_strip_masked(strip0, lane0, hi);
+          } else {
+            scan_strip_masked(strip0, lane0, 64);
+            for (size_t s = strip0 + 1; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
+          }
+
+          for (size_t qi = 0; qi < qb; ++qi) total += min_q[qi];
         }
-        results[cid] = {cloud_id, total / static_cast<float>(num_q)};
-      });
-      return num_q;
-#else
-      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
-        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
-      });
-      return num_q;
-#endif
-    } else if constexpr (has_tq_fast_t<EncRange>::value) {
-      // TurboQuant-fast: per-cloud slice + AVX2 32-point block kernel (interleaved layout).
-#if defined(__AVX2__)
-      static thread_local std::vector<float> tq_fast_tmp;
-      parlay::parallel_for(0, n_clouds, [&](size_t cid) {
-        const uint32_t cloud_id = static_cast<uint32_t>(cid);
-        const size_t start = offsets[cloud_id];
-        size_t cloud_size = 0;
-        if (sizes_unpadded.size() == static_cast<size_t>(n_clouds)) {
-          cloud_size = static_cast<size_t>(sizes_unpadded[cloud_id]);
-        } else {
-          const size_t end_padded = offsets[cloud_id + 1];
-          cloud_size = (end_padded > start) ? (end_padded - start) : 0;
-        }
-        if (num_q == 0) {
-          results[cid] = {cloud_id, 0.0f};
-          return;
-        }
-        if (cloud_size == 0) {
-          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
-          return;
-        }
-        tq_fast_tmp.resize(cloud_size);
-        float total = 0.0f;
-        for (const auto& qv : q_query.vec_queries) {
-          qv.distances_slice(vec_db, start, cloud_size, tq_fast_tmp.data());
-          float min_d = *std::min_element(tq_fast_tmp.begin(), tq_fast_tmp.begin() + cloud_size);
-          total += min_d;
-        }
-        results[cid] = {cloud_id, total / static_cast<float>(num_q)};
+
+        results[cid] = {cloud_id, total * inv_num_q};
       });
       return num_q;
 #else

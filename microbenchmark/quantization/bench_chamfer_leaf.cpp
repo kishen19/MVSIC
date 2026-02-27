@@ -60,9 +60,13 @@
 #include "parlay/primitives.h"
 
 #include "mvsic/core/quantization/fastscan.h"
+#include "mvsic/core/quantization/pq.h"
+#ifdef __AVX512F__
+#include "mvsic/core/quantization/rabitq.h"
+#endif  // __AVX512F__
 #include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
-#include "mvsic/core/quantization/turboquant_low_bit.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -88,6 +92,32 @@ struct Timer {
 
 static inline double ns_per_op(double seconds, uint64_t ops) {
   return (seconds * 1e9) / double(ops);
+}
+
+struct BenchRow {
+  std::string name;
+  double best_s = 0.0;
+};
+
+static void print_leaf_table(const char* title, const std::vector<BenchRow>& rows,
+                             uint64_t logical_blocks, double exact_best) {
+  if (rows.empty() || logical_blocks == 0) return;
+  std::cout << "\n=== " << title << " ===\n";
+  std::cout << std::left << std::setw(28) << "Method"
+            << std::right << std::setw(12) << "time [s]"
+            << std::setw(16) << "ns / leaf"
+            << std::setw(12) << "speedup\n";
+  std::cout << std::string(28 + 12 + 16 + 12, '-') << "\n";
+  for (const auto& r : rows) {
+    const double t = r.best_s;
+    const double ns = ns_per_op(t, logical_blocks);
+    const double speedup = (exact_best > 0.0) ? (exact_best / t) : 0.0;
+    std::cout << std::left << std::setw(28) << r.name
+              << std::right << std::setw(12) << std::fixed << std::setprecision(4) << t
+              << std::setw(16) << std::setprecision(1) << ns
+              << std::setw(12) << std::setprecision(2) << speedup << "\n";
+  }
+  std::cout << "\n";
 }
 
 // ---------------------------
@@ -327,11 +357,51 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
   Timer t;
 
+  const uint32_t pq_block = 8;
+  constexpr uint32_t PQ_K = 16;
+  constexpr uint32_t PQ_S = 20;
+  const uint32_t fs_block = 8;
+  const uint32_t rbits = 2;
+
+  // PQ (K=16)
+  MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
+  t.start();
+  pq_model.train(db, pq_block, PQ_K, PQ_S);
+  double pq_train_s = t.sec();
+
+  t.start();
+  using PQ_DB = decltype(pq_model.encode(db));
+  std::vector<PQ_DB> pq_leaf_dbs;
+  pq_leaf_dbs.reserve(num_leaf_blocks);
+  for (size_t b = 0; b < num_leaf_blocks; ++b) {
+    pq_leaf_dbs.emplace_back(pq_model.encode(leaves[b]));
+  }
+  auto pq_all_db = pq_model.encode(all_leafs);
+  double pq_encode_s = t.sec();
+
+#ifdef __AVX512F__
+  // RaBitQ (requires AVX-512)
+  MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
+  t.start();
+  rq_model.train(db, rbits);
+  double rq_train_s = t.sec();
+
+  t.start();
+  using RQ_DB = decltype(rq_model.encode(db));
+  std::vector<RQ_DB> rq_leaf_dbs;
+  rq_leaf_dbs.reserve(num_leaf_blocks);
+  for (size_t b = 0; b < num_leaf_blocks; ++b) {
+    rq_leaf_dbs.emplace_back(rq_model.encode(leaves[b]));
+  }
+  auto rq_all_db = rq_model.encode(all_leafs);
+  double rq_encode_s = t.sec();
+#endif  // __AVX512F__
+
 #if defined(__AVX512F__) || defined(__AVX2__)
   // FastScan
   MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
   t.start();
-  fs_model.train(db, /*fs_block=*/8);
+  fs_model.train(db, fs_block);
   double fs_train_s = t.sec();
 
   t.start();
@@ -377,51 +447,71 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto btq_all_db = btq_model.encode(all_leafs);
   double btq_encode_s = t.sec();
 
-  // TQ-1bit and TQ-2bit (scalar low-bit Chamfer using same rotator as TQ4)
-  // using EncodedVec = turboquant_low_bit::EncodedVec;
-  // using PreparedQuery = turboquant_low_bit::PreparedQuery;
-  // const auto& tq4_vec_model = tq_model.vec_model;
-  // const size_t pdim = tq4_vec_model.padded_dim;
+  // TurboQuant PQ 4-bit (B=1/2/4/8)
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 4>, Metric> tqpq4_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 8>, Metric> tqpq8_model;
 
-  // Encode DB leaves (per-cloud, per-vector) for 1-bit and 2-bit.
-  // std::vector<std::vector<std::vector<EncodedVec>>> enc_1bit_leaves(num_leaf_blocks);
-  // std::vector<std::vector<std::vector<EncodedVec>>> enc_2bit_leaves(num_leaf_blocks);
-  // t.start();
-  // for (size_t b = 0; b < num_leaf_blocks; ++b) {
-  //   const auto& leaf_pc = leaves[b];
-  //   const size_t leaf_sz = leaf_pc.size();
-  //   enc_1bit_leaves[b].resize(leaf_sz);
-  //   enc_2bit_leaves[b].resize(leaf_sz);
-  //   for (size_t i = 0; i < leaf_sz; ++i) {
-  //     const uint32_t nv = leaf_pc.get_size(i);
-  //     enc_1bit_leaves[b][i].resize(nv);
-  //     enc_2bit_leaves[b][i].resize(nv);
-  //     const float* base = leaf_pc.data(i);
-  //     std::vector<float> ws;
-  //     for (uint32_t j = 0; j < nv; ++j) {
-  //       enc_1bit_leaves[b][i][j] = turboquant_low_bit::encode_1bit(tq4_vec_model, base + j * D,
-  //       ws); enc_2bit_leaves[b][i][j] = turboquant_low_bit::encode_2bit(tq4_vec_model, base + j *
-  //       D, ws);
-  //     }
-  //   }
-  // }
-  // double tq_lowbit_encode_s = t.sec();
+  t.start();
+  tqpq1_model.train(db);
+  double tqpq1_train_s = t.sec();
+  t.start();
+  using TQPQ1_DB = decltype(tqpq1_model.encode(db));
+  std::vector<TQPQ1_DB> tqpq1_leaf_dbs;
+  tqpq1_leaf_dbs.reserve(num_leaf_blocks);
+  for (size_t b = 0; b < num_leaf_blocks; ++b) {
+    tqpq1_leaf_dbs.emplace_back(tqpq1_model.encode(leaves[b]));
+  }
+  auto tqpq1_all_db = tqpq1_model.encode(all_leafs);
+  double tqpq1_encode_s = t.sec();
 
-  // Prepare queries for 1-bit and 2-bit.
-  // std::vector<std::vector<PreparedQuery>> pqs_1bit(queries.size());
-  // std::vector<std::vector<PreparedQuery>> pqs_2bit(queries.size());
-  // for (size_t qi = 0; qi < queries.size(); ++qi) {
-  //   const uint32_t nv = queries.get_size(qi);
-  //   pqs_1bit[qi].resize(nv);
-  //   pqs_2bit[qi].resize(nv);
-  //   const float* base = queries.data(qi);
-  //   for (uint32_t j = 0; j < nv; ++j) {
-  //     pqs_1bit[qi][j] = turboquant_low_bit::prepare_query(tq4_vec_model, base + j * D);
-  //     pqs_2bit[qi][j] = turboquant_low_bit::prepare_query(tq4_vec_model, base + j * D);
-  //   }
-  // }
+  t.start();
+  tqpq2_model.train(db);
+  double tqpq2_train_s = t.sec();
+  t.start();
+  using TQPQ2_DB = decltype(tqpq2_model.encode(db));
+  std::vector<TQPQ2_DB> tqpq2_leaf_dbs;
+  tqpq2_leaf_dbs.reserve(num_leaf_blocks);
+  for (size_t b = 0; b < num_leaf_blocks; ++b) {
+    tqpq2_leaf_dbs.emplace_back(tqpq2_model.encode(leaves[b]));
+  }
+  auto tqpq2_all_db = tqpq2_model.encode(all_leafs);
+  double tqpq2_encode_s = t.sec();
+
+  t.start();
+  tqpq4_model.train(db);
+  double tqpq4_train_s = t.sec();
+  t.start();
+  using TQPQ4_DB = decltype(tqpq4_model.encode(db));
+  std::vector<TQPQ4_DB> tqpq4_leaf_dbs;
+  tqpq4_leaf_dbs.reserve(num_leaf_blocks);
+  for (size_t b = 0; b < num_leaf_blocks; ++b) {
+    tqpq4_leaf_dbs.emplace_back(tqpq4_model.encode(leaves[b]));
+  }
+  auto tqpq4_all_db = tqpq4_model.encode(all_leafs);
+  double tqpq4_encode_s = t.sec();
+
+  t.start();
+  tqpq8_model.train(db);
+  double tqpq8_train_s = t.sec();
+  t.start();
+  using TQPQ8_DB = decltype(tqpq8_model.encode(db));
+  std::vector<TQPQ8_DB> tqpq8_leaf_dbs;
+  tqpq8_leaf_dbs.reserve(num_leaf_blocks);
+  for (size_t b = 0; b < num_leaf_blocks; ++b) {
+    tqpq8_leaf_dbs.emplace_back(tqpq8_model.encode(leaves[b]));
+  }
+  auto tqpq8_all_db = tqpq8_model.encode(all_leafs);
+  double tqpq8_encode_s = t.sec();
 
   std::cout << "\n=== Train / Encode (quantized) ===\n";
+  std::cout << "PQ(K=16) train       : " << pq_train_s << " s\n";
+  std::cout << "PQ(K=16) encode      : " << pq_encode_s << " s (leaves + all_leafs)\n";
+#ifdef __AVX512F__
+  std::cout << "RaBitQ train         : " << rq_train_s << " s\n";
+  std::cout << "RaBitQ encode        : " << rq_encode_s << " s (leaves + all_leafs)\n";
+#endif
 #if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
   std::cout << "FastScan encode  : " << fs_encode_s << " s (leaves + all_leafs)\n";
@@ -430,216 +520,91 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "TurboQuant-4bit encode: " << tq_encode_s << " s (leaves + all_leafs)\n";
   std::cout << "ByteTQ-int8 train     : " << btq_train_s << " s\n";
   std::cout << "ByteTQ-int8 encode    : " << btq_encode_s << " s (leaves + all_leafs)\n";
-  // std::cout << "TQ-lowbit encode (1+2bit, all leaves): " << tq_lowbit_encode_s << " s\n";
+  std::cout << "TQ-PQ(K=16,B=1)       : " << (tqpq1_train_s + tqpq1_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=2)       : " << (tqpq2_train_s + tqpq2_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=4)       : " << (tqpq4_train_s + tqpq4_encode_s) << " s\n";
+  std::cout << "TQ-PQ(K=16,B=8)       : " << (tqpq8_train_s + tqpq8_encode_s) << " s\n";
 
   const uint64_t leaf_blocks_total = num_leaf_blocks * static_cast<uint64_t>(queries.size());
 
   // ---------------------------
   // Quantized: sequential leaves
   // ---------------------------
-  std::cout << "\n--- Sequential leaves (quantized) ---\n";
-
   std::vector<std::pair<uint32_t, float>> q_results(leaf_n);
-  double t_seq_tq4 = 0.0, t_seq_btq = 0.0;
-#if defined(__AVX512F__) || defined(__AVX2__)
-  double t_seq_fs = 0.0;
-#endif
   volatile double sink_q = 0.0;
 
-  std::cout << "  Exact  seq total_time (s): " << std::fixed << std::setprecision(6) << t_seq
-            << std::endl;
-
-  // TQ-4bit
-  {
-    Timer tq_t;
+  auto bench_seq = [&](auto& model, const auto& leaf_dbs_for_model) -> double {
+    Timer m_t;
     double best = 1e100;
     for (int r = 0; r < reps; ++r) {
-      tq_t.start();
+      m_t.start();
       for (size_t qi = 0; qi < queries.size(); ++qi) {
-        auto qq = tq_model.quantize_query(queries[qi]);
+        auto qq = model.quantize_query(queries[qi]);
         for (size_t b = 0; b < num_leaf_blocks; ++b) {
-          tq_leaf_dbs[b].distances_all(qq, q_results.data());
+          leaf_dbs_for_model[b].distances_all(qq, q_results.data());
           sink_q += q_results[qi % leaf_n].second;
         }
       }
-      best = std::min(best, tq_t.sec());
+      best = std::min(best, m_t.sec());
     }
-    t_seq_tq4 = best;
-  }
+    return best;
+  };
 
-  // ByteTQ-int8
-  {
-    Timer btq_t;
-    double best = 1e100;
-    for (int r = 0; r < reps; ++r) {
-      btq_t.start();
-      for (size_t qi = 0; qi < queries.size(); ++qi) {
-        auto qq = btq_model.quantize_query(queries[qi]);
-        for (size_t b = 0; b < num_leaf_blocks; ++b) {
-          btq_leaf_dbs[b].distances_all(qq, q_results.data());
-          sink_q += q_results[qi % leaf_n].second;
-        }
-      }
-      best = std::min(best, btq_t.sec());
-    }
-    t_seq_btq = best;
-  }
-
+  std::vector<BenchRow> seq_rows;
+  seq_rows.push_back({"Exact", t_seq});
+  seq_rows.push_back({"PQ (K=16)", bench_seq(pq_model, pq_leaf_dbs)});
 #if defined(__AVX512F__) || defined(__AVX2__)
-  // FastScan
-  {
-    Timer fs_t;
-    double best = 1e100;
-    for (int r = 0; r < reps; ++r) {
-      fs_t.start();
-      for (size_t qi = 0; qi < queries.size(); ++qi) {
-        auto qq = fs_model.quantize_query(queries[qi]);
-        for (size_t b = 0; b < num_leaf_blocks; ++b) {
-          fs_leaf_dbs[b].distances_all(qq, q_results.data());
-          sink_q += q_results[qi % leaf_n].second;
-        }
-      }
-      best = std::min(best, fs_t.sec());
-    }
-    t_seq_fs = best;
-  }
+  seq_rows.push_back({"FastScan (K=16)", bench_seq(fs_model, fs_leaf_dbs)});
 #endif
-
-  // TQ-1bit and TQ-2bit (scalar Chamfer per leaf)
-  // auto chamfer_leaf_lowbit = [&](bool two_bit) {
-  //   Timer t_lb;
-  //   double best = 1e100;
-  //   for (int r = 0; r < reps; ++r) {
-  //     t_lb.start();
-  //     for (size_t qi = 0; qi < queries.size(); ++qi) {
-  //       const auto& q_pre_1 = pqs_1bit[qi];
-  //       const auto& q_pre_2 = pqs_2bit[qi];
-  //       for (size_t b = 0; b < num_leaf_blocks; ++b) {
-  //         const auto& leaf_pc = leaves[b];
-  //         const size_t leaf_sz = leaf_pc.size();
-  //         double leaf_sum = 0.0;
-  //         for (size_t c = 0; c < leaf_sz; ++c) {
-  //           float dist = 0.0f;
-  //           // Chamfer: average over query vectors of min distance to vectors in cloud c.
-  //           const uint32_t nv_q = queries.get_size(qi);
-  //           for (uint32_t qv = 0; qv < nv_q; ++qv) {
-  //             const auto& pq = two_bit ? q_pre_2[qv] : q_pre_1[qv];
-  //             float best_v = std::numeric_limits<float>::max();
-  //             const auto& enc_vecs = two_bit ? enc_2bit_leaves[b][c] : enc_1bit_leaves[b][c];
-  //             for (const auto& ev : enc_vecs) {
-  //               float dv = two_bit ? turboquant_low_bit::distance_2bit(ev, pq, pdim, Metric)
-  //                                  : turboquant_low_bit::distance_1bit(ev, pq, pdim, Metric);
-  //               if (dv < best_v) best_v = dv;
-  //             }
-  //             leaf_sum += best_v;
-  //           }
-  //         }
-  //       }
-  //     }
-  //     best = std::min(best, t_lb.sec());
-  //   }
-  //   return best;
-  // };
-
-  // double t_seq_tq1 = chamfer_leaf_lowbit(false);
-  // double t_seq_tq2 = chamfer_leaf_lowbit(true);
-
-  std::cout << "  TQ4     seq total_time (s): " << std::fixed << std::setprecision(6) << t_seq_tq4
-            << std::endl;
-  std::cout << "  ByteTQ  seq total_time (s): " << std::fixed << std::setprecision(6) << t_seq_btq
-            << std::endl;
-#if defined(__AVX512F__) || defined(__AVX2__)
-  std::cout << "  FastScan seq total_time (s): " << std::fixed << std::setprecision(6) << t_seq_fs
-            << std::endl;
+#ifdef __AVX512F__
+  seq_rows.push_back({"RaBitQ", bench_seq(rq_model, rq_leaf_dbs)});
 #endif
-  // std::cout << "  TQ-1bit seq total_time (s): " << std::fixed << std::setprecision(6) <<
-  // t_seq_tq1
-  //           << std::endl;
-  // std::cout << "  TQ-2bit seq total_time (s): " << std::fixed << std::setprecision(6) <<
-  // t_seq_tq2
-  //           << std::endl;
+  seq_rows.push_back({"TQ-4bit (K=16)", bench_seq(tq_model, tq_leaf_dbs)});
+  seq_rows.push_back({"ByteTQ (int8)", bench_seq(btq_model, btq_leaf_dbs)});
+  seq_rows.push_back({"TQ-PQ (K=16,B=1)", bench_seq(tqpq1_model, tqpq1_leaf_dbs)});
+  seq_rows.push_back({"TQ-PQ (K=16,B=2)", bench_seq(tqpq2_model, tqpq2_leaf_dbs)});
+  seq_rows.push_back({"TQ-PQ (K=16,B=4)", bench_seq(tqpq4_model, tqpq4_leaf_dbs)});
+  seq_rows.push_back({"TQ-PQ (K=16,B=8)", bench_seq(tqpq8_model, tqpq8_leaf_dbs)});
+
+  print_leaf_table("Sequential leaves (quantized)", seq_rows, leaf_blocks_total, t_seq);
 
   // ---------------------------
   // Quantized: all leaves together
   // ---------------------------
-  std::cout << "\n--- All leaves together (quantized) ---" << std::endl;
-
   const size_t used_N_all = all_leafs.size();
   std::vector<std::pair<uint32_t, float>> q_results_all(used_N_all);
-  double t_all_tq4 = 0.0, t_all_btq = 0.0;
-#if defined(__AVX512F__) || defined(__AVX2__)
-  double t_all_fs = 0.0;
-#endif
-
-  // TQ-4bit
-  {
-    Timer tq_t;
+  auto bench_all = [&](auto& model, const auto& all_db_for_model) -> double {
+    Timer m_t;
     double best = 1e100;
     for (int r = 0; r < reps; ++r) {
-      tq_t.start();
+      m_t.start();
       for (size_t qi = 0; qi < queries.size(); ++qi) {
-        auto qq = tq_model.quantize_query(queries[qi]);
-        tq_all_db.distances_all(qq, q_results_all.data());
+        auto qq = model.quantize_query(queries[qi]);
+        all_db_for_model.distances_all(qq, q_results_all.data());
         sink_q += q_results_all[qi % used_N].second;
       }
-      best = std::min(best, tq_t.sec());
+      best = std::min(best, m_t.sec());
     }
-    t_all_tq4 = best;
-  }
+    return best;
+  };
 
-  // ByteTQ-int8
-  {
-    Timer btq_t;
-    double best = 1e100;
-    for (int r = 0; r < reps; ++r) {
-      btq_t.start();
-      for (size_t qi = 0; qi < queries.size(); ++qi) {
-        auto qq = btq_model.quantize_query(queries[qi]);
-        btq_all_db.distances_all(qq, q_results_all.data());
-        sink_q += q_results_all[qi % used_N].second;
-      }
-      best = std::min(best, btq_t.sec());
-    }
-    t_all_btq = best;
-  }
-
+  std::vector<BenchRow> all_rows;
+  all_rows.push_back({"Exact", t_all});
+  all_rows.push_back({"PQ (K=16)", bench_all(pq_model, pq_all_db)});
 #if defined(__AVX512F__) || defined(__AVX2__)
-  // FastScan
-  {
-    Timer fs_t;
-    double best = 1e100;
-    for (int r = 0; r < reps; ++r) {
-      fs_t.start();
-      for (size_t qi = 0; qi < queries.size(); ++qi) {
-        auto qq = fs_model.quantize_query(queries[qi]);
-        fs_all_db.distances_all(qq, q_results_all.data());
-        sink_q += q_results_all[qi % used_N].second;
-      }
-      best = std::min(best, fs_t.sec());
-    }
-    t_all_fs = best;
-  }
+  all_rows.push_back({"FastScan (K=16)", bench_all(fs_model, fs_all_db)});
 #endif
-
-  std::cout << "  Exact  all total_time (s): " << std::fixed << std::setprecision(6) << t_all
-            << std::endl;
-  std::cout << "  TQ4     all total_time (s): " << std::fixed << std::setprecision(6) << t_all_tq4
-            << std::endl;
-  std::cout << "  ByteTQ  all total_time (s): " << std::fixed << std::setprecision(6) << t_all_btq
-            << std::endl;
-#if defined(__AVX512F__) || defined(__AVX2__)
-  std::cout << "  FastScan all total_time (s): " << std::fixed << std::setprecision(6) << t_all_fs
-            << std::endl;
+#ifdef __AVX512F__
+  all_rows.push_back({"RaBitQ", bench_all(rq_model, rq_all_db)});
 #endif
+  all_rows.push_back({"TQ-4bit (K=16)", bench_all(tq_model, tq_all_db)});
+  all_rows.push_back({"ByteTQ (int8)", bench_all(btq_model, btq_all_db)});
+  all_rows.push_back({"TQ-PQ (K=16,B=1)", bench_all(tqpq1_model, tqpq1_all_db)});
+  all_rows.push_back({"TQ-PQ (K=16,B=2)", bench_all(tqpq2_model, tqpq2_all_db)});
+  all_rows.push_back({"TQ-PQ (K=16,B=4)", bench_all(tqpq4_model, tqpq4_all_db)});
+  all_rows.push_back({"TQ-PQ (K=16,B=8)", bench_all(tqpq8_model, tqpq8_all_db)});
 
-  // For TQ-1bit / 2-bit we only implement a per-leaf path; report their
-  // sequential timings again here for comparison.
-  // std::cout << "  TQ-1bit all total_time (s): " << std::fixed << std::setprecision(6) <<
-  // t_seq_tq1
-  //           << " (same loop structure as seq)" << std::endl;
-  // std::cout << "  TQ-2bit all total_time (s): " << std::fixed << std::setprecision(6) <<
-  // t_seq_tq2
-  //           << " (same loop structure as seq)" << std::endl;
+  print_leaf_table("All leaves together (quantized)", all_rows, leaf_blocks_total, t_all);
 
   std::cout << "\n(sink=" << sink << ")" << std::endl;
   std::cout << "(sink_quant=" << sink_q << ")" << std::endl;

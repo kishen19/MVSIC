@@ -88,6 +88,7 @@ cc_library(
     hdrs = ["wrapper.h"],
     deps = [
         ":turboquant_4bit",
+        ":turboquant_pq_4bit",
         ":turboquant_byte",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",

@@ -57,13 +57,9 @@
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
-#if defined(__AVX512F__) || defined(__AVX2__)
-#include "mvsic/core/quantization/other_methods/rabitq_fast.h"
-#endif
 #include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
-// Low-bit TurboQuant: shared header for 1-bit and 2-bit quality methods.
-#include "mvsic/core/quantization/turboquant_low_bit.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -171,31 +167,6 @@ static PointCloudSet<ChPoint> project_pcs(const PointCloudSet<ChPoint>& pcs,
 
   return PointCloudSet<ChPoint>(static_cast<uint32_t>(Nclouds), pca_dim, proj_vals.data(),
                                 new_offsets.data(), new_ids.data());
-}
-
-using LowBitTQ_Vec = mvsic::turboquant_low_bit::EncodedVec;
-using LowBitTQ_Query = mvsic::turboquant_low_bit::PreparedQuery;
-
-// Chamfer distance using low-bit TQ.
-// db_vecs: pre-encoded flat vector array, indexed by cloud_offsets.
-template<typename ChPoint>
-static float lowbit_chamfer(const std::vector<LowBitTQ_Vec>& db_vecs, size_t db_start,
-                            size_t db_count, const std::vector<LowBitTQ_Query>& q_vecs,
-                            size_t q_start, size_t q_count, size_t pdim, bool metric,
-                            bool use_2bit) {
-  float total = 0.0f;
-  for (size_t qi = 0; qi < q_count; ++qi) {
-    float best = std::numeric_limits<float>::max();
-    for (size_t di = 0; di < db_count; ++di) {
-      float d = use_2bit ? mvsic::turboquant_low_bit::distance_2bit(
-                               db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric)
-                         : mvsic::turboquant_low_bit::distance_1bit(
-                               db_vecs[db_start + di], q_vecs[q_start + qi], pdim, metric);
-      if (d < best) best = d;
-    }
-    total += best;
-  }
-  return total / static_cast<float>(q_count);
 }
 
 static std::vector<uint32_t> default_K_grid(uint32_t Kmax) {
@@ -319,12 +290,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   rq_model.train(db, rbits);
   auto rq_db = rq_model.encode(db);
 
-#if defined(__AVX512F__) || defined(__AVX2__)
-  MultiVecQuantizer<rabitq_fast::Model<Metric>, Metric> rq_fast_model;
-  rq_fast_model.train(db, rbits);
-  auto rq_fast_db = rq_fast_model.encode(db);
-#endif
-
   MultiVecQuantizer<turboquant_4bit::Model<Metric>, Metric> tq_model;
   tq_model.train(db);
   auto tq_db = tq_model.encode(db);
@@ -333,35 +298,24 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   btq_model.train(db);
   auto btq_db = btq_model.encode(db);
 
+  // TurboQuant PQ 4-bit (B=1/2/4/8)
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 4>, Metric> tqpq4_model;
+  MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 8>, Metric> tqpq8_model;
+  tqpq1_model.train(db);
+  tqpq2_model.train(db);
+  tqpq4_model.train(db);
+  tqpq8_model.train(db);
+  auto tqpq1_db = tqpq1_model.encode(db);
+  auto tqpq2_db = tqpq2_model.encode(db);
+  auto tqpq4_db = tqpq4_model.encode(db);
+  auto tqpq8_db = tqpq8_model.encode(db);
+
   // PCA: fit on DB, project both DB and queries.
   auto [pca_W, pca_mean] = compute_pca(db, pca_dim);
   auto pca_db = project_pcs(db, pca_W, pca_mean, pca_dim);
   auto pca_queries = project_pcs(queries, pca_W, pca_mean, pca_dim);
-
-  // Low-bit TQ: encode all DB and query vectors (flattened).
-  // We access the inner TQ model to get the rotator.
-  const auto& tq_inner = tq_model.vec_model;
-  const size_t pdim = tq_inner.padded_dim;
-
-  // Encode all DB vectors (flattened).
-  const size_t total_db_vecs = db.total_size();
-  std::vector<LowBitTQ_Vec> db_1bit(total_db_vecs), db_2bit(total_db_vecs);
-  {
-    std::cout << "Encoding DB for 1-bit and 2-bit TQ (" << total_db_vecs << " vecs)..."
-              << std::endl;
-    parlay::parallel_for(0, total_db_vecs, [&](size_t vi) {
-      static thread_local std::vector<float> ws;
-      const float* p = db.data() + vi * D;
-      db_1bit[vi] = mvsic::turboquant_low_bit::encode_1bit(tq_inner, p, ws);
-      db_2bit[vi] = mvsic::turboquant_low_bit::encode_2bit(tq_inner, p, ws);
-    });
-  }
-
-  // Build per-cloud offsets into the flattened vector.
-  std::vector<size_t> db_cloud_starts(Nclouds + 1);
-  db_cloud_starts[0] = 0;
-  for (size_t i = 0; i < Nclouds; ++i)
-    db_cloud_starts[i + 1] = db_cloud_starts[i] + db.get_size(i);
 
   std::vector<std::pair<uint32_t, float>> exact_scores(Nclouds);
   std::vector<std::pair<uint32_t, float>> approx_scores(Nclouds);
@@ -376,19 +330,20 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     PQ = 0,
     FASTSCAN = 1,
     RABITQ = 2,
-    RABITQ_FAST = 3,
-    TURBOQUANT_4BIT = 4,
-    BYTETQ = 5,
-    TQ_SCALAR = 6,
-    PCA_METHOD = 7,
-    TQ_1BIT = 8,
-    TQ_2BIT = 9,
+    TURBOQUANT_4BIT = 3,
+    BYTETQ = 4,
+    PCA_METHOD = 5,
+    TQPQ_B1 = 6,
+    TQPQ_B2 = 7,
+    TQPQ_B4 = 8,
+    TQPQ_B8 = 9,
     NUM_METHODS = 10
   };
   std::string pca_label = "PCA-" + std::to_string(pca_dim) + "d";
   const char* method_names[NUM_METHODS] = {
-      "PQ",     "FastScan",  "RaBitQ",          "RaBitQ-fast", "TurboQuant-4bit",
-      "ByteTQ", "TQ-Scalar", pca_label.c_str(), "TQ-1bit",     "TQ-2bit"};
+      "PQ (K=16)",        "FastScan (K=16)", "RaBitQ",            "TQ-4bit (K=16)",
+      "ByteTQ (int8)",    pca_label.c_str(), "TQ-PQ (K=16,B=1)", "TQ-PQ (K=16,B=2)",
+      "TQ-PQ (K=16,B=4)", "TQ-PQ (K=16,B=8)"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
@@ -446,13 +401,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       rq_db.distances_all(qq, approx_scores.data());
       eval_method(RABITQ);
     }
-#if defined(__AVX512F__) || defined(__AVX2__)
-    {
-      auto qq = rq_fast_model.quantize_query(queries[qi]);
-      rq_fast_db.distances_all(qq, approx_scores.data());
-      eval_method(RABITQ_FAST);
-    }
-#endif
 
     {
       auto qq = tq_model.quantize_query(queries[qi]);
@@ -483,45 +431,48 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       eval_method(PCA_METHOD);
     }
 
-    // Low-bit TQ: encode query cloud, compute chamfer distances.
+    // TQ-PQ (wrapper / multi-vector)
     {
-      const auto& qcloud = queries[qi];
-      const size_t nq = qcloud.size();
-      std::vector<LowBitTQ_Query> q_lowbit(nq);
-      for (size_t v = 0; v < nq; ++v) {
-        q_lowbit[v] = mvsic::turboquant_low_bit::prepare_query(tq_inner, qcloud.data(v));
-      }
-
-      // 1-bit chamfer distance to each DB cloud.
-      parlay::parallel_for(0, Nclouds, [&](size_t cid) {
-        float d = lowbit_chamfer<ChPoint>(db_1bit, db_cloud_starts[cid], db.get_size(cid), q_lowbit,
-                                          0, nq, pdim, Metric, /*use_2bit=*/false);
-        approx_scores[cid] = {static_cast<uint32_t>(cid), d};
-      });
-      eval_method(TQ_1BIT);
-
-      // 2-bit chamfer distance to each DB cloud.
-      parlay::parallel_for(0, Nclouds, [&](size_t cid) {
-        float d = lowbit_chamfer<ChPoint>(db_2bit, db_cloud_starts[cid], db.get_size(cid), q_lowbit,
-                                          0, nq, pdim, Metric, /*use_2bit=*/true);
-        approx_scores[cid] = {static_cast<uint32_t>(cid), d};
-      });
-      eval_method(TQ_2BIT);
+      auto qq = tqpq1_model.quantize_query(queries[qi]);
+      tqpq1_db.distances_all(qq, approx_scores.data());
+      eval_method(TQPQ_B1);
+    }
+    {
+      auto qq = tqpq2_model.quantize_query(queries[qi]);
+      tqpq2_db.distances_all(qq, approx_scores.data());
+      eval_method(TQPQ_B2);
+    }
+    {
+      auto qq = tqpq4_model.quantize_query(queries[qi]);
+      tqpq4_db.distances_all(qq, approx_scores.data());
+      eval_method(TQPQ_B4);
+    }
+    {
+      auto qq = tqpq8_model.quantize_query(queries[qi]);
+      tqpq8_db.distances_all(qq, approx_scores.data());
+      eval_method(TQPQ_B8);
     }
   }
 
-  std::cout << "\n=== Number of candidates (M) to reach recall@K ===\n";
-  std::cout << "Averages over Q=" << Qclouds << " query clouds.\n";
+  std::cout << "\n=== Avg candidates M to reach recall@K (rec" << int(rec99 * 100 + 0.5f)
+            << "%) ===\n";
+  std::cout << "Averages over Q=" << Qclouds << " query clouds.\n\n";
+
+  // Pretty table: rows = methods, cols = Kgrid, entries = avg M.
+  std::cout << std::left << std::setw(24) << "Method";
+  for (uint32_t K : Kgrid)
+    std::cout << std::right << std::setw(10) << ("K=" + std::to_string(K));
+  std::cout << "\n";
+  std::cout << std::string(24 + 10 * Kgrid.size(), '-') << "\n";
 
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
-    std::cout << "\n" << method_names[meth] << ":\n";
+    std::cout << std::left << std::setw(24) << method_names[meth];
     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-      const uint32_t K = Kgrid[k_i];
       const double avg_M =
           sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Qclouds);
-      std::cout << "  K=" << std::setw(4) << K << "  rec" << int(rec99 * 100 + 0.5f)
-                << "%: " << std::setw(10) << std::fixed << std::setprecision(1) << avg_M << "\n";
+      std::cout << std::right << std::setw(10) << std::fixed << std::setprecision(1) << avg_M;
     }
+    std::cout << "\n";
   }
 
   return 0;

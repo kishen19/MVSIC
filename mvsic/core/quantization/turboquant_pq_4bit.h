@@ -322,6 +322,118 @@ class Quantized_Query {
         /*granularity=*/1);
   }
 #endif
+
+  // Compute distances for a contiguous slice [start, start+count) of an encoded range.
+  // Used by the multi-vector wrapper to compute per-cloud Chamfer efficiently.
+  template<typename PointRangeTy>
+  inline void distances_slice(const Quantized_Point_Range<PointRangeTy, Metric, BlockSize>& enc,
+                              size_t start, size_t count, float* out) const {
+    if (count == 0) return;
+
+#ifdef __AVX512F__
+    const uint8_t* strip_data = enc.packed_codes.data();
+    const float* norms = enc.norm_scaling_factors.data();
+    const float* squared_norms = enc.unquantized_squared_norms.data();
+    const size_t strip_stride = enc.stride;
+
+    const size_t nb = num_blocks;
+    const __m256i low_mask = _mm256_set1_epi8(0x0F);
+    // Pre-bake query scaling (norm + LUT scale + centroid int8 scale) once.
+    const float alpha =
+        (norm_scaling_factor * lut_int8_scale) / kPQ_Int8Scale_D1_K16;
+
+    auto compute_strip64 = [&](size_t strip_idx, float* out64) {
+      const uint8_t* codes_ptr = strip_data + strip_idx * strip_stride;
+      const float* ns = norms + strip_idx * 64;
+      const float* sq = squared_norms + strip_idx * 64;
+
+      __m512i acc_even = _mm512_setzero_si512();
+      __m512i acc_odd = _mm512_setzero_si512();
+
+      for (size_t b = 0; b < nb; ++b) {
+        const __m256i packed =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+        codes_ptr += 32;
+
+        const __m256i codes_even = _mm256_and_si256(packed, low_mask);
+        const __m256i codes_odd =
+            _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+
+        const __m128i lut128 = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(&lut_int8[static_cast<size_t>(b) * K]));
+        const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
+
+        const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
+        const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
+
+        acc_even =
+            _mm512_add_epi16(acc_even, _mm512_cvtepi8_epi16(scores_even_i8));
+        acc_odd =
+            _mm512_add_epi16(acc_odd, _mm512_cvtepi8_epi16(scores_odd_i8));
+      }
+
+      alignas(64) int16_t raw_even[32];
+      alignas(64) int16_t raw_odd[32];
+      _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
+      _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
+
+      for (size_t i = 0; i < 64; ++i) {
+        const size_t pair = i / 2;
+        const bool is_even = ((i & 1u) == 0);
+        const int16_t s8 = is_even ? raw_even[pair] : raw_odd[pair];
+
+        const float acc_approx = static_cast<float>(s8);
+        const float dot_est = ns[i] * alpha * acc_approx;
+        if constexpr (Metric) {
+          out64[i] = sq[i] + unquantized_squared_norm - 2.0f * dot_est;
+        } else {
+          out64[i] = -dot_est;
+        }
+      }
+    };
+
+    const size_t end = start + count;
+    const size_t strip0 = start / 64;
+    const size_t lane0 = start % 64;
+    const size_t strip1 = end / 64;
+    const size_t lane1 = end % 64;
+
+    alignas(64) float buf64[64];
+
+    size_t out_off = 0;
+    if (strip0 == strip1) {
+      compute_strip64(strip0, buf64);
+      const size_t hi = (lane1 == 0) ? 64 : lane1;
+      for (size_t lane = lane0; lane < hi; ++lane)
+        out[out_off++] = buf64[lane];
+      return;
+    }
+
+    // First partial strip.
+    compute_strip64(strip0, buf64);
+    for (size_t lane = lane0; lane < 64; ++lane)
+      out[out_off++] = buf64[lane];
+
+    // Full strips.
+    for (size_t s = strip0 + 1; s < strip1; ++s) {
+      compute_strip64(s, buf64);
+      std::memcpy(out + out_off, buf64, 64 * sizeof(float));
+      out_off += 64;
+    }
+
+    // Last partial strip (if lane1 != 0).
+    if (lane1 != 0) {
+      compute_strip64(strip1, buf64);
+      for (size_t lane = 0; lane < lane1; ++lane)
+        out[out_off++] = buf64[lane];
+    }
+    return;
+#else
+    // Scalar fallback.
+    for (size_t i = 0; i < count; ++i)
+      out[i] = enc[start + i].distance(*this);
+#endif
+  }
 };
 
 template<bool Metric, size_t BlockSize>
@@ -357,6 +469,7 @@ template<typename PointRange, bool Metric, size_t BlockSize>
 class Quantized_Point_Range {
  public:
   static constexpr bool is_fastscan = false;
+  static constexpr bool is_tqpq_fast = true;
   size_t n_points_raw = 0, n_points_raw_unpadded = 0, dim = 0;
   size_t num_bytes_per_datapoint = 0, stride = 0;
   parlay::sequence<uint8_t> packed_codes;
