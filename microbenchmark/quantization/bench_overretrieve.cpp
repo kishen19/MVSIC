@@ -146,7 +146,12 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
     return 1;
   }
 
-  const auto Kgrid = default_K_grid(Kmax);
+  // Use a compact K grid; we care most about K = 1, 10, 100.
+  std::vector<uint32_t> Kgrid;
+  for (uint32_t k : {1u, 10u, 100u}) {
+    if (k <= Kmax) Kgrid.push_back(k);
+  }
+  if (Kgrid.empty()) Kgrid.push_back(std::min<uint32_t>(1u, Kmax));
 
   std::cout << "DB: vectors=" << N << " dims=" << D << std::endl;
   std::cout << "Q : vectors=" << Q << " dims=" << D << std::endl;
@@ -178,9 +183,20 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   std::vector<std::pair<uint32_t, float>> approx_scores(N);
   std::vector<float> approx_distances(N);
 
-  enum Method { FASTSCAN = 0, RABITQ = 1, TQ4BIT = 2, BYTETQ = 3, TQPQ4BIT = 4, NUM_METHODS = 5 };
-  const char* method_names[NUM_METHODS] = {"FastScan", "RaBitQ", "TQ-4bit", "Byte TQ",
-                                           "TQ-PQ-4bit"};
+  enum Method {
+    FASTSCAN = 0,
+    RABITQ = 1,
+    TQ4BIT = 2,
+    BYTETQ = 3,
+    TQPQ16_1 = 4,
+    TQPQ16_2 = 5,
+    TQPQ16_4 = 6,
+    TQPQ16_8 = 7,
+    NUM_METHODS = 8
+  };
+  const char* method_names[NUM_METHODS] = {"FastScan",     "RaBitQ",      "TQ-4bit",
+                                           "Byte TQ",     "TQ-PQ-16-1",  "TQ-PQ-16-2",
+                                           "TQ-PQ-16-4",  "TQ-PQ-16-8"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
@@ -272,7 +288,7 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
 
 #if defined(__AVX512F__)
   {
-    auto run_tqpq_queries = [&](auto& tqpq_m, auto& tqpq_enc) {
+    auto run_tqpq_queries = [&](auto& tqpq_m, auto& tqpq_enc, Method meth) {
       for (size_t qi = 0; qi < Q; ++qi) {
         const float* q = queries.data() + qi * size_t(D);
         auto qq = tqpq_m.quantize_query(q);
@@ -288,51 +304,59 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
           const size_t K = static_cast<size_t>(Kgrid[k_i]);
           const size_t need = static_cast<size_t>(std::ceil(rec99 * static_cast<float>(K)));
           const size_t M = min_M_for_recall(approx_ids, exact_sets_per_query[qi][k_i], need);
-          sum_M[idx2(TQPQ4BIT, k_i)] += static_cast<double>(M);
+          sum_M[idx2(meth, k_i)] += static_cast<double>(M);
         }
       }
     };
-    if (tqpq_block == 1) {
+    {
       turboquant_pq_4bit::Model<Metric, 1> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
-      run_tqpq_queries(tqpq_m, tqpq_enc);
-    } else if (tqpq_block == 2) {
+      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_1);
+    }
+    {
       turboquant_pq_4bit::Model<Metric, 2> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
-      run_tqpq_queries(tqpq_m, tqpq_enc);
-    } else if (tqpq_block == 4) {
+      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_2);
+    }
+    {
       turboquant_pq_4bit::Model<Metric, 4> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
-      run_tqpq_queries(tqpq_m, tqpq_enc);
-    } else if (tqpq_block == 8) {
+      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_4);
+    }
+    {
       turboquant_pq_4bit::Model<Metric, 8> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
-      run_tqpq_queries(tqpq_m, tqpq_enc);
-    } else {
-      turboquant_pq_4bit::Model<Metric, 16> tqpq_m;
-      tqpq_m.train(db);
-      auto tqpq_enc = tqpq_m.encode(db);
-      run_tqpq_queries(tqpq_m, tqpq_enc);
+      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_8);
     }
   }
 #endif
 
-  std::cout << "\n=== Number of candidates (M) to reach recall@K ===" << std::endl;
-  std::cout << "Averages over Q=" << Q << " query vectors." << std::endl;
+  std::cout << "\n=== Avg M (candidates) to reach recall@K ===\n";
+  std::cout << "Averages over Q=" << Q << " query vectors.\n\n";
+
+  constexpr int method_w = 16;
+  constexpr int col_w = 12;
+
+  std::cout << std::left << std::setw(method_w) << "Method";
+  for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
+    std::string col = "K=" + std::to_string(Kgrid[k_i]);
+    std::cout << std::right << std::setw(col_w) << col;
+  }
+  std::cout << "\n";
+  std::cout << std::string(method_w + int(col_w * Kgrid.size()), '-') << "\n";
 
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
-    std::cout << std::endl << method_names[meth] << ":\n";
+    std::cout << std::left << std::setw(method_w) << method_names[meth];
     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-      const uint32_t K = Kgrid[k_i];
-      const double avg_M = sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Q);
-      std::cout << "  K=" << std::setw(4) << K << "  rec" << int(rec99 * 100 + 0.5f)
-                << "%: " << std::setw(10) << std::fixed << std::setprecision(1) << avg_M
-                << std::endl;
+      const double avg_M =
+          sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Q);
+      std::cout << std::right << std::setw(col_w) << std::fixed << std::setprecision(1) << avg_M;
     }
+    std::cout << "\n";
   }
 
   return 0;

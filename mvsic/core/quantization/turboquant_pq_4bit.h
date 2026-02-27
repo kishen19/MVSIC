@@ -177,6 +177,8 @@ static constexpr float kOfflineCodebooks_Block16[16][16] = {
 
 template<bool Metric, size_t BlockSize>
 class Quantized_Point;
+template<typename PointRange, bool Metric, size_t BlockSize>
+class Quantized_Point_Range;
 template<bool Metric, size_t BlockSize>
 class Quantized_Query;
 
@@ -213,8 +215,13 @@ class Quantized_Query {
   size_t num_blocks = 0;
   size_t num_bytes_per_datapoint = 0;
   // Query-side LUT: raw int8×int8 dot products per block/centroid.
-  // Entry (b, k) holds dot(q_block_b, centroid_b_k).
+  // Entry (b, k) holds dot(q_block_b, centroid_b_k) as 32-bit integer.
   std::vector<int32_t> lut_int32;
+  // Optional 8-bit compressed LUT for fast SIMD scoring. Values are scalar-
+  // quantized versions of lut_int32 using a single global scale per query:
+  //   lut_int32[b,k] ≈ lut_int8[b,k] * lut_int8_scale.
+  std::vector<int8_t> lut_int8;
+  float lut_int8_scale = 1.0f;
   // Query norm information (for potential rescaling); currently not used in
   // the scoring path, but kept for completeness and future extensions.
   float norm_scaling_factor = 0.0f;
@@ -226,7 +233,7 @@ class Quantized_Query {
     return p.distance(*this);
   }
 
-  // FastScan-style: parallel over strips, each strip writes 64 distances.
+  // Generic fallback: parallel over points, each point uses scalar distance().
   template<typename EncRange>
   void distances_all(const EncRange& db, float* out) const {
     const size_t N = (db.n_points_raw_unpadded != 0) ? db.n_points_raw_unpadded : db.n_points_raw;
@@ -236,86 +243,84 @@ class Quantized_Query {
         /*granularity=*/1024);
   }
 
-#if 0 && defined(__AVX512F__)
-  // FastScan-style: 32 bytes per block, nibble split, shuffle with int_lut, int16 accumulate.
-  inline void scan_strip_64_lut_sums(const uint8_t* strip_ptr, float* lut_sums,
-                                     const float* norms_sqrt, const float* squared_norms,
-                                     size_t base_idx) const {
-    __m512i acc_even = _mm512_setzero_si512();
-    __m512i acc_odd = _mm512_setzero_si512();
+#ifdef __AVX512F__
+  // AVX-512 FastScan-style scoring using the 8-bit LUT (lut_int8) plus a single
+  // global scale factor (lut_int8_scale). This processes contiguous strip-
+  // interleaved codes (64 points per strip).
+  template<typename PointRangeTy>
+  void distances_all(const Quantized_Point_Range<PointRangeTy, Metric, BlockSize>& enc,
+                     float* out) const {
+    const size_t N =
+        (enc.n_points_raw_unpadded != 0) ? enc.n_points_raw_unpadded : enc.n_points_raw;
+    if (N == 0) return;
+
+    const uint8_t* strip_data = enc.packed_codes.data();
+    const float* norms = enc.norm_scaling_factors.data();
+    const float* squared_norms = enc.unquantized_squared_norms.data();
+    const size_t strip_stride = enc.stride;
+    const size_t n_strips = (N + 63) / 64;
+
+    const size_t nb = num_blocks;
     const __m256i low_mask = _mm256_set1_epi8(0x0F);
 
-    for (size_t b = 0; b < num_blocks; ++b) {
-      const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(strip_ptr));
-      strip_ptr += 32;
+    parlay::parallel_for(
+        0, n_strips,
+        [&](size_t s) {
+          const uint8_t* codes_ptr = strip_data + s * strip_stride;
+          const float* ns = norms + s * 64;
+          const float* sq = squared_norms + s * 64;
+          const size_t base = s * 64;
+          const size_t count = std::min<size_t>(64, N - base);
 
-      const __m256i codes_even = _mm256_and_si256(packed, low_mask);
-      const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+          __m512i acc_even = _mm512_setzero_si512();
+          __m512i acc_odd = _mm512_setzero_si512();
 
-      const __m128i lut128 =
-          _mm_loadu_si128(reinterpret_cast<const __m128i*>(&int_lut[static_cast<size_t>(b) * K]));
-      const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
+          for (size_t b = 0; b < nb; ++b) {
+            const __m256i packed =
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+            codes_ptr += 32;
 
-      const __m256i scores_even_u8 = _mm256_shuffle_epi8(lut256, codes_even);
-      const __m256i scores_odd_u8 = _mm256_shuffle_epi8(lut256, codes_odd);
+            const __m256i codes_even = _mm256_and_si256(packed, low_mask);
+            const __m256i codes_odd =
+                _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
-      acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepu8_epi16(scores_even_u8));
-      acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepu8_epi16(scores_odd_u8));
-    }
+            const __m128i lut128 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(&lut_int8[static_cast<size_t>(b) * K]));
+            const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
 
-    alignas(64) uint16_t raw_even[32];
-    alignas(64) uint16_t raw_odd[32];
-    _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
-    _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
+            const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
+            const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
 
-    for (int i = 0; i < 32; ++i) {
-      float decoded_even = decode(raw_even[i]);
-      float decoded_odd = decode(raw_odd[i]);
-      if constexpr (Metric) {
-        float qs_e = squared_norms[base_idx + i * 2] / (norms_sqrt[base_idx + i * 2] * norms_sqrt[base_idx + i * 2]);
-        float qs_o = squared_norms[base_idx + i * 2 + 1] / (norms_sqrt[base_idx + i * 2 + 1] * norms_sqrt[base_idx + i * 2 + 1]);
-        float real_e = (qs_e - decoded_even) * 0.5f;
-        float real_o = (qs_o - decoded_odd) * 0.5f;
-        lut_sums[i * 2] = unquantized_squared_norm + squared_norms[base_idx + i * 2] - 2.0f * real_e;
-        lut_sums[i * 2 + 1] = unquantized_squared_norm + squared_norms[base_idx + i * 2 + 1] - 2.0f * real_o;
-      } else {
-        float real_e = (-decoded_even) * scale_q * norms_sqrt[base_idx + i * 2];
-        float real_o = (-decoded_odd) * scale_q * norms_sqrt[base_idx + i * 2 + 1];
-        lut_sums[i * 2] = -real_e;
-        lut_sums[i * 2 + 1] = -real_o;
-      }
-    }
+            acc_even =
+                _mm512_add_epi16(acc_even, _mm512_cvtepi8_epi16(scores_even_i8));
+            acc_odd =
+                _mm512_add_epi16(acc_odd, _mm512_cvtepi8_epi16(scores_odd_i8));
+          }
+
+          alignas(64) int16_t raw_even[32];
+          alignas(64) int16_t raw_odd[32];
+          _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
+          _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
+
+          const float alpha_q = norm_scaling_factor;
+          for (size_t i = 0; i < count; ++i) {
+            const size_t pair = i / 2;
+            const bool is_even = ((i & 1u) == 0);
+            const int16_t s8 = is_even ? raw_even[pair] : raw_odd[pair];
+
+            const float acc_approx = static_cast<float>(s8) * lut_int8_scale;
+            const float alpha_x = ns[i];
+            const float dot_est = alpha_x * alpha_q * acc_approx;
+
+            if constexpr (Metric) {
+              out[base + i] = sq[i] + unquantized_squared_norm - 2.0f * dot_est;
+            } else {
+              out[base + i] = -dot_est;
+            }
+          }
+        },
+        /*granularity=*/1);
   }
-
-  void distances_contiguous(const uint8_t* strip_data, const float* norms_sqrt,
-                            const float* squared_norms, size_t strip_stride, size_t N_real,
-                            float* out) const {
-    if (N_real == 0) return;
-    const size_t n_strips = (N_real + 63) / 64;
-    alignas(64) float lut_sums[64];
-    for (size_t s = 0; s < n_strips; ++s) {
-      scan_strip_64_lut_sums(strip_data + s * strip_stride, lut_sums,
-                             norms_sqrt + s * 64, squared_norms + s * 64, s * 64);
-      const size_t base = s * 64;
-      const size_t count = std::min<size_t>(64, N_real - base);
-      for (size_t i = 0; i < count; ++i)
-        out[base + i] = lut_sums[i];
-    }
-  }
-
-  float chamfer_min_strip(const uint8_t* strip_data, const float* norms_sqrt,
-                          const float* squared_norms, size_t strip_stride, size_t n_strips) const {
-    float best = std::numeric_limits<float>::max();
-    alignas(64) float lut_sums[64];
-    for (size_t s = 0; s < n_strips; ++s) {
-      scan_strip_64_lut_sums(strip_data + s * strip_stride, lut_sums,
-                             norms_sqrt + s * 64, squared_norms + s * 64, s * 64);
-      for (int i = 0; i < 64; ++i)
-        best = std::min(best, lut_sums[i]);
-    }
-    return best;
-  }
-  static constexpr bool has_batch_distances = true;
 #endif
 };
 
@@ -791,6 +796,7 @@ class Model {
     qq.num_blocks = num_blocks;
     qq.num_bytes_per_datapoint = num_bytes_per_datapoint;
     qq.lut_int32.assign(num_blocks * 16, 0);
+    qq.lut_int8.assign(num_blocks * 16, 0);
     std::vector<float> q_rot(padded_dim);
     rotator->rotate(qptr, q_rot.data());
     float sqr_norm = 0.0f;
@@ -832,6 +838,26 @@ class Model {
         for (size_t d = 0; d < BlockSize; ++d)
           dot += static_cast<int32_t>(q_b[d]) * static_cast<int32_t>(c_b[k * BlockSize + d]);
         qq.lut_int32[b * 16 + k] = dot;
+      }
+    }
+
+    // Build an 8-bit compressed LUT from lut_int32 for fast SIMD scoring.
+    // We use a single global scale per query so that:
+    //   lut_int32[b,k] ≈ lut_int8[b,k] * lut_int8_scale,
+    // with lut_int8 in [-127,127].
+    int32_t max_abs = 0;
+    for (size_t i = 0; i < qq.lut_int32.size(); ++i)
+      max_abs = std::max<int32_t>(max_abs, std::abs(qq.lut_int32[i]));
+    if (max_abs == 0) {
+      qq.lut_int8_scale = 1.0f;
+      std::fill(qq.lut_int8.begin(), qq.lut_int8.end(), 0);
+    } else {
+      qq.lut_int8_scale = static_cast<float>(max_abs) / 127.0f;
+      const float inv_scale = 1.0f / qq.lut_int8_scale;
+      for (size_t i = 0; i < qq.lut_int8.size(); ++i) {
+        float v = static_cast<float>(qq.lut_int32[i]) * inv_scale;
+        v = std::round(std::clamp(v, -127.0f, 127.0f));
+        qq.lut_int8[i] = static_cast<int8_t>(v);
       }
     }
 
