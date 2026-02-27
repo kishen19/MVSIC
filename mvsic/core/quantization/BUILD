@@ -47,6 +47,19 @@ cc_library(
 )
 
 cc_library(
+    name = "turboquant_pq_4bit",
+    hdrs = [
+        "turboquant_pq_4bit.h",
+        "turboquant_pq_codebooks.h",
+    ],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
+
+cc_library(
     name = "turboquant_low_bit",
     hdrs = ["turboquant_low_bit.h"],
     deps = [],

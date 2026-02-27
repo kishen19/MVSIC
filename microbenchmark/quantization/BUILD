@@ -8,11 +8,10 @@ cc_binary(
     deps = [
         "//mvsic/core/distance_measures:one_to_one",
         "//mvsic/core/quantization:fastscan",
-        "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_pq_4bit",
         "//mvsic/core/quantization:turboquant_byte",
-        "//mvsic/core/quantization/other_methods:rabitq_sym",
         "@eigen",
         "@parlaylib//parlay:primitives",
     ],
@@ -65,12 +64,14 @@ cc_binary(
     deps = [
         "//mvsic/core/distance_measures:one_to_one",
         "//mvsic/core/quantization:fastscan",
-        "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization/other_methods:turboquant_naive",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_byte",
+        "//mvsic/core/quantization:turboquant_pq_4bit",
         "//mvsic/core/utils:parse_command_line",
         "@eigen",
         "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay:sequence",
     ],
 )
 
