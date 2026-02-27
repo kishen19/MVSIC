@@ -433,7 +433,6 @@ class Quantized_Point_Cloud_Set {
         const size_t true_end = start + cloud_size;
         const size_t strip_stride = vec_db.stride;
         const size_t strip0 = start / 64;
-        const int lane0 = static_cast<int>(start % 64);
         const size_t strip1 = true_end / 64;
         const int lane1 = static_cast<int>(true_end % 64);
 
@@ -457,7 +456,9 @@ class Quantized_Point_Cloud_Set {
           float beta_q[kQBatch];
           float sqn_q[kQBatch];
           for (size_t qi = 0; qi < qb; ++qi) {
-            beta_q[qi] = qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale;
+            float base_beta = (qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale) /
+                              turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+            beta_q[qi] = Metric ? (2.0f * base_beta) : base_beta;
             sqn_q[qi] = qv_arr[qi].unquantized_squared_norm;
           }
 
@@ -499,38 +500,110 @@ class Quantized_Point_Cloud_Set {
               }
             }
 
-            alignas(64) int16_t raw_even[kQBatch][32];
-            alignas(64) int16_t raw_odd[kQBatch][32];
-            for (size_t qi = 0; qi < qb; ++qi) {
-              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even[qi]), acc_even[qi]);
-              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd[qi]), acc_odd[qi]);
+            // Keep everything in registers: convert acc -> float, apply norms, compute L2/IP, reduce min.
+            const __m512 inf_ps = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+            // Precompute masks for pair vectors (16 pairs at a time) for both even and odd lanes.
+            auto mask_pairs16 = [&](int pair_base, bool odd) -> __mmask16 {
+              uint16_t m = 0;
+              for (int j = 0; j < 16; ++j) {
+                const int pair = pair_base + j;
+                const int lane = (pair << 1) + (odd ? 1 : 0);
+                if (lane >= lo && lane < hi) m |= static_cast<uint16_t>(1u << j);
+              }
+              return static_cast<__mmask16>(m);
+            };
+            const __mmask16 me0 = mask_pairs16(/*pair_base=*/0, /*odd=*/false);
+            const __mmask16 mo0 = mask_pairs16(/*pair_base=*/0, /*odd=*/true);
+            const __mmask16 me1 = mask_pairs16(/*pair_base=*/16, /*odd=*/false);
+            const __mmask16 mo1 = mask_pairs16(/*pair_base=*/16, /*odd=*/true);
+
+            alignas(64) float ns_even[32];
+            alignas(64) float ns_odd[32];
+            alignas(64) float sq_even[32];
+            alignas(64) float sq_odd[32];
+            for (int p = 0; p < 32; ++p) {
+              ns_even[p] = ns[2 * p + 0];
+              ns_odd[p] = ns[2 * p + 1];
+              sq_even[p] = sq[2 * p + 0];
+              sq_odd[p] = sq[2 * p + 1];
             }
 
-            for (int lane = lo; lane < hi; ++lane) {
-              const int pair = lane >> 1;
-              const bool even = ((lane & 1) == 0);
-              const float alpha_x = ns[lane];
-              const float sq_x = sq[lane];
-              for (size_t qi = 0; qi < qb; ++qi) {
-                const int16_t s8 = even ? raw_even[qi][pair] : raw_odd[qi][pair];
-                const float dot = alpha_x * beta_q[qi] * static_cast<float>(s8);
-                float dist;
+            auto lane16_ps = [](const __m512i& acc, int half) -> __m512 {
+              const __m256i v16 = (half == 0) ? _mm512_castsi512_si256(acc)
+                                              : _mm512_extracti64x4_epi64(acc, 1);
+              const __m512i i32 = _mm512_cvtepi16_epi32(v16);
+              return _mm512_cvtepi32_ps(i32);
+            };
+
+            for (size_t qi = 0; qi < qb; ++qi) {
+              __m512 running_min = inf_ps;
+              const __m512 beta_ps = _mm512_set1_ps(beta_q[qi]);
+
+              // pairs 0..15
+              {
+                const __m512 s_e = lane16_ps(acc_even[qi], 0);
+                const __m512 s_o = lane16_ps(acc_odd[qi], 0);
+                const __m512 ns_e = _mm512_load_ps(ns_even + 0);
+                const __m512 ns_o = _mm512_load_ps(ns_odd + 0);
+                const __m512 t_e = _mm512_mul_ps(s_e, ns_e);
+                const __m512 t_o = _mm512_mul_ps(s_o, ns_o);
+
+                __m512 dist_e, dist_o;
                 if constexpr (Metric) {
-                  dist = sq_x + sqn_q[qi] - 2.0f * dot;
+                  const __m512 base_e =
+                      _mm512_add_ps(_mm512_load_ps(sq_even + 0), _mm512_set1_ps(sqn_q[qi]));
+                  const __m512 base_o =
+                      _mm512_add_ps(_mm512_load_ps(sq_odd + 0), _mm512_set1_ps(sqn_q[qi]));
+                  dist_e = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e, base_e);
+                  dist_o = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o, base_o);
                 } else {
-                  dist = -dot;
+                  dist_e = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e);
+                  dist_o = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o);
                 }
-                if (dist < min_q[qi]) min_q[qi] = dist;
+                dist_e = _mm512_mask_blend_ps(me0, inf_ps, dist_e);
+                dist_o = _mm512_mask_blend_ps(mo0, inf_ps, dist_o);
+                running_min = _mm512_min_ps(running_min, dist_e);
+                running_min = _mm512_min_ps(running_min, dist_o);
               }
+
+              // pairs 16..31
+              {
+                const __m512 s_e = lane16_ps(acc_even[qi], 1);
+                const __m512 s_o = lane16_ps(acc_odd[qi], 1);
+                const __m512 ns_e = _mm512_load_ps(ns_even + 16);
+                const __m512 ns_o = _mm512_load_ps(ns_odd + 16);
+                const __m512 t_e = _mm512_mul_ps(s_e, ns_e);
+                const __m512 t_o = _mm512_mul_ps(s_o, ns_o);
+
+                __m512 dist_e, dist_o;
+                if constexpr (Metric) {
+                  const __m512 base_e =
+                      _mm512_add_ps(_mm512_load_ps(sq_even + 16), _mm512_set1_ps(sqn_q[qi]));
+                  const __m512 base_o =
+                      _mm512_add_ps(_mm512_load_ps(sq_odd + 16), _mm512_set1_ps(sqn_q[qi]));
+                  dist_e = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e, base_e);
+                  dist_o = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o, base_o);
+                } else {
+                  dist_e = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e);
+                  dist_o = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o);
+                }
+                dist_e = _mm512_mask_blend_ps(me1, inf_ps, dist_e);
+                dist_o = _mm512_mask_blend_ps(mo1, inf_ps, dist_o);
+                running_min = _mm512_min_ps(running_min, dist_e);
+                running_min = _mm512_min_ps(running_min, dist_o);
+              }
+
+              const float m = _mm512_reduce_min_ps(running_min);
+              if (m < min_q[qi]) min_q[qi] = m;
             }
           };
 
           if (strip0 == strip1) {
             const int hi = (lane1 == 0) ? 64 : lane1;
-            scan_strip_masked(strip0, lane0, hi);
+            scan_strip_masked(strip0, 0, hi);
           } else {
-            scan_strip_masked(strip0, lane0, 64);
-            for (size_t s = strip0 + 1; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            for (size_t s = strip0; s < strip1; ++s) scan_strip_masked(s, 0, 64);
             if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
           }
 
@@ -686,6 +759,7 @@ class Quantized_Point_Cloud_Set {
     } else if constexpr (has_tqpq_fast_t<EncRange>::value) {
       // TQ-PQ: strip-interleaved layout (like FastScan), but scoring uses per-query LUTs.
 #if defined(__AVX512F__)
+      const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
         const uint32_t cloud_id = static_cast<uint32_t>(cid);
         const size_t start = offsets[cloud_id];
@@ -704,7 +778,6 @@ class Quantized_Point_Cloud_Set {
         const size_t true_end = start + cloud_size;
         const size_t strip_stride = vec_db.stride;
         const size_t strip0 = start / 64;
-        const int lane0 = static_cast<int>(start % 64);
         const size_t strip1 = true_end / 64;
         const int lane1 = static_cast<int>(true_end % 64);
 
@@ -731,8 +804,10 @@ class Quantized_Point_Cloud_Set {
           float sqn_q[kQBatch];
           for (size_t qi = 0; qi < qb; ++qi) {
             // Combine NSF, LUT int8 scale, and centroid int8 scale once.
-            beta_q[qi] = (qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale) /
-                         turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+            float base_beta = (qv_arr[qi].norm_scaling_factor * qv_arr[qi].lut_int8_scale) /
+                              turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+            // Pre-bake the 2.0 factor for L2 so the inner loop can use a single FMA.
+            beta_q[qi] = Metric ? (2.0f * base_beta) : base_beta;
             sqn_q[qi] = qv_arr[qi].unquantized_squared_norm;
           }
 
@@ -740,7 +815,6 @@ class Quantized_Point_Cloud_Set {
           for (size_t qi = 0; qi < qb; ++qi) min_q[qi] = std::numeric_limits<float>::max();
 
           const __m256i low_mask = _mm256_set1_epi8(0x0F);
-          const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
 
           auto scan_strip_masked = [&](size_t s, int lo, int hi) {
             const uint8_t* codes_ptr = strip_ptr(s);
@@ -769,43 +843,121 @@ class Quantized_Point_Cloud_Set {
                 const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
                 const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
                 const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
-                acc_even[qi] = _mm512_add_epi16(acc_even[qi], _mm512_cvtepi8_epi16(scores_even_i8));
-                acc_odd[qi] = _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
+                acc_even[qi] =
+                    _mm512_add_epi16(acc_even[qi], _mm512_cvtepi8_epi16(scores_even_i8));
+                acc_odd[qi] =
+                    _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
               }
             }
 
-            alignas(64) int16_t raw_even[kQBatch][32];
-            alignas(64) int16_t raw_odd[kQBatch][32];
+            // Keep everything in registers: convert acc -> float, apply norms, compute L2/IP, reduce min.
+            const __m512 inf_ps = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+
+            auto mask_pairs16 = [&](int pair_base, bool odd) -> __mmask16 {
+              uint16_t m = 0;
+              for (int j = 0; j < 16; ++j) {
+                const int pair = pair_base + j;
+                const int lane = (pair << 1) + (odd ? 1 : 0);
+                if (lane >= lo && lane < hi) m |= static_cast<uint16_t>(1u << j);
+              }
+              return static_cast<__mmask16>(m);
+            };
+            const __mmask16 me0 = mask_pairs16(/*pair_base=*/0, /*odd=*/false);
+            const __mmask16 mo0 = mask_pairs16(/*pair_base=*/0, /*odd=*/true);
+            const __mmask16 me1 = mask_pairs16(/*pair_base=*/16, /*odd=*/false);
+            const __mmask16 mo1 = mask_pairs16(/*pair_base=*/16, /*odd=*/true);
+
+            alignas(64) float ns_even[32];
+            alignas(64) float ns_odd[32];
+            alignas(64) float sq_even[32];
+            alignas(64) float sq_odd[32];
+            for (int p = 0; p < 32; ++p) {
+              ns_even[p] = ns[2 * p + 0];
+              ns_odd[p] = ns[2 * p + 1];
+              sq_even[p] = sq[2 * p + 0];
+              sq_odd[p] = sq[2 * p + 1];
+            }
+
+            auto lane16_ps = [](const __m512i& acc, int half) -> __m512 {
+              const __m256i v16 = (half == 0) ? _mm512_castsi512_si256(acc)
+                                              : _mm512_extracti64x4_epi64(acc, 1);
+              const __m512i i32 = _mm512_cvtepi16_epi32(v16);
+              return _mm512_cvtepi32_ps(i32);
+            };
+
             for (size_t qi = 0; qi < qb; ++qi) {
-              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even[qi]), acc_even[qi]);
-              _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd[qi]), acc_odd[qi]);
-            }
+              __m512 running_min = inf_ps;
+              const __m512 beta_ps = _mm512_set1_ps(beta_q[qi]);
+              const __m512 neg_beta_ps = _mm512_sub_ps(_mm512_setzero_ps(), beta_ps);
+              const __m512 sqn_q_ps = _mm512_set1_ps(sqn_q[qi]);
 
-            for (int lane = lo; lane < hi; ++lane) {
-              const int pair = lane >> 1;
-              const bool even = ((lane & 1) == 0);
-              const float alpha_x = ns[lane];
-              const float sq_x = sq[lane];
-              for (size_t qi = 0; qi < qb; ++qi) {
-                const int16_t s8 = even ? raw_even[qi][pair] : raw_odd[qi][pair];
-                const float dot = alpha_x * beta_q[qi] * static_cast<float>(s8);
-                float dist;
+              // pairs 0..15
+              {
+                const __m512 s_e = lane16_ps(acc_even[qi], 0);
+                const __m512 s_o = lane16_ps(acc_odd[qi], 0);
+                const __m512 ns_e = _mm512_load_ps(ns_even + 0);
+                const __m512 ns_o = _mm512_load_ps(ns_odd + 0);
+                const __m512 t_e = _mm512_mul_ps(s_e, ns_e);
+                const __m512 t_o = _mm512_mul_ps(s_o, ns_o);
+
+                __m512 dist_e, dist_o;
                 if constexpr (Metric) {
-                  dist = sq_x + sqn_q[qi] - 2.0f * dot;
+                  const __m512 base_e =
+                      _mm512_add_ps(_mm512_load_ps(sq_even + 0), sqn_q_ps);
+                  const __m512 base_o =
+                      _mm512_add_ps(_mm512_load_ps(sq_odd + 0), sqn_q_ps);
+                  dist_e = _mm512_fmadd_ps(neg_beta_ps, t_e, base_e);
+                  dist_o = _mm512_fmadd_ps(neg_beta_ps, t_o, base_o);
                 } else {
-                  dist = -dot;
+                  dist_e = _mm512_mul_ps(neg_beta_ps, t_e);
+                  dist_o = _mm512_mul_ps(neg_beta_ps, t_o);
                 }
-                if (dist < min_q[qi]) min_q[qi] = dist;
+                dist_e = _mm512_mask_blend_ps(me0, inf_ps, dist_e);
+                dist_o = _mm512_mask_blend_ps(mo0, inf_ps, dist_o);
+                running_min = _mm512_min_ps(running_min, dist_e);
+                running_min = _mm512_min_ps(running_min, dist_o);
               }
+
+              // pairs 16..31
+              {
+                const __m512 s_e = lane16_ps(acc_even[qi], 1);
+                const __m512 s_o = lane16_ps(acc_odd[qi], 1);
+                const __m512 ns_e = _mm512_load_ps(ns_even + 16);
+                const __m512 ns_o = _mm512_load_ps(ns_odd + 16);
+                const __m512 t_e = _mm512_mul_ps(s_e, ns_e);
+                const __m512 t_o = _mm512_mul_ps(s_o, ns_o);
+
+                __m512 dist_e, dist_o;
+                if constexpr (Metric) {
+                  const __m512 base_e =
+                      _mm512_add_ps(_mm512_load_ps(sq_even + 16), sqn_q_ps);
+                  const __m512 base_o =
+                      _mm512_add_ps(_mm512_load_ps(sq_odd + 16), sqn_q_ps);
+                  dist_e = _mm512_fmadd_ps(neg_beta_ps, t_e, base_e);
+                  dist_o = _mm512_fmadd_ps(neg_beta_ps, t_o, base_o);
+                } else {
+                  dist_e = _mm512_mul_ps(neg_beta_ps, t_e);
+                  dist_o = _mm512_mul_ps(neg_beta_ps, t_o);
+                }
+                dist_e = _mm512_mask_blend_ps(me1, inf_ps, dist_e);
+                dist_o = _mm512_mask_blend_ps(mo1, inf_ps, dist_o);
+                running_min = _mm512_min_ps(running_min, dist_e);
+                running_min = _mm512_min_ps(running_min, dist_o);
+              }
+
+              const float m = _mm512_reduce_min_ps(running_min);
+              if (m < min_q[qi]) min_q[qi] = m;
             }
           };
 
           if (strip0 == strip1) {
+            // Cloud fits entirely within a single strip; only mask the end.
             const int hi = (lane1 == 0) ? 64 : lane1;
-            scan_strip_masked(strip0, lane0, hi);
+            scan_strip_masked(strip0, 0, hi);
           } else {
-            scan_strip_masked(strip0, lane0, 64);
-            for (size_t s = strip0 + 1; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            // Full strips from strip0 to strip1 - 1.
+            for (size_t s = strip0; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            // Final partial strip if needed.
             if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
           }
 
