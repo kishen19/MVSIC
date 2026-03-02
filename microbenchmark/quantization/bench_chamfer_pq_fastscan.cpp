@@ -27,10 +27,10 @@
 //     NOTE: query vectors-per-cloud K_q is FIXED to 32 (standard).
 //
 //   Common:
-//     -dist_func <L2|IP> (default L2)
+//     -dist_func <L2|IP> (default IP)
 //     -pq_block <u32>    (default 8)
 //     -fs_block <u32>    (default 8)
-//     -rbits <u32>       (default 2)
+//     -rbits <u32>       (default 4)
 //     -reps <u32>        (default 3)
 
 #include <algorithm>
@@ -676,7 +676,7 @@ int main(int argc, char** argv) {
   std::string df = P.getOptionValue("-dist_func", "IP");
   uint32_t pq_block = static_cast<uint32_t>(P.getOptionIntValue("-pq_block", 8));
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
-  uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
+  uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 4));
   int reps = std::max(1, P.getOptionIntValue("-reps", 3));
   bool verify = P.getOption("-verify");
 

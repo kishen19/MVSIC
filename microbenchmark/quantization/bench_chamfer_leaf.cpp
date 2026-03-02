@@ -18,7 +18,7 @@
 //     NOTE: query vectors-per-cloud K_q is FIXED to 32.
 //
 // - Common:
-//     -dist_func <L2|IP> (default L2)
+//     -dist_func <L2|IP> (default IP)
 //     -leaf_size <u32>   (default 500)
 //     -reps <u32>        (default 3)
 //
@@ -103,18 +103,15 @@ static void print_leaf_table(const char* title, const std::vector<BenchRow>& row
                              uint64_t logical_blocks, double exact_best) {
   if (rows.empty() || logical_blocks == 0) return;
   std::cout << "\n=== " << title << " ===\n";
-  std::cout << std::left << std::setw(28) << "Method"
-            << std::right << std::setw(12) << "time [s]"
-            << std::setw(16) << "ns / leaf"
-            << std::setw(12) << "speedup\n";
+  std::cout << std::left << std::setw(28) << "Method" << std::right << std::setw(12) << "time [s]"
+            << std::setw(16) << "ns / leaf" << std::setw(12) << "speedup\n";
   std::cout << std::string(28 + 12 + 16 + 12, '-') << "\n";
   for (const auto& r : rows) {
     const double t = r.best_s;
     const double ns = ns_per_op(t, logical_blocks);
     const double speedup = (exact_best > 0.0) ? (exact_best / t) : 0.0;
-    std::cout << std::left << std::setw(28) << r.name
-              << std::right << std::setw(12) << std::fixed << std::setprecision(4) << t
-              << std::setw(16) << std::setprecision(1) << ns
+    std::cout << std::left << std::setw(28) << r.name << std::right << std::setw(12) << std::fixed
+              << std::setprecision(4) << t << std::setw(16) << std::setprecision(1) << ns
               << std::setw(12) << std::setprecision(2) << speedup << "\n";
   }
   std::cout << "\n";
@@ -361,7 +358,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   constexpr uint32_t PQ_K = 16;
   constexpr uint32_t PQ_S = 20;
   const uint32_t fs_block = 8;
-  const uint32_t rbits = 2;
+  const uint32_t rbits = 4;
 
   // PQ (K=16)
   MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;

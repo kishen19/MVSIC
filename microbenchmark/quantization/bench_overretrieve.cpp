@@ -56,6 +56,9 @@
 #include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/turboquant_pq_4bit.h"
 
+#include "mvsic/core/types/ip_point.h"
+#include "mvsic/core/types/l2_point.h"
+#include "mvsic/core/types/point_range.h"
 #include "mvsic/core/utils/parse_command_line.h"
 
 using namespace mvsic;
@@ -126,15 +129,53 @@ static size_t min_M_for_recall(const std::vector<uint32_t>& approx_ranked_ids,
   return approx_ranked_ids.size();
 }
 
-template<bool Metric>
-static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint64_t seed_q,
-                         uint32_t fs_block, uint32_t rbits, uint32_t tqpq_block, uint32_t Kmax,
-                         float rec99) {
-  DensePointRange db(N, D);
-  DensePointRange queries(Q, D);
+struct IbinGroundTruth {
+  uint32_t num_queries = 0;
+  uint32_t k = 0;
+  std::vector<uint32_t> ids;     // [num_queries * k]
+  std::vector<float> distances;  // [num_queries * k]
+};
 
-  fill_random(db, seed_db, /*l2_normalize=*/true);
-  fill_random(queries, seed_q, /*l2_normalize=*/true);
+// ParlayANN ground-truth format ("ibin", used by big-ann-benchmarks):
+// int32 num_queries, int32 k, then num_queries*k int32 ids, then num_queries*k float distances.
+static IbinGroundTruth load_ibin_ground_truth(const char* path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) {
+    std::cerr << "ERROR: cannot open ground truth file: " << path << "\n";
+    std::exit(1);
+  }
+
+  int32_t nq_i32 = 0;
+  int32_t k_i32 = 0;
+  in.read(reinterpret_cast<char*>(&nq_i32), sizeof(int32_t));
+  in.read(reinterpret_cast<char*>(&k_i32), sizeof(int32_t));
+  if (!in || nq_i32 <= 0 || k_i32 <= 0) {
+    std::cerr << "ERROR: invalid ibin header in " << path << "\n";
+    std::exit(1);
+  }
+
+  IbinGroundTruth gt;
+  gt.num_queries = static_cast<uint32_t>(nq_i32);
+  gt.k = static_cast<uint32_t>(k_i32);
+  const size_t total = static_cast<size_t>(gt.num_queries) * static_cast<size_t>(gt.k);
+  gt.ids.resize(total);
+  gt.distances.resize(total);
+  in.read(reinterpret_cast<char*>(gt.ids.data()), total * sizeof(uint32_t));
+  in.read(reinterpret_cast<char*>(gt.distances.data()), total * sizeof(float));
+  if (!in) {
+    std::cerr << "ERROR: ground truth file too short: " << path << "\n";
+    std::exit(1);
+  }
+  return gt;
+}
+
+template<bool Metric, typename DBRange, typename QRange>
+static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_block,
+                         uint32_t rbits, uint32_t tqpq_block, uint32_t Kmax, float rec99,
+                         const IbinGroundTruth* gt = nullptr) {
+  const size_t N = db.size();
+  const size_t Q = queries.size();
+  const uint32_t D = static_cast<uint32_t>(db.get_dims());
 
   if (D % fs_block != 0) {
     std::cerr << "ERROR: D must be divisible by fs_block.\n";
@@ -179,7 +220,6 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   btq_model.train(db);
   auto btq_db = btq_model.encode(db);
 
-  std::vector<std::pair<uint32_t, float>> exact_scores(N);
   std::vector<std::pair<uint32_t, float>> approx_scores(N);
   std::vector<float> approx_distances(N);
 
@@ -201,16 +241,13 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
 
-  efanna2e::DistanceInnerProduct distfunc_ip;
-  efanna2e::DistanceL2 distfunc_l2;
-
   std::vector<std::vector<std::unordered_set<uint32_t>>> exact_sets_per_query(
       Q, std::vector<std::unordered_set<uint32_t>>(Kgrid.size()));
 
   parlay::sequence<std::vector<double>> per_query_contrib(Q);
   parlay::parallel_for(0, Q, [&](size_t qi) {
     per_query_contrib[qi].resize(NUM_METHODS * Kgrid.size(), 0.0);
-    const float* q = queries.data() + qi * size_t(D);
+    const float* q = reinterpret_cast<const float*>(queries.location(qi));
 
     static thread_local std::vector<std::pair<uint32_t, float>> tl_exact;
     static thread_local std::vector<std::pair<uint32_t, float>> tl_approx;
@@ -219,22 +256,37 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
     tl_approx.resize(N);
     tl_dists.resize(N);
 
-    for (size_t i = 0; i < N; ++i) {
-      const float* p = db.data() + i * size_t(D);
-      float dist;
-      if constexpr (Metric) {
-        dist = distfunc_l2.compare(q, p, D);
-      } else {
-        dist = -distfunc_ip.compare(q, p, D);
+    if (gt) {
+      for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
+        const uint32_t K = Kgrid[k_i];
+        exact_sets_per_query[qi][k_i].clear();
+        for (uint32_t j = 0; j < K; ++j) {
+          const uint32_t id = gt->ids[qi * static_cast<size_t>(gt->k) + static_cast<size_t>(j)];
+          exact_sets_per_query[qi][k_i].insert(id);
+        }
       }
-      tl_exact[i] = {static_cast<uint32_t>(i), dist};
-    }
-    parlay::sort_inplace(tl_exact, [](const auto& a, const auto& b) { return a.second < b.second; });
-    for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-      const uint32_t K = Kgrid[k_i];
-      exact_sets_per_query[qi][k_i].clear();
-      for (uint32_t j = 0; j < K && j < N; ++j)
-        exact_sets_per_query[qi][k_i].insert(tl_exact[j].first);
+    } else {
+      static thread_local efanna2e::DistanceInnerProduct distfunc_ip;
+      static thread_local efanna2e::DistanceL2 distfunc_l2;
+      for (size_t i = 0; i < N; ++i) {
+        const float* p = reinterpret_cast<const float*>(db.location(i));
+        float dist;
+        if constexpr (Metric) {
+          dist = distfunc_l2.compare(q, p, D);
+        } else {
+          dist = -distfunc_ip.compare(q, p, D);
+        }
+        tl_exact[i] = {static_cast<uint32_t>(i), dist};
+      }
+      parlay::sort_inplace(tl_exact, [](const auto& a, const auto& b) {
+        return a.second < b.second;
+      });
+      for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
+        const uint32_t K = Kgrid[k_i];
+        exact_sets_per_query[qi][k_i].clear();
+        for (uint32_t j = 0; j < K && j < N; ++j)
+          exact_sets_per_query[qi][k_i].insert(tl_exact[j].first);
+      }
     }
 
     auto add_M = [&](Method meth, const std::vector<uint32_t>& approx_ids) {
@@ -290,7 +342,7 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
   {
     auto run_tqpq_queries = [&](auto& tqpq_m, auto& tqpq_enc, Method meth) {
       for (size_t qi = 0; qi < Q; ++qi) {
-        const float* q = queries.data() + qi * size_t(D);
+        const float* q = reinterpret_cast<const float*>(queries.location(qi));
         auto qq = tqpq_m.quantize_query(q);
         qq.distances_all(tqpq_enc, approx_distances.data());
         for (size_t i = 0; i < N; ++i)
@@ -364,27 +416,95 @@ static int run_benchmark(size_t N, size_t Q, uint32_t D, uint64_t seed_db, uint6
 
 int main(int argc, char** argv) {
   commandLine P(argc, argv,
+                "[-i <dbFile>] [-q <qFile>] [-gt <gtFile>] "
                 "[-N <n>] [-Q <q>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-fs_block <b>] [-rbits <b>] [-tqpq_block <b>] "
                 "[-Kmax <k>] [-rec99 <f>]");
 
   std::string df = P.getOptionValue("-dist_func", "IP");
-  size_t N = static_cast<size_t>(P.getOptionIntValue("-N", 1000000));
-  size_t Q = static_cast<size_t>(P.getOptionIntValue("-Q", 1000));
-  uint32_t D = static_cast<uint32_t>(P.getOptionIntValue("-D", 128));
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
   uint32_t tqpq_block = static_cast<uint32_t>(P.getOptionIntValue("-tqpq_block", 4));
   uint32_t Kmax = static_cast<uint32_t>(P.getOptionIntValue("-Kmax", 100));
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
 
+  const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
+  const char* gt_file = P.getOptionValue("-gt");
+
+  if (file_mode) {
+    if (P.getOptionValue("-i") == nullptr || P.getOptionValue("-q") == nullptr) {
+      std::cerr << "ERROR: Provide both -i <dbFile> and -q <qFile> for file mode.\n";
+      return 1;
+    }
+
+    const char* db_file = P.getOptionValue("-i");
+    const char* q_file = P.getOptionValue("-q");
+
+    // Optional ParlayANN ground truth (.ibin).
+    IbinGroundTruth gt;
+    const IbinGroundTruth* gt_ptr = nullptr;
+    if (gt_file) {
+      gt = load_ibin_ground_truth(gt_file);
+      gt_ptr = &gt;
+    }
+
+    if (df == "L2" || df == "l2") {
+      mvsic::PointRange<float, mvsic::L2_Point<float>> db(const_cast<char*>(db_file));
+      mvsic::PointRange<float, mvsic::L2_Point<float>> queries(const_cast<char*>(q_file));
+      if (queries.get_dims() != db.get_dims()) {
+        std::cerr << "ERROR: DB dims != query dims.\n";
+        return 1;
+      }
+      if (gt_ptr) {
+        if (gt_ptr->num_queries != queries.size()) {
+          std::cerr << "ERROR: GT num_queries (" << gt_ptr->num_queries << ") != Q ("
+                    << queries.size() << ").\n";
+          return 1;
+        }
+        if (gt_ptr->k < Kmax) {
+          std::cerr << "ERROR: GT k (" << gt_ptr->k << ") < Kmax (" << Kmax << ").\n";
+          return 1;
+        }
+      }
+      return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr);
+    }
+
+    mvsic::PointRange<float, mvsic::IP_Point<float>> db(const_cast<char*>(db_file));
+    mvsic::PointRange<float, mvsic::IP_Point<float>> queries(const_cast<char*>(q_file));
+    if (queries.get_dims() != db.get_dims()) {
+      std::cerr << "ERROR: DB dims != query dims.\n";
+      return 1;
+    }
+    if (gt_ptr) {
+      if (gt_ptr->num_queries != queries.size()) {
+        std::cerr << "ERROR: GT num_queries (" << gt_ptr->num_queries << ") != Q (" << queries.size()
+                  << ").\n";
+        return 1;
+      }
+      if (gt_ptr->k < Kmax) {
+        std::cerr << "ERROR: GT k (" << gt_ptr->k << ") < Kmax (" << Kmax << ").\n";
+        return 1;
+      }
+    }
+    return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr);
+  }
+
+  // Synthetic mode
+  size_t N = static_cast<size_t>(P.getOptionIntValue("-N", 1000000));
+  size_t Q = static_cast<size_t>(P.getOptionIntValue("-Q", 1000));
+  uint32_t D = static_cast<uint32_t>(P.getOptionIntValue("-D", 128));
   uint64_t seed_db = 12345ULL;
   uint64_t seed_q = 999ULL;
   if (char* s = P.getOptionValue("-seed_db")) seed_db = static_cast<uint64_t>(std::stoull(s));
   if (char* s = P.getOptionValue("-seed_q")) seed_q = static_cast<uint64_t>(std::stoull(s));
 
+  DensePointRange db(N, D);
+  DensePointRange queries(Q, D);
+  fill_random(db, seed_db, /*l2_normalize=*/true);
+  fill_random(queries, seed_q, /*l2_normalize=*/true);
+
   if (df == "L2" || df == "l2") {
-    return run_benchmark<true>(N, Q, D, seed_db, seed_q, fs_block, rbits, tqpq_block, Kmax, rec99);
+    return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr);
   }
-  return run_benchmark<false>(N, Q, D, seed_db, seed_q, fs_block, rbits, tqpq_block, Kmax, rec99);
+  return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr);
 }

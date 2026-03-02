@@ -472,10 +472,10 @@ class Quantized_Point_Cloud_Set {
             sqn_q[qi] = sqn_all[q0 + qi];
           }
 
-          float min_q[kQBatch];
-          for (size_t qi = 0; qi < qb; ++qi) min_q[qi] = std::numeric_limits<float>::max();
-
           const __m256i low_mask = _mm256_set1_epi8(0x0F);
+          const __m512 inf_ps = _mm512_set1_ps(std::numeric_limits<float>::infinity());
+          __m512 global_min_v[kQBatch];
+          for (size_t qi = 0; qi < qb; ++qi) global_min_v[qi] = inf_ps;
           const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
 
           auto scan_strip_masked = [&](size_t s, int lo, int hi) {
@@ -509,9 +509,6 @@ class Quantized_Point_Cloud_Set {
                 acc_odd[qi] = _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
               }
             }
-
-            // Keep everything in registers: convert acc -> float, apply norms, compute L2/IP, reduce min.
-            const __m512 inf_ps = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
             // Precompute masks for pair vectors (16 pairs at a time) for both even and odd lanes.
             auto mask_pairs16 = [&](int pair_base, bool odd) -> __mmask16 {
@@ -547,7 +544,7 @@ class Quantized_Point_Cloud_Set {
             };
 
             for (size_t qi = 0; qi < qb; ++qi) {
-              __m512 running_min = inf_ps;
+              __m512 min_v = global_min_v[qi];
               const __m512 beta_ps = _mm512_set1_ps(beta_q[qi]);
 
               // pairs 0..15
@@ -573,8 +570,8 @@ class Quantized_Point_Cloud_Set {
                 }
                 dist_e = _mm512_mask_blend_ps(me0, inf_ps, dist_e);
                 dist_o = _mm512_mask_blend_ps(mo0, inf_ps, dist_o);
-                running_min = _mm512_min_ps(running_min, dist_e);
-                running_min = _mm512_min_ps(running_min, dist_o);
+                min_v = _mm512_min_ps(min_v, dist_e);
+                min_v = _mm512_min_ps(min_v, dist_o);
               }
 
               // pairs 16..31
@@ -600,12 +597,11 @@ class Quantized_Point_Cloud_Set {
                 }
                 dist_e = _mm512_mask_blend_ps(me1, inf_ps, dist_e);
                 dist_o = _mm512_mask_blend_ps(mo1, inf_ps, dist_o);
-                running_min = _mm512_min_ps(running_min, dist_e);
-                running_min = _mm512_min_ps(running_min, dist_o);
+                min_v = _mm512_min_ps(min_v, dist_e);
+                min_v = _mm512_min_ps(min_v, dist_o);
               }
 
-              const float m = _mm512_reduce_min_ps(running_min);
-              if (m < min_q[qi]) min_q[qi] = m;
+              global_min_v[qi] = min_v;
             }
           };
 
@@ -617,7 +613,10 @@ class Quantized_Point_Cloud_Set {
             if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
           }
 
-          for (size_t qi = 0; qi < qb; ++qi) total += min_q[qi];
+          for (size_t qi = 0; qi < qb; ++qi) {
+            const float m = _mm512_reduce_min_ps(global_min_v[qi]);
+            total += m;
+          }
         }
 
         results[i] = {cloud_id, total / static_cast<float>(num_q)};

@@ -9,11 +9,11 @@
 //   6) TQ-PQ-4bit: block-wise k-means, uint8 LUT, FastScan-style shuffle scan
 //
 // Usage (Bazel):
-//   PARLAY_NUM_THREADS=16 bazel run -c opt //microbenchmark/quantization:bench_pq_fastscan -- [N]
-//   [Q] [D] [fs_block] [rbits] [REPS]
+//   ... -- [-i <db_file>] [-q <query_file>] [-N <n>] [-Q <q>] [-D <d>]
+//          [-fs_block <b>] [-rbits <b>] [-reps <r>] [-seed_db <s>] [-seed_q <s>]
 //
-// Defaults:
-//   N=1,000,000  Q=1,000  D=128  fs_block=64  rbits=8  REPS=2
+// With -i and -q: load real data (PointRange binary = uint32 n, uint32 d, n*d floats).
+// Without: synthetic data. Defaults: N=1000000, Q=1000, D=128, fs_block=64, rbits=8, reps=2.
 //
 // Notes:
 // - FastScan requires AVX-512 (AVX512F + AVX512BW recommended).
@@ -43,6 +43,9 @@
 #include "mvsic/core/quantization/turboquant_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/turboquant_pq_4bit.h"
+#include "mvsic/core/types/ip_point.h"
+#include "mvsic/core/types/point_range.h"
+#include "mvsic/core/utils/parse_command_line.h"
 
 #if !defined(__AVX512F__)
 #warning "AVX-512 not enabled by compiler flags; fastscan benchmarks will be skipped."
@@ -145,24 +148,22 @@ static void fill_random(DensePointRange& r, uint64_t seed, bool l2_normalize) {
 
 // ---------------------------
 // Exact: DB-parallel sum for one query (IP: distance = -inner_product)
+// Works with any range that has size(), get_dims(), location(i).
 // ---------------------------
-static inline float full_scan_sum_exact_ip_dbpar(const DensePointRange& db, const float* q,
-                                                 uint32_t D, size_t grain = 4096) {
+template<typename DBRange>
+static inline float full_scan_sum_exact_ip_dbpar(const DBRange& db, const float* q, uint32_t D,
+                                                 size_t grain = 4096) {
   const size_t N = db.size();
-  const float* base = db.data();
-
   const size_t num_blocks = (N + grain - 1) / grain;
   parlay::sequence<double> block_sums(num_blocks, 0.0);
 
   parlay::parallel_for(0, num_blocks, [&](size_t bi) {
     static thread_local efanna2e::DistanceInnerProduct distfunc;
-
     const size_t s = bi * grain;
     const size_t e = std::min(N, s + grain);
-
     double local = 0.0;
     for (size_t i = s; i < e; ++i) {
-      const float* p = base + i * size_t(D);
+      const float* p = reinterpret_cast<const float*>(db.location(i));
       local += double(-distfunc.compare(q, p, D));  // distance = -IP
     }
     block_sums[bi] = local;
@@ -174,20 +175,14 @@ static inline float full_scan_sum_exact_ip_dbpar(const DensePointRange& db, cons
   return float(total);
 }
 
-// ---------------------------
-// Query-serial runners (avoid nested parallelism)
-// ---------------------------
-static inline float scan_all_queries_exact_serial(const DensePointRange& db,
-                                                  const DensePointRange& queries, uint32_t D,
+template<typename DBRange, typename QRange>
+static inline float scan_all_queries_exact_serial(const DBRange& db, const QRange& queries,
+                                                  uint32_t D, size_t Q,
                                                   parlay::sequence<double>& per_q_sum) {
-  const size_t Q = queries.size();
-  const float* qbase = queries.data();
-
   for (size_t qi = 0; qi < Q; ++qi) {
-    const float* q = qbase + qi * size_t(D);
+    const float* q = reinterpret_cast<const float*>(queries.location(qi));
     per_q_sum[qi] = double(full_scan_sum_exact_ip_dbpar(db, q, D));
   }
-
   double total = 0.0;
   for (size_t i = 0; i < Q; ++i)
     total += per_q_sum[i];
@@ -252,35 +247,27 @@ static inline float scan_all_queries_byte_tq_serial(const BTQEnc& enc, const BTQ
 }
 
 // ---------------------------
-// Benchmark runner
+// Benchmark runner (template: works with DensePointRange or PointRange<float, IPPoint>)
 // ---------------------------
-int main(int argc, char** argv) {
-  size_t N = (argc > 1 ? std::stoull(argv[1]) : 1'000'000);
-  size_t Q = (argc > 2 ? std::stoull(argv[2]) : 1000);
-  uint32_t D = (argc > 3 ? uint32_t(std::stoul(argv[3])) : 128);
-
-  uint32_t fs_block = (argc > 4 ? uint32_t(std::stoul(argv[4])) : 64);
-  size_t rbits = (argc > 5 ? size_t(std::stoull(argv[5])) : size_t(8));
-
-  int REPS = (argc > 6 ? int(std::stoi(argv[6])) : 2);
-  if (REPS < 1) REPS = 1;
-
-  // IP mode (distance = -inner_product; smaller = more similar)
+template<typename DBRange, typename QRange>
+static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block, size_t rbits,
+                    int REPS) {
+  const size_t N = db.size();
+  const size_t Q_total = queries.size();
+  const size_t Q = std::min<size_t>(Q_total, 100);
+  const uint32_t D = static_cast<uint32_t>(db.get_dims());
   constexpr bool Metric = false;
 
   std::cout << "N=" << N << " Q=" << Q << " D=" << D << " fs_block=" << fs_block
             << " rbits=" << rbits << " (Metric=IP)\n";
+  if (Q_total > Q) {
+    std::cout << "  (subsampling " << Q << " / " << Q_total << " queries)\n";
+  }
 
   if (D % fs_block != 0) {
     std::cerr << "ERROR: D not divisible by fs_block.\n";
     return 1;
   }
-
-  DensePointRange db(N, D);
-  DensePointRange queries(Q, D);
-
-  fill_random(db, 12345, /*l2_normalize=*/false);
-  fill_random(queries, 999, /*l2_normalize=*/false);
 
   Timer t;
 
@@ -344,7 +331,7 @@ int main(int argc, char** argv) {
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(queries.data() + i * size_t(D)));
+        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -365,7 +352,7 @@ int main(int argc, char** argv) {
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(queries.data() + i * size_t(D)));
+        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -386,7 +373,7 @@ int main(int argc, char** argv) {
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(queries.data() + i * size_t(D)));
+        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -407,7 +394,7 @@ int main(int argc, char** argv) {
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(queries.data() + i * size_t(D)));
+        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -459,26 +446,26 @@ int main(int argc, char** argv) {
 #if defined(__AVX512F__) || defined(__AVX2__)
   t.start();
   for (size_t i = 0; i < Q; ++i) {
-    fs_q.push_back(fs_model.quantize_query(queries.data() + i * size_t(D)));
+    fs_q.push_back(fs_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
   }
   double fs_lut_s = t.sec();
 #endif
 
   t.start();
   for (size_t i = 0; i < Q; ++i) {
-    rq_q.push_back(rq_model.quantize_query(queries.data() + i * size_t(D)));
+    rq_q.push_back(rq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
   }
   double rq_lut_s = t.sec();
 
   t.start();
   for (size_t i = 0; i < Q; ++i) {
-    tq_q.push_back(tq_model.quantize_query(queries.data() + i * size_t(D)));
+    tq_q.push_back(tq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
   }
   double tq_lut_s = t.sec();
 
   t.start();
   for (size_t i = 0; i < Q; ++i) {
-    btq_q.push_back(btq_model.quantize_query(queries.data() + i * size_t(D)));
+    btq_q.push_back(btq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
   }
   double btq_lut_s = t.sec();
 
@@ -518,7 +505,7 @@ int main(int argc, char** argv) {
 
   // Warmup (avoid cold-start effects)
   for (size_t i = 0; i < std::min<size_t>(Q, 2); ++i) {
-    sink += full_scan_sum_exact_ip_dbpar(db, queries.data() + i * size_t(D), D);
+    sink += full_scan_sum_exact_ip_dbpar(db, reinterpret_cast<const float*>(queries.location(i)), D);
 
 #if defined(__AVX512F__) || defined(__AVX2__)
     fs_q[i].distances_all(fs, fs_out.data());
@@ -556,7 +543,7 @@ int main(int argc, char** argv) {
     float acc = 0.0f;
     for (int r = 0; r < REPS; ++r) {
       t.start();
-      float local = scan_all_queries_exact_serial(db, queries, D, per_q_sum);
+      float local = scan_all_queries_exact_serial(db, queries, D, Q, per_q_sum);
       double s = t.sec();
       best = std::min(best, s);
       acc = local;
@@ -650,10 +637,10 @@ int main(int argc, char** argv) {
   for (size_t qi = 0; qi < check_queries; ++qi) {
     tq_q[qi].distances_contiguous(tq.packed_codes.data(), tq.norm_scaling_factors.data(),
                                   tq.unquantized_squared_norms.data(), tq.stride, N, tq_out.data());
-    const float* q = queries.data() + qi * size_t(D);
+    const float* q = reinterpret_cast<const float*>(queries.location(qi));
     for (size_t i = 0; i < check_db; ++i) {
       static thread_local efanna2e::DistanceInnerProduct distfunc;
-      float exact = -distfunc.compare(q, db.data() + i * size_t(D), D);  // distance = -IP
+      float exact = -distfunc.compare(q, reinterpret_cast<const float*>(db.location(i)), D);  // distance = -IP
       float approx = tq_out[i];
       double ae = std::fabs(static_cast<double>(exact) - static_cast<double>(approx));
       tq_max_ae = std::max(tq_max_ae, ae);
@@ -671,4 +658,52 @@ int main(int argc, char** argv) {
 
   std::cout << "\n(sink=" << sink << ")\n";
   return 0;
+}
+
+int main(int argc, char** argv) {
+  using namespace mvsic;
+  commandLine P(argc, argv,
+                "[-i <db_file>] [-q <query_file>] "
+                "[-N <n>] [-Q <q>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
+                "[-fs_block <b>] [-rbits <b>] [-reps <r>]");
+
+  // Common options
+  uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 64));
+  size_t rbits = static_cast<size_t>(P.getOptionLongValue("-rbits", 8));
+  int reps = std::max(1, P.getOptionIntValue("-reps", 2));
+
+  char* db_file = P.getOptionValue("-i");
+  char* q_file = P.getOptionValue("-q");
+
+  if (db_file && q_file) {
+    // Real-world input (PointRange format: binary = uint32 n, uint32 d, n*d floats)
+    mvsic::PointRange<float, mvsic::IP_Point<float>> db(db_file);
+    mvsic::PointRange<float, mvsic::IP_Point<float>> queries(q_file);
+    if (queries.get_dims() != db.get_dims()) {
+      std::cerr << "ERROR: DB and query dimensions differ.\n";
+      return 1;
+    }
+    return run_bench(db, queries, fs_block, rbits, reps);
+  }
+
+  if (db_file || q_file) {
+    std::cerr << "ERROR: Provide both -i <db_file> and -q <query_file> for file mode.\n";
+    return 1;
+  }
+
+  // Synthetic mode: all -flag
+  size_t N = static_cast<size_t>(P.getOptionLongValue("-N", 1000000));
+  size_t Q = static_cast<size_t>(P.getOptionLongValue("-Q", 1000));
+  uint32_t D = static_cast<uint32_t>(P.getOptionIntValue("-D", 128));
+  uint64_t seed_db = 12345ULL;
+  uint64_t seed_q = 999ULL;
+  if (char* s = P.getOptionValue("-seed_db")) seed_db = static_cast<uint64_t>(std::stoull(s));
+  if (char* s = P.getOptionValue("-seed_q")) seed_q = static_cast<uint64_t>(std::stoull(s));
+
+  DensePointRange db(N, D);
+  DensePointRange queries(Q, D);
+  fill_random(db, seed_db, /*l2_normalize=*/false);
+  fill_random(queries, seed_q, /*l2_normalize=*/false);
+
+  return run_bench(db, queries, fs_block, rbits, reps);
 }
