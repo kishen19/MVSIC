@@ -1,4 +1,6 @@
 import numpy as np
+import os
+import sys
 from scipy.cluster.vq import kmeans2, vq
 
 def generate_vq_centroids(d, k, num_samples=2_000_000):
@@ -19,13 +21,13 @@ def generate_vq_centroids(d, k, num_samples=2_000_000):
     if d == 1:
         # Enforce perfect symmetry for 1D Scalar Quantization
         X_abs = np.abs(X)
-        centroids_half, _ = kmeans2(X_abs, k // 2, minit='points')
+        centroids_half, _ = kmeans2(X_abs, k // 2, minit='++')
         # Ensure it's a 2D array of shape (K, 1) to match VQ output
         centroids_half = centroids_half.reshape(-1, 1)
         C_float = np.sort(np.concatenate([centroids_half, -centroids_half]), axis=0)
     else:
         # Standard k-means for Vector Quantization
-        C_float, _ = kmeans2(X, k, minit='points')
+        C_float, _ = kmeans2(X, k, minit='++')
     
     # 3. Scale to Int8 (Anchor absolute max coordinate across all dims to 127)
     max_val = np.max(np.abs(C_float))
@@ -49,6 +51,61 @@ def generate_vq_centroids(d, k, num_samples=2_000_000):
     
     return attenuation, C_float, C_int, Sq_int_norms, scale
 
+
+def emit_cpp_block(d, k, attenuation, C_float, C_int, Sq_int_norms, scale):
+    """Emit one (D, K) block for the C++ header."""
+    lines = []
+    lines.append(f"// D = {d}, K = {k}")
+    lines.append(f"static constexpr float kPQ_Attenuation_D{d}_K{k} = {attenuation:.8f}f;")
+    lines.append(f"static constexpr float kPQ_Int8Scale_D{d}_K{k} = {scale:.8f}f;")
+    # Centroids float [K][D] row-major
+    lines.append(f"static constexpr float kPQ_CentroidsFloat_D{d}_K{k}[{k}][{d}] = {{")
+    for i in range(k):
+        row = ", ".join(f"{C_float[i, j]:.8f}f" for j in range(d))
+        lines.append(f"  {{{row}}},")
+    lines.append("};")
+    # Centroids int8 [K][D]; clamp to [-127, 127]
+    C_int_clamped = np.clip(C_int, -127, 127).astype(np.int32)
+    lines.append(f"static constexpr int8_t kPQ_CentroidsInt8_D{d}_K{k}[{k}][{d}] = {{")
+    for i in range(k):
+        row = ", ".join(str(C_int_clamped[i, j]) for j in range(d))
+        lines.append(f"  {{{row}}},")
+    lines.append("};")
+    lines.append(f"static constexpr float kPQ_SqIntNorms_D{d}_K{k}[{k}] = {{")
+    norms_str = ", ".join(f"{s:.8f}f" for s in Sq_int_norms)
+    lines.append(f"  {norms_str}")
+    lines.append("};")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_header_file(out_path, dimensions, k_values, num_samples=2_000_000):
+    """Generate all (D,K) codebooks and write the C++ header."""
+    preamble = """#pragma once
+#include <cstdint>
+
+namespace mvsic {
+namespace turboquant_pq_4bit {
+
+"""
+    footer = """}  // namespace turboquant_pq_4bit
+}  // namespace mvsic
+"""
+    blocks = []
+    for d in dimensions:
+        for k in k_values:
+            attenuation, C_float, C_int, Sq_int_norms, scale = generate_vq_centroids(
+                d, k, num_samples=num_samples
+            )
+            blocks.append(
+                emit_cpp_block(d, k, attenuation, C_float, C_int, Sq_int_norms, scale)
+            )
+    with open(out_path, "w") as f:
+        f.write(preamble)
+        f.write("\n".join(blocks))
+        f.write(footer)
+
+
 if __name__ == "__main__":
     np.random.seed(42)
     
@@ -67,3 +124,11 @@ if __name__ == "__main__":
             
             print(f"{d:<4} | {k:<4} | {bits_per_dim:<10.3f} | {attenuation:<12.4f} | {scale:<12.4f}")
         print("-" * 55)
+
+    # Write C++ header next to this script's directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    header_path = os.path.join(script_dir, "..", "turboquant_pq_codebooks.h")
+    header_path = os.path.normpath(header_path)
+    print(f"\nWriting header to {header_path} ...")
+    write_header_file(header_path, dimensions, k_values)
+    print("Done.")
