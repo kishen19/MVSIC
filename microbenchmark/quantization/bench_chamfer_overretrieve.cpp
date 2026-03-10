@@ -241,7 +241,8 @@ template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t pq_k, uint32_t fs_block, uint32_t rbits,
                          uint32_t Kmax, float rec99, uint32_t pca_dim = 40,
-                         const char* gt_file = nullptr) {
+                         const char* gt_file = nullptr, bool run_pq = true,
+                         bool run_rabitq = true) {
   constexpr bool Metric = ChPoint::is_metric();
 
   const uint32_t D = db.get_dims();
@@ -279,16 +280,24 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   const uint32_t PQ_S = 20;
 
   MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
-  pq_model.train(db, pq_block, pq_k, PQ_S);
-  auto pq_db = pq_model.encode(db);
+  using PQ_DB = decltype(pq_model.encode(db));
+  PQ_DB pq_db;
+  if (run_pq) {
+    pq_model.train(db, pq_block, pq_k, PQ_S);
+    pq_db = pq_model.encode(db);
+  }
 
   MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
   fs_model.train(db, fs_block);
   auto fs_db = fs_model.encode(db);
 
   MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
-  rq_model.train(db, rbits);
-  auto rq_db = rq_model.encode(db);
+  using RQ_DB = decltype(rq_model.encode(db));
+  RQ_DB rq_db;
+  if (run_rabitq) {
+    rq_model.train(db, rbits);
+    rq_db = rq_model.encode(db);
+  }
 
   MultiVecQuantizer<turboquant_4bit::Model<Metric>, Metric> tq_model;
   tq_model.train(db);
@@ -386,7 +395,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       }
     };
 
-    {
+    if (run_pq) {
       auto qq = pq_model.quantize_query(queries[qi]);
       pq_db.distances_all(qq, approx_scores.data());
       eval_method(PQ);
@@ -396,7 +405,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       fs_db.distances_all(qq, approx_scores.data());
       eval_method(FASTSCAN);
     }
-    {
+    if (run_rabitq) {
       auto qq = rq_model.quantize_query(queries[qi]);
       rq_db.distances_all(qq, approx_scores.data());
       eval_method(RABITQ);
@@ -481,7 +490,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
                      uint64_t seed_q, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
-                     uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim) {
+                     uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim, bool run_pq,
+                     bool run_rabitq) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -495,13 +505,13 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
   return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                /*gt_file=*/nullptr);
+                                /*gt_file=*/nullptr, run_pq, run_rabitq);
 }
 
 template<typename ChPoint>
 static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
                      uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim,
-                     const char* gt_file) {
+                     const char* gt_file, bool run_pq, bool run_rabitq) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -526,7 +536,7 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
   return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                gt_file);
+                                gt_file, run_pq, run_rabitq);
 }
 
 int main(int argc, char** argv) {
@@ -534,7 +544,7 @@ int main(int argc, char** argv) {
                 "[-i <dbFile>] [-q <qFile>] [-mm] [-gt <gtFile>] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-pq_block <b>] [-pq_k <k>] [-fs_block <b>] [-rbits <b>] "
-                "[-Kmax <k>] [-rec99 <f>] [-pca_dim <d>]");
+                "[-Kmax <k>] [-rec99 <f>] [-pca_dim <d>] [-pq] [-rabitq]");
 
   std::string df = P.getOptionValue("-dist_func", "L2");
   uint32_t pq_block = static_cast<uint32_t>(P.getOptionIntValue("-pq_block", 8));
@@ -545,6 +555,8 @@ int main(int argc, char** argv) {
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
   uint32_t pca_dim = static_cast<uint32_t>(P.getOptionIntValue("-pca_dim", 40));
   const char* gt_file = P.getOptionValue("-gt");
+  bool run_pq = P.getOption("-pq");
+  bool run_rabitq = P.getOption("-rabitq");
 
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
   if (file_mode) {
@@ -554,9 +566,9 @@ int main(int argc, char** argv) {
     }
     if (df == "IP" || df == "ip")
       return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                        gt_file);
+                                        gt_file, run_pq, run_rabitq);
     return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                      gt_file);
+                                      gt_file, run_pq, run_rabitq);
   }
 
   uint32_t N_db = static_cast<uint32_t>(P.getOptionIntValue("-N_db", 20000));
@@ -571,8 +583,8 @@ int main(int argc, char** argv) {
 
   if (df == "IP" || df == "ip") {
     return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
-                                      rbits, Kmax, rec99, pca_dim);
+                                      rbits, Kmax, rec99, pca_dim, run_pq, run_rabitq);
   }
   return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
-                                    rbits, Kmax, rec99, pca_dim);
+                                    rbits, Kmax, rec99, pca_dim, run_pq, run_rabitq);
 }

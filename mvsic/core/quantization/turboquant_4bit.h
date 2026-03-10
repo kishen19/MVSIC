@@ -141,6 +141,8 @@ class Quantized_Query {
 
   float norm_scaling_factor = 0.0f;
   float unquantized_squared_norm = 0.0f;
+  // Sum of all int8 query coefficients (used for VNNI/AVX2 bias correction).
+  int32_t byte_sum = 0;
 
   Quantized_Query() = default;
 
@@ -265,6 +267,7 @@ class Quantized_Query {
   // strip_data + norms + squared_norms are in strip layout.
   // N = number of points (strip-padded to multiple of 64).
   // N_real = actual number of points.
+  // Single-threaded full-distance kernel.
   void distances_contiguous(const uint8_t* strip_data, const float* norms,
                             const float* squared_norms, size_t /* stride_unused */, size_t N_real,
                             float* out) const {
@@ -293,6 +296,37 @@ class Quantized_Query {
         }
       }
     }
+  }
+
+  // Multi-threaded variant for full-distance scans: parallel over strips.
+  // This is suitable for distances_all-style benchmarks (Q serial, N parallel).
+  void distances_contiguous_parallel(const uint8_t* strip_data, const float* norms,
+                                     const float* squared_norms, size_t /* stride_unused */,
+                                     size_t N_real, float* out) const {
+    if (N_real == 0) return;
+
+    const size_t n_strips = (N_real + 63) / 64;
+    const size_t strip_stride = num_bytes_per_datapoint * 64;
+
+    parlay::parallel_for(0, n_strips, [&](size_t s) {
+      alignas(64) int32_t dots[64];
+      const uint8_t* sp = strip_data + s * strip_stride;
+      const float* ns = norms + s * 64;
+      const float* sq = squared_norms + s * 64;
+      const size_t base = s * 64;
+      const size_t count = std::min<size_t>(64, N_real - base);
+
+      scan_strip_64_dots(sp, dots);
+
+      for (size_t i = 0; i < count; ++i) {
+        float neg_dot = -static_cast<float>(dots[i]) * ns[i] * norm_scaling_factor;
+        if constexpr (Metric) {
+          out[base + i] = sq[i] + 2.0f * neg_dot + unquantized_squared_norm;
+        } else {
+          out[base + i] = neg_dot;
+        }
+      }
+    });
   }
 
   // ---- Chamfer: one query vector vs entire cloud, return min ----
@@ -343,22 +377,18 @@ static constexpr size_t kVnniMq = 8;       // queries per batch (2-panel path)
 static constexpr size_t kVnniMq4 = 4;      // queries per batch (4-panel path)
 
 // Decode one query from nibble-packed to row-major int8.
-// Returns byte_sum (sum of all decoded int8 values) for bias correction.
-inline int32_t decode_query_vnni(
+// Copies already-decoded int8 query coefficients into the GEMM workspace and
+// zero-pads up to a multiple of 4 dimensions expected by the micro-kernels.
+inline void decode_query_vnni(
     const int8_t* query_data,  // int8 per dim (already decoded by quantize_query)
     size_t decoded_dim, int8_t* out) {
-  // query_data is already in row-major int8 format from quantize_query.
-  // Just copy and compute byte sum.
-  int32_t byte_sum = 0;
   for (size_t d = 0; d < decoded_dim; ++d) {
     out[d] = query_data[d];
-    byte_sum += static_cast<int32_t>(query_data[d]);
   }
   // Pad to multiple of 4 for vpbroadcastd.
   const size_t padded = (decoded_dim + 3) & ~3;
   for (size_t d = decoded_dim; d < padded; ++d)
     out[d] = 0;
-  return byte_sum;
 }
 
 // SIMD bulk decode: 16 points from a strip into one block-transposed panel.
@@ -376,7 +406,6 @@ inline void decode_strip_to_panel_simd(
   const __m128i mask_0f = _mm_set1_epi8(0x0F);
 
   constexpr size_t N = kVnniPoints * 4;  // 64 bytes per tile
-  const size_t decoded_dim = 2 * num_bytes;
 
   // Process pairs of byte-positions: (j, j+1) → 4 decoded dims = 1 tile group.
   // Each pair produces two tiles (tile_2g for dims from j, tile_2g+1 for j+1).
@@ -619,19 +648,18 @@ inline float chamfer_vnni_gemm(const Quantized_Query<Metric>* const* query_ptrs,
   thread_local std::vector<int8_t> all_q_decoded;
   thread_local std::vector<int32_t> all_q_byte_sums;
   all_q_decoded.resize(num_queries * q_stride);
-  std::memset(all_q_decoded.data(), 0, num_queries * q_stride);
   all_q_byte_sums.resize(num_queries);
 
   for (size_t qi = 0; qi < num_queries; ++qi) {
-    all_q_byte_sums[qi] = decode_query_vnni(query_ptrs[qi]->query_data.data(), decoded_dim,
-                                            all_q_decoded.data() + qi * q_stride);
+    decode_query_vnni(query_ptrs[qi]->query_data.data(), decoded_dim,
+                      all_q_decoded.data() + qi * q_stride);
+    all_q_byte_sums[qi] = query_ptrs[qi]->byte_sum;
   }
 
   // Step 2: Decode DB cloud to block-transposed panels (all at once).
   // lane_offset accounts for the cloud's start position within the first strip.
   thread_local std::vector<uint8_t> panels;
   panels.resize(n_panels * panel_bytes + 64);
-  std::memset(panels.data(), 0x80, panels.size());
   uint8_t* panels_aligned =
       reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
 
@@ -927,19 +955,18 @@ inline float chamfer_avx2_gemm(const Quantized_Query<Metric>* const* query_ptrs,
   thread_local std::vector<int8_t> all_q_decoded;
   thread_local std::vector<int32_t> all_q_byte_sums;
   all_q_decoded.resize(num_queries * q_stride);
-  std::memset(all_q_decoded.data(), 0, num_queries * q_stride);
   all_q_byte_sums.resize(num_queries);
 
   for (size_t qi = 0; qi < num_queries; ++qi) {
-    all_q_byte_sums[qi] = decode_query_vnni(query_ptrs[qi]->query_data.data(), decoded_dim,
-                                            all_q_decoded.data() + qi * q_stride);
+    decode_query_vnni(query_ptrs[qi]->query_data.data(), decoded_dim,
+                      all_q_decoded.data() + qi * q_stride);
+    all_q_byte_sums[qi] = query_ptrs[qi]->byte_sum;
   }
 
   // Step 2: Decode DB to 16-point panels (reuses SSE decode function).
   // lane_offset accounts for the cloud's start position within the first strip.
   thread_local std::vector<uint8_t> panels;
   panels.resize(n_panels * panel_bytes + 64);
-  std::memset(panels.data(), 0x80, panels.size());
   uint8_t* panels_aligned =
       reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
 
@@ -1474,15 +1501,18 @@ class Model {
     const float sf = max_value > 0.0f ? 127.0f / max_value : 0.0f;
 
     int quant_norm = 0;
+    int32_t byte_sum = 0;
     for (size_t i = 0; i < padded_dim; ++i) {
       float scaled = std::clamp(std::round(q_rot[i] * sf), -127.0f, 127.0f);
       int8_t snapped = static_cast<int8_t>(scaled);
       qq.query_data[i] = snapped;
       quant_norm += snapped * snapped;
+      byte_sum += static_cast<int32_t>(snapped);
     }
 
     qq.norm_scaling_factor = norm / std::sqrt(static_cast<float>(quant_norm));
     qq.unquantized_squared_norm = sqr_norm;
+    qq.byte_sum = byte_sum;
     return qq;
   }
 

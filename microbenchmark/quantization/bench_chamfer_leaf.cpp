@@ -223,7 +223,7 @@ static double bench_leaf_all(const PointCloudSet<ChPoint>& db_full,
 // ---------------------------
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
-                         uint32_t leaf_size, int reps) {
+                         uint32_t leaf_size, int reps, bool run_pq, bool run_rabitq) {
   using PC = PointCloudSet<ChPoint>;
   constexpr bool Metric = ChPoint::is_metric();
 
@@ -362,36 +362,44 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
   // PQ (K=16)
   MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
-  t.start();
-  pq_model.train(db, pq_block, PQ_K, PQ_S);
-  double pq_train_s = t.sec();
-
-  t.start();
+  double pq_train_s = 0.0, pq_encode_s = 0.0;
   using PQ_DB = decltype(pq_model.encode(db));
   std::vector<PQ_DB> pq_leaf_dbs;
-  pq_leaf_dbs.reserve(num_leaf_blocks);
-  for (size_t b = 0; b < num_leaf_blocks; ++b) {
-    pq_leaf_dbs.emplace_back(pq_model.encode(leaves[b]));
+  PQ_DB pq_all_db;
+  if (run_pq) {
+    t.start();
+    pq_model.train(db, pq_block, PQ_K, PQ_S);
+    pq_train_s = t.sec();
+
+    t.start();
+    pq_leaf_dbs.reserve(num_leaf_blocks);
+    for (size_t b = 0; b < num_leaf_blocks; ++b) {
+      pq_leaf_dbs.emplace_back(pq_model.encode(leaves[b]));
+    }
+    pq_all_db = pq_model.encode(all_leafs);
+    pq_encode_s = t.sec();
   }
-  auto pq_all_db = pq_model.encode(all_leafs);
-  double pq_encode_s = t.sec();
 
 #ifdef __AVX512F__
   // RaBitQ (requires AVX-512)
   MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
-  t.start();
-  rq_model.train(db, rbits);
-  double rq_train_s = t.sec();
-
-  t.start();
+  double rq_train_s = 0.0, rq_encode_s = 0.0;
   using RQ_DB = decltype(rq_model.encode(db));
   std::vector<RQ_DB> rq_leaf_dbs;
-  rq_leaf_dbs.reserve(num_leaf_blocks);
-  for (size_t b = 0; b < num_leaf_blocks; ++b) {
-    rq_leaf_dbs.emplace_back(rq_model.encode(leaves[b]));
+  RQ_DB rq_all_db;
+  if (run_rabitq) {
+    t.start();
+    rq_model.train(db, rbits);
+    rq_train_s = t.sec();
+
+    t.start();
+    rq_leaf_dbs.reserve(num_leaf_blocks);
+    for (size_t b = 0; b < num_leaf_blocks; ++b) {
+      rq_leaf_dbs.emplace_back(rq_model.encode(leaves[b]));
+    }
+    rq_all_db = rq_model.encode(all_leafs);
+    rq_encode_s = t.sec();
   }
-  auto rq_all_db = rq_model.encode(all_leafs);
-  double rq_encode_s = t.sec();
 #endif  // __AVX512F__
 
 #if defined(__AVX512F__) || defined(__AVX2__)
@@ -503,11 +511,19 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double tqpq8_encode_s = t.sec();
 
   std::cout << "\n=== Train / Encode (quantized) ===\n";
-  std::cout << "PQ(K=16) train       : " << pq_train_s << " s\n";
-  std::cout << "PQ(K=16) encode      : " << pq_encode_s << " s (leaves + all_leafs)\n";
+  if (run_pq) {
+    std::cout << "PQ(K=16) train       : " << pq_train_s << " s\n";
+    std::cout << "PQ(K=16) encode      : " << pq_encode_s << " s (leaves + all_leafs)\n";
+  } else {
+    std::cout << "PQ(K=16)             : (skipped, pass -pq to enable)\n";
+  }
 #ifdef __AVX512F__
-  std::cout << "RaBitQ train         : " << rq_train_s << " s\n";
-  std::cout << "RaBitQ encode        : " << rq_encode_s << " s (leaves + all_leafs)\n";
+  if (run_rabitq) {
+    std::cout << "RaBitQ train         : " << rq_train_s << " s\n";
+    std::cout << "RaBitQ encode        : " << rq_encode_s << " s (leaves + all_leafs)\n";
+  } else {
+    std::cout << "RaBitQ               : (skipped, pass -rabitq to enable)\n";
+  }
 #endif
 #if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
@@ -549,12 +565,16 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
   std::vector<BenchRow> seq_rows;
   seq_rows.push_back({"Exact", t_seq});
-  seq_rows.push_back({"PQ (K=16)", bench_seq(pq_model, pq_leaf_dbs)});
+  if (run_pq) {
+    seq_rows.push_back({"PQ (K=16)", bench_seq(pq_model, pq_leaf_dbs)});
+  }
 #if defined(__AVX512F__) || defined(__AVX2__)
   seq_rows.push_back({"FastScan (K=16)", bench_seq(fs_model, fs_leaf_dbs)});
 #endif
 #ifdef __AVX512F__
-  seq_rows.push_back({"RaBitQ", bench_seq(rq_model, rq_leaf_dbs)});
+  if (run_rabitq) {
+    seq_rows.push_back({"RaBitQ", bench_seq(rq_model, rq_leaf_dbs)});
+  }
 #endif
   seq_rows.push_back({"TQ-4bit (K=16)", bench_seq(tq_model, tq_leaf_dbs)});
   seq_rows.push_back({"ByteTQ (int8)", bench_seq(btq_model, btq_leaf_dbs)});
@@ -587,12 +607,16 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
   std::vector<BenchRow> all_rows;
   all_rows.push_back({"Exact", t_all});
-  all_rows.push_back({"PQ (K=16)", bench_all(pq_model, pq_all_db)});
+  if (run_pq) {
+    all_rows.push_back({"PQ (K=16)", bench_all(pq_model, pq_all_db)});
+  }
 #if defined(__AVX512F__) || defined(__AVX2__)
   all_rows.push_back({"FastScan (K=16)", bench_all(fs_model, fs_all_db)});
 #endif
 #ifdef __AVX512F__
-  all_rows.push_back({"RaBitQ", bench_all(rq_model, rq_all_db)});
+  if (run_rabitq) {
+    all_rows.push_back({"RaBitQ", bench_all(rq_model, rq_all_db)});
+  }
 #endif
   all_rows.push_back({"TQ-4bit (K=16)", bench_all(tq_model, tq_all_db)});
   all_rows.push_back({"ByteTQ (int8)", bench_all(btq_model, btq_all_db)});
@@ -613,7 +637,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 // ---------------------------
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
-                     uint64_t seed_q, uint32_t leaf_size, int reps) {
+                     uint64_t seed_q, uint32_t leaf_size, int reps, bool run_pq, bool run_rabitq) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -629,7 +653,7 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
   fill_random_point_cloud_set(queries, seed_q, l2_normalize_vectors);
 
   std::cout << "Mode: synthetic (K_q fixed to 32)" << std::endl;
-  return run_from_sets<ChPoint>(db, queries, leaf_size, reps);
+  return run_from_sets<ChPoint>(db, queries, leaf_size, reps, run_pq, run_rabitq);
 }
 
 // ---------------------------
@@ -657,19 +681,23 @@ static int run_files(commandLine& P, uint32_t leaf_size, int reps) {
   std::cout << "Mode: file" << std::endl;
   std::cout << "  db=" << dbFile << (mm ? " (mmap)" : "") << std::endl;
   std::cout << "  q =" << qFile << std::endl;
-  return run_from_sets<ChPoint>(db, queries, leaf_size, reps);
+  // For file mode, always run all methods (PQ/RaBitQ enabled).
+  return run_from_sets<ChPoint>(db, queries, leaf_size, reps, /*run_pq=*/true,
+                                /*run_rabitq=*/true);
 }
 
 int main(int argc, char** argv) {
   commandLine P(argc, argv,
                 "[-i <dbFile>] [-q <qFile>] [-mm] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
-                "[-dist_func <L2|IP>] [-leaf_size <b>] [-reps <r>]");
+                "[-dist_func <L2|IP>] [-leaf_size <b>] [-reps <r>] [-pq] [-rabitq]");
 
   // Common
   std::string df = P.getOptionValue("-dist_func", "IP");
   uint32_t leaf_size = static_cast<uint32_t>(P.getOptionIntValue("-leaf_size", 500));
   int reps = std::max(1, P.getOptionIntValue("-reps", 1));
+  bool run_pq = P.getOption("-pq");
+  bool run_rabitq = P.getOption("-rabitq");
 
   // Decide mode: if both -i and -q are present => file mode, else synthetic
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
@@ -697,7 +725,9 @@ int main(int argc, char** argv) {
   if (char* s = P.getOptionValue("-seed_q")) seed_q = static_cast<uint64_t>(std::stoull(s));
 
   if (df == "IP" || df == "ip") {
-    return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, leaf_size, reps);
+    return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, leaf_size, reps, run_pq,
+                                      run_rabitq);
   }
-  return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, leaf_size, reps);
+  return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, leaf_size, reps, run_pq,
+                                    run_rabitq);
 }

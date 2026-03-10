@@ -4,9 +4,9 @@
 //   1) Exact (unquantized) float IP distance via efanna2e::DistanceInnerProduct (NSGDist)
 //   2) FastScan (K=16) using Quantized_Query::distances_all
 //   3) RaBitQ using Quantized_Query::distances_all
-//   4) TQ-4bit: per-point distance (same path as Byte TQ)
-//   5) Byte TQ (int8) per-point distance
-//   6) TQ-PQ-4bit: block-wise k-means, uint8 LUT, FastScan-style shuffle scan
+//   4) TQ-4bit: Quantized_Query::distances_contiguous (batch strip scan)
+//   5) Byte TQ (int8): per-point distance only (no batch API)
+//   6) TQ-PQ-4bit: Quantized_Query::distances_all (FastScan-style shuffle scan)
 //
 // Usage (Bazel):
 //   ... -- [-i <db_file>] [-q <query_file>] [-N <n>] [-Q <q>] [-D <d>]
@@ -228,7 +228,28 @@ static inline float scan_all_queries_tqpq_serial(const TQEnc& enc, const TQQuery
   return float(total);
 }
 
-// TQ-4bit / Byte TQ: per-point distance (same pattern for both).
+// TQ-4bit: use distances_contiguous_parallel when available (parallel over strips; no generic
+// distances_all(enc) API).
+template<typename TQEnc, typename TQQueryVec>
+static inline float scan_all_queries_tq4bit_serial(const TQEnc& enc, const TQQueryVec& qvec,
+                                                    size_t Q, float* scratch, size_t N,
+                                                    parlay::sequence<double>& per_q_sum) {
+  for (size_t qi = 0; qi < Q; ++qi) {
+    qvec[qi].distances_contiguous_parallel(enc.packed_codes.data(), enc.norm_scaling_factors.data(),
+                                           enc.unquantized_squared_norms.data(), enc.stride, N,
+                                           scratch);
+    double s = 0.0;
+    for (size_t i = 0; i < N; ++i)
+      s += double(scratch[i]);
+    per_q_sum[qi] = s;
+  }
+  double total = 0.0;
+  for (size_t i = 0; i < Q; ++i)
+    total += per_q_sum[i];
+  return float(total);
+}
+
+// Byte TQ: per-point distance only (no batch distances_all API).
 template<typename BTQEnc, typename BTQQueryVec>
 static inline float scan_all_queries_byte_tq_serial(const BTQEnc& enc, const BTQQueryVec& qvec,
                                                     size_t Q, float* scratch, size_t N,
@@ -251,7 +272,7 @@ static inline float scan_all_queries_byte_tq_serial(const BTQEnc& enc, const BTQ
 // ---------------------------
 template<typename DBRange, typename QRange>
 static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block, size_t rbits,
-                    int REPS) {
+                    int REPS, bool run_rabitq) {
   const size_t N = db.size();
   const size_t Q_total = queries.size();
   const size_t Q = std::min<size_t>(Q_total, 100);
@@ -284,13 +305,18 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 #endif
 
   // ---------------------------
-  // Build RaBitQ model + encode
+  // Build RaBitQ model + encode (optional, controlled by -rabitq flag)
   // ---------------------------
-  t.start();
   mvsic::rabitq::Model<Metric> rq_model;
-  rq_model.train(db, rbits);
-  auto rq = rq_model.encode(db);
-  double rq_build_s = t.sec();
+  using RQ_DB = decltype(rq_model.encode(db));
+  RQ_DB rq;
+  double rq_build_s = 0.0;
+  if (run_rabitq) {
+    t.start();
+    rq_model.train(db, rbits);
+    rq = rq_model.encode(db);
+    rq_build_s = t.sec();
+  }
 
   // ---------------------------
   // Build turboquant_4bit (4-bit TQ) model + encode
@@ -416,7 +442,11 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 #else
   std::cout << "FastScan(K=16):  (skipped, no AVX512/AVX2)\n";
 #endif
-  std::cout << "RaBitQ(bits=" << rbits << "): " << rq_build_s << " s\n";
+  if (run_rabitq) {
+    std::cout << "RaBitQ(bits=" << rbits << "): " << rq_build_s << " s\n";
+  } else {
+    std::cout << "RaBitQ:          (skipped, pass -rabitq to enable)\n";
+  }
   std::cout << "TQ-4bit(K=16):    " << tq_build_s << " s\n";
   std::cout << "Byte TQ:          " << btq_build_s << " s\n";
 #if defined(__AVX512F__)
@@ -435,7 +465,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 #endif
 
   std::vector<mvsic::rabitq::Quantized_Query<Metric>> rq_q;
-  rq_q.reserve(Q);
+  if (run_rabitq) rq_q.reserve(Q);
 
   std::vector<mvsic::turboquant_4bit::Quantized_Query<Metric>> tq_q;
   tq_q.reserve(Q);
@@ -451,11 +481,15 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   double fs_lut_s = t.sec();
 #endif
 
-  t.start();
-  for (size_t i = 0; i < Q; ++i) {
-    rq_q.push_back(rq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
+  double rq_lut_s = 0.0;
+  if (run_rabitq) {
+    t.start();
+    for (size_t i = 0; i < Q; ++i) {
+      rq_q.push_back(rq_model.quantize_query(
+          reinterpret_cast<const float*>(queries.location(i))));
+    }
+    rq_lut_s = t.sec();
   }
-  double rq_lut_s = t.sec();
 
   t.start();
   for (size_t i = 0; i < Q; ++i) {
@@ -477,7 +511,12 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 #else
   std::cout << "FastScan(K=16):  (skipped, no AVX512/AVX2)\n";
 #endif
-  std::cout << "RaBitQ:          " << rq_lut_s << " s  (" << (rq_lut_s * 1e6 / Q) << " us/query)\n";
+  if (run_rabitq) {
+    std::cout << "RaBitQ:          " << rq_lut_s << " s  (" << (rq_lut_s * 1e6 / Q)
+              << " us/query)\n";
+  } else {
+    std::cout << "RaBitQ:          (skipped, pass -rabitq to enable)\n";
+  }
   std::cout << "TQ-4bit: " << tq_lut_s << " s  (" << (tq_lut_s * 1e6 / Q) << " us/query)\n";
   std::cout << "Byte TQ:  " << btq_lut_s << " s  (" << (btq_lut_s * 1e6 / Q) << " us/query)\n";
 #if defined(__AVX512F__)
@@ -517,8 +556,12 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     for (size_t j = 0; j < N; ++j)
       sink += rq_out[j];
 
+#if defined(__AVX512F__)
     tq_q[i].distances_contiguous(tq.packed_codes.data(), tq.norm_scaling_factors.data(),
                                  tq.unquantized_squared_norms.data(), tq.stride, N, tq_out.data());
+#else
+    parlay::parallel_for(0, N, [&](size_t j) { tq_out[j] = tq_q[i].distance(tq[j]); });
+#endif
     for (size_t j = 0; j < N; ++j)
       sink += tq_out[j];
 
@@ -571,13 +614,14 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   std::cout << "FastScan K=16: (skipped, no AVX512/AVX2)\n";
 #endif
 
-  // RaBitQ
-  {
+  // RaBitQ (optional)
+  if (run_rabitq) {
     double best = 1e100;
     float acc = 0.0f;
     for (int r = 0; r < REPS; ++r) {
       t.start();
-      float local = scan_all_queries_distances_all_serial(rq, rq_q, Q, rq_out.data(), N, per_q_sum);
+      float local =
+          scan_all_queries_distances_all_serial(rq, rq_q, Q, rq_out.data(), N, per_q_sum);
       double s = t.sec();
       best = std::min(best, s);
       acc = local;
@@ -586,13 +630,17 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     stats.push_back({"RaBitQ", best});
   }
 
-  // TQ-4bit: per-point distance (same as Byte TQ path)
+  // TQ-4bit: distances_contiguous when AVX512, else per-point (no batch API without AVX512)
   {
     double best = 1e100;
     float acc = 0.0f;
     for (int r = 0; r < REPS; ++r) {
       t.start();
+#if defined(__AVX512F__)
+      float local = scan_all_queries_tq4bit_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
+#else
       float local = scan_all_queries_byte_tq_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
+#endif
       double s = t.sec();
       best = std::min(best, s);
       acc = local;
@@ -665,12 +713,14 @@ int main(int argc, char** argv) {
   commandLine P(argc, argv,
                 "[-i <db_file>] [-q <query_file>] "
                 "[-N <n>] [-Q <q>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
-                "[-fs_block <b>] [-rbits <b>] [-reps <r>]");
+                "[-fs_block <b>] [-rbits <b>] [-reps <r>] "
+                "[-rabitq]");
 
   // Common options
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 64));
   size_t rbits = static_cast<size_t>(P.getOptionLongValue("-rbits", 8));
   int reps = std::max(1, P.getOptionIntValue("-reps", 2));
+  bool run_rabitq = P.getOption("-rabitq");
 
   char* db_file = P.getOptionValue("-i");
   char* q_file = P.getOptionValue("-q");
@@ -683,7 +733,7 @@ int main(int argc, char** argv) {
       std::cerr << "ERROR: DB and query dimensions differ.\n";
       return 1;
     }
-    return run_bench(db, queries, fs_block, rbits, reps);
+    return run_bench(db, queries, fs_block, rbits, reps, run_rabitq);
   }
 
   if (db_file || q_file) {
@@ -705,5 +755,5 @@ int main(int argc, char** argv) {
   fill_random(db, seed_db, /*l2_normalize=*/false);
   fill_random(queries, seed_q, /*l2_normalize=*/false);
 
-  return run_bench(db, queries, fs_block, rbits, reps);
+  return run_bench(db, queries, fs_block, rbits, reps, run_rabitq);
 }

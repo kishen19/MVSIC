@@ -364,7 +364,7 @@ static void print_bench_table(const std::vector<BenchRow>& rows, uint64_t ops, d
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t fs_block, uint32_t rbits, int reps,
-                         bool verify) {
+                         bool verify, bool run_pq, bool run_rabitq) {
   using PC = PointCloudSet<ChPoint>;
   constexpr bool Metric = ChPoint::is_metric();
 
@@ -405,26 +405,36 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   const uint32_t PQ_K = 16;
   const uint32_t PQ_S = 20;
 
-  // PQ
+  // PQ (optional, controlled by -pq flag)
   MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
-  t.start();
-  pq_model.train(db, pq_block, PQ_K, PQ_S);
-  double pq_train_s = t.sec();
+  double pq_train_s = 0.0, pq_encode_s = 0.0;
+  using PQ_DB = decltype(pq_model.encode(db));
+  PQ_DB pq_db;
+  if (run_pq) {
+    t.start();
+    pq_model.train(db, pq_block, PQ_K, PQ_S);
+    pq_train_s = t.sec();
 
-  t.start();
-  auto pq_db = pq_model.encode(db);
-  double pq_encode_s = t.sec();
+    t.start();
+    pq_db = pq_model.encode(db);
+    pq_encode_s = t.sec();
+  }
 
 #ifdef __AVX512F__
-  // RaBitQ (requires AVX-512)
+  // RaBitQ (requires AVX-512, optional via -rabitq)
   MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
-  t.start();
-  rq_model.train(db, rbits);
-  double rq_train_s = t.sec();
+  double rq_train_s = 0.0, rq_encode_s = 0.0;
+  using RQ_DB = decltype(rq_model.encode(db));
+  RQ_DB rq_db;
+  if (run_rabitq) {
+    t.start();
+    rq_model.train(db, rbits);
+    rq_train_s = t.sec();
 
-  t.start();
-  auto rq_db = rq_model.encode(db);
-  double rq_encode_s = t.sec();
+    t.start();
+    rq_db = rq_model.encode(db);
+    rq_encode_s = t.sec();
+  }
 #endif  // __AVX512F__
 
 #if defined(__AVX512F__) || defined(__AVX2__)
@@ -494,16 +504,24 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double tqpq8_encode_s = t.sec();
 
   std::cout << "\n=== Train / Encode ===\n";
-  std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
-  std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
-  std::cout << "PQ(K=16) total   : " << (pq_train_s + pq_encode_s) << " s\n";
+  if (run_pq) {
+    std::cout << "PQ(K=16) train  : " << pq_train_s << " s\n";
+    std::cout << "PQ(K=16) encode  : " << pq_encode_s << " s\n";
+    std::cout << "PQ(K=16) total   : " << (pq_train_s + pq_encode_s) << " s\n";
+  } else {
+    std::cout << "PQ(K=16)        : (skipped, pass -pq to enable)\n";
+  }
 #ifdef __AVX512F__
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
   std::cout << "FastScan encode  : " << fs_encode_s << " s\n";
   std::cout << "FastScan total   : " << (fs_train_s + fs_encode_s) << " s\n";
-  std::cout << "RaBitQ train   : " << rq_train_s << " s\n";
-  std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
-  std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
+  if (run_rabitq) {
+    std::cout << "RaBitQ train   : " << rq_train_s << " s\n";
+    std::cout << "RaBitQ encode  : " << rq_encode_s << " s\n";
+    std::cout << "RaBitQ total   : " << (rq_train_s + rq_encode_s) << " s\n";
+  } else {
+    std::cout << "RaBitQ          : (skipped, pass -rabitq to enable)\n";
+  }
 #endif
 #if defined(__AVX512F__) || defined(__AVX2__)
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
@@ -535,7 +553,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   print_result("Exact (PointCloudSet::distances)", exact_best, ops, 0);
   summary.push_back({"Exact", exact_best});
 
-  {
+  if (run_pq) {
     double best = bench_quant_all(pq_model, pq_db, queries, results, reps, sink);
     print_result("PQ(K=16) (wrapper::distances_all)", best, ops, exact_best);
     summary.push_back({"PQ (K=16)", best});
@@ -550,7 +568,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 #endif
 
 #ifdef __AVX512F__
-  {
+  if (run_rabitq) {
     double best = bench_quant_all(rq_model, rq_db, queries, results, reps, sink);
     print_result("RaBitQ (wrapper::distances_all)", best, ops, exact_best);
     summary.push_back({"RaBitQ", best});
@@ -619,7 +637,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
                      uint64_t seed_q, uint32_t pq_block, uint32_t fs_block, uint32_t rbits,
-                     int reps, bool verify) {
+                     int reps, bool verify, bool run_pq, bool run_rabitq) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -633,7 +651,8 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
   fill_random_point_cloud_set(queries, seed_q, l2_normalize_vectors);
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps, verify);
+  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps, verify, run_pq,
+                                run_rabitq);
 }
 
 // ---------------------------
@@ -641,7 +660,7 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 // ---------------------------
 template<typename ChPoint>
 static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint32_t rbits, int reps,
-                     bool verify) {
+                     bool verify, bool run_pq, bool run_rabitq) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -662,7 +681,8 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t fs_block, uint3
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps, verify);
+  return run_from_sets<ChPoint>(db, queries, pq_block, fs_block, rbits, reps, verify, run_pq,
+                                run_rabitq);
 }
 
 int main(int argc, char** argv) {
@@ -670,7 +690,7 @@ int main(int argc, char** argv) {
                 "[-i <dbFile>] [-q <qFile>] [-mm] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-pq_block <b>] [-fs_block <b>] [-rbits <b>] [-reps <r>] "
-                "[-verify]");
+                "[-verify] [-pq] [-rabitq]");
 
   // Common
   std::string df = P.getOptionValue("-dist_func", "IP");
@@ -679,6 +699,8 @@ int main(int argc, char** argv) {
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 4));
   int reps = std::max(1, P.getOptionIntValue("-reps", 3));
   bool verify = P.getOption("-verify");
+  bool run_pq = P.getOption("-pq");
+  bool run_rabitq = P.getOption("-rabitq");
 
   // Decide mode: if both -i and -q are present => file mode, else synthetic
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
@@ -690,8 +712,10 @@ int main(int argc, char** argv) {
     }
 
     if (df == "IP" || df == "ip")
-      return run_files<ChamferIP_Point>(P, pq_block, fs_block, rbits, reps, verify);
-    return run_files<ChamferL2_Point>(P, pq_block, fs_block, rbits, reps, verify);
+      return run_files<ChamferIP_Point>(P, pq_block, fs_block, rbits, reps, verify, run_pq,
+                                        run_rabitq);
+    return run_files<ChamferL2_Point>(P, pq_block, fs_block, rbits, reps, verify, run_pq,
+                                      run_rabitq);
   }
 
   // Synthetic mode args
@@ -708,8 +732,8 @@ int main(int argc, char** argv) {
 
   if (df == "IP" || df == "ip") {
     return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block,
-                                      rbits, reps, verify);
+                                      rbits, reps, verify, run_pq, run_rabitq);
   }
   return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, fs_block, rbits,
-                                    reps, verify);
+                                    reps, verify, run_pq, run_rabitq);
 }

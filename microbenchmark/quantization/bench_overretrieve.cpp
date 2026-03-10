@@ -1,7 +1,8 @@
 // bench_overretrieve.cpp
 //
 // Quality microbenchmark: Exact vs FastScan vs RaBitQ vs TQ-4bit vs Byte TQ vs TQ-PQ-4bit.
-// Reports average number of candidates (M) needed to achieve target recall@K (e.g. 90%, 95%).
+// Reports average number of candidates (M) needed to retrieve *all* K true neighbors
+// (full recall@K) across queries.
 //
 // For each query vector:
 //  1) Brute-force exact distances to ALL db vectors; obtain exact top-K ids.
@@ -23,7 +24,7 @@
 //     -rbits <u32>       (default 2)
 //     -tqpq_block <u32>  (default 4)    // TQ-PQ-4bit block size (1, 2, 4, 8, or 16)
 //     -Kmax <u32>        (default 100)  // largest K evaluated; K grid is derived from this
-//     -rec99 <f>         (default 0.99)
+//     -rec99 <f>         (ignored; always full recall@K)
 //
 // Notes:
 // - K grid: {1, 5, 10, 20, 50, 100} intersected with [1..Kmax].
@@ -41,6 +42,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -55,6 +57,7 @@
 #include "mvsic/core/quantization/turboquant_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit_scalar.h"
 
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/types/l2_point.h"
@@ -172,7 +175,8 @@ static IbinGroundTruth load_ibin_ground_truth(const char* path) {
 template<bool Metric, typename DBRange, typename QRange>
 static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_block,
                          uint32_t rbits, uint32_t tqpq_block, uint32_t Kmax, float rec99,
-                         const IbinGroundTruth* gt = nullptr) {
+                         const IbinGroundTruth* gt = nullptr, bool run_pq = true,
+                         bool run_rabitq = true) {
   const size_t N = db.size();
   const size_t Q = queries.size();
   const uint32_t D = static_cast<uint32_t>(db.get_dims());
@@ -202,15 +206,19 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
   for (auto k : Kgrid)
     std::cout << k << " ";
   std::cout << std::endl;
-  std::cout << "Recall target: " << rec99 << std::endl;
+  std::cout << "Metric: full recall@K (all K true neighbors)\n";
 
   fastscan::Model<Metric> fs_model;
   fs_model.train(db, fs_block);
   auto fs_db = fs_model.encode(db);
 
   rabitq::Model<Metric> rq_model;
-  rq_model.train(db, rbits);
-  auto rq_db = rq_model.encode(db);
+  using RQ_DB = decltype(rq_model.encode(db));
+  RQ_DB rq_db;
+  if (run_rabitq) {
+    rq_model.train(db, rbits);
+    rq_db = rq_model.encode(db);
+  }
 
   turboquant_4bit::Model<Metric> tq_model;
   tq_model.train(db);
@@ -224,6 +232,7 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
   std::vector<float> approx_distances(N);
 
   enum Method {
+    EXACT = 0,
     FASTSCAN = 0,
     RABITQ = 1,
     TQ4BIT = 2,
@@ -232,11 +241,16 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
     TQPQ16_2 = 5,
     TQPQ16_4 = 6,
     TQPQ16_8 = 7,
-    NUM_METHODS = 8
+    TQPQ_SCALAR_1 = 8,
+    TQPQ_SCALAR_2 = 9,
+    TQPQ_SCALAR_4 = 10,
+    TQPQ_SCALAR_8 = 11,
+    NUM_METHODS = 12
   };
-  const char* method_names[NUM_METHODS] = {"FastScan",     "RaBitQ",      "TQ-4bit",
-                                           "Byte TQ",     "TQ-PQ-16-1",  "TQ-PQ-16-2",
-                                           "TQ-PQ-16-4",  "TQ-PQ-16-8"};
+  const char* method_names[NUM_METHODS] = {
+      "FastScan",        "RaBitQ",          "TQ-4bit",        "Byte TQ",
+      "TQ-PQ-16-1",      "TQ-PQ-16-2",      "TQ-PQ-16-4",     "TQ-PQ-16-8",
+      "TQ-PQ-scalar-B1", "TQ-PQ-scalar-B2", "TQ-PQ-scalar-B4","TQ-PQ-scalar-B8"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
@@ -278,9 +292,8 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
         }
         tl_exact[i] = {static_cast<uint32_t>(i), dist};
       }
-      parlay::sort_inplace(tl_exact, [](const auto& a, const auto& b) {
-        return a.second < b.second;
-      });
+      parlay::sort_inplace(tl_exact,
+                           [](const auto& a, const auto& b) { return a.second < b.second; });
       for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
         const uint32_t K = Kgrid[k_i];
         exact_sets_per_query[qi][k_i].clear();
@@ -292,30 +305,35 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
     auto add_M = [&](Method meth, const std::vector<uint32_t>& approx_ids) {
       for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
         const size_t K = static_cast<size_t>(Kgrid[k_i]);
-        const size_t need = static_cast<size_t>(std::ceil(rec99 * static_cast<float>(K)));
+        // Full recall@K: need all K true neighbors.
+        const size_t need = K;
         const size_t M = min_M_for_recall(approx_ids, exact_sets_per_query[qi][k_i], need);
         per_query_contrib[qi][idx2(meth, k_i)] = static_cast<double>(M);
       }
     };
 
     auto run_method = [&](Method meth) {
-      parlay::sort_inplace(tl_approx, [](const auto& a, const auto& b) { return a.second < b.second; });
+      parlay::sort_inplace(tl_approx,
+                           [](const auto& a, const auto& b) { return a.second < b.second; });
       std::vector<uint32_t> approx_ids;
       approx_ids.reserve(N);
-      for (const auto& p : tl_approx) approx_ids.push_back(p.first);
+      for (const auto& p : tl_approx)
+        approx_ids.push_back(p.first);
       add_M(meth, approx_ids);
     };
 
     {
       auto qq = fs_model.quantize_query(q);
       qq.distances_all(fs_db, tl_dists.data());
-      for (size_t i = 0; i < N; ++i) tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
+      for (size_t i = 0; i < N; ++i)
+        tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
       run_method(FASTSCAN);
     }
-    {
+    if (run_rabitq) {
       auto qq = rq_model.quantize_query(q);
       qq.distances_all(rq_db, tl_dists.data());
-      for (size_t i = 0; i < N; ++i) tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
+      for (size_t i = 0; i < N; ++i)
+        tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
       run_method(RABITQ);
     }
     {
@@ -323,13 +341,16 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
       qq.distances_contiguous(tq_db.packed_codes.data(), tq_db.norm_scaling_factors.data(),
                               tq_db.unquantized_squared_norms.data(), tq_db.stride, N,
                               tl_dists.data());
-      for (size_t i = 0; i < N; ++i) tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
+      for (size_t i = 0; i < N; ++i)
+        tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
       run_method(TQ4BIT);
     }
     {
       auto qq = btq_model.quantize_query(q);
-      for (size_t i = 0; i < N; ++i) tl_dists[i] = qq.distance(btq_db[i]);
-      for (size_t i = 0; i < N; ++i) tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
+      for (size_t i = 0; i < N; ++i)
+        tl_dists[i] = qq.distance(btq_db[i]);
+      for (size_t i = 0; i < N; ++i)
+        tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
       run_method(BYTETQ);
     }
   });
@@ -338,7 +359,9 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
     for (size_t i = 0; i < sum_M.size(); ++i)
       sum_M[i] += per_query_contrib[qi][i];
 
-#if defined(__AVX512F__)
+  // TQ-PQ and scalar: train ONCE per B and run both with the same model so scalar is a
+  // true reference (same encoding; only distance differs: LUT vs float). Avoids rotator
+  // non-determinism giving different quality between the two.
   {
     auto run_tqpq_queries = [&](auto& tqpq_m, auto& tqpq_enc, Method meth) {
       for (size_t qi = 0; qi < Q; ++qi) {
@@ -347,45 +370,91 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
         qq.distances_all(tqpq_enc, approx_distances.data());
         for (size_t i = 0; i < N; ++i)
           approx_scores[i] = {static_cast<uint32_t>(i), approx_distances[i]};
-        parlay::sort_inplace(approx_scores, [](const auto& a, const auto& b) { return a.second < b.second; });
+        parlay::sort_inplace(approx_scores,
+                             [](const auto& a, const auto& b) { return a.second < b.second; });
         std::vector<uint32_t> approx_ids;
         approx_ids.reserve(N);
         for (const auto& p : approx_scores)
           approx_ids.push_back(p.first);
         for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
           const size_t K = static_cast<size_t>(Kgrid[k_i]);
-          const size_t need = static_cast<size_t>(std::ceil(rec99 * static_cast<float>(K)));
+          const size_t need = K;
           const size_t M = min_M_for_recall(approx_ids, exact_sets_per_query[qi][k_i], need);
           sum_M[idx2(meth, k_i)] += static_cast<double>(M);
         }
       }
     };
-    {
+    // auto run_scalar_tqpq = [&](auto& tqpq_m, Method meth) {
+    //   const size_t pdim = tqpq_m.padded_dim;
+    //   std::vector<turboquant_pq_scalar::EncodedVec> scalar_db(N);
+    //   std::vector<float> ws;
+    //   for (size_t i = 0; i < N; ++i) {
+    //     const float* p = reinterpret_cast<const float*>(db.location(i));
+    //     scalar_db[i] = turboquant_pq_scalar::encode_single<
+    //         std::decay_t<decltype(tqpq_m)>::block_size>(tqpq_m, p, ws);
+    //   }
+    //   for (size_t qi = 0; qi < Q; ++qi) {
+    //     const float* q = reinterpret_cast<const float*>(queries.location(qi));
+    //     auto qq = turboquant_pq_scalar::prepare_query<
+    //         std::decay_t<decltype(tqpq_m)>::block_size>(tqpq_m, q);
+    //     for (size_t i = 0; i < N; ++i) {
+    //       approx_scores[i] = {
+    //           static_cast<uint32_t>(i),
+    //           turboquant_pq_scalar::distance<std::decay_t<decltype(tqpq_m)>::block_size>(
+    //               scalar_db[i], qq, pdim, Metric)};
+    //     }
+    //     parlay::sort_inplace(approx_scores,
+    //                         [](const auto& a, const auto& b) { return a.second < b.second; });
+    //     std::vector<uint32_t> approx_ids;
+    //     approx_ids.reserve(N);
+    //     for (const auto& p : approx_scores)
+    //       approx_ids.push_back(p.first);
+    //     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
+    //       const size_t K = static_cast<size_t>(Kgrid[k_i]);
+    //       const size_t need = static_cast<size_t>(std::ceil(rec99 * static_cast<float>(K)));
+    //       const size_t M = min_M_for_recall(approx_ids, exact_sets_per_query[qi][k_i], need);
+    //       sum_M[idx2(meth, k_i)] += static_cast<double>(M);
+    //     }
+    //   }
+    // };
+
+    if (D >= 1 && (D % 1 == 0)) {
       turboquant_pq_4bit::Model<Metric, 1> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
+#if defined(__AVX512F__)
       run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_1);
+#endif
+      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_1);
     }
-    {
+    if (D >= 2 && (D % 2 == 0)) {
       turboquant_pq_4bit::Model<Metric, 2> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
+#if defined(__AVX512F__)
       run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_2);
+#endif
+      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_2);
     }
-    {
+    if (D >= 4 && (D % 4 == 0)) {
       turboquant_pq_4bit::Model<Metric, 4> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
+#if defined(__AVX512F__)
       run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_4);
+#endif
+      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_4);
     }
-    {
+    if (D >= 8 && (D % 8 == 0)) {
       turboquant_pq_4bit::Model<Metric, 8> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
+#if defined(__AVX512F__)
       run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_8);
+#endif
+      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_8);
     }
   }
-#endif
 
   std::cout << "\n=== Avg M (candidates) to reach recall@K ===\n";
   std::cout << "Averages over Q=" << Q << " query vectors.\n\n";
@@ -404,8 +473,7 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
     std::cout << std::left << std::setw(method_w) << method_names[meth];
     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-      const double avg_M =
-          sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Q);
+      const double avg_M = sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Q);
       std::cout << std::right << std::setw(col_w) << std::fixed << std::setprecision(1) << avg_M;
     }
     std::cout << "\n";
@@ -419,7 +487,7 @@ int main(int argc, char** argv) {
                 "[-i <dbFile>] [-q <qFile>] [-gt <gtFile>] "
                 "[-N <n>] [-Q <q>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-fs_block <b>] [-rbits <b>] [-tqpq_block <b>] "
-                "[-Kmax <k>] [-rec99 <f>]");
+                "[-Kmax <k>] [-rec99 <f>] [-pq] [-rabitq]");
 
   std::string df = P.getOptionValue("-dist_func", "IP");
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
@@ -427,6 +495,8 @@ int main(int argc, char** argv) {
   uint32_t tqpq_block = static_cast<uint32_t>(P.getOptionIntValue("-tqpq_block", 4));
   uint32_t Kmax = static_cast<uint32_t>(P.getOptionIntValue("-Kmax", 100));
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
+  bool run_pq = P.getOption("-pq");
+  bool run_rabitq = P.getOption("-rabitq");
 
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
   const char* gt_file = P.getOptionValue("-gt");
@@ -466,7 +536,8 @@ int main(int argc, char** argv) {
           return 1;
         }
       }
-      return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr);
+      return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr,
+                                 run_pq, run_rabitq);
     }
 
     mvsic::PointRange<float, mvsic::IP_Point<float>> db(const_cast<char*>(db_file));
@@ -477,8 +548,8 @@ int main(int argc, char** argv) {
     }
     if (gt_ptr) {
       if (gt_ptr->num_queries != queries.size()) {
-        std::cerr << "ERROR: GT num_queries (" << gt_ptr->num_queries << ") != Q (" << queries.size()
-                  << ").\n";
+        std::cerr << "ERROR: GT num_queries (" << gt_ptr->num_queries << ") != Q ("
+                  << queries.size() << ").\n";
         return 1;
       }
       if (gt_ptr->k < Kmax) {
@@ -486,7 +557,8 @@ int main(int argc, char** argv) {
         return 1;
       }
     }
-    return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr);
+    return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr,
+                                run_pq, run_rabitq);
   }
 
   // Synthetic mode
@@ -504,7 +576,9 @@ int main(int argc, char** argv) {
   fill_random(queries, seed_q, /*l2_normalize=*/true);
 
   if (df == "L2" || df == "l2") {
-    return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr);
+    return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr,
+                               run_pq, run_rabitq);
   }
-  return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr);
+  return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr,
+                              run_pq, run_rabitq);
 }

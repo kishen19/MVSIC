@@ -31,3 +31,14 @@ cc_library(
         "@parlaylib//parlay:sequence",
     ],
 )
+
+cc_library(
+    name = "turboquant_pq_4bit_dd",
+    hdrs = ["turboquant_pq_4bit_dd.h"],
+    deps = [
+        ":turboquant_pq_4bit",
+        "//mvsic/core/utils:kmeans_util",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+    ],
+)

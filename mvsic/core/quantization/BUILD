@@ -66,6 +66,15 @@ cc_library(
 )
 
 cc_library(
+    name = "turboquant_pq_4bit_scalar",
+    hdrs = [
+        "turboquant_pq_4bit_scalar.h",
+        "turboquant_pq_codebooks.h",
+    ],
+    deps = ["@rabitq//:rabitqlib"],
+)
+
+cc_library(
     name = "turboquant_byte",
     hdrs = ["turboquant_byte.h"],
     deps = [

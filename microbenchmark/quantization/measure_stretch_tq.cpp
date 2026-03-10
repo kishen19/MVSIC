@@ -4,7 +4,7 @@
 //
 // Usage:
 //   ./measure_stretch_tq -i <base_file> -q <query_file> [-gt <gt_file>]
-//     [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|All]
+//     [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|TQPQ|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
 //     [-rabitq_bits <bits>] [-output_gt_path <path>]
 
@@ -35,6 +35,7 @@
 #include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/turboquant_low_bit.h"
 #include "mvsic/core/quantization/turboquant_centered.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/stats.h"
 
 using namespace mvsic;
@@ -183,8 +184,11 @@ void recall_curve(DistFn&& dist_fn, size_t n_q, size_t n_b,
   std::cout << "\n=== " << label << " ===" << std::endl;
   std::cout << std::setw(10) << "k'" << std::setw(15) << "Recall@" << k << std::endl;
   std::cout << "----------------------------------------" << std::endl;
+  // Effective k per query is limited by available ground-truth neighbors.
+  const size_t ak0 = gt.empty() ? 0ul : std::min(k, gt[0].size());
   for (size_t i = 0; i < k_primes.size(); ++i) {
-    double rec = (double)tc[i] / (double)(n_q * k);
+    double denom = static_cast<double>(n_q) * static_cast<double>(ak0 == 0 ? 1ul : ak0);
+    double rec = denom > 0.0 ? static_cast<double>(tc[i]) / denom : 0.0;
     std::cout << std::setw(10) << k_primes[i] << std::setw(15) << std::fixed << std::setprecision(4)
               << rec << std::endl;
   }
@@ -206,7 +210,8 @@ void run_benchmark(commandLine& P) {
 
   if (!inFile || (!qFile && !dataset_as_query)) {
     std::cerr << "Usage: measure_stretch_tq -i <base> [-q <queries> | -dataset_as_query]\n"
-              << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|All]\n"
+              << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP] "
+              << "[-pq_method TQ4|ByteTQ|RabitQ|TQPQ|All]\n"
               << "  [-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-num_query <N>]\n";
     return;
   }
@@ -318,6 +323,37 @@ void run_benchmark(commandLine& P) {
           return qqs[qi].distance(pt);
         },
         n_q, n_b, gt, k, kps, "TurboQuant-4bit");
+  }
+
+  // ==== TQ-PQ-4bit (B = 1,2,4,8) ====
+  if (method == "TQPQ" || method == "All") {
+    auto run_tqpq = [&](auto block_tag, const std::string& label) {
+      constexpr size_t B = decltype(block_tag)::value;
+      std::cout << "\n--- TQ-PQ-4bit (B=" << B << ") ---" << std::endl;
+      parlay::internal::timer t;
+      t.start();
+      turboquant_pq_4bit::Model<Metric, B> model;
+      model.train(base);
+      auto enc = model.encode(base);
+      std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+      std::vector<turboquant_pq_4bit::Quantized_Query<Metric, B>> qqs(n_q);
+      parlay::parallel_for(0, n_q, [&](size_t i) {
+        qqs[i] = model.quantize_query(reinterpret_cast<const float*>(queries.location(i)));
+      });
+
+      recall_curve(
+          [&](size_t qi, size_t j) {
+            auto pt = enc[j];
+            return qqs[qi].distance(pt);
+          },
+          n_q, n_b, gt, k, kps, label);
+    };
+
+    run_tqpq(std::integral_constant<size_t, 1>{}, "TQ-PQ-4bit-B1");
+    run_tqpq(std::integral_constant<size_t, 2>{}, "TQ-PQ-4bit-B2");
+    run_tqpq(std::integral_constant<size_t, 4>{}, "TQ-PQ-4bit-B4");
+    run_tqpq(std::integral_constant<size_t, 8>{}, "TQ-PQ-4bit-B8");
   }
 
   // ==== RaBitQ ====
@@ -699,7 +735,7 @@ void run_benchmark(commandLine& P) {
 int main(int argc, char* argv[]) {
   commandLine P(argc, argv,
                 "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
-                "[-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|All] "
+                "[-dist_func L2|IP] [-pq_method TQ4|ByteTQ|RabitQ|TQPQ|All] "
                 "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
