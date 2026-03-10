@@ -19,6 +19,7 @@
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 namespace mvsic {
@@ -47,18 +48,26 @@ class IndexMVIVF : public Index<metric> {
   using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
   using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
   using TQ4_Enc = turboquant_4bit::Quantized_Point_Range<FlatRange, metric>;
+  using TQPQ4_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 4>;
+  using TQPQ8_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 8>;
 
   using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
   using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
   using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
   using TQ4_Set = Quantized_Point_Cloud_Set<TQ4_Enc, metric>;
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ4_Set>;
+  using TQPQ4_Set = Quantized_Point_Cloud_Set<TQPQ4_Enc, metric>;
+  using TQPQ8_Set = Quantized_Point_Cloud_Set<TQPQ8_Enc, metric>;
+  using QuantSet =
+      std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ4_Set, TQPQ4_Set, TQPQ8_Set>;
 
   using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
   using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
   using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
   using TQ4_Model = MultiVecQuantizer<turboquant_4bit::Model<metric>, metric>;
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ4_Model>;
+  using TQPQ4_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 4>, metric>;
+  using TQPQ8_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 8>, metric>;
+  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ4_Model,
+                                  TQPQ4_Model, TQPQ8_Model>;
 
   // helper for decltype
   template<class M, class Q>
@@ -67,7 +76,9 @@ class IndexMVIVF : public Index<metric> {
   using FS_Q = QQueryT<FS_Model, ChPoint>;
   using RQ_Q = QQueryT<RQ_Model, ChPoint>;
   using TQ4_Q = QQueryT<TQ4_Model, ChPoint>;
-  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q, TQ4_Q>;
+  using TQPQ4_Q = QQueryT<TQPQ4_Model, ChPoint>;
+  using TQPQ8_Q = QQueryT<TQPQ8_Model, ChPoint>;
+  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q, TQ4_Q, TQPQ4_Q, TQPQ8_Q>;
 
   using QT = IndexParams::QuantizerType;
 
@@ -105,8 +116,10 @@ class IndexMVIVF : public Index<metric> {
   // Recursive kmeans tree builder
   void recursive_build(node_t *node, const PointCloudSet<ChPoint> &points) {
     size_t n = points.size();
-    size_t num_clusters = (params.k_per_level > 0) ? params.k_per_level
-                                                   : static_cast<size_t>(std::ceil(std::sqrt(n)));
+    size_t auto_nc = (params.k_per_level > 0) ? params.k_per_level
+                                              : static_cast<size_t>(std::ceil(std::sqrt(n)));
+    size_t small_nc = 1.5 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
+    size_t num_clusters = std::max(static_cast<size_t>(2), std::min({auto_nc, small_nc, n}));
     if (params.verbose >= 1) {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
@@ -151,6 +164,16 @@ class IndexMVIVF : public Index<metric> {
           node->quantized_data = m.encode(node->data);
           break;
         }
+        case QT::TurboQuantPQ4Bit: {
+          if (params.pq.block_size == 4) {
+            auto &m = std::get<TQPQ4_Model>(quantizer);
+            node->quantized_data = m.encode(node->data);
+          } else {
+            auto &m = std::get<TQPQ8_Model>(quantizer);
+            node->quantized_data = m.encode(node->data);
+          }
+          break;
+        }
         case QT::None:
         default: node->quantized_data = std::monostate{}; break;
       }
@@ -187,6 +210,16 @@ class IndexMVIVF : public Index<metric> {
               case QT::TurboQuant4Bit: {
                 auto &m = std::get<TQ4_Model>(quantizer);
                 child->quantized_data = m.encode(child->data);
+                break;
+              }
+              case QT::TurboQuantPQ4Bit: {
+                if (params.pq.block_size == 4) {
+                  auto &m = std::get<TQPQ4_Model>(quantizer);
+                  child->quantized_data = m.encode(child->data);
+                } else {
+                  auto &m = std::get<TQPQ8_Model>(quantizer);
+                  child->quantized_data = m.encode(child->data);
+                }
                 break;
               }
               case QT::None:
@@ -227,6 +260,20 @@ class IndexMVIVF : public Index<metric> {
       case QT::TurboQuant4Bit: {
         quantizer.template emplace<TQ4_Model>();
         std::get<TQ4_Model>(quantizer).train(points);
+        break;
+      }
+      case QT::TurboQuantPQ4Bit: {
+        if (params.pq.block_size == 4) {
+          quantizer.template emplace<TQPQ4_Model>();
+          std::get<TQPQ4_Model>(quantizer).train(points);
+        } else if (params.pq.block_size == 8) {
+          quantizer.template emplace<TQPQ8_Model>();
+          std::get<TQPQ8_Model>(quantizer).train(points);
+        } else {
+          std::cerr << "IndexMVIVF: TurboQuantPQ4Bit currently supports block_size 4 or 8 "
+                    << "(got " << params.pq.block_size << ")." << std::endl;
+          abort();
+        }
         break;
       }
       default: quantizer = std::monostate{}; break;
@@ -277,6 +324,16 @@ class IndexMVIVF : public Index<metric> {
             case QT::TurboQuant4Bit: {
               auto &m = std::get<TQ4_Model>(quantizer);
               leaf_centers_quant = m.encode(leaf_centers);
+              break;
+            }
+            case QT::TurboQuantPQ4Bit: {
+              if (params.pq.block_size == 4) {
+                auto &m = std::get<TQPQ4_Model>(quantizer);
+                leaf_centers_quant = m.encode(leaf_centers);
+              } else {
+                auto &m = std::get<TQPQ8_Model>(quantizer);
+                leaf_centers_quant = m.encode(leaf_centers);
+              }
               break;
             }
             case QT::None:
@@ -359,6 +416,18 @@ class IndexMVIVF : public Index<metric> {
             auto &q_query = std::get<TQ4_Q>(q_query_var);
             auto &qleaf = std::get<TQ4_Set>(current_node->quantized_data);
             qleaf.distances_all(q_query, child_dists.data());
+            break;
+          }
+          case QT::TurboQuantPQ4Bit: {
+            if (params.pq.block_size == 4) {
+              auto &q_query = std::get<TQPQ4_Q>(q_query_var);
+              auto &qleaf = std::get<TQPQ4_Set>(current_node->quantized_data);
+              qleaf.distances_all(q_query, child_dists.data());
+            } else {
+              auto &q_query = std::get<TQPQ8_Q>(q_query_var);
+              auto &qleaf = std::get<TQPQ8_Set>(current_node->quantized_data);
+              qleaf.distances_all(q_query, child_dists.data());
+            }
             break;
           }
           case QT::PQ: {
@@ -465,6 +534,18 @@ class IndexMVIVF : public Index<metric> {
           qcent.distances_all(q_query, centers_dists.data());
           break;
         }
+        case QT::TurboQuantPQ4Bit: {
+          if (params.pq.block_size == 4) {
+            auto &q_query = std::get<TQPQ4_Q>(q_query_var);
+            auto &qcent = std::get<TQPQ4_Set>(leaf_centers_quant);
+            qcent.distances_all(q_query, centers_dists.data());
+          } else {
+            auto &q_query = std::get<TQPQ8_Q>(q_query_var);
+            auto &qcent = std::get<TQPQ8_Set>(leaf_centers_quant);
+            qcent.distances_all(q_query, centers_dists.data());
+          }
+          break;
+        }
         case QT::PQ: {
           auto &q_query = std::get<PQ_Q>(q_query_var);
           auto &qcent = std::get<PQ_Set>(leaf_centers_quant);
@@ -533,6 +614,16 @@ class IndexMVIVF : public Index<metric> {
       case QT::TurboQuant4Bit: {
         auto &m = std::get<TQ4_Model>(quantizer);
         q_query_var = m.quantize_query(query);
+        break;
+      }
+      case QT::TurboQuantPQ4Bit: {
+        if (params.pq.block_size == 4) {
+          auto &m = std::get<TQPQ4_Model>(quantizer);
+          q_query_var = m.quantize_query(query);
+        } else {
+          auto &m = std::get<TQPQ8_Model>(quantizer);
+          q_query_var = m.quantize_query(query);
+        }
         break;
       }
       case QT::PQ: {
@@ -610,6 +701,33 @@ class IndexMVIVF : public Index<metric> {
             visited[offsets[i] + j].first = leaf->data.get_id(j);
           });
         });
+        t_distances = t.stop();
+        t.reset();
+        break;
+      }
+      case QT::TurboQuantPQ4Bit: {
+        t.start();
+        if (params.pq.block_size == 4) {
+          auto &q_query = std::get<TQPQ4_Q>(q_query_var);
+          parlay::parallel_for(0, nprobes, [&](size_t i) {
+            node_t *leaf = probe_list[i].second;
+            auto &qleaf = std::get<TQPQ4_Set>(leaf->quantized_data);
+            qleaf.distances_all(q_query, &visited[offsets[i]]);
+            parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
+              visited[offsets[i] + j].first = leaf->data.get_id(j);
+            });
+          });
+        } else {
+          auto &q_query = std::get<TQPQ8_Q>(q_query_var);
+          parlay::parallel_for(0, nprobes, [&](size_t i) {
+            node_t *leaf = probe_list[i].second;
+            auto &qleaf = std::get<TQPQ8_Set>(leaf->quantized_data);
+            qleaf.distances_all(q_query, &visited[offsets[i]]);
+            parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
+              visited[offsets[i] + j].first = leaf->data.get_id(j);
+            });
+          });
+        }
         t_distances = t.stop();
         t.reset();
         break;
@@ -699,6 +817,21 @@ class IndexMVIVF : public Index<metric> {
     double avg_internal_node_size = 0.0;  // average number of children (centers) per internal node
     size_t total_point_clouds_internal = 0;  // sum over internal nodes of node->data.size()
     size_t height = 0;
+    // Balance metrics:
+    // For each internal node with at least two children, we look at the subtree
+    // sizes (# of leaf point clouds under each child). If the child subtree sizes
+    // are perfectly balanced, the imbalance is 0; if one child contains all points
+    // and the others are empty, the imbalance is 1.
+    //
+    //   imbalance(node) = (max_child_subtree_size - min_child_subtree_size)
+    //                     / sum_child_subtree_sizes
+    //
+    // We aggregate this across internal nodes.
+    double avg_child_fraction_imbalance = 0.0;  // average imbalance over internal nodes
+    double max_child_fraction_imbalance = 0.0;  // worst-case imbalance over internal nodes
+    // Nodes with imbalance >= kBadImbalanceThreshold: (subtree_size, imbalance_ratio), sorted by subtree_size.
+    static constexpr double kBadImbalanceThreshold = 0.8;
+    std::vector<std::pair<size_t, double>> bad_imbalance_entries;
   };
 
   // Fills TreeStats by traversing the k-means tree. Call after build() or load().
@@ -708,20 +841,53 @@ class IndexMVIVF : public Index<metric> {
 
     size_t leaf_size_sum = 0;
     size_t internal_size_sum = 0;
+    double sum_child_frac_imbalance = 0.0;
+    size_t num_internal_balance_nodes = 0;
 
-    std::function<void(const node_t *, size_t)> visit = [&](const node_t *node, size_t depth) {
+    // Returns the total number of leaf point clouds in the subtree rooted at `node`.
+    std::function<size_t(const node_t *, size_t)> visit = [&](const node_t *node,
+                                                              size_t depth) -> size_t {
       if (node->children.empty()) {
         s.num_leaves++;
-        leaf_size_sum += node->get_size();
+        size_t leaf_size = node->get_size();
+        leaf_size_sum += leaf_size;
         if (depth + 1 > s.height) s.height = depth + 1;  // number of levels (matches get_height())
-      } else {
-        s.num_internal_nodes++;
-        size_t n = node->get_size();
-        s.total_point_clouds_internal += n;
-        internal_size_sum += n;
-        for (const node_t *child : node->children)
-          visit(child, depth + 1);
+        return leaf_size;
       }
+
+      s.num_internal_nodes++;
+      size_t n = node->get_size();
+      s.total_point_clouds_internal += n;
+      internal_size_sum += n;
+
+      std::vector<size_t> child_subtree_sizes;
+      child_subtree_sizes.reserve(node->children.size());
+      size_t subtree_total = 0;
+      for (const node_t *child : node->children) {
+        size_t child_size = visit(child, depth + 1);
+        child_subtree_sizes.push_back(child_size);
+        subtree_total += child_size;
+      }
+
+      // Compute per-node imbalance based on child subtree sizes.
+      if (child_subtree_sizes.size() >= 2 && subtree_total > 0) {
+        auto [min_it, max_it] =
+            std::minmax_element(child_subtree_sizes.begin(), child_subtree_sizes.end());
+        size_t min_sz = *min_it;
+        size_t max_sz = *max_it;
+        double frac_imbalance =
+            static_cast<double>(max_sz - min_sz) / static_cast<double>(subtree_total);
+        sum_child_frac_imbalance += frac_imbalance;
+        if (frac_imbalance > s.max_child_fraction_imbalance) {
+          s.max_child_fraction_imbalance = frac_imbalance;
+        }
+        num_internal_balance_nodes++;
+        if (frac_imbalance >= TreeStats::kBadImbalanceThreshold) {
+          s.bad_imbalance_entries.emplace_back(subtree_total, frac_imbalance);
+        }
+      }
+
+      return subtree_total;
     };
 
     visit(root, 0);
@@ -729,6 +895,11 @@ class IndexMVIVF : public Index<metric> {
     if (s.num_internal_nodes > 0) {
       s.avg_internal_node_size = static_cast<double>(internal_size_sum) / s.num_internal_nodes;
     }
+    if (num_internal_balance_nodes > 0) {
+      s.avg_child_fraction_imbalance =
+          sum_child_frac_imbalance / static_cast<double>(num_internal_balance_nodes);
+    }
+    std::sort(s.bad_imbalance_entries.begin(), s.bad_imbalance_entries.end());
     return s;
   }
 
@@ -886,6 +1057,26 @@ class IndexMVIVF : public Index<metric> {
       case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
       case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
       case QT::TurboQuant4Bit: std::get<TQ4_Model>(quantizer).save(outfile); break;
+      case QT::TurboQuantPQ4Bit: {
+        // Persist the actual TQPQ block size used by the model (4 or 8).
+        int tqpq_block_size = 0;
+        if (std::holds_alternative<TQPQ4_Model>(quantizer)) {
+          tqpq_block_size = 4;
+        } else if (std::holds_alternative<TQPQ8_Model>(quantizer)) {
+          tqpq_block_size = 8;
+        } else {
+          std::cerr << "IndexMVIVF::save: TurboQuantPQ4Bit active, but quantizer variant is "
+                       "neither TQPQ4_Model nor TQPQ8_Model.\n";
+          abort();
+        }
+        outfile.write(reinterpret_cast<const char *>(&tqpq_block_size), sizeof(int));
+        if (tqpq_block_size == 4) {
+          std::get<TQPQ4_Model>(quantizer).save(outfile);
+        } else {
+          std::get<TQPQ8_Model>(quantizer).save(outfile);
+        }
+        break;
+      }
       case QT::None:
       default:
         // nothing
@@ -956,6 +1147,24 @@ class IndexMVIVF : public Index<metric> {
         quantizer.template emplace<TQ4_Model>();
         std::get<TQ4_Model>(quantizer).load(infile);
         break;
+      case QT::TurboQuantPQ4Bit: {
+        // Read and restore the TQPQ block size used when the model was trained.
+        int tqpq_block_size = 0;
+        infile.read(reinterpret_cast<char *>(&tqpq_block_size), sizeof(int));
+        params.pq.block_size = tqpq_block_size;
+        if (tqpq_block_size == 4) {
+          quantizer.template emplace<TQPQ4_Model>();
+          std::get<TQPQ4_Model>(quantizer).load(infile);
+        } else if (tqpq_block_size == 8) {
+          quantizer.template emplace<TQPQ8_Model>();
+          std::get<TQPQ8_Model>(quantizer).load(infile);
+        } else {
+          std::cerr << "IndexMVIVF::load: TurboQuantPQ4Bit model with unsupported block_size="
+                    << tqpq_block_size << " (expected 4 or 8)." << std::endl;
+          abort();
+        }
+        break;
+      }
       case QT::None:
       default: quantizer = std::monostate{}; break;
     }
@@ -1055,6 +1264,16 @@ class IndexMVIVF : public Index<metric> {
               leaf_centers_quant = m.encode(leaf_centers);
               break;
             }
+            case QT::TurboQuantPQ4Bit: {
+              if (params.pq.block_size == 4) {
+                auto &m = std::get<TQPQ4_Model>(quantizer);
+                leaf_centers_quant = m.encode(leaf_centers);
+              } else {
+                auto &m = std::get<TQPQ8_Model>(quantizer);
+                leaf_centers_quant = m.encode(leaf_centers);
+              }
+              break;
+            }
             case QT::None:
             default: leaf_centers_quant = std::monostate{}; break;
           }
@@ -1091,6 +1310,16 @@ class IndexMVIVF : public Index<metric> {
               case QT::TurboQuant4Bit: {
                 auto &m = std::get<TQ4_Model>(quantizer);
                 node->quantized_data = m.encode(node->data);
+                break;
+              }
+              case QT::TurboQuantPQ4Bit: {
+                if (params.pq.block_size == 4) {
+                  auto &m = std::get<TQPQ4_Model>(quantizer);
+                  node->quantized_data = m.encode(node->data);
+                } else {
+                  auto &m = std::get<TQPQ8_Model>(quantizer);
+                  node->quantized_data = m.encode(node->data);
+                }
                 break;
               }
               case QT::None:

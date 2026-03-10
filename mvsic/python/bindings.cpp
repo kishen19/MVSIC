@@ -40,6 +40,7 @@ PYBIND11_MODULE(mvsic, m) {
       .value("RaBitQ", mvsic::IndexParams::QuantizerType::RaBitQ)
       .value("FastScan", mvsic::IndexParams::QuantizerType::FastScan)
       .value("TurboQuant4Bit", mvsic::IndexParams::QuantizerType::TurboQuant4Bit)
+      .value("TurboQuantPQ4Bit", mvsic::IndexParams::QuantizerType::TurboQuantPQ4Bit)
       .export_values();
 
   py::class_<mvsic::IndexParams::fde_config>(m, "fde_config")

@@ -136,7 +136,8 @@ class Quantized_Query_Point_Cloud {
         total += min_d;
       }
       return total / static_cast<float>(num_q);
-    } else if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
+    } else if constexpr (std::is_same_v<QuantizedQueryVec,
+                                        turboquant_byte::Quantized_Query<Metric>>) {
       const float total = turboquant_byte::chamfer_byte_tq_gemm_512<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
@@ -188,7 +189,8 @@ class Quantized_Query_Point_Cloud {
         total += min_d;
       }
       return total / static_cast<float>(num_q);
-    } else if constexpr (std::is_same_v<QuantizedQueryVec, turboquant_byte::Quantized_Query<Metric>>) {
+    } else if constexpr (std::is_same_v<QuantizedQueryVec,
+                                        turboquant_byte::Quantized_Query<Metric>>) {
       const float total = turboquant_byte::chamfer_byte_tq_gemm<Metric>(
           qptrs.data(), num_q, strip_data, norms, sqn, strip_stride, n_strips,
           db->num_bytes_per_datapoint, cloud_size);
@@ -421,8 +423,8 @@ class Quantized_Point_Cloud_Set {
       std::vector<float> sqn_all(num_q);
       for (size_t qi = 0; qi < num_q; ++qi) {
         const auto& qv = q_query.vec_queries[qi];
-        float base_beta = (qv.norm_scaling_factor * qv.lut_int8_scale) /
-                          turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+        float base_beta =
+            (qv.norm_scaling_factor * qv.lut_int8_scale) / turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
         beta_all[qi] = Metric ? (2.0f * base_beta) : base_beta;
         sqn_all[qi] = qv.unquantized_squared_norm;
       }
@@ -452,9 +454,7 @@ class Quantized_Point_Cloud_Set {
         const float* base_norms = vec_db.norm_scaling_factors.data();
         const float* base_sqn = vec_db.unquantized_squared_norms.data();
 
-        auto strip_ptr = [&](size_t s) -> const uint8_t* {
-          return &base_codes[s * strip_stride];
-        };
+        auto strip_ptr = [&](size_t s) -> const uint8_t* { return &base_codes[s * strip_stride]; };
         auto norms_ptr = [&](size_t s) -> const float* { return base_norms + s * 64; };
         auto sqn_ptr = [&](size_t s) -> const float* { return base_sqn + s * 64; };
 
@@ -475,7 +475,8 @@ class Quantized_Point_Cloud_Set {
           const __m256i low_mask = _mm256_set1_epi8(0x0F);
           const __m512 inf_ps = _mm512_set1_ps(std::numeric_limits<float>::infinity());
           __m512 global_min_v[kQBatch];
-          for (size_t qi = 0; qi < qb; ++qi) global_min_v[qi] = inf_ps;
+          for (size_t qi = 0; qi < qb; ++qi)
+            global_min_v[qi] = inf_ps;
           const size_t nb = static_cast<size_t>(vec_db.num_blocks_for_scan());
 
           auto scan_strip_masked = [&](size_t s, int lo, int hi) {
@@ -496,12 +497,11 @@ class Quantized_Point_Cloud_Set {
               codes_ptr += 32;
 
               const __m256i codes_even = _mm256_and_si256(packed, low_mask);
-              const __m256i codes_odd =
-                  _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+              const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
               for (size_t qi = 0; qi < qb; ++qi) {
-                const __m128i lut128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(
-                    &qv_arr[qi].lut_int8[b * 16]));
+                const __m128i lut128 =
+                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(&qv_arr[qi].lut_int8[b * 16]));
                 const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
                 const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
                 const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
@@ -537,8 +537,8 @@ class Quantized_Point_Cloud_Set {
             }
 
             auto lane16_ps = [](const __m512i& acc, int half) -> __m512 {
-              const __m256i v16 = (half == 0) ? _mm512_castsi512_si256(acc)
-                                              : _mm512_extracti64x4_epi64(acc, 1);
+              const __m256i v16 =
+                  (half == 0) ? _mm512_castsi512_si256(acc) : _mm512_extracti64x4_epi64(acc, 1);
               const __m512i i32 = _mm512_cvtepi16_epi32(v16);
               return _mm512_cvtepi32_ps(i32);
             };
@@ -562,8 +562,10 @@ class Quantized_Point_Cloud_Set {
                       _mm512_add_ps(_mm512_load_ps(sq_even + 0), _mm512_set1_ps(sqn_q[qi]));
                   const __m512 base_o =
                       _mm512_add_ps(_mm512_load_ps(sq_odd + 0), _mm512_set1_ps(sqn_q[qi]));
-                  dist_e = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e, base_e);
-                  dist_o = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o, base_o);
+                  dist_e =
+                      _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e, base_e);
+                  dist_o =
+                      _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o, base_o);
                 } else {
                   dist_e = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e);
                   dist_o = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o);
@@ -589,8 +591,10 @@ class Quantized_Point_Cloud_Set {
                       _mm512_add_ps(_mm512_load_ps(sq_even + 16), _mm512_set1_ps(sqn_q[qi]));
                   const __m512 base_o =
                       _mm512_add_ps(_mm512_load_ps(sq_odd + 16), _mm512_set1_ps(sqn_q[qi]));
-                  dist_e = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e, base_e);
-                  dist_o = _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o, base_o);
+                  dist_e =
+                      _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e, base_e);
+                  dist_o =
+                      _mm512_fmadd_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o, base_o);
                 } else {
                   dist_e = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_e);
                   dist_o = _mm512_mul_ps(_mm512_sub_ps(_mm512_setzero_ps(), beta_ps), t_o);
@@ -609,7 +613,8 @@ class Quantized_Point_Cloud_Set {
             const int hi = (lane1 == 0) ? 64 : lane1;
             scan_strip_masked(strip0, 0, hi);
           } else {
-            for (size_t s = strip0; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            for (size_t s = strip0; s < strip1; ++s)
+              scan_strip_masked(s, 0, 64);
             if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
           }
 
@@ -776,8 +781,8 @@ class Quantized_Point_Cloud_Set {
       std::vector<float> sqn_all(num_q);
       for (size_t qi = 0; qi < num_q; ++qi) {
         const auto& qv = q_query.vec_queries[qi];
-        float base_beta = (qv.norm_scaling_factor * qv.lut_int8_scale) /
-                          turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
+        float base_beta =
+            (qv.norm_scaling_factor * qv.lut_int8_scale) / turboquant_pq_4bit::kPQ_Int8Scale_D1_K16;
         beta_all[qi] = Metric ? (2.0f * base_beta) : base_beta;
         sqn_all[qi] = qv.unquantized_squared_norm;
       }
@@ -807,9 +812,7 @@ class Quantized_Point_Cloud_Set {
         const float* base_norms = vec_db.norm_scaling_factors.data();
         const float* base_sqn = vec_db.unquantized_squared_norms.data();
 
-        auto strip_ptr = [&](size_t s) -> const uint8_t* {
-          return &base_codes[s * strip_stride];
-        };
+        auto strip_ptr = [&](size_t s) -> const uint8_t* { return &base_codes[s * strip_stride]; };
         auto norms_ptr = [&](size_t s) -> const float* { return base_norms + s * 64; };
         auto sqn_ptr = [&](size_t s) -> const float* { return base_sqn + s * 64; };
 
@@ -830,7 +833,8 @@ class Quantized_Point_Cloud_Set {
           }
 
           float min_q[kQBatch];
-          for (size_t qi = 0; qi < qb; ++qi) min_q[qi] = std::numeric_limits<float>::max();
+          for (size_t qi = 0; qi < qb; ++qi)
+            min_q[qi] = std::numeric_limits<float>::max();
 
           const __m256i low_mask = _mm256_set1_epi8(0x0F);
 
@@ -852,23 +856,21 @@ class Quantized_Point_Cloud_Set {
               codes_ptr += 32;
 
               const __m256i codes_even = _mm256_and_si256(packed, low_mask);
-              const __m256i codes_odd =
-                  _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+              const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
               for (size_t qi = 0; qi < qb; ++qi) {
-                const __m128i lut128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(
-                    &qv_arr[qi].lut_int8[b * 16]));
+                const __m128i lut128 =
+                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(&qv_arr[qi].lut_int8[b * 16]));
                 const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
                 const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
                 const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
-                acc_even[qi] =
-                    _mm512_add_epi16(acc_even[qi], _mm512_cvtepi8_epi16(scores_even_i8));
-                acc_odd[qi] =
-                    _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
+                acc_even[qi] = _mm512_add_epi16(acc_even[qi], _mm512_cvtepi8_epi16(scores_even_i8));
+                acc_odd[qi] = _mm512_add_epi16(acc_odd[qi], _mm512_cvtepi8_epi16(scores_odd_i8));
               }
             }
 
-            // Keep everything in registers: convert acc -> float, apply norms, compute L2/IP, reduce min.
+            // Keep everything in registers: convert acc -> float, apply norms, compute L2/IP,
+            // reduce min.
             const __m512 inf_ps = _mm512_set1_ps(std::numeric_limits<float>::infinity());
 
             auto mask_pairs16 = [&](int pair_base, bool odd) -> __mmask16 {
@@ -897,8 +899,8 @@ class Quantized_Point_Cloud_Set {
             }
 
             auto lane16_ps = [](const __m512i& acc, int half) -> __m512 {
-              const __m256i v16 = (half == 0) ? _mm512_castsi512_si256(acc)
-                                              : _mm512_extracti64x4_epi64(acc, 1);
+              const __m256i v16 =
+                  (half == 0) ? _mm512_castsi512_si256(acc) : _mm512_extracti64x4_epi64(acc, 1);
               const __m512i i32 = _mm512_cvtepi16_epi32(v16);
               return _mm512_cvtepi32_ps(i32);
             };
@@ -920,10 +922,8 @@ class Quantized_Point_Cloud_Set {
 
                 __m512 dist_e, dist_o;
                 if constexpr (Metric) {
-                  const __m512 base_e =
-                      _mm512_add_ps(_mm512_load_ps(sq_even + 0), sqn_q_ps);
-                  const __m512 base_o =
-                      _mm512_add_ps(_mm512_load_ps(sq_odd + 0), sqn_q_ps);
+                  const __m512 base_e = _mm512_add_ps(_mm512_load_ps(sq_even + 0), sqn_q_ps);
+                  const __m512 base_o = _mm512_add_ps(_mm512_load_ps(sq_odd + 0), sqn_q_ps);
                   dist_e = _mm512_fmadd_ps(neg_beta_ps, t_e, base_e);
                   dist_o = _mm512_fmadd_ps(neg_beta_ps, t_o, base_o);
                 } else {
@@ -947,10 +947,8 @@ class Quantized_Point_Cloud_Set {
 
                 __m512 dist_e, dist_o;
                 if constexpr (Metric) {
-                  const __m512 base_e =
-                      _mm512_add_ps(_mm512_load_ps(sq_even + 16), sqn_q_ps);
-                  const __m512 base_o =
-                      _mm512_add_ps(_mm512_load_ps(sq_odd + 16), sqn_q_ps);
+                  const __m512 base_e = _mm512_add_ps(_mm512_load_ps(sq_even + 16), sqn_q_ps);
+                  const __m512 base_o = _mm512_add_ps(_mm512_load_ps(sq_odd + 16), sqn_q_ps);
                   dist_e = _mm512_fmadd_ps(neg_beta_ps, t_e, base_e);
                   dist_o = _mm512_fmadd_ps(neg_beta_ps, t_o, base_o);
                 } else {
@@ -974,12 +972,14 @@ class Quantized_Point_Cloud_Set {
             scan_strip_masked(strip0, 0, hi);
           } else {
             // Full strips from strip0 to strip1 - 1.
-            for (size_t s = strip0; s < strip1; ++s) scan_strip_masked(s, 0, 64);
+            for (size_t s = strip0; s < strip1; ++s)
+              scan_strip_masked(s, 0, 64);
             // Final partial strip if needed.
             if (lane1 != 0) scan_strip_masked(strip1, 0, lane1);
           }
 
-          for (size_t qi = 0; qi < qb; ++qi) total += min_q[qi];
+          for (size_t qi = 0; qi < qb; ++qi)
+            total += min_q[qi];
         }
 
         results[cid] = {cloud_id, total * inv_num_q};

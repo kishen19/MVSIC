@@ -58,6 +58,8 @@ void bench(mvsic::commandLine &P) {
     pq_method_t = 3;
   } else if (pq_method == "TQ4") {
     pq_method_t = 4;
+  } else if (pq_method == "TQPQ") {
+    pq_method_t = 5;
   } else {
     std::cerr << "Unknown PQ method: " << pq_method << std::endl;
     exit(1);

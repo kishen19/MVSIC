@@ -11,6 +11,7 @@
 #include "mvsic/core/quantization/pq.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/fastscan.h"
+#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 namespace mvsic {
@@ -37,17 +38,23 @@ class IndexMVIVFFlat : public Index<metric> {
   using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
   using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
   using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
+  using TQPQ4_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 4>;
+  using TQPQ8_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 8>;
 
   using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
   using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
   using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set>;
+  using TQPQ4_Set = Quantized_Point_Cloud_Set<TQPQ4_Enc, metric>;
+  using TQPQ8_Set = Quantized_Point_Cloud_Set<TQPQ8_Enc, metric>;
+  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQPQ4_Set, TQPQ8_Set>;
 
   using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
   using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
   using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
+  using TQPQ4_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 4>, metric>;
+  using TQPQ8_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 8>, metric>;
 
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model>;
+  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQPQ4_Model, TQPQ8_Model>;
   using QT = IndexParams::QuantizerType;
 
   struct node_t {
@@ -105,6 +112,20 @@ class IndexMVIVFFlat : public Index<metric> {
         std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
         break;
       }
+      case QT::TurboQuantPQ4Bit: {
+        if (params.pq.block_size == 4) {
+          quantizer.template emplace<TQPQ4_Model>();
+          std::get<TQPQ4_Model>(quantizer).train(points);
+        } else if (params.pq.block_size == 8) {
+          quantizer.template emplace<TQPQ8_Model>();
+          std::get<TQPQ8_Model>(quantizer).train(points);
+        } else {
+          std::cerr << "IndexMVIVFFlat: TurboQuantPQ4Bit currently supports block_size 4 or 8 "
+                    << "(got " << params.pq.block_size << ")." << std::endl;
+          abort();
+        }
+        break;
+      }
       default: quantizer = std::monostate{}; break;
     }
 
@@ -141,6 +162,16 @@ class IndexMVIVFFlat : public Index<metric> {
             case QT::RaBitQ: {
               auto &m = std::get<RQ_Model>(quantizer);
               clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
+              break;
+            }
+            case QT::TurboQuantPQ4Bit: {
+              if (params.pq.block_size == 4) {
+                auto &m = std::get<TQPQ4_Model>(quantizer);
+                clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
+              } else {
+                auto &m = std::get<TQPQ8_Model>(quantizer);
+                clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
+              }
               break;
             }
             case QT::None:
@@ -213,6 +244,41 @@ class IndexMVIVFFlat : public Index<metric> {
             visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
           });
         });
+        t_distances += t.stop();
+        t.reset();
+        break;
+      }
+      case QT::TurboQuantPQ4Bit: {
+        t.start();
+        if (params.pq.block_size == 4) {
+          auto &m = std::get<TQPQ4_Model>(quantizer);
+          auto q_query = m.quantize_query(query);
+          t_quantize += t.stop();
+          t.reset();
+          t.start();
+          parlay::parallel_for(0, nprobes, [&](size_t i) {
+            uint32_t cluster_id = id_dist[i].first;
+            auto &qleaf = std::get<TQPQ4_Set>(clusters[cluster_id].quantized_data);
+            qleaf.distances_all(q_query, &visited[offsets[i]]);
+            parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
+              visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
+            });
+          });
+        } else {
+          auto &m = std::get<TQPQ8_Model>(quantizer);
+          auto q_query = m.quantize_query(query);
+          t_quantize += t.stop();
+          t.reset();
+          t.start();
+          parlay::parallel_for(0, nprobes, [&](size_t i) {
+            uint32_t cluster_id = id_dist[i].first;
+            auto &qleaf = std::get<TQPQ8_Set>(clusters[cluster_id].quantized_data);
+            qleaf.distances_all(q_query, &visited[offsets[i]]);
+            parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
+              visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
+            });
+          });
+        }
         t_distances += t.stop();
         t.reset();
         break;
@@ -343,17 +409,36 @@ class IndexMVIVFFlat : public Index<metric> {
       }
     }
 
-    // quantizer MODEL only
-    const int type_id = static_cast<int>(active_quantizer);
-    outfile.write(reinterpret_cast<const char *>(&type_id), sizeof(int));
+  // quantizer MODEL only
+  const int type_id = static_cast<int>(active_quantizer);
+  outfile.write(reinterpret_cast<const char *>(&type_id), sizeof(int));
 
-    switch (active_quantizer) {
-      case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
-      case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
-      case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
-      case QT::None:
-      default: break;
+  switch (active_quantizer) {
+    case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
+    case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
+    case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
+    case QT::TurboQuantPQ4Bit: {
+      int tqpq_block_size = 0;
+      if (std::holds_alternative<TQPQ4_Model>(quantizer)) {
+        tqpq_block_size = 4;
+      } else if (std::holds_alternative<TQPQ8_Model>(quantizer)) {
+        tqpq_block_size = 8;
+      } else {
+        std::cerr << "IndexMVIVFFlat::save: TurboQuantPQ4Bit active, but quantizer variant is "
+                     "neither TQPQ4_Model nor TQPQ8_Model.\n";
+        abort();
+      }
+      outfile.write(reinterpret_cast<const char *>(&tqpq_block_size), sizeof(int));
+      if (tqpq_block_size == 4) {
+        std::get<TQPQ4_Model>(quantizer).save(outfile);
+      } else {
+        std::get<TQPQ8_Model>(quantizer).save(outfile);
+      }
+      break;
     }
+    case QT::None:
+    default: break;
+  }
 
     outfile.close();
   }
@@ -411,8 +496,27 @@ class IndexMVIVFFlat : public Index<metric> {
         quantizer.template emplace<RQ_Model>();
         std::get<RQ_Model>(quantizer).load(infile);
         break;
+      case QT::TurboQuantPQ4Bit: {
+        int tqpq_block_size = 0;
+        infile.read(reinterpret_cast<char *>(&tqpq_block_size), sizeof(int));
+        params.pq.block_size = tqpq_block_size;
+        if (tqpq_block_size == 4) {
+          quantizer.template emplace<TQPQ4_Model>();
+          std::get<TQPQ4_Model>(quantizer).load(infile);
+        } else if (tqpq_block_size == 8) {
+          quantizer.template emplace<TQPQ8_Model>();
+          std::get<TQPQ8_Model>(quantizer).load(infile);
+        } else {
+          std::cerr << "IndexMVIVFFlat::load: TurboQuantPQ4Bit model with unsupported block_size="
+                    << tqpq_block_size << " (expected 4 or 8).\n";
+          abort();
+        }
+        break;
+      }
       case QT::None: quantizer = std::monostate{}; break;
-      default: std::cerr << "IndexMVIVFFlat: Unsupported quantizer in load.\n"; abort();
+      default:
+        std::cerr << "IndexMVIVFFlat: Unsupported quantizer in load.\n";
+        abort();
     }
     infile.close();
 
@@ -430,25 +534,35 @@ class IndexMVIVFFlat : public Index<metric> {
           return point_id_to_data_id[point_id];
         });
         clusters[i].data = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
-        switch (active_quantizer) {
-          case QT::PQ: {
-            auto &m = std::get<PQ_Model>(quantizer);
-            clusters[i].quantized_data = m.encode(clusters[i].data);
-            break;
+          switch (active_quantizer) {
+            case QT::PQ: {
+              auto &m = std::get<PQ_Model>(quantizer);
+              clusters[i].quantized_data = m.encode(clusters[i].data);
+              break;
+            }
+            case QT::FastScan: {
+              auto &m = std::get<FS_Model>(quantizer);
+              clusters[i].quantized_data = m.encode(clusters[i].data);
+              break;
+            }
+            case QT::RaBitQ: {
+              auto &m = std::get<RQ_Model>(quantizer);
+              clusters[i].quantized_data = m.encode(clusters[i].data);
+              break;
+            }
+            case QT::TurboQuantPQ4Bit: {
+              if (params.pq.block_size == 4) {
+                auto &m = std::get<TQPQ4_Model>(quantizer);
+                clusters[i].quantized_data = m.encode(clusters[i].data);
+              } else {
+                auto &m = std::get<TQPQ8_Model>(quantizer);
+                clusters[i].quantized_data = m.encode(clusters[i].data);
+              }
+              break;
+            }
+            case QT::None:
+            default: clusters[i].quantized_data = std::monostate{}; break;
           }
-          case QT::FastScan: {
-            auto &m = std::get<FS_Model>(quantizer);
-            clusters[i].quantized_data = m.encode(clusters[i].data);
-            break;
-          }
-          case QT::RaBitQ: {
-            auto &m = std::get<RQ_Model>(quantizer);
-            clusters[i].quantized_data = m.encode(clusters[i].data);
-            break;
-          }
-          case QT::None:
-          default: clusters[i].quantized_data = std::monostate{}; break;
-        }
       }
     });
   }

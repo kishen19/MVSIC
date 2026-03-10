@@ -68,25 +68,25 @@ static int run_leaf_diversity(commandLine& P) {
     return 1;
   }
   if (db.get_dims() != queries.get_dims()) {
-    std::cerr << "ERROR: DB dims (" << db.get_dims()
-              << ") != Query dims (" << queries.get_dims() << ")\n";
+    std::cerr << "ERROR: DB dims (" << db.get_dims() << ") != Query dims (" << queries.get_dims()
+              << ")\n";
     return 1;
   }
 
   std::cout << "DB: clouds=" << db.size() << "  dims=" << db.get_dims()
-            << "  total_vecs=" << db.total_size()
-            << "  avg_k=" << std::fixed << std::setprecision(2) << db.average_size() << "\n";
+            << "  total_vecs=" << db.total_size() << "  avg_k=" << std::fixed
+            << std::setprecision(2) << db.average_size() << "\n";
   std::cout << "Q : clouds=" << queries.size() << "  dims=" << queries.get_dims()
-            << "  total_vecs=" << queries.total_size()
-            << "  avg_k=" << std::fixed << std::setprecision(2) << queries.average_size() << "\n";
+            << "  total_vecs=" << queries.total_size() << "  avg_k=" << std::fixed
+            << std::setprecision(2) << queries.average_size() << "\n";
   std::cout << "k=" << k << "\n";
 
   // Load ground truth.
   std::string gt_path(gtFile);
   auto gt = ReadGT(gt_path, queries.size());
   if (gt.size() != queries.size()) {
-    std::cerr << "ERROR: GT size (" << gt.size()
-              << ") != number of queries (" << queries.size() << ")\n";
+    std::cerr << "ERROR: GT size (" << gt.size() << ") != number of queries (" << queries.size()
+              << ")\n";
     return 1;
   }
   if (gt[0].size() == 0) {
@@ -95,8 +95,7 @@ static int run_leaf_diversity(commandLine& P) {
   }
 
   if (k > gt[0].size()) {
-    std::cout << "WARNING: requested k=" << k
-              << " but GT only has " << gt[0].size()
+    std::cout << "WARNING: requested k=" << k << " but GT only has " << gt[0].size()
               << " neighbors per query; clamping k.\n";
     k = static_cast<uint32_t>(gt[0].size());
   }
@@ -106,6 +105,28 @@ static int run_leaf_diversity(commandLine& P) {
   IndexT index(db.get_dims(), params);
   std::string idx_path(indexFile);
   index.load(idx_path, db);
+
+  // Basic tree stats and balance metrics.
+  auto tree_stats = index.get_tree_stats();
+  std::cout << "\n=== MVIVF tree structure stats ===\n";
+  std::cout << "num_internal_nodes            : " << tree_stats.num_internal_nodes << "\n";
+  std::cout << "num_leaves                    : " << tree_stats.num_leaves << "\n";
+  std::cout << "avg_leaf_size                 : " << tree_stats.avg_leaf_size << "\n";
+  std::cout << "avg_internal_node_size        : " << tree_stats.avg_internal_node_size << "\n";
+  std::cout << "total_point_clouds_internal   : " << tree_stats.total_point_clouds_internal << "\n";
+  std::cout << "height                        : " << tree_stats.height << "\n";
+  std::cout << "avg_child_fraction_imbalance  : " << tree_stats.avg_child_fraction_imbalance
+            << "\n";
+  std::cout << "max_child_fraction_imbalance  : " << tree_stats.max_child_fraction_imbalance
+            << "\n";
+  std::cout << "bad_imbalance (>= " << tree_stats.kBadImbalanceThreshold
+            << ") (subtree_size, imbalance_ratio), sorted by subtree_size: ";
+  for (size_t i = 0; i < tree_stats.bad_imbalance_entries.size(); ++i) {
+    if (i > 0) std::cout << ", ";
+    const auto& p = tree_stats.bad_imbalance_entries[i];
+    std::cout << "(" << p.first << ", " << std::fixed << std::setprecision(4) << p.second << ")";
+  }
+  std::cout << "\n";
 
   // Flat clustering: map point id -> leaf id.
   auto leaf_of_point = index.get_flat_clustering();
@@ -141,9 +162,8 @@ static int run_leaf_diversity(commandLine& P) {
   }
 
   if (missing_ids > 0) {
-    std::cout << "WARNING: encountered " << missing_ids
-              << " GT ids outside [0, " << (leaf_of_point.size() - 1)
-              << "]; those neighbors were ignored.\n";
+    std::cout << "WARNING: encountered " << missing_ids << " GT ids outside [0, "
+              << (leaf_of_point.size() - 1) << "]; those neighbors were ignored.\n";
   }
 
   // Aggregate statistics.
@@ -192,4 +212,3 @@ int main(int argc, char** argv) {
   }
   return run_leaf_diversity<ChamferIP_Point, IndexMVIVFIP>(P);
 }
-

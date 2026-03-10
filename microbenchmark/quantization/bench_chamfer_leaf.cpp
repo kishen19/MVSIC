@@ -660,7 +660,7 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 // File mode
 // ---------------------------
 template<typename ChPoint>
-static int run_files(commandLine& P, uint32_t leaf_size, int reps) {
+static int run_files(commandLine& P, uint32_t leaf_size, int reps, bool run_pq, bool run_rabitq) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -681,9 +681,8 @@ static int run_files(commandLine& P, uint32_t leaf_size, int reps) {
   std::cout << "Mode: file" << std::endl;
   std::cout << "  db=" << dbFile << (mm ? " (mmap)" : "") << std::endl;
   std::cout << "  q =" << qFile << std::endl;
-  // For file mode, always run all methods (PQ/RaBitQ enabled).
-  return run_from_sets<ChPoint>(db, queries, leaf_size, reps, /*run_pq=*/true,
-                                /*run_rabitq=*/true);
+  // For file mode, respect -pq and -rabitq flags as in synthetic mode.
+  return run_from_sets<ChPoint>(db, queries, leaf_size, reps, run_pq, run_rabitq);
 }
 
 int main(int argc, char** argv) {
@@ -708,8 +707,9 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    if (df == "IP" || df == "ip") return run_files<ChamferIP_Point>(P, leaf_size, reps);
-    return run_files<ChamferL2_Point>(P, leaf_size, reps);
+    if (df == "IP" || df == "ip")
+      return run_files<ChamferIP_Point>(P, leaf_size, reps, run_pq, run_rabitq);
+    return run_files<ChamferL2_Point>(P, leaf_size, reps, run_pq, run_rabitq);
   }
 
   // Synthetic mode args
