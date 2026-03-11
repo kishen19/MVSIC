@@ -110,6 +110,22 @@ cc_binary(
 )
 
 cc_binary(
+    name = "bench_chamfer_topk",
+    srcs = ["bench_chamfer_topk.cpp"],
+    deps = [
+        "//mvsic/core/quantization:fastscan",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:turboquant_pq_4bit",
+        "//mvsic/core/quantization:wrapper",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
     name = "test_vnni_chamfer",
     srcs = ["test_vnni_chamfer.cpp"],
     deps = [

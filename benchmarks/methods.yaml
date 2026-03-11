@@ -3,6 +3,7 @@
 mvivf:
   variable_param: nprobes
   class: "MVIVF" 
+  labels: ["search_cmps", "t_search_dists", "t_search_beam", "t_search_rest", "t_quant", "t_leaf_dists", "t_leaf_sort", "t_leaf_rest", "t_rerank"]
 
 mvivf_flat:
   variable_param: nprobes

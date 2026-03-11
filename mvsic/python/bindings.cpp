@@ -6,6 +6,7 @@
 #include "mvsic/core/index_params.h"
 #include "mvsic/core/search_params.h"
 #include "mvsic/core/stats.h"
+#include "mvsic/core/mvclustering/mvclustering_config.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -73,6 +74,18 @@ PYBIND11_MODULE(mvsic, m) {
                      &mvsic::IndexParams::pq_config::num_points_per_cluster)
       .def_readwrite("rabitq_bits", &mvsic::IndexParams::pq_config::rabitq_bits);
 
+  py::class_<mvsic::MVClusteringConfig>(m, "MVClusteringConfig")
+      .def(py::init<>())
+      .def_readwrite("niters", &mvsic::MVClusteringConfig::niters)
+      .def_readwrite("max_point_clouds_per_cluster",
+                     &mvsic::MVClusteringConfig::max_point_clouds_per_cluster)
+      .def_readwrite("max_points_per_centroid_inner_kmeans",
+                     &mvsic::MVClusteringConfig::max_points_per_centroid_inner_kmeans)
+      .def_readwrite("verbose", &mvsic::MVClusteringConfig::verbose)
+      .def_readwrite("init", &mvsic::MVClusteringConfig::init)
+      .def_readwrite("seed", &mvsic::MVClusteringConfig::seed)
+      .def_readwrite("use_weighted_inner_kmeans", &mvsic::MVClusteringConfig::use_weighted_inner_kmeans);
+
   py::class_<mvsic::IndexParams>(m, "IndexParams")
       .def(py::init([]() { return mvsic::IndexParams(); }))
       .def_readwrite("method", &mvsic::IndexParams::method)
@@ -97,7 +110,7 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
-                  py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
+                  py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
@@ -105,7 +118,7 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
-                  py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = false,
+                  py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
@@ -274,7 +287,7 @@ PYBIND11_MODULE(mvsic, m) {
   // trigger "object with that name is already defined" in some pybind11 builds).
   m.def(
       "get_mvivf_tree_stats",
-      [](mvsic::IndexMVIVFL2& index) {
+      [](mvsic::IndexMVIVFL2 &index) {
         auto s = index.get_tree_stats();
         py::dict d;
         d["num_internal_nodes"] = s.num_internal_nodes;
@@ -285,11 +298,10 @@ PYBIND11_MODULE(mvsic, m) {
         d["height"] = s.height;
         return d;
       },
-      py::arg("index"),
-      "Returns tree stats for an MVIVF L2 index.");
+      py::arg("index"), "Returns tree stats for an MVIVF L2 index.");
   m.def(
       "get_mvivf_tree_stats",
-      [](mvsic::IndexMVIVFIP& index) {
+      [](mvsic::IndexMVIVFIP &index) {
         auto s = index.get_tree_stats();
         py::dict d;
         d["num_internal_nodes"] = s.num_internal_nodes;
@@ -300,8 +312,7 @@ PYBIND11_MODULE(mvsic, m) {
         d["height"] = s.height;
         return d;
       },
-      py::arg("index"),
-      "Returns tree stats for an MVIVF IP index.");
+      py::arg("index"), "Returns tree stats for an MVIVF IP index.");
 
   BIND_INDEX(IndexMVIVFFlatL2, ChamferL2_Point, "IndexMVIVFFlatL2")
   BIND_INDEX(IndexMVIVFFlatIP, ChamferIP_Point, "IndexMVIVFFlatIP")

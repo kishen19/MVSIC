@@ -1,13 +1,14 @@
 // bench_chamfer_overretrieve.cpp
 //
-// Quality microbenchmark: Exact vs PQ(K=16) vs FastScan(K=16) vs RaBitQ vs TurboQuant-4bit vs
-// ByteTQ. Reports average overretrieval (%) needed to achieve target recall@K (e.g. 90%, 95%).
+// Quality microbenchmark: Exact vs (optional) PQ(K=16) vs FastScan(K=16) vs (optional) RaBitQ vs
+// TurboQuant-4bit vs TurboQuantPQ-4bit (various block sizes).
+// Reports recall@k as a function of the candidate budget k' (multiples of k).
 //
 // For each query cloud:
 //  1) Brute-force exact distances to ALL db clouds; obtain exact top-K ids.
 //  2) For each quantized method: compute approximate distances to ALL db clouds; sort by score.
-//  3) For each K and recall target r: find minimal M such that top-M approx contains
-//     at least ceil(r*K) of the exact top-K ids. Overretrieval% = (M-K)/K * 100.
+//  3) For each candidate budget k' in {k,2k,4k,...}, compute recall@k:
+//       | approx_top_k' ∩ exact_top_k | / k
 //
 // Args (parse_command_line.h style):
 //   File mode:
@@ -29,11 +30,12 @@
 //     -pq_block <u32>    (default 8)
 //     -fs_block <u32>    (default 8)
 //     -rbits <u32>       (default 2)
-//     -Kmax <u32>        (default 100)   // largest K evaluated; K grid is derived from this
-//     -rec99 <f>         (default 0.99)
+//     -k <u32>           (default 10)    // report recall@k
+//     -pq                (enable PQ; default off)
+//     -rabitq            (enable RaBitQ; default off)
 //
 // Notes:
-// - K grid: {1, 5, 10, 20, 50, 100} intersected with [1..Kmax].
+// - k' grid: {k, 2k, 4k, 8k, ...} capped at min(Nclouds, 64k).
 // - This benchmark is meant for *quality* not speed; it sorts full Nclouds lists.
 
 #include <algorithm>
@@ -50,8 +52,6 @@
 #include <utility>
 #include <vector>
 
-#include <Eigen/Dense>
-
 #include "parlay/parallel.h"
 
 #include "mvsic/core/quantization/fastscan.h"
@@ -59,7 +59,6 @@
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant_4bit.h"
 #include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -97,101 +96,20 @@ static void fill_random_point_cloud_set(PC& pcs, uint64_t seed, bool l2_normaliz
   });
 }
 
-// --------------- PCA helpers ---------------
-
-// Compute PCA projection matrix from the flattened DB vectors.
-// Returns {W (D x pca_dim), mean (D)}.
-template<typename ChPoint>
-static std::pair<Eigen::MatrixXf, Eigen::VectorXf> compute_pca(const PointCloudSet<ChPoint>& pcs,
-                                                               uint32_t pca_dim) {
-  const uint32_t D = pcs.get_dims();
-  const size_t N = pcs.total_size();
-  pca_dim = std::min(pca_dim, D);
-
-  // Map all vectors into an Eigen matrix (N x D).
-  Eigen::MatrixXf X(N, D);
-  const float* base = pcs.data();
-  for (size_t i = 0; i < N; ++i)
-    for (uint32_t j = 0; j < D; ++j)
-      X(i, j) = base[i * D + j];
-
-  // Center.
-  Eigen::VectorXf mean = X.colwise().mean();  // (D,)
-  X.rowwise() -= mean.transpose();
-
-  // Covariance-based PCA (D x D covariance, D is typically 128).
-  Eigen::MatrixXf cov = (X.transpose() * X) / float(N);  // (D x D)
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXf> eig(cov);
-  // Eigenvalues are ascending; take the last pca_dim columns.
-  Eigen::MatrixXf W = eig.eigenvectors().rightCols(pca_dim);  // (D x pca_dim)
-
-  std::cout << "PCA: " << D << "d -> " << pca_dim << "d  (" << N << " training vectors)\n";
-  return {W, mean};
-}
-
-// Project a PointCloudSet through PCA, returning a new set with dim=pca_dim.
-template<typename ChPoint>
-static PointCloudSet<ChPoint> project_pcs(const PointCloudSet<ChPoint>& pcs,
-                                          const Eigen::MatrixXf& W, const Eigen::VectorXf& mean,
-                                          uint32_t pca_dim) {
-  const uint32_t D_in = pcs.get_dims();
-  const size_t Nclouds = pcs.size();
-
-  // Build offsets in the projected space (in float counts, not byte counts).
-  std::vector<size_t> new_offsets(Nclouds + 1);
-  new_offsets[0] = 0;
-  for (size_t i = 0; i < Nclouds; ++i)
-    new_offsets[i + 1] = new_offsets[i] + size_t(pcs.get_size(i)) * pca_dim;
-
-  const size_t total_coords = new_offsets[Nclouds];
-  std::vector<float> proj_vals(total_coords);
-
-  // Project every vector: v_proj = (v - mean)^T * W
-  parlay::parallel_for(0, Nclouds, [&](size_t ci) {
-    const uint32_t K_ci = pcs.get_size(ci);
-    const float* src = pcs.data(ci);
-    float* dst = proj_vals.data() + new_offsets[ci];
-    Eigen::Map<const Eigen::MatrixXf> Vsrc(src, K_ci, D_in);  // row-major natural
-    // Manually center + project row by row (avoids temp allocation).
-    for (uint32_t r = 0; r < K_ci; ++r) {
-      Eigen::Map<const Eigen::VectorXf> v(src + size_t(r) * D_in, D_in);
-      Eigen::Map<Eigen::VectorXf> out(dst + size_t(r) * pca_dim, pca_dim);
-      out.noalias() = W.transpose() * (v - mean);
-    }
-  });
-
-  // Build ids.
-  std::vector<uint32_t> new_ids(Nclouds);
-  for (size_t i = 0; i < Nclouds; ++i)
-    new_ids[i] = pcs.get_id(i);
-
-  return PointCloudSet<ChPoint>(static_cast<uint32_t>(Nclouds), pca_dim, proj_vals.data(),
-                                new_offsets.data(), new_ids.data());
-}
-
-static std::vector<uint32_t> default_K_grid(uint32_t Kmax) {
-  std::vector<uint32_t> ks = {1, 5, 10, 20, 50, 100};
+static std::vector<uint32_t> default_kprime_grid(uint32_t k, uint32_t Nclouds_cap) {
+  // Report recall@k while varying the candidate budget k' in reasonable multiples of k.
+  // Default: {k, 2k, 5k, 10k, 25k, 50k} (capped by Nclouds).
+  static constexpr std::array<uint32_t, 6> mult = {1, 2, 5, 10, 25, 50};
   std::vector<uint32_t> out;
-  out.reserve(ks.size());
-  for (uint32_t k : ks) {
-    if (k <= Kmax) out.push_back(k);
+  if (k == 0) return out;
+  for (uint32_t m : mult) {
+    uint64_t kp64 = uint64_t(k) * uint64_t(m);
+    if (kp64 == 0) continue;
+    uint32_t kp = static_cast<uint32_t>(std::min<uint64_t>(kp64, uint64_t(Nclouds_cap)));
+    if (kp == 0) continue;
+    if (out.empty() || kp > out.back()) out.push_back(kp);
   }
-  if (out.empty()) out.push_back(std::max<uint32_t>(1, Kmax));
   return out;
-}
-
-// Returns minimal M (1..N) such that top-M approx contains >= need hits from exact_topK_set.
-static size_t min_M_for_recall(const std::vector<uint32_t>& approx_ranked_ids,
-                               const std::unordered_set<uint32_t>& exact_topK_set, size_t need) {
-  if (need == 0) return 0;
-  size_t hits = 0;
-  for (size_t m = 0; m < approx_ranked_ids.size(); ++m) {
-    if (exact_topK_set.find(approx_ranked_ids[m]) != exact_topK_set.end()) {
-      ++hits;
-      if (hits >= need) return m + 1;  // M is 1-based count
-    }
-  }
-  return approx_ranked_ids.size();
 }
 
 // Load pre-computed ground truth from binary file produced by compute_ground_truth.
@@ -200,7 +118,7 @@ static size_t min_M_for_recall(const std::vector<uint32_t>& approx_ranked_ids,
 // Returns per-query sorted (id, dist) pairs.
 static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(const char* path,
                                                                               size_t num_queries,
-                                                                              uint32_t Kmax) {
+                                                                              uint32_t k) {
   std::ifstream in(path, std::ios::binary);
   if (!in.is_open()) {
     std::cerr << "ERROR: cannot open ground truth file: " << path << "\n";
@@ -209,21 +127,27 @@ static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(co
 
   int k_gt = 0;
   in.read(reinterpret_cast<char*>(&k_gt), sizeof(int));
-  if (k_gt < static_cast<int>(Kmax)) {
-    std::cerr << "ERROR: ground truth k (" << k_gt << ") < Kmax (" << Kmax
-              << "); not enough neighbors.\n";
+  if (k_gt < static_cast<int>(k)) {
+    std::cerr << "ERROR: ground truth k (" << k_gt << ") < k (" << k << "); not enough neighbors.\n";
     std::exit(1);
   }
 
   std::vector<std::vector<std::pair<uint32_t, float>>> gt(num_queries);
   for (size_t qi = 0; qi < num_queries; ++qi) {
-    gt[qi].resize(k_gt);
-    for (int j = 0; j < k_gt; ++j) {
+    gt[qi].resize(k);
+    for (uint32_t j = 0; j < k; ++j) {
       float dist;
       uint32_t id;
       in.read(reinterpret_cast<char*>(&dist), sizeof(float));
       in.read(reinterpret_cast<char*>(&id), sizeof(uint32_t));
       gt[qi][j] = {id, dist};
+    }
+    // Skip remaining neighbors, if any.
+    for (int j = static_cast<int>(k); j < k_gt; ++j) {
+      float dist;
+      uint32_t id;
+      in.read(reinterpret_cast<char*>(&dist), sizeof(float));
+      in.read(reinterpret_cast<char*>(&id), sizeof(uint32_t));
     }
   }
 
@@ -240,9 +164,8 @@ static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(co
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t pq_k, uint32_t fs_block, uint32_t rbits,
-                         uint32_t Kmax, float rec99, uint32_t pca_dim = 40,
-                         const char* gt_file = nullptr, bool run_pq = true,
-                         bool run_rabitq = true) {
+                         uint32_t k, const char* gt_file = nullptr,
+                         bool run_pq = true, bool run_rabitq = true) {
   constexpr bool Metric = ChPoint::is_metric();
 
   const uint32_t D = db.get_dims();
@@ -259,9 +182,13 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     return 1;
   }
 
-  const auto Kgrid = default_K_grid(Kmax);
   const size_t Nclouds = db.size();
   const size_t Qclouds = queries.size();
+  if (k == 0 || k > Nclouds) {
+    std::cerr << "ERROR: invalid -k (k=" << k << ", Nclouds=" << Nclouds << ")\n";
+    return 1;
+  }
+  const auto kprime_grid = default_kprime_grid(k, static_cast<uint32_t>(Nclouds));
 
   std::cout << "DB: clouds=" << Nclouds << " dims=" << D << " total_vecs=" << db.total_size()
             << " avg_k=" << std::fixed << std::setprecision(2) << db.average_size() << "\n";
@@ -269,12 +196,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
             << " avg_k=" << std::fixed << std::setprecision(2) << queries.average_size() << "\n";
   std::cout << "pq_block=" << pq_block << " fs_block=" << fs_block << " rbits=" << rbits
             << " dist=" << (Metric ? "L2" : "IP") << "\n";
-  std::cout << "Kgrid: ";
-  for (auto k : Kgrid)
-    std::cout << k << " ";
+  std::cout << "k=" << k << "  k' grid: ";
+  for (auto kp : kprime_grid) std::cout << kp << " ";
   std::cout << "\n";
   if (gt_file) std::cout << "Ground truth: " << gt_file << "\n";
-  std::cout << "Recall target: " << rec99 << "\n";
 
   // Train + Encode quantized DBs (same as bench_chamfer_pq_fastscan).
   const uint32_t PQ_S = 20;
@@ -303,10 +228,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   tq_model.train(db);
   auto tq_db = tq_model.encode(db);
 
-  MultiVecQuantizer<turboquant_byte::Model<Metric>, Metric> btq_model;
-  btq_model.train(db);
-  auto btq_db = btq_model.encode(db);
-
   // TurboQuant PQ 4-bit (B=1/2/4/8)
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
@@ -321,18 +242,13 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto tqpq4_db = tqpq4_model.encode(db);
   auto tqpq8_db = tqpq8_model.encode(db);
 
-  // PCA: fit on DB, project both DB and queries.
-  auto [pca_W, pca_mean] = compute_pca(db, pca_dim);
-  auto pca_db = project_pcs(db, pca_W, pca_mean, pca_dim);
-  auto pca_queries = project_pcs(queries, pca_W, pca_mean, pca_dim);
-
   std::vector<std::pair<uint32_t, float>> exact_scores(Nclouds);
   std::vector<std::pair<uint32_t, float>> approx_scores(Nclouds);
 
   // Optionally load pre-computed ground truth.
   std::vector<std::vector<std::pair<uint32_t, float>>> gt_data;
   if (gt_file) {
-    gt_data = load_ground_truth(gt_file, Qclouds, Kmax);
+    gt_data = load_ground_truth(gt_file, Qclouds, k);
   }
 
   enum Method {
@@ -340,22 +256,25 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     FASTSCAN = 1,
     RABITQ = 2,
     TURBOQUANT_4BIT = 3,
-    BYTETQ = 4,
-    PCA_METHOD = 5,
-    TQPQ_B1 = 6,
-    TQPQ_B2 = 7,
-    TQPQ_B4 = 8,
-    TQPQ_B8 = 9,
-    NUM_METHODS = 10
+    TQPQ_B1 = 4,
+    TQPQ_B2 = 5,
+    TQPQ_B4 = 6,
+    TQPQ_B8 = 7,
+    NUM_METHODS = 8
   };
-  std::string pca_label = "PCA-" + std::to_string(pca_dim) + "d";
   const char* method_names[NUM_METHODS] = {
-      "PQ (K=16)",        "FastScan (K=16)", "RaBitQ",            "TQ-4bit (K=16)",
-      "ByteTQ (int8)",    pca_label.c_str(), "TQ-PQ (K=16,B=1)", "TQ-PQ (K=16,B=2)",
-      "TQ-PQ (K=16,B=4)", "TQ-PQ (K=16,B=8)"};
+      "PQ (K=16)",
+      "FastScan (K=16)",
+      "RaBitQ",
+      "TQ-4bit (K=16)",
+      "TQ-PQ (K=16,B=1)",
+      "TQ-PQ (K=16,B=2)",
+      "TQ-PQ (K=16,B=4)",
+      "TQ-PQ (K=16,B=8)",
+  };
 
-  std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
-  auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
+  std::vector<double> sum_recall(NUM_METHODS * kprime_grid.size(), 0.0);
+  auto idx2 = [&](Method m, size_t i) { return static_cast<size_t>(m) * kprime_grid.size() + i; };
 
   std::cout << "Outer iterations: " << Qclouds << std::endl;
   for (size_t qi = 0; qi < Qclouds; ++qi) {
@@ -369,29 +288,29 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
     const auto& sorted_exact = gt_file ? gt_data[qi] : exact_scores;
 
-    std::vector<std::unordered_set<uint32_t>> exact_sets;
-    exact_sets.reserve(Kgrid.size());
-    for (uint32_t K : Kgrid) {
-      std::unordered_set<uint32_t> s;
-      s.reserve(static_cast<size_t>(K) * 2);
-      for (uint32_t j = 0; j < K; ++j)
-        s.insert(sorted_exact[j].first);
-      exact_sets.emplace_back(std::move(s));
-    }
+    std::unordered_set<uint32_t> exact_set;
+    exact_set.reserve(static_cast<size_t>(k) * 2);
+    for (uint32_t j = 0; j < k; ++j) exact_set.insert(sorted_exact[j].first);
 
     auto eval_method = [&](Method meth) {
       std::sort(approx_scores.begin(), approx_scores.end(),
                 [](const auto& a, const auto& b) { return a.second < b.second; });
+      // IMPORTANT: distances_all() reports cloud indices (cid) as ids, while the exact path uses
+      // PointCloudSet ids (db.get_id(cid)). Map to the same id space before computing recall.
       std::vector<uint32_t> approx_ids;
       approx_ids.reserve(Nclouds);
-      for (const auto& p : approx_scores)
-        approx_ids.push_back(p.first);
+      for (const auto& p : approx_scores) {
+        approx_ids.push_back(db.get_id(p.first));
+      }
 
-      for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-        const size_t K = static_cast<size_t>(Kgrid[k_i]);
-        const size_t need = static_cast<size_t>(std::ceil(rec99 * static_cast<float>(K)));
-        const size_t M = min_M_for_recall(approx_ids, exact_sets[k_i], need);
-        sum_M[idx2(meth, k_i)] += static_cast<double>(M);
+      for (size_t i = 0; i < kprime_grid.size(); ++i) {
+        const size_t kp = static_cast<size_t>(kprime_grid[i]);
+        size_t hits = 0;
+        const size_t limit = std::min(kp, approx_ids.size());
+        for (size_t j = 0; j < limit; ++j) {
+          if (exact_set.find(approx_ids[j]) != exact_set.end()) ++hits;
+        }
+        sum_recall[idx2(meth, i)] += static_cast<double>(hits) / static_cast<double>(k);
       }
     };
 
@@ -416,13 +335,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       tq_db.distances_all(qq, approx_scores.data());
       eval_method(TURBOQUANT_4BIT);
     }
-    {
-      auto qq = btq_model.quantize_query(queries[qi]);
-      btq_db.distances_all(qq, approx_scores.data());
-      eval_method(BYTETQ);
-    }
 
-    std::cout << "Running TQ scalar." << std::endl;
     // TQ-Scalar: same encoding as TQ4 but using per-point scalar distance
     // instead of VNNI GEMM batch distance. Isolates GEMM kernel issues.
     //    {
@@ -433,12 +346,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     //      });
     //      eval_method(TQ_SCALAR);
     //    }
-
-    // PCA: exact Chamfer distance in reduced dimensionality.
-    {
-      pca_db.distances(pca_queries[qi], approx_scores.data());
-      eval_method(PCA_METHOD);
-    }
 
     // TQ-PQ (wrapper / multi-vector)
     {
@@ -463,23 +370,24 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     }
   }
 
-  std::cout << "\n=== Avg candidates M to reach recall@K (rec" << int(rec99 * 100 + 0.5f)
-            << "%) ===\n";
+  std::cout << "\n=== Recall@" << k << " vs candidate budget k' ===\n";
   std::cout << "Averages over Q=" << Qclouds << " query clouds.\n\n";
 
-  // Pretty table: rows = methods, cols = Kgrid, entries = avg M.
+  // Pretty table: rows = methods, cols = k' grid, entries = avg recall@k.
   std::cout << std::left << std::setw(24) << "Method";
-  for (uint32_t K : Kgrid)
-    std::cout << std::right << std::setw(10) << ("K=" + std::to_string(K));
+  for (uint32_t kp : kprime_grid)
+    std::cout << std::right << std::setw(10) << ("k'=" + std::to_string(kp));
   std::cout << "\n";
-  std::cout << std::string(24 + 10 * Kgrid.size(), '-') << "\n";
+  std::cout << std::string(24 + 10 * kprime_grid.size(), '-') << "\n";
 
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
+    if (meth == PQ && !run_pq) continue;
+    if (meth == RABITQ && !run_rabitq) continue;
     std::cout << std::left << std::setw(24) << method_names[meth];
-    for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-      const double avg_M =
-          sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Qclouds);
-      std::cout << std::right << std::setw(10) << std::fixed << std::setprecision(1) << avg_M;
+    for (size_t i = 0; i < kprime_grid.size(); ++i) {
+      const double avg_r =
+          sum_recall[idx2(static_cast<Method>(meth), i)] / std::max<size_t>(1, Qclouds);
+      std::cout << std::right << std::setw(10) << std::fixed << std::setprecision(2) << avg_r;
     }
     std::cout << "\n";
   }
@@ -490,8 +398,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 template<typename ChPoint>
 static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uint64_t seed_db,
                      uint64_t seed_q, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
-                     uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim, bool run_pq,
-                     bool run_rabitq) {
+                     uint32_t rbits, uint32_t k, bool run_pq, bool run_rabitq) {
   constexpr bool Metric = ChPoint::is_metric();
   using PC = PointCloudSet<ChPoint>;
 
@@ -504,14 +411,14 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
   fill_random_point_cloud_set(queries, seed_q, l2_normalize_vectors);
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
+  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, k,
                                 /*gt_file=*/nullptr, run_pq, run_rabitq);
 }
 
 template<typename ChPoint>
 static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t fs_block,
-                     uint32_t rbits, uint32_t Kmax, float rec99, uint32_t pca_dim,
-                     const char* gt_file, bool run_pq, bool run_rabitq) {
+                     uint32_t rbits, uint32_t k, const char* gt_file, bool run_pq,
+                     bool run_rabitq) {
   using PC = PointCloudSet<ChPoint>;
 
   char* dbFile = P.getOptionValue("-i");
@@ -535,8 +442,8 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                gt_file, run_pq, run_rabitq);
+  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, k, gt_file, run_pq,
+                                run_rabitq);
 }
 
 int main(int argc, char** argv) {
@@ -544,16 +451,14 @@ int main(int argc, char** argv) {
                 "[-i <dbFile>] [-q <qFile>] [-mm] [-gt <gtFile>] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-pq_block <b>] [-pq_k <k>] [-fs_block <b>] [-rbits <b>] "
-                "[-Kmax <k>] [-rec99 <f>] [-pca_dim <d>] [-pq] [-rabitq]");
+                "[-k <k>] [-pq] [-rabitq]");
 
   std::string df = P.getOptionValue("-dist_func", "L2");
   uint32_t pq_block = static_cast<uint32_t>(P.getOptionIntValue("-pq_block", 8));
   uint32_t pq_k = static_cast<uint32_t>(P.getOptionIntValue("-pq_k", 16));
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
   uint32_t rbits = static_cast<uint32_t>(P.getOptionIntValue("-rbits", 2));
-  uint32_t Kmax = static_cast<uint32_t>(P.getOptionIntValue("-Kmax", 100));
-  float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
-  uint32_t pca_dim = static_cast<uint32_t>(P.getOptionIntValue("-pca_dim", 40));
+  uint32_t k = static_cast<uint32_t>(P.getOptionIntValue("-k", 10));
   const char* gt_file = P.getOptionValue("-gt");
   bool run_pq = P.getOption("-pq");
   bool run_rabitq = P.getOption("-rabitq");
@@ -565,10 +470,10 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (df == "IP" || df == "ip")
-      return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                        gt_file, run_pq, run_rabitq);
-    return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, Kmax, rec99, pca_dim,
-                                      gt_file, run_pq, run_rabitq);
+      return run_files<ChamferIP_Point>(P, pq_block, pq_k, fs_block, rbits, k, gt_file, run_pq,
+                                        run_rabitq);
+    return run_files<ChamferL2_Point>(P, pq_block, pq_k, fs_block, rbits, k, gt_file, run_pq,
+                                      run_rabitq);
   }
 
   uint32_t N_db = static_cast<uint32_t>(P.getOptionIntValue("-N_db", 20000));
@@ -583,8 +488,8 @@ int main(int argc, char** argv) {
 
   if (df == "IP" || df == "ip") {
     return run_synth<ChamferIP_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
-                                      rbits, Kmax, rec99, pca_dim, run_pq, run_rabitq);
+                                      rbits, k, run_pq, run_rabitq);
   }
   return run_synth<ChamferL2_Point>(N_db, N_q, K_db, D, seed_db, seed_q, pq_block, pq_k, fs_block,
-                                    rbits, Kmax, rec99, pca_dim, run_pq, run_rabitq);
+                                    rbits, k, run_pq, run_rabitq);
 }

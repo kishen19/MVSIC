@@ -66,6 +66,12 @@ class MVClustering {
   // Data given as a PointCloudSet Object: Main implementation
   void train(const PointCloudSet<ChPoint>& data);
 
+  // // Quantizer model given
+  // // Idea: For the last stage, after training on subsampled set, first score using TQ and get top
+  // //       1-3 centers per PC. Then, do full chamfer dist to these 1-3 to get the actual centers.
+  // template<typename QModelT>
+  // void train(const PointCloudSet<ChPoint>& data, const QModelT Model);
+
   // Raw data given
   void train(uint32_t n, const float* data, const size_t* offsets, const uint32_t* ids) {
     PointCloudSet<ChPoint> points(n, d, data, offsets, ids);
@@ -98,7 +104,7 @@ template<bool metric>
 void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   // Subsample if dataset is too large
   if (params.max_point_clouds_per_cluster > 0 &&
-      points.size() > params.max_point_clouds_per_cluster * k) {
+      points.size() > params.max_point_clouds_per_cluster * k && points.size() > 2048) {
     if (params.verbose >= 1) {
       std::cout << "[MVClustering] Subsampling from " << points.size() << " to "
                 << params.max_point_clouds_per_cluster * k << " point clouds for training"
@@ -207,15 +213,17 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
         if (params.use_weighted_inner_kmeans) {
           // Build per-vector weights so each point cloud contributes total weight 1.
           const size_t num_docs = grouped[i].size();
-          auto sizes = parlay::delayed_seq<size_t>(
-              num_docs, [&](size_t j) { return static_cast<size_t>(points.get_size(grouped[i][j].second)); });
+          auto sizes = parlay::delayed_seq<size_t>(num_docs, [&](size_t j) {
+            return static_cast<size_t>(points.get_size(grouped[i][j].second));
+          });
           parlay::sequence<size_t> offsets;
           size_t total_vecs;
           std::tie(offsets, total_vecs) = parlay::scan(sizes);
 
           if (total_vecs != data.size()) {
-            std::cerr << "[MVClustering] Error: total_vecs != data.size() in weighted inner k-means."
-                      << std::endl;
+            std::cerr
+                << "[MVClustering] Error: total_vecs != data.size() in weighted inner k-means."
+                << std::endl;
             abort();
           }
 
@@ -273,8 +281,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
               abort();
             }
             auto new_centers = kmeans_weighted_subsample<metric>(
-                data, weights, s, params.max_points_per_centroid_inner_kmeans,
-                params.verbose >= 3);
+                data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
             centers.set_point_cloud(i, new_centers);
           } else {
             auto new_centers = kmeans_subsample<metric>(

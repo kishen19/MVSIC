@@ -110,11 +110,34 @@ class IndexMVIVF : public Index<metric> {
   QuantModel quantizer = std::monostate{};
   QT active_quantizer = QT::None;
 
+  // Center quantization: when params.quantize_centers is enabled, we *always* use TurboQuant4Bit
+  // (TQ4) for internal-node / leaf-center scoring, regardless of the leaf quantizer.
+  //
+  // If the leaf quantizer is already TQ4, we reuse the same model instance (no duplicate training).
+  std::optional<TQ4_Model> center_quantizer_owned;
+  TQ4_Model *center_quantizer = nullptr;  // points to either owned model or leaf model
+
   // Stats
   size_t kmeanstree_height = 0;
 
   IndexMVIVF(size_t d_) noexcept : params(IndexParams::mvivf()) { d = d_; }
   IndexMVIVF(size_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
+
+  void init_center_quantizer(const PointCloudSet<ChPoint> &points) {
+    center_quantizer = nullptr;
+    center_quantizer_owned.reset();
+    if (!params.quantize_centers) return;
+
+    if (active_quantizer == QT::TurboQuant4Bit) {
+      center_quantizer = &std::get<TQ4_Model>(quantizer);
+      return;
+    }
+
+    // Train a dedicated TQ4 model for center scoring.
+    center_quantizer_owned.emplace();
+    center_quantizer_owned->train(points);
+    center_quantizer = &(*center_quantizer_owned);
+  }
 
   QuantSet encode_points_quantized(const PointCloudSet<ChPoint> &points) {
     switch (active_quantizer) {
@@ -128,6 +151,11 @@ class IndexMVIVF : public Index<metric> {
       case QT::None:
       default: return std::monostate{};
     }
+  }
+
+  QuantSet encode_centers_tq(const PointCloudSet<ChPoint> &points) {
+    if (!center_quantizer) return std::monostate{};
+    return center_quantizer->encode(points);  // returns TQ4_Set (wrapped in QuantSet)
   }
 
   void quant_distances_all(const QuantQuery &q_var, const QuantSet &s_var,
@@ -160,7 +188,7 @@ class IndexMVIVF : public Index<metric> {
     size_t auto_nc = (params.k_per_level > 0) ? params.k_per_level
                                               : static_cast<size_t>(std::ceil(std::sqrt(n)));
     size_t small_nc = 4 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
-    size_t num_clusters = std::max(static_cast<size_t>(2), std::min({auto_nc, small_nc, n}));
+    size_t num_clusters = std::max(static_cast<size_t>(4), std::min({auto_nc, small_nc, n}));
     if (params.verbose >= 1) {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
@@ -182,11 +210,9 @@ class IndexMVIVF : public Index<metric> {
     } else {
       node->data = std::move(centers);
     }
-    // Quantize internal-node centers if requested. Leaf points are always quantized (see below)
-    // when a quantizer is active; this flag only controls quantization of internal centers used
-    // during greedy / flat search.
-    if (params.quantize_centers && active_quantizer != QT::None) {
-      node->quantized_data = encode_points_quantized(node->data);
+    // Quantize internal-node centers if requested (always using TQ4).
+    if (params.quantize_centers) {
+      node->quantized_data = encode_centers_tq(node->data);
     }
     parlay::parallel_for(
         0, grouped.size(),
@@ -260,6 +286,9 @@ class IndexMVIVF : public Index<metric> {
       default: quantizer = std::monostate{}; break;
     }
 
+    // Center quantization (internal-node / leaf-center scoring): always TQ4.
+    init_center_quantizer(points);
+
     // Recursively build k-means tree
     recursive_build(root, points);
 
@@ -285,8 +314,8 @@ class IndexMVIVF : public Index<metric> {
       if (!center_points.empty()) {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
 
-        if (params.quantize_centers && active_quantizer != QT::None) {
-          leaf_centers_quant = encode_points_quantized(leaf_centers);
+        if (params.quantize_centers) {
+          leaf_centers_quant = encode_centers_tq(leaf_centers);
         }
       }
     }
@@ -301,6 +330,7 @@ class IndexMVIVF : public Index<metric> {
 
   // Simple Beam Search using std::set
   GreedySearchResult greedy_search(const ChPoint &query, const QuantQuery &q_query_var,
+                                   const TQ4_Q *q_center_query,
                                    size_t nprobes) const {
     using score_node = std::pair<float, node_t *>;
     auto less = [](const score_node &a, const score_node &b) {
@@ -353,7 +383,15 @@ class IndexMVIVF : public Index<metric> {
         auto &centers = current_node->data;
         centers.distances(query, child_dists.data());
       } else {
-        quant_distances_all(q_query_var, current_node->quantized_data, child_dists.data());
+        // Center scoring always uses TQ4 when enabled.
+        if (q_center_query) {
+          std::get<TQ4_Set>(current_node->quantized_data).distances_all(*q_center_query,
+                                                                        child_dists.data());
+        } else {
+          // Should not happen in practice; fall back to exact.
+          auto &centers = current_node->data;
+          centers.distances(query, child_dists.data());
+        }
       }
       t_dists += t.stop();
       t.reset();
@@ -404,6 +442,7 @@ class IndexMVIVF : public Index<metric> {
   // Flat leaf scoring: score all leaves by distance to a precomputed representative center and
   // pick the best nprobes leaves.
   GreedySearchResult flat_leaf_search(const ChPoint &query, const QuantQuery &q_query_var,
+                                      const TQ4_Q *q_center_query,
                                       size_t nprobes) const {
     using score_node = std::pair<float, node_t *>;
     GreedySearchResult out;
@@ -423,11 +462,15 @@ class IndexMVIVF : public Index<metric> {
     auto centers_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
     auto scores = parlay::sequence<score_node>::uninitialized(L);
 
-    if (!params.quantize_centers || active_quantizer == QT::None) {
+    if (!params.quantize_centers) {
       // Exact Chamfer distance to the representative centers.
       leaf_centers.distances(query, centers_dists.data());
     } else {
-      quant_distances_all(q_query_var, leaf_centers_quant, centers_dists.data());
+      if (q_center_query) {
+        std::get<TQ4_Set>(leaf_centers_quant).distances_all(*q_center_query, centers_dists.data());
+      } else {
+        leaf_centers.distances(query, centers_dists.data());
+      }
     }
     parlay::parallel_for(0, L, [&](size_t i) {
       scores[i] = {centers_dists[i].second, leaves_flat[i]};
@@ -469,6 +512,8 @@ class IndexMVIVF : public Index<metric> {
     // Step 0: Quantize Query
     // -------------------------
     QuantQuery q_query_var;
+    TQ4_Q q_center_query;
+    const TQ4_Q *q_center_query_ptr = nullptr;
     t.start();
     switch (active_quantizer) {
       case QT::PQ: q_query_var = std::get<PQ_Model>(quantizer).quantize_query(query); break;
@@ -487,6 +532,10 @@ class IndexMVIVF : public Index<metric> {
       case QT::None:
       default: q_query_var = std::monostate{}; break;
     }
+    if (params.quantize_centers && center_quantizer) {
+      q_center_query = center_quantizer->quantize_query(query);
+      q_center_query_ptr = &q_center_query;
+    }
     t_quantize = t.stop();
     t.reset();
 
@@ -498,9 +547,9 @@ class IndexMVIVF : public Index<metric> {
     const double alpha = 1.0;  // heuristic threshold: TODO: set this
     bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
     if (use_flat) {
-      gs = flat_leaf_search(query, q_query_var, nprobes);
+      gs = flat_leaf_search(query, q_query_var, q_center_query_ptr, nprobes);
     } else {
-      gs = greedy_search(query, q_query_var, nprobes);
+      gs = greedy_search(query, q_query_var, q_center_query_ptr, nprobes);
     }
     auto probe_list = std::move(gs.probe_list);
     dist_cmps += gs.dist_cmps;
@@ -997,6 +1046,9 @@ class IndexMVIVF : public Index<metric> {
     }
     infile.close();
 
+    // Center quantization (internal-node / leaf-center scoring): always TQ4.
+    init_center_quantizer(points);
+
     // Build the index
     size_t dim = points.get_dims();
     auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
@@ -1069,26 +1121,33 @@ class IndexMVIVF : public Index<metric> {
       if (!center_points.empty()) {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
 
-        if (params.quantize_centers && active_quantizer != QT::None) {
-          leaf_centers_quant = encode_points_quantized(leaf_centers);
+        if (params.quantize_centers) {
+          leaf_centers_quant = encode_centers_tq(leaf_centers);
         }
       }
     }
 
     // Re-encode nodes (since we only saved the model)
-    if (active_quantizer != QT::None) {
-      parlay::parallel_for(
-          0, num,
-          [&](size_t i) {
-            node_t *node = ind_to_node[i];
-            if (!node) return;
-            if (!params.quantize_centers && !node->children.empty()) return;  // internal node
-            if (node->data.size() == 0) return;
+    parlay::parallel_for(
+        0, num,
+        [&](size_t i) {
+          node_t *node = ind_to_node[i];
+          if (!node) return;
+          if (node->data.size() == 0) return;
 
+          if (!node->children.empty()) {  // internal node
+            if (params.quantize_centers) {
+              node->quantized_data = encode_centers_tq(node->data);
+            }
+            return;
+          }
+
+          // leaf node
+          if (active_quantizer != QT::None) {
             node->quantized_data = encode_points_quantized(node->data);
-          },
-          /*granularity=*/1);
-    }
+          }
+        },
+        /*granularity=*/1);
   }
 
   // Traversing the tree and deleting nodes

@@ -436,22 +436,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto tq_all_db = tq_model.encode(all_leafs);
   double tq_encode_s = t.sec();
 
-  // Byte TurboQuant (int8)
-  MultiVecQuantizer<turboquant_byte::Model<Metric>, Metric> btq_model;
-  t.start();
-  btq_model.train(db);
-  double btq_train_s = t.sec();
-
-  t.start();
-  using BTQ_DB = decltype(btq_model.encode(db));
-  std::vector<BTQ_DB> btq_leaf_dbs;
-  btq_leaf_dbs.reserve(num_leaf_blocks);
-  for (size_t b = 0; b < num_leaf_blocks; ++b) {
-    btq_leaf_dbs.emplace_back(btq_model.encode(leaves[b]));
-  }
-  auto btq_all_db = btq_model.encode(all_leafs);
-  double btq_encode_s = t.sec();
-
   // TurboQuant PQ 4-bit (B=1/2/4/8)
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
@@ -531,8 +515,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 #endif
   std::cout << "TurboQuant-4bit train : " << tq_train_s << " s\n";
   std::cout << "TurboQuant-4bit encode: " << tq_encode_s << " s (leaves + all_leafs)\n";
-  std::cout << "ByteTQ-int8 train     : " << btq_train_s << " s\n";
-  std::cout << "ByteTQ-int8 encode    : " << btq_encode_s << " s (leaves + all_leafs)\n";
   std::cout << "TQ-PQ(K=16,B=1)       : " << (tqpq1_train_s + tqpq1_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=2)       : " << (tqpq2_train_s + tqpq2_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=4)       : " << (tqpq4_train_s + tqpq4_encode_s) << " s\n";
@@ -577,7 +559,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   }
 #endif
   seq_rows.push_back({"TQ-4bit (K=16)", bench_seq(tq_model, tq_leaf_dbs)});
-  seq_rows.push_back({"ByteTQ (int8)", bench_seq(btq_model, btq_leaf_dbs)});
   seq_rows.push_back({"TQ-PQ (K=16,B=1)", bench_seq(tqpq1_model, tqpq1_leaf_dbs)});
   seq_rows.push_back({"TQ-PQ (K=16,B=2)", bench_seq(tqpq2_model, tqpq2_leaf_dbs)});
   seq_rows.push_back({"TQ-PQ (K=16,B=4)", bench_seq(tqpq4_model, tqpq4_leaf_dbs)});
@@ -619,7 +600,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   }
 #endif
   all_rows.push_back({"TQ-4bit (K=16)", bench_all(tq_model, tq_all_db)});
-  all_rows.push_back({"ByteTQ (int8)", bench_all(btq_model, btq_all_db)});
   all_rows.push_back({"TQ-PQ (K=16,B=1)", bench_all(tqpq1_model, tqpq1_all_db)});
   all_rows.push_back({"TQ-PQ (K=16,B=2)", bench_all(tqpq2_model, tqpq2_all_db)});
   all_rows.push_back({"TQ-PQ (K=16,B=4)", bench_all(tqpq4_model, tqpq4_all_db)});

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from itertools import product
@@ -22,6 +23,119 @@ def signal_handler(sig, frame):
 
 
 signal.signal(signal.SIGINT, signal_handler)
+
+
+def _get_git_info(repo_dir: str):
+    """
+    Best-effort git metadata for reproducibility.
+    Returns (sha, is_dirty). If unavailable, returns (None, None).
+    """
+    try:
+        sha = (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_dir, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+        dirty = (
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=repo_dir, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+        return sha, bool(dirty)
+    except Exception:
+        return None, None
+
+
+def _format_scalar_for_csv(x):
+    """Round floats to <=3 decimals; print whole numbers as ints."""
+    # Preserve None/NaN
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return x
+    # Preserve booleans as-is
+    if isinstance(x, bool):
+        return x
+    # Numpy scalars / pandas may show up here
+    try:
+        import numpy as np
+
+        if isinstance(x, (np.integer,)):
+            return int(x)
+        if isinstance(x, (np.floating,)):
+            x = float(x)
+    except Exception:
+        pass
+
+    if isinstance(x, int):
+        return x
+    if isinstance(x, float):
+        if x.is_integer():
+            return int(x)
+        return round(x, 3)
+    return x
+
+
+def _expand_method_timings(df, method_info):
+    """
+    If methods.yaml provides 'labels', expand avg_timings (list) into separate columns.
+    - Error if avg_timings has fewer entries than labels.
+    - If avg_timings has extra entries, store the remainder as a list in a 'timings' column.
+    """
+    labels = method_info.get("labels") or []
+    if not labels or "avg_timings" not in df.columns:
+        return df
+
+    def _row_expand(row):
+        t = row.get("avg_timings", None)
+        if not isinstance(t, (list, tuple)):
+            raise ValueError(
+                f"Expected avg_timings to be a list/tuple for labeled method; got {type(t)}"
+            )
+        if len(t) < len(labels):
+            raise ValueError(
+                f"avg_timings has {len(t)} entries but methods.yaml defines {len(labels)} labels: {labels}"
+            )
+        out = {lab: t[i] for i, lab in enumerate(labels)}
+        rest = list(t[len(labels):])
+        if rest:
+            out["timings"] = rest
+        return pd.Series(out)
+
+    expanded = df.apply(_row_expand, axis=1)
+    df = pd.concat([df.drop(columns=["avg_timings"]), expanded], axis=1)
+    return df
+
+
+def _reorder_result_columns(df, method_info):
+    """Common columns first; method-specific timing columns at the end."""
+    variable_param = method_info.get("variable_param")
+    labels = method_info.get("labels") or []
+
+    common_front = [
+        "k",
+        "recall_1_k",
+        "recall_k_k",
+        "QPS_seq",
+        "QPS_par",
+    ]
+    if variable_param and variable_param in df.columns:
+        common_front.append(variable_param)
+    # These are commonly present in configs/results
+    for c in ["num_rerank", "avg_cmps"]:
+        if c in df.columns:
+            common_front.append(c)
+
+    # Remaining columns: keep params & other metadata next.
+    remaining = [c for c in df.columns if c not in common_front and c not in labels and c != "timings"]
+    # Timing label columns go at the end.
+    timing_cols = [c for c in labels if c in df.columns]
+    if "timings" in df.columns:
+        timing_cols.append("timings")
+
+    ordered = common_front + remaining + timing_cols
+    # Deduplicate while preserving order
+    seen = set()
+    ordered = [c for c in ordered if not (c in seen or seen.add(c))]
+    return df[ordered]
 
 
 # Context manager to suppress stdout/stderr
@@ -45,6 +159,83 @@ def get_params_hash(params):
     """Creates a stable hash from a dictionary of parameters."""
     sorted_params = json.dumps(params, sort_keys=True)
     return hashlib.md5(sorted_params.encode('utf-8')).hexdigest()[:8]
+
+
+def _enum_to_name(e):
+    # pybind11 enums typically expose .name; fall back to str().
+    name = getattr(e, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    s = str(e)
+    # Often "QuantizerType.PQ" -> "PQ"
+    if "." in s:
+        return s.split(".")[-1]
+    return s
+
+
+def index_params_to_dict(p):
+    """
+    Materialize a full IndexParams -> nested dict (including defaults),
+    matching the exposed pybind attributes.
+    """
+    def pq_to_dict(pq):
+        return {
+            "method": _enum_to_name(pq.method),
+            "block_size": int(pq.block_size),
+            "num_clusters_per_block": int(pq.num_clusters_per_block),
+            "num_points_per_cluster": int(pq.num_points_per_cluster),
+            "rabitq_bits": int(pq.rabitq_bits),
+        }
+
+    def fde_to_dict(fde):
+        return {
+            "num_repetitions": int(fde.num_repetitions),
+            "num_simhash_projections": int(fde.num_simhash_projections),
+            "seed": int(fde.seed),
+            "projection_dimension": int(fde.projection_dimension),
+            "fill_empty_partitions": bool(fde.fill_empty_partitions),
+            "final_projection_dimension": int(fde.final_projection_dimension),
+            "normalize": bool(fde.normalize),
+        }
+
+    def ann_to_dict(ann):
+        return {
+            "R": int(ann.R),
+            "L": int(ann.L),
+            "alpha": float(ann.alpha),
+            "num_pass": int(ann.num_pass),
+        }
+
+    def mvclus_to_dict(mv):
+        return {
+            "niters": int(mv.niters),
+            "max_point_clouds_per_cluster": int(mv.max_point_clouds_per_cluster),
+            "max_points_per_centroid_inner_kmeans": int(mv.max_points_per_centroid_inner_kmeans),
+            "verbose": int(mv.verbose),
+            "init": str(mv.init),
+            "seed": int(mv.seed),
+            "use_weighted_inner_kmeans": bool(mv.use_weighted_inner_kmeans),
+        }
+
+    return {
+        "method": str(p.method),
+        "verbose": int(p.verbose),
+        "compress_input": bool(p.compress_input),
+        "k_per_level": int(p.k_per_level),
+        "max_leaf_size": int(p.max_leaf_size),
+        "quantize_centers": bool(p.quantize_centers),
+        "mvclus": mvclus_to_dict(p.mvclus),
+        "s": int(p.s),
+        "fde": fde_to_dict(p.fde),
+        "ann": ann_to_dict(p.ann),
+        "normalize": bool(p.normalize),
+        "R": int(p.R),
+        "L": int(p.L),
+        "alpha": float(p.alpha),
+        "two_pass": bool(p.two_pass),
+        "pq": pq_to_dict(p.pq),
+        "max_points_per_centroid": int(p.max_points_per_centroid),
+    }
 
 
 def generate_search_params(search_config, method_info):
@@ -131,11 +322,25 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                     index_class_name = f"Index{method_info['class']}IP"
                     index_class = getattr(mvsic, index_class_name)
 
-                params_hash = get_params_hash(build_params_dict)
-                index_filename = f"index_{params_hash}.bin"
                 index_dir = os.path.join(base_results_dir, index_name, build_name)
-                index_path = os.path.join(index_dir, index_filename)
                 os.makedirs(index_dir, exist_ok=True)
+
+                # Use a hash of fully materialized IndexParams (includes defaults) for stable naming.
+                # fastplaid uses its own wrapper params.
+                index_params_dict = None
+                if index_name == "fastplaid":
+                    params_hash = get_params_hash(build_params_dict)
+                else:
+                    build_params_func = getattr(mvsic.IndexParams, index_name)
+                    build_params = build_params_func(**build_params_dict)
+                    index_params_dict = index_params_to_dict(build_params)
+                    params_hash = get_params_hash(index_params_dict)
+                    index_params_path = os.path.join(index_dir, "index_params.json")
+                    with open(index_params_path, "w") as f:
+                        json.dump(index_params_dict, f, indent=2, sort_keys=True)
+
+                index_filename = f"index_{params_hash}.bin"
+                index_path = os.path.join(index_dir, index_filename)
 
                 # --- Build Task ---
                 if 'build' in tasks:
@@ -155,8 +360,6 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                         if index_name == 'fastplaid':
                             index = index_class(dim, build_params_dict, index_path=index_path)
                         else:
-                            build_params_func = getattr(mvsic.IndexParams, index_name)
-                            build_params = build_params_func(**build_params_dict)
                             index = index_class(dim, build_params)
 
                         start_time = time.time()
@@ -174,7 +377,11 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                             else:
                                 index_size_bytes = os.path.getsize(index_path)
 
+                            git_sha, git_dirty = _get_git_info(os.getcwd())
                             build_stats = {
+                                'built_at': time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime()),
+                                'git_sha': git_sha,
+                                'git_dirty': git_dirty,
                                 'build_time_sec': build_time,
                                 'index_size_mb': index_size_bytes / (1024 * 1024),
                                 'build_params': build_params_dict,
@@ -362,6 +569,13 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                             params_df.reset_index(drop=True, inplace=True)
                             df.reset_index(drop=True, inplace=True)
                             full_df = pd.concat([df, params_df], axis=1)
+
+                            # Method-specific expansion and column ordering.
+                            full_df = _expand_method_timings(full_df, method_info)
+                            full_df = _reorder_result_columns(full_df, method_info)
+
+                            # Pretty formatting: <=3 decimals; whole numbers as ints.
+                            full_df = full_df.applymap(_format_scalar_for_csv)
 
                             mode = 'a' if os.path.exists(results_path) else 'w'
                             header = not (os.path.exists(results_path) and os.path.getsize(results_path) > 0)

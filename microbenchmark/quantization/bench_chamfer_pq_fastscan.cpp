@@ -459,16 +459,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto tq_db = tq_model.encode(db);
   double tq_encode_s = t.sec();
 
-  // Byte TurboQuant (int8)
-  MultiVecQuantizer<turboquant_byte::Model<Metric>, Metric> btq_model;
-  t.start();
-  btq_model.train(db);
-  double btq_train_s = t.sec();
-
-  t.start();
-  auto btq_db = btq_model.encode(db);
-  double btq_encode_s = t.sec();
-
   // TurboQuant PQ 4-bit (B=1/2/4/8)
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
@@ -531,9 +521,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "TurboQuant train : " << tq_train_s << " s\n";
   std::cout << "TurboQuant encode: " << tq_encode_s << " s\n";
   std::cout << "TurboQuant total : " << (tq_train_s + tq_encode_s) << " s\n";
-  std::cout << "ByteTQ train     : " << btq_train_s << " s\n";
-  std::cout << "ByteTQ encode    : " << btq_encode_s << " s\n";
-  std::cout << "ByteTQ total     : " << (btq_train_s + btq_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=1)   : " << (tqpq1_train_s + tqpq1_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=2)   : " << (tqpq2_train_s + tqpq2_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=4)   : " << (tqpq4_train_s + tqpq4_encode_s) << " s\n";
@@ -582,12 +569,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   }
 
   {
-    double best = bench_quant_all(btq_model, btq_db, queries, results, reps, sink);
-    print_result("ByteTQ-int8 (wrapper::distances_all)", best, ops, exact_best);
-    summary.push_back({"Byte TQ", best});
-  }
-
-  {
     double best = bench_quant_all(tqpq1_model, tqpq1_db, queries, results, reps, sink);
     print_result("TQ-PQ(K=16,B=1) (wrapper::distances_all)", best, ops, exact_best);
     summary.push_back({"TQ-PQ (B=1)", best});
@@ -616,7 +597,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   if (verify) {
     // Limit to first 20 query clouds × first 100 DB clouds for speed.
     verify_quant("TurboQuant-4bit", tq_model, tq_db, queries, 20, 100);
-    verify_quant("ByteTQ-int8", btq_model, btq_db, queries, 20, 100);
 
     // Brute-force per-vector quality check.
     // Uses the first N raw float vectors from DB and queries.
