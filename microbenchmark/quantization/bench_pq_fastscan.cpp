@@ -232,8 +232,8 @@ static inline float scan_all_queries_tqpq_serial(const TQEnc& enc, const TQQuery
 // distances_all(enc) API).
 template<typename TQEnc, typename TQQueryVec>
 static inline float scan_all_queries_tq4bit_serial(const TQEnc& enc, const TQQueryVec& qvec,
-                                                    size_t Q, float* scratch, size_t N,
-                                                    parlay::sequence<double>& per_q_sum) {
+                                                   size_t Q, float* scratch, size_t N,
+                                                   parlay::sequence<double>& per_q_sum) {
   for (size_t qi = 0; qi < Q; ++qi) {
     qvec[qi].distances_contiguous_parallel(enc.packed_codes.data(), enc.norm_scaling_factors.data(),
                                            enc.unquantized_squared_norms.data(), enc.stride, N,
@@ -272,7 +272,7 @@ static inline float scan_all_queries_byte_tq_serial(const BTQEnc& enc, const BTQ
 // ---------------------------
 template<typename DBRange, typename QRange>
 static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block, size_t rbits,
-                    int REPS, bool run_rabitq) {
+                     int REPS, bool run_rabitq) {
   const size_t N = db.size();
   const size_t Q_total = queries.size();
   const size_t Q = std::min<size_t>(Q_total, 100);
@@ -357,7 +357,8 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
+        tqpq_q.push_back(
+            tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -378,7 +379,8 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
+        tqpq_q.push_back(
+            tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -399,7 +401,8 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
+        tqpq_q.push_back(
+            tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -420,7 +423,8 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
       tqpq_q.reserve(Q);
       t.start();
       for (size_t i = 0; i < Q; ++i)
-        tqpq_q.push_back(tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
+        tqpq_q.push_back(
+            tqpq_m.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
       tqpq_lut_s[bi] = t.sec();
       std::vector<float> tqpq_scratch(N);
       double best = 1e100;
@@ -485,8 +489,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   if (run_rabitq) {
     t.start();
     for (size_t i = 0; i < Q; ++i) {
-      rq_q.push_back(rq_model.quantize_query(
-          reinterpret_cast<const float*>(queries.location(i))));
+      rq_q.push_back(rq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
     }
     rq_lut_s = t.sec();
   }
@@ -544,7 +547,8 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 
   // Warmup (avoid cold-start effects)
   for (size_t i = 0; i < std::min<size_t>(Q, 2); ++i) {
-    sink += full_scan_sum_exact_ip_dbpar(db, reinterpret_cast<const float*>(queries.location(i)), D);
+    sink +=
+        full_scan_sum_exact_ip_dbpar(db, reinterpret_cast<const float*>(queries.location(i)), D);
 
 #if defined(__AVX512F__) || defined(__AVX2__)
     fs_q[i].distances_all(fs, fs_out.data());
@@ -620,8 +624,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     float acc = 0.0f;
     for (int r = 0; r < REPS; ++r) {
       t.start();
-      float local =
-          scan_all_queries_distances_all_serial(rq, rq_q, Q, rq_out.data(), N, per_q_sum);
+      float local = scan_all_queries_distances_all_serial(rq, rq_q, Q, rq_out.data(), N, per_q_sum);
       double s = t.sec();
       best = std::min(best, s);
       acc = local;
@@ -688,7 +691,8 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     const float* q = reinterpret_cast<const float*>(queries.location(qi));
     for (size_t i = 0; i < check_db; ++i) {
       static thread_local efanna2e::DistanceInnerProduct distfunc;
-      float exact = -distfunc.compare(q, reinterpret_cast<const float*>(db.location(i)), D);  // distance = -IP
+      float exact = -distfunc.compare(q, reinterpret_cast<const float*>(db.location(i)),
+                                      D);  // distance = -IP
       float approx = tq_out[i];
       double ae = std::fabs(static_cast<double>(exact) - static_cast<double>(approx));
       tq_max_ae = std::max(tq_max_ae, ae);

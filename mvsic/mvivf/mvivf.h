@@ -330,8 +330,7 @@ class IndexMVIVF : public Index<metric> {
 
   // Simple Beam Search using std::set
   GreedySearchResult greedy_search(const ChPoint &query, const QuantQuery &q_query_var,
-                                   const TQ4_Q *q_center_query,
-                                   size_t nprobes) const {
+                                   const TQ4_Q *q_center_query, size_t nprobes) const {
     using score_node = std::pair<float, node_t *>;
     auto less = [](const score_node &a, const score_node &b) {
       return a.first < b.first || (a.first == b.first && a.second < b.second);
@@ -385,8 +384,8 @@ class IndexMVIVF : public Index<metric> {
       } else {
         // Center scoring always uses TQ4 when enabled.
         if (q_center_query) {
-          std::get<TQ4_Set>(current_node->quantized_data).distances_all(*q_center_query,
-                                                                        child_dists.data());
+          std::get<TQ4_Set>(current_node->quantized_data)
+              .distances_all(*q_center_query, child_dists.data());
         } else {
           // Should not happen in practice; fall back to exact.
           auto &centers = current_node->data;
@@ -442,8 +441,7 @@ class IndexMVIVF : public Index<metric> {
   // Flat leaf scoring: score all leaves by distance to a precomputed representative center and
   // pick the best nprobes leaves.
   GreedySearchResult flat_leaf_search(const ChPoint &query, const QuantQuery &q_query_var,
-                                      const TQ4_Q *q_center_query,
-                                      size_t nprobes) const {
+                                      const TQ4_Q *q_center_query, size_t nprobes) const {
     using score_node = std::pair<float, node_t *>;
     GreedySearchResult out;
     if (leaves_flat.empty() || leaf_centers.size() == 0 || nprobes == 0) {

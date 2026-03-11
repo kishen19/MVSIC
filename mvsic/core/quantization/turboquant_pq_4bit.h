@@ -159,6 +159,7 @@ class Quantized_Query {
             codes_ptr += 32;
 
             const __m256i codes_even = _mm256_and_si256(packed, low_mask);
+            // TODO:
             const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
             const __m128i lut128 = _mm_loadu_si128(
