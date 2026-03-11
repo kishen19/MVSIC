@@ -5,6 +5,8 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 // #include "absl/container/btree_set.h"
@@ -99,6 +101,7 @@ class IndexMVIVF : public Index<metric> {
   IndexParams params;
   node_t *root = nullptr;  // Root of the k-means tree
 
+  // Leaf Data: Accessed directly during search when nprobes is large
   std::vector<node_t *> leaves_flat;    // Flat list of leaves for large-nprobes search
   PointCloudSet<ChPoint> leaf_centers;  // One representative center per leaf
   QuantSet leaf_centers_quant;          // Quantized centers for flat search (when enabled)
@@ -113,12 +116,50 @@ class IndexMVIVF : public Index<metric> {
   IndexMVIVF(size_t d_) noexcept : params(IndexParams::mvivf()) { d = d_; }
   IndexMVIVF(size_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
 
+  QuantSet encode_points_quantized(const PointCloudSet<ChPoint> &points) {
+    switch (active_quantizer) {
+      case QT::PQ: return std::get<PQ_Model>(quantizer).encode(points);
+      case QT::FastScan: return std::get<FS_Model>(quantizer).encode(points);
+      case QT::RaBitQ: return std::get<RQ_Model>(quantizer).encode(points);
+      case QT::TurboQuant4Bit: return std::get<TQ4_Model>(quantizer).encode(points);
+      case QT::TurboQuantPQ4Bit:
+        if (params.pq.block_size == 4) return std::get<TQPQ4_Model>(quantizer).encode(points);
+        return std::get<TQPQ8_Model>(quantizer).encode(points);
+      case QT::None:
+      default: return std::monostate{};
+    }
+  }
+
+  void quant_distances_all(const QuantQuery &q_var, const QuantSet &s_var,
+                           std::pair<uint32_t, float> *out) const {
+    switch (active_quantizer) {
+      case QT::PQ: std::get<PQ_Set>(s_var).distances_all(std::get<PQ_Q>(q_var), out); break;
+      case QT::FastScan: std::get<FS_Set>(s_var).distances_all(std::get<FS_Q>(q_var), out); break;
+      case QT::RaBitQ: std::get<RQ_Set>(s_var).distances_all(std::get<RQ_Q>(q_var), out); break;
+      case QT::TurboQuant4Bit:
+        std::get<TQ4_Set>(s_var).distances_all(std::get<TQ4_Q>(q_var), out);
+        break;
+      case QT::TurboQuantPQ4Bit:
+        if (params.pq.block_size == 4) {
+          std::get<TQPQ4_Set>(s_var).distances_all(std::get<TQPQ4_Q>(q_var), out);
+        } else {
+          std::get<TQPQ8_Set>(s_var).distances_all(std::get<TQPQ8_Q>(q_var), out);
+        }
+        break;
+      case QT::None:
+      default: break;
+    }
+  }
+
   // Recursive kmeans tree builder
   void recursive_build(node_t *node, const PointCloudSet<ChPoint> &points) {
     size_t n = points.size();
+    // Number of centers: Dynamic
+    // main_val: either k_per_level or sqrt(n)
+    // small_nc: If n is small, choosing ~ n/max_leaf_size is better
     size_t auto_nc = (params.k_per_level > 0) ? params.k_per_level
                                               : static_cast<size_t>(std::ceil(std::sqrt(n)));
-    size_t small_nc = 1.5 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
+    size_t small_nc = 4 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
     size_t num_clusters = std::max(static_cast<size_t>(2), std::min({auto_nc, small_nc, n}));
     if (params.verbose >= 1) {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
@@ -141,42 +182,11 @@ class IndexMVIVF : public Index<metric> {
     } else {
       node->data = std::move(centers);
     }
-    // Quantize centers
-    if (params.quantize_centers) {
-      switch (active_quantizer) {
-        case QT::PQ: {
-          auto &m = std::get<PQ_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::FastScan: {
-          auto &m = std::get<FS_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::RaBitQ: {
-          auto &m = std::get<RQ_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::TurboQuant4Bit: {
-          auto &m = std::get<TQ4_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::TurboQuantPQ4Bit: {
-          if (params.pq.block_size == 4) {
-            auto &m = std::get<TQPQ4_Model>(quantizer);
-            node->quantized_data = m.encode(node->data);
-          } else {
-            auto &m = std::get<TQPQ8_Model>(quantizer);
-            node->quantized_data = m.encode(node->data);
-          }
-          break;
-        }
-        case QT::None:
-        default: node->quantized_data = std::monostate{}; break;
-      }
+    // Quantize internal-node centers if requested. Leaf points are always quantized (see below)
+    // when a quantizer is active; this flag only controls quantization of internal centers used
+    // during greedy / flat search.
+    if (params.quantize_centers && active_quantizer != QT::None) {
+      node->quantized_data = encode_points_quantized(node->data);
     }
     parlay::parallel_for(
         0, grouped.size(),
@@ -191,39 +201,10 @@ class IndexMVIVF : public Index<metric> {
             recursive_build(child, child_points);
           } else {  // Leaf Node
             child->data = std::move(child_points);
-            switch (active_quantizer) {
-              case QT::PQ: {
-                auto &m = std::get<PQ_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::FastScan: {
-                auto &m = std::get<FS_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::RaBitQ: {
-                auto &m = std::get<RQ_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::TurboQuant4Bit: {
-                auto &m = std::get<TQ4_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::TurboQuantPQ4Bit: {
-                if (params.pq.block_size == 4) {
-                  auto &m = std::get<TQPQ4_Model>(quantizer);
-                  child->quantized_data = m.encode(child->data);
-                } else {
-                  auto &m = std::get<TQPQ8_Model>(quantizer);
-                  child->quantized_data = m.encode(child->data);
-                }
-                break;
-              }
-              case QT::None:
-              default: child->quantized_data = std::monostate{}; break;
+            // Always quantize leaf nodes when a quantizer is active; Step 2 of search assumes
+            // that leaf->quantized_data holds encoded points whenever active_quantizer != None.
+            if (active_quantizer != QT::None) {
+              child->quantized_data = encode_points_quantized(child->data);
             }
           }
         },
@@ -305,40 +286,7 @@ class IndexMVIVF : public Index<metric> {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
 
         if (params.quantize_centers && active_quantizer != QT::None) {
-          switch (active_quantizer) {
-            case QT::PQ: {
-              auto &m = std::get<PQ_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::FastScan: {
-              auto &m = std::get<FS_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::RaBitQ: {
-              auto &m = std::get<RQ_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::TurboQuant4Bit: {
-              auto &m = std::get<TQ4_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::TurboQuantPQ4Bit: {
-              if (params.pq.block_size == 4) {
-                auto &m = std::get<TQPQ4_Model>(quantizer);
-                leaf_centers_quant = m.encode(leaf_centers);
-              } else {
-                auto &m = std::get<TQPQ8_Model>(quantizer);
-                leaf_centers_quant = m.encode(leaf_centers);
-              }
-              break;
-            }
-            case QT::None:
-            default: leaf_centers_quant = std::monostate{}; break;
-          }
+          leaf_centers_quant = encode_points_quantized(leaf_centers);
         }
       }
     }
@@ -362,10 +310,10 @@ class IndexMVIVF : public Index<metric> {
     // bottleneck.
     const size_t beam_length = 2 * nprobes;
     parlay::internal::timer t;
-    double num_chamfer_cmps = 0.0;
     double t_dists = 0.0;
     double t_beam = 0.0;
     double t_rest = 0.0;
+
     t.start();
     size_t dist_cmps = 0;
     std::set<score_node> beam;
@@ -400,53 +348,12 @@ class IndexMVIVF : public Index<metric> {
       if (children.empty()) continue;
       // Compute distances to children
       child_dists.resize(children.size());
-      num_chamfer_cmps += children.size();
+      dist_cmps += children.size();
       if (!params.quantize_centers) {
         auto &centers = current_node->data;
-        dist_cmps += centers.distances(query, child_dists.data());
+        centers.distances(query, child_dists.data());
       } else {
-        switch (active_quantizer) {
-          case QT::RaBitQ: {
-            auto &q_query = std::get<RQ_Q>(q_query_var);
-            auto &qleaf = std::get<RQ_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::TurboQuant4Bit: {
-            auto &q_query = std::get<TQ4_Q>(q_query_var);
-            auto &qleaf = std::get<TQ4_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::TurboQuantPQ4Bit: {
-            if (params.pq.block_size == 4) {
-              auto &q_query = std::get<TQPQ4_Q>(q_query_var);
-              auto &qleaf = std::get<TQPQ4_Set>(current_node->quantized_data);
-              qleaf.distances_all(q_query, child_dists.data());
-            } else {
-              auto &q_query = std::get<TQPQ8_Q>(q_query_var);
-              auto &qleaf = std::get<TQPQ8_Set>(current_node->quantized_data);
-              qleaf.distances_all(q_query, child_dists.data());
-            }
-            break;
-          }
-          case QT::PQ: {
-            auto &q_query = std::get<PQ_Q>(q_query_var);
-            auto &qleaf = std::get<PQ_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::FastScan: {
-            auto &q_query = std::get<FS_Q>(q_query_var);
-            auto &qleaf = std::get<FS_Set>(current_node->quantized_data);
-            qleaf.distances_all(q_query, child_dists.data());
-            break;
-          }
-          case QT::None:
-          default:
-            std::cerr << "Error: Invalid quantizer type in greedy search." << std::endl;
-            abort();
-        }
+        quant_distances_all(q_query_var, current_node->quantized_data, child_dists.data());
       }
       t_dists += t.stop();
       t.reset();
@@ -489,7 +396,7 @@ class IndexMVIVF : public Index<metric> {
 
     GreedySearchResult out;
     out.dist_cmps = dist_cmps;
-    out.timings = {num_chamfer_cmps, t_dists, t_beam, t_rest};
+    out.timings = {t_dists, t_beam, t_rest};
     out.probe_list = std::move(top_probes);
     return out;
   }
@@ -508,61 +415,19 @@ class IndexMVIVF : public Index<metric> {
     const size_t use_nprobes = std::min(nprobes, L);
 
     parlay::internal::timer t;
-    double num_chamfer_cmps = 0.0;
     double t_dists = 0.0;
     double t_rest = 0.0;
 
     t.start();
+    size_t dist_cmps = L;
     auto centers_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
     auto scores = parlay::sequence<score_node>::uninitialized(L);
 
     if (!params.quantize_centers || active_quantizer == QT::None) {
       // Exact Chamfer distance to the representative centers.
       leaf_centers.distances(query, centers_dists.data());
-      num_chamfer_cmps = static_cast<double>(L);
     } else {
-      switch (active_quantizer) {
-        case QT::RaBitQ: {
-          auto &q_query = std::get<RQ_Q>(q_query_var);
-          auto &qcent = std::get<RQ_Set>(leaf_centers_quant);
-          qcent.distances_all(q_query, centers_dists.data());
-          break;
-        }
-        case QT::TurboQuant4Bit: {
-          auto &q_query = std::get<TQ4_Q>(q_query_var);
-          auto &qcent = std::get<TQ4_Set>(leaf_centers_quant);
-          qcent.distances_all(q_query, centers_dists.data());
-          break;
-        }
-        case QT::TurboQuantPQ4Bit: {
-          if (params.pq.block_size == 4) {
-            auto &q_query = std::get<TQPQ4_Q>(q_query_var);
-            auto &qcent = std::get<TQPQ4_Set>(leaf_centers_quant);
-            qcent.distances_all(q_query, centers_dists.data());
-          } else {
-            auto &q_query = std::get<TQPQ8_Q>(q_query_var);
-            auto &qcent = std::get<TQPQ8_Set>(leaf_centers_quant);
-            qcent.distances_all(q_query, centers_dists.data());
-          }
-          break;
-        }
-        case QT::PQ: {
-          auto &q_query = std::get<PQ_Q>(q_query_var);
-          auto &qcent = std::get<PQ_Set>(leaf_centers_quant);
-          qcent.distances_all(q_query, centers_dists.data());
-          break;
-        }
-        case QT::FastScan: {
-          auto &q_query = std::get<FS_Q>(q_query_var);
-          auto &qcent = std::get<FS_Set>(leaf_centers_quant);
-          qcent.distances_all(q_query, centers_dists.data());
-          break;
-        }
-        case QT::None:
-        default:
-          std::cerr << "Error: Invalid quantizer type in flat leaf search." << std::endl;
-          abort();
-      }
+      quant_distances_all(q_query_var, leaf_centers_quant, centers_dists.data());
     }
     parlay::parallel_for(0, L, [&](size_t i) {
       scores[i] = {centers_dists[i].second, leaves_flat[i]};
@@ -581,8 +446,8 @@ class IndexMVIVF : public Index<metric> {
     t.reset();
 
     out.probe_list = std::move(scores);
-    out.dist_cmps = 0;  // we only counted center distances as num_chamfer_cmps
-    out.timings = {num_chamfer_cmps, t_dists, /*t_beam=*/0.0, t_rest};
+    out.dist_cmps = dist_cmps;
+    out.timings = {t_dists, /*t_beam=*/0.0, t_rest};
     return out;
   }
 
@@ -606,41 +471,21 @@ class IndexMVIVF : public Index<metric> {
     QuantQuery q_query_var;
     t.start();
     switch (active_quantizer) {
-      case QT::RaBitQ: {
-        auto &m = std::get<RQ_Model>(quantizer);
-        q_query_var = m.quantize_query(query);
+      case QT::PQ: q_query_var = std::get<PQ_Model>(quantizer).quantize_query(query); break;
+      case QT::FastScan: q_query_var = std::get<FS_Model>(quantizer).quantize_query(query); break;
+      case QT::RaBitQ: q_query_var = std::get<RQ_Model>(quantizer).quantize_query(query); break;
+      case QT::TurboQuant4Bit:
+        q_query_var = std::get<TQ4_Model>(quantizer).quantize_query(query);
         break;
-      }
-      case QT::TurboQuant4Bit: {
-        auto &m = std::get<TQ4_Model>(quantizer);
-        q_query_var = m.quantize_query(query);
-        break;
-      }
-      case QT::TurboQuantPQ4Bit: {
+      case QT::TurboQuantPQ4Bit:
         if (params.pq.block_size == 4) {
-          auto &m = std::get<TQPQ4_Model>(quantizer);
-          q_query_var = m.quantize_query(query);
+          q_query_var = std::get<TQPQ4_Model>(quantizer).quantize_query(query);
         } else {
-          auto &m = std::get<TQPQ8_Model>(quantizer);
-          q_query_var = m.quantize_query(query);
+          q_query_var = std::get<TQPQ8_Model>(quantizer).quantize_query(query);
         }
         break;
-      }
-      case QT::PQ: {
-        auto &m = std::get<PQ_Model>(quantizer);
-        q_query_var = m.quantize_query(query);
-        break;
-      }
-      case QT::FastScan: {
-        auto &m = std::get<FS_Model>(quantizer);
-        q_query_var = m.quantize_query(query);
-        break;
-      }
-      case QT::None: {
-        q_query_var = std::monostate{};
-        break;
-      }
-      default: abort();
+      case QT::None:
+      default: q_query_var = std::monostate{}; break;
     }
     t_quantize = t.stop();
     t.reset();
@@ -650,7 +495,7 @@ class IndexMVIVF : public Index<metric> {
     // -------------------------
     GreedySearchResult gs;
     const size_t num_leaves = leaves_flat.size();
-    const double alpha = 0.5;  // heuristic threshold
+    const double alpha = 1.0;  // heuristic threshold: TODO: set this
     bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
     if (use_flat) {
       gs = flat_leaf_search(query, q_query_var, nprobes);
@@ -674,107 +519,86 @@ class IndexMVIVF : public Index<metric> {
     t_rest += t.stop();
     t.reset();
 
-    switch (active_quantizer) {
-      case QT::RaBitQ: {
-        t.start();
-        auto &q_query = std::get<RQ_Q>(q_query_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t *leaf = probe_list[i].second;
-          auto &qleaf = std::get<RQ_Set>(leaf->quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
-            visited[offsets[i] + j].first = leaf->data.get_id(j);
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::TurboQuant4Bit: {
-        t.start();
-        auto &q_query = std::get<TQ4_Q>(q_query_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t *leaf = probe_list[i].second;
-          auto &qleaf = std::get<TQ4_Set>(leaf->quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
-            visited[offsets[i] + j].first = leaf->data.get_id(j);
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::TurboQuantPQ4Bit: {
-        t.start();
-        if (params.pq.block_size == 4) {
-          auto &q_query = std::get<TQPQ4_Q>(q_query_var);
+    if (active_quantizer == QT::None) {
+      t_quantize = 0.0;
+      t.start();
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        node_t *leaf_node = probe_list[i].second;
+        leaf_node->data.distances(query, &visited[offsets[i]]);
+      });
+      t_distances = t.stop();
+      t.reset();
+    } else {
+      t.start();
+      switch (active_quantizer) {
+        case QT::PQ:
           parlay::parallel_for(0, nprobes, [&](size_t i) {
             node_t *leaf = probe_list[i].second;
-            auto &qleaf = std::get<TQPQ4_Set>(leaf->quantized_data);
-            qleaf.distances_all(q_query, &visited[offsets[i]]);
-            parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
-              visited[offsets[i] + j].first = leaf->data.get_id(j);
-            });
+            std::get<PQ_Set>(leaf->quantized_data)
+                .distances_all(std::get<PQ_Q>(q_query_var), &visited[offsets[i]]);
+            const size_t leaf_k = leaf->get_size();
+            parlay::parallel_for(
+                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
           });
-        } else {
-          auto &q_query = std::get<TQPQ8_Q>(q_query_var);
+          break;
+        case QT::FastScan:
           parlay::parallel_for(0, nprobes, [&](size_t i) {
             node_t *leaf = probe_list[i].second;
-            auto &qleaf = std::get<TQPQ8_Set>(leaf->quantized_data);
-            qleaf.distances_all(q_query, &visited[offsets[i]]);
-            parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
-              visited[offsets[i] + j].first = leaf->data.get_id(j);
+            std::get<FS_Set>(leaf->quantized_data)
+                .distances_all(std::get<FS_Q>(q_query_var), &visited[offsets[i]]);
+            const size_t leaf_k = leaf->get_size();
+            parlay::parallel_for(
+                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
+          });
+          break;
+        case QT::RaBitQ:
+          parlay::parallel_for(0, nprobes, [&](size_t i) {
+            node_t *leaf = probe_list[i].second;
+            std::get<RQ_Set>(leaf->quantized_data)
+                .distances_all(std::get<RQ_Q>(q_query_var), &visited[offsets[i]]);
+            const size_t leaf_k = leaf->get_size();
+            parlay::parallel_for(
+                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
+          });
+          break;
+        case QT::TurboQuant4Bit:
+          parlay::parallel_for(0, nprobes, [&](size_t i) {
+            node_t *leaf = probe_list[i].second;
+            std::get<TQ4_Set>(leaf->quantized_data)
+                .distances_all(std::get<TQ4_Q>(q_query_var), &visited[offsets[i]]);
+            const size_t leaf_k = leaf->get_size();
+            parlay::parallel_for(
+                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
+          });
+          break;
+        case QT::TurboQuantPQ4Bit:
+          if (params.pq.block_size == 4) {
+            parlay::parallel_for(0, nprobes, [&](size_t i) {
+              node_t *leaf = probe_list[i].second;
+              std::get<TQPQ4_Set>(leaf->quantized_data)
+                  .distances_all(std::get<TQPQ4_Q>(q_query_var), &visited[offsets[i]]);
+              const size_t leaf_k = leaf->get_size();
+              parlay::parallel_for(0, leaf_k, [&](size_t j) {
+                visited[offsets[i] + j].first = leaf->data.get_id(j);
+              });
             });
-          });
-        }
-        t_distances = t.stop();
-        t.reset();
-        break;
+          } else {
+            parlay::parallel_for(0, nprobes, [&](size_t i) {
+              node_t *leaf = probe_list[i].second;
+              std::get<TQPQ8_Set>(leaf->quantized_data)
+                  .distances_all(std::get<TQPQ8_Q>(q_query_var), &visited[offsets[i]]);
+              const size_t leaf_k = leaf->get_size();
+              parlay::parallel_for(0, leaf_k, [&](size_t j) {
+                visited[offsets[i] + j].first = leaf->data.get_id(j);
+              });
+            });
+          }
+          break;
+        case QT::None:
+        default: break;
       }
-      case QT::PQ: {
-        t.start();
-        auto &q_query = std::get<PQ_Q>(q_query_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t *leaf = probe_list[i].second;
-          auto &qleaf = std::get<PQ_Set>(leaf->quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
-            visited[offsets[i] + j].first = leaf->data.get_id(j);
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::FastScan: {
-        t.start();
-        auto &q_query = std::get<FS_Q>(q_query_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t *leaf = probe_list[i].second;
-          auto &qleaf = std::get<FS_Set>(leaf->quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, leaf->data.size(), [&](size_t j) {
-            visited[offsets[i] + j].first = leaf->data.get_id(j);
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::None: {
-        t_quantize = 0.0;
-        t.start();
-        auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t *leaf_node = probe_list[i].second;
-          leaf_dist_cmps[i] = leaf_node->data.distances(query, &visited[offsets[i]]);
-        });
-        dist_cmps += parlay::reduce(leaf_dist_cmps);
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
+      t_distances = t.stop();
+      t.reset();
     }
 
     t.start();
@@ -782,7 +606,8 @@ class IndexMVIVF : public Index<metric> {
     t_rest += t.stop();
     t.reset();
 
-    timings.push_back(total_size);
+    timings.push_back(dist_cmps);
+    dist_cmps += total_size;
     for (double time : gs.timings) {
       timings.push_back(time);
     }
@@ -798,7 +623,8 @@ class IndexMVIVF : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
+      this->rerank(query, points, visited, num_rerank, final_results);
+      dist_cmps += num_rerank;
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -829,7 +655,8 @@ class IndexMVIVF : public Index<metric> {
     // We aggregate this across internal nodes.
     double avg_child_fraction_imbalance = 0.0;  // average imbalance over internal nodes
     double max_child_fraction_imbalance = 0.0;  // worst-case imbalance over internal nodes
-    // Nodes with imbalance >= kBadImbalanceThreshold: (subtree_size, imbalance_ratio), sorted by subtree_size.
+    // Nodes with imbalance >= kBadImbalanceThreshold: (subtree_size, imbalance_ratio), sorted by
+    // subtree_size.
     static constexpr double kBadImbalanceThreshold = 0.8;
     std::vector<std::pair<size_t, double>> bad_imbalance_entries;
   };
@@ -1243,40 +1070,7 @@ class IndexMVIVF : public Index<metric> {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
 
         if (params.quantize_centers && active_quantizer != QT::None) {
-          switch (active_quantizer) {
-            case QT::PQ: {
-              auto &m = std::get<PQ_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::FastScan: {
-              auto &m = std::get<FS_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::RaBitQ: {
-              auto &m = std::get<RQ_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::TurboQuant4Bit: {
-              auto &m = std::get<TQ4_Model>(quantizer);
-              leaf_centers_quant = m.encode(leaf_centers);
-              break;
-            }
-            case QT::TurboQuantPQ4Bit: {
-              if (params.pq.block_size == 4) {
-                auto &m = std::get<TQPQ4_Model>(quantizer);
-                leaf_centers_quant = m.encode(leaf_centers);
-              } else {
-                auto &m = std::get<TQPQ8_Model>(quantizer);
-                leaf_centers_quant = m.encode(leaf_centers);
-              }
-              break;
-            }
-            case QT::None:
-            default: leaf_centers_quant = std::monostate{}; break;
-          }
+          leaf_centers_quant = encode_points_quantized(leaf_centers);
         }
       }
     }
@@ -1291,40 +1085,7 @@ class IndexMVIVF : public Index<metric> {
             if (!params.quantize_centers && !node->children.empty()) return;  // internal node
             if (node->data.size() == 0) return;
 
-            switch (active_quantizer) {
-              case QT::PQ: {
-                auto &m = std::get<PQ_Model>(quantizer);
-                node->quantized_data = m.encode(node->data);
-                break;
-              }
-              case QT::FastScan: {
-                auto &m = std::get<FS_Model>(quantizer);
-                node->quantized_data = m.encode(node->data);
-                break;
-              }
-              case QT::RaBitQ: {
-                auto &m = std::get<RQ_Model>(quantizer);
-                node->quantized_data = m.encode(node->data);
-                break;
-              }
-              case QT::TurboQuant4Bit: {
-                auto &m = std::get<TQ4_Model>(quantizer);
-                node->quantized_data = m.encode(node->data);
-                break;
-              }
-              case QT::TurboQuantPQ4Bit: {
-                if (params.pq.block_size == 4) {
-                  auto &m = std::get<TQPQ4_Model>(quantizer);
-                  node->quantized_data = m.encode(node->data);
-                } else {
-                  auto &m = std::get<TQPQ8_Model>(quantizer);
-                  node->quantized_data = m.encode(node->data);
-                }
-                break;
-              }
-              case QT::None:
-              default: node->quantized_data = std::monostate{}; break;
-            }
+            node->quantized_data = encode_points_quantized(node->data);
           },
           /*granularity=*/1);
     }
