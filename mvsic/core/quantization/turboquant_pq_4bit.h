@@ -36,6 +36,75 @@
 namespace mvsic {
 namespace turboquant_pq_4bit {
 
+// ---------------------------------------------------------
+// Running-min vector type: 64 floats (matches strip size)
+// ---------------------------------------------------------
+#ifdef __AVX512F__
+struct RunningMinV {
+  __m512 v[4];
+  void set_max() {
+    for (int i = 0; i < 4; ++i) v[i] = _mm512_set1_ps(std::numeric_limits<float>::max());
+  }
+  static RunningMinV max() {
+    RunningMinV r;
+    r.set_max();
+    return r;
+  }
+  inline float reduce() const {
+    __m512 m = _mm512_min_ps(_mm512_min_ps(v[0], v[1]), _mm512_min_ps(v[2], v[3]));
+    __m256 lo = _mm512_castps512_ps256(m);
+    __m256 hi = _mm512_extractf32x8_ps(m, 1);
+    __m256 m2 = _mm256_min_ps(lo, hi);
+    __m128 m128_lo = _mm256_castps256_ps128(m2);
+    __m128 m128_hi = _mm256_extractf128_ps(m2, 1);
+    __m128 m128 = _mm_min_ps(m128_lo, m128_hi);
+    m128 = _mm_min_ps(m128, _mm_shuffle_ps(m128, m128, _MM_SHUFFLE(1, 0, 3, 2)));
+    m128 = _mm_min_ps(m128, _mm_shuffle_ps(m128, m128, _MM_SHUFFLE(0, 0, 0, 1)));
+    return _mm_cvtss_f32(m128);
+  }
+};
+#elif defined(__AVX2__)
+struct RunningMinV {
+  __m256 v[8];
+  void set_max() {
+    for (int i = 0; i < 8; ++i) v[i] = _mm256_set1_ps(std::numeric_limits<float>::max());
+  }
+  static RunningMinV max() {
+    RunningMinV r;
+    r.set_max();
+    return r;
+  }
+  inline float reduce() const {
+    __m256 m = v[0];
+    for (int i = 1; i < 8; ++i) m = _mm256_min_ps(m, v[i]);
+    __m128 m128_lo = _mm256_castps256_ps128(m);
+    __m128 m128_hi = _mm256_extractf128_ps(m, 1);
+    __m128 m128 = _mm_min_ps(m128_lo, m128_hi);
+    m128 = _mm_min_ps(m128, _mm_shuffle_ps(m128, m128, _MM_SHUFFLE(1, 0, 3, 2)));
+    m128 = _mm_min_ps(m128, _mm_shuffle_ps(m128, m128, _MM_SHUFFLE(0, 0, 0, 1)));
+    return _mm_cvtss_f32(m128);
+  }
+};
+#else
+struct RunningMinV {
+  alignas(64) float data[64];
+  void set_max() {
+    for (int i = 0; i < 64; ++i) data[i] = std::numeric_limits<float>::max();
+  }
+  static RunningMinV max() {
+    RunningMinV r;
+    r.set_max();
+    return r;
+  }
+  inline float reduce() const {
+    float best = std::numeric_limits<float>::max();
+    for (int i = 0; i < 64; ++i)
+      if (data[i] < best) best = data[i];
+    return best;
+  }
+};
+#endif
+
 template<size_t BlockSize>
 struct BlockSizeTraits {
   static_assert(BlockSize == 1 || BlockSize == 2 || BlockSize == 4 || BlockSize == 8 ||
@@ -43,12 +112,40 @@ struct BlockSizeTraits {
                 "BlockSize must be 1, 2, 4, 8, or 16.");
   static constexpr size_t value = BlockSize;
   static constexpr size_t K = 16;
+  static inline float get_centroid_scale() {
+    if constexpr (BlockSize == 1) return kPQ_Int8Scale_D1_K16;
+    if constexpr (BlockSize == 2) return kPQ_Int8Scale_D2_K16;
+    if constexpr (BlockSize == 4) return kPQ_Int8Scale_D4_K16;
+    if constexpr (BlockSize == 8) return kPQ_Int8Scale_D8_K16;
+    if constexpr (BlockSize == 16) return kPQ_Int8Scale_D16_K16;
+    return 1.0f;
+  }
 };
 
 namespace internal {
 static constexpr size_t kStripSize = 64;
 // Clamp used in TurboQuant (matches turboquant_4bit/byte).
 static constexpr float kValueCap = 3.91724f;
+
+// One-hot table: row c has 1 at byte c, 0 elsewhere (16 bytes per row).
+alignas(16) static const uint8_t kOneHot[16][16] = {
+    {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+};
 }  // namespace internal
 
 template<bool Metric, size_t BlockSize>
@@ -106,98 +203,98 @@ class Quantized_Query {
   float norm_scaling_factor = 0.0f;
   float unquantized_squared_norm = 0.0f;
 
+  // sum(query_int8) for VNNI bias correction.
+  int32_t byte_sum = 0;
+  // (norm_scaling_factor * lut_int8_scale) / centroid_scale
+  float alpha = 1.0f;
+  float centroid_scale = 1.0f;
+
   Quantized_Query() = default;
 
   inline float distance(const Quantized_Point<Metric, BlockSize>& p) const {
     return p.distance(*this);
   }
 
-  // Generic fallback: parallel over points, each point uses scalar distance().
+  // Unified distances_all: uses optimized scan_64_chunk if available.
   template<typename EncRange>
   void distances_all(const EncRange& db, float* out) const {
     const size_t N = (db.n_points_raw_unpadded != 0) ? db.n_points_raw_unpadded : db.n_points_raw;
     if (N == 0) return;
-    parlay::parallel_for(
-        0, N, [&](size_t i) { out[i] = db[static_cast<size_t>(i)].distance(*this); },
-        /*granularity=*/1024);
-  }
+
+    if constexpr (EncRange::is_tqpq_fast) {
+      const size_t strip_stride = db.stride;
+      const size_t n_strips = (N + 63) / 64;
 
 #ifdef __AVX512F__
-  // AVX-512 FastScan-style scoring using the 8-bit LUT (lut_int8) plus a single
-  // global scale factor (lut_int8_scale). This processes contiguous strip-
-  // interleaved codes (64 points per strip).
-  template<typename PointRangeTy>
-  void distances_all(const Quantized_Point_Range<PointRangeTy, Metric, BlockSize>& enc,
-                     float* out) const {
-    const size_t N =
-        (enc.n_points_raw_unpadded != 0) ? enc.n_points_raw_unpadded : enc.n_points_raw;
-    if (N == 0) return;
+      const uint8_t* strip_data = db.packed_codes.data();
+      const float* norms = db.norm_scaling_factors.data();
+      const float* squared_norms = db.unquantized_squared_norms.data();
+      const size_t nb = num_blocks;
+      const __m256i low_mask = _mm256_set1_epi8(0x0F);
+      const float alpha_val = alpha;
+      const float usn_q = unquantized_squared_norm;
 
-    const uint8_t* strip_data = enc.packed_codes.data();
-    const float* norms = enc.norm_scaling_factors.data();
-    const float* squared_norms = enc.unquantized_squared_norms.data();
-    const size_t strip_stride = enc.stride;
-    const size_t n_strips = (N + 63) / 64;
+      parlay::parallel_for(
+          0, n_strips,
+          [&](size_t s) {
+            const uint8_t* codes_ptr = strip_data + s * strip_stride;
+            const float* ns = norms + s * 64;
+            const float* sq = squared_norms + s * 64;
+            const size_t base = s * 64;
+            const size_t count = std::min<size_t>(64, N - base);
 
-    const size_t nb = num_blocks;
-    const __m256i low_mask = _mm256_set1_epi8(0x0F);
+            __m512i acc_even = _mm512_setzero_si512();
+            __m512i acc_odd = _mm512_setzero_si512();
 
-    parlay::parallel_for(
-        0, n_strips,
-        [&](size_t s) {
-          const uint8_t* codes_ptr = strip_data + s * strip_stride;
-          const float* ns = norms + s * 64;
-          const float* sq = squared_norms + s * 64;
-          const size_t base = s * 64;
-          const size_t count = std::min<size_t>(64, N - base);
-
-          __m512i acc_even = _mm512_setzero_si512();
-          __m512i acc_odd = _mm512_setzero_si512();
-
-          for (size_t b = 0; b < nb; ++b) {
-            const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
-            codes_ptr += 32;
-
-            const __m256i codes_even = _mm256_and_si256(packed, low_mask);
-            // TODO:
-            const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
-
-            const __m128i lut128 = _mm_loadu_si128(
-                reinterpret_cast<const __m128i*>(&lut_int8[static_cast<size_t>(b) * K]));
-            const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
-
-            const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
-            const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
-
-            acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepi8_epi16(scores_even_i8));
-            acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepi8_epi16(scores_odd_i8));
-          }
-
-          alignas(64) int16_t raw_even[32];
-          alignas(64) int16_t raw_odd[32];
-          _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
-          _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
-
-          const float alpha_q = norm_scaling_factor;
-          for (size_t i = 0; i < count; ++i) {
-            const size_t pair = i / 2;
-            const bool is_even = ((i & 1u) == 0);
-            const int16_t s8 = is_even ? raw_even[pair] : raw_odd[pair];
-
-            const float acc_approx = static_cast<float>(s8) * lut_int8_scale;
-            const float alpha_x = ns[i];
-            const float dot_est = alpha_x * alpha_q * acc_approx;
-
-            if constexpr (Metric) {
-              out[base + i] = sq[i] + unquantized_squared_norm - 2.0f * dot_est;
-            } else {
-              out[base + i] = -dot_est;
+            for (size_t b = 0; b < nb; ++b) {
+              const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+              codes_ptr += 32;
+              const __m256i codes_even = _mm256_and_si256(packed, low_mask);
+              const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+              const __m256i lut256 = _mm256_broadcastsi128_si256(
+                  _mm_loadu_si128(reinterpret_cast<const __m128i*>(&lut_int8[b * 16])));
+              const __m256i s_even = _mm256_shuffle_epi8(lut256, codes_even);
+              const __m256i s_odd = _mm256_shuffle_epi8(lut256, codes_odd);
+              acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepi8_epi16(s_even));
+              acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepi8_epi16(s_odd));
             }
-          }
-        },
-        /*granularity=*/1);
-  }
+
+            alignas(64) int16_t r_even[32], r_odd[32];
+            _mm512_store_si512(reinterpret_cast<__m512i*>(r_even), acc_even);
+            _mm512_store_si512(reinterpret_cast<__m512i*>(r_odd), acc_odd);
+
+            for (size_t i = 0; i < count; ++i) {
+              const size_t pair = i / 2;
+              const int16_t s8 = (i % 2 == 0) ? r_even[pair] : r_odd[pair];
+              const float dot_est = ns[i] * alpha_val * static_cast<float>(s8);
+              out[base + i] = Metric ? (sq[i] + usn_q - 2.0f * dot_est) : -dot_est;
+            }
+          },
+          /*granularity=*/1);
+#else
+      parlay::parallel_for(
+          0, n_strips,
+          [&](size_t s) {
+            const uint8_t* codes_ptr = db.packed_codes.data() + s * strip_stride;
+            const float* ns = db.norm_scaling_factors.data() + s * 64;
+            const float* sq = db.unquantized_squared_norms.data() + s * 64;
+            const size_t base = s * 64;
+            if (base + 64 <= N) {
+              db.scan_64_chunk(*this, codes_ptr, out + base, ns, sq);
+            } else {
+              alignas(64) float tmp[64];
+              db.scan_64_chunk(*this, codes_ptr, tmp, ns, sq);
+              std::memcpy(out + base, tmp, (N - base) * sizeof(float));
+            }
+          },
+          /*granularity=*/1);
 #endif
+    } else {
+      parlay::parallel_for(
+          0, N, [&](size_t i) { out[i] = db[static_cast<size_t>(i)].distance(*this); },
+          /*granularity=*/1024);
+    }
+  }
 
   // Compute distances for a contiguous slice [start, start+count) of an encoded range.
   // Used by the multi-vector wrapper to compute per-cloud Chamfer efficiently.
@@ -206,63 +303,6 @@ class Quantized_Query {
                               size_t start, size_t count, float* out) const {
     if (count == 0) return;
 
-#ifdef __AVX512F__
-    const uint8_t* strip_data = enc.packed_codes.data();
-    const float* norms = enc.norm_scaling_factors.data();
-    const float* squared_norms = enc.unquantized_squared_norms.data();
-    const size_t strip_stride = enc.stride;
-
-    const size_t nb = num_blocks;
-    const __m256i low_mask = _mm256_set1_epi8(0x0F);
-    // Pre-bake query scaling (norm + LUT scale + centroid int8 scale) once.
-    const float alpha = (norm_scaling_factor * lut_int8_scale) / kPQ_Int8Scale_D1_K16;
-
-    auto compute_strip64 = [&](size_t strip_idx, float* out64) {
-      const uint8_t* codes_ptr = strip_data + strip_idx * strip_stride;
-      const float* ns = norms + strip_idx * 64;
-      const float* sq = squared_norms + strip_idx * 64;
-
-      __m512i acc_even = _mm512_setzero_si512();
-      __m512i acc_odd = _mm512_setzero_si512();
-
-      for (size_t b = 0; b < nb; ++b) {
-        const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
-        codes_ptr += 32;
-
-        const __m256i codes_even = _mm256_and_si256(packed, low_mask);
-        const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
-
-        const __m128i lut128 = _mm_loadu_si128(
-            reinterpret_cast<const __m128i*>(&lut_int8[static_cast<size_t>(b) * K]));
-        const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
-
-        const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
-        const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
-
-        acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepi8_epi16(scores_even_i8));
-        acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepi8_epi16(scores_odd_i8));
-      }
-
-      alignas(64) int16_t raw_even[32];
-      alignas(64) int16_t raw_odd[32];
-      _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
-      _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
-
-      for (size_t i = 0; i < 64; ++i) {
-        const size_t pair = i / 2;
-        const bool is_even = ((i & 1u) == 0);
-        const int16_t s8 = is_even ? raw_even[pair] : raw_odd[pair];
-
-        const float acc_approx = static_cast<float>(s8);
-        const float dot_est = ns[i] * alpha * acc_approx;
-        if constexpr (Metric) {
-          out64[i] = sq[i] + unquantized_squared_norm - 2.0f * dot_est;
-        } else {
-          out64[i] = -dot_est;
-        }
-      }
-    };
-
     const size_t end = start + count;
     const size_t strip0 = start / 64;
     const size_t lane0 = start % 64;
@@ -270,10 +310,15 @@ class Quantized_Query {
     const size_t lane1 = end % 64;
 
     alignas(64) float buf64[64];
+    const size_t strip_stride = enc.stride;
+    const uint8_t* strip_data = enc.packed_codes.data();
+    const float* norms = enc.norm_scaling_factors.data();
+    const float* squared_norms = enc.unquantized_squared_norms.data();
 
     size_t out_off = 0;
     if (strip0 == strip1) {
-      compute_strip64(strip0, buf64);
+      enc.scan_64_chunk(*this, strip_data + strip0 * strip_stride, buf64, norms + strip0 * 64,
+                        squared_norms + strip0 * 64);
       const size_t hi = (lane1 == 0) ? 64 : lane1;
       for (size_t lane = lane0; lane < hi; ++lane)
         out[out_off++] = buf64[lane];
@@ -281,29 +326,25 @@ class Quantized_Query {
     }
 
     // First partial strip.
-    compute_strip64(strip0, buf64);
+    enc.scan_64_chunk(*this, strip_data + strip0 * strip_stride, buf64, norms + strip0 * 64,
+                      squared_norms + strip0 * 64);
     for (size_t lane = lane0; lane < 64; ++lane)
       out[out_off++] = buf64[lane];
 
     // Full strips.
     for (size_t s = strip0 + 1; s < strip1; ++s) {
-      compute_strip64(s, buf64);
-      std::memcpy(out + out_off, buf64, 64 * sizeof(float));
+      enc.scan_64_chunk(*this, strip_data + s * strip_stride, out + out_off, norms + s * 64,
+                        squared_norms + s * 64);
       out_off += 64;
     }
 
     // Last partial strip (if lane1 != 0).
     if (lane1 != 0) {
-      compute_strip64(strip1, buf64);
+      enc.scan_64_chunk(*this, strip_data + strip1 * strip_stride, buf64, norms + strip1 * 64,
+                        squared_norms + strip1 * 64);
       for (size_t lane = 0; lane < lane1; ++lane)
         out[out_off++] = buf64[lane];
     }
-    return;
-#else
-    // Scalar fallback.
-    for (size_t i = 0; i < count; ++i)
-      out[i] = enc[start + i].distance(*this);
-#endif
   }
 };
 
@@ -324,8 +365,7 @@ inline float Quantized_Point<Metric, BlockSize>::distance(
   const float acc_f = static_cast<float>(acc);
   const float alpha_x = norm_scaling_factor;
   const float alpha_q = qq.norm_scaling_factor;
-  // You need to pass or store the global centroid scale, then:
-  const float dot_est = (alpha_x * alpha_q * acc_f) / kPQ_Int8Scale_D1_K16;
+  const float dot_est = (alpha_x * alpha_q * acc_f) / qq.centroid_scale;
 
   if constexpr (Metric) {
     // Approximate L2 distance: ||x - q||^2 ≈ ||x||^2 + ||q||^2 - 2 * dot_est.
@@ -359,87 +399,202 @@ class Quantized_Point_Range {
   uint32_t size() const noexcept { return static_cast<uint32_t>(n_points_raw_unpadded); }
   uint32_t get_dims() const noexcept { return static_cast<uint32_t>(dim); }
 
+  void distances_all(const Quantized_Query<Metric, BlockSize>& q, float* out) const {
+    q.distances_all(*this, out);
+  }
+
   size_t num_blocks_for_scan() const { return stride / 32; }
 
 #ifdef __AVX512F__
-  // FastScan-style: shuffle LUT + int16 accumulate, then SIMD decode + norm -> 64 distances.
+  // Optimized AVX-512 scan: dispatches to VNNI if available.
   void scan_64_chunk(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
-                     float* results, const float* norms_sqrt_64,
-                     const float* squared_norms_64) const {
-    const size_t nb = num_blocks_for_scan();
-    __m512i acc_even = _mm512_setzero_si512();
-    __m512i acc_odd = _mm512_setzero_si512();
-    const __m256i low_mask = _mm256_set1_epi8(0x0F);
+                     float* results, const float* ns_ptr, const float* sq_ptr) const {
+#ifdef __AVX512VNNI__
+    scan_64_chunk_vnni(q, codes_ptr, results, ns_ptr, sq_ptr);
+#else
+    scan_64_chunk_avx512_shuffle(q, codes_ptr, results, ns_ptr, sq_ptr);
+#endif
+  }
 
+  void scan_64_chunk_avx512_shuffle(const Quantized_Query<Metric, BlockSize>& q,
+                                   const uint8_t* codes_ptr, float* results, const float* ns_ptr,
+                                   const float* sq_ptr) const {
+    const size_t nb = num_blocks_for_scan();
+    __m512i acc_even = _mm512_setzero_si512(), acc_odd = _mm512_setzero_si512();
+    const __m256i low_mask = _mm256_set1_epi8(0x0F);
     for (size_t b = 0; b < nb; ++b) {
       const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
       codes_ptr += 32;
       const __m256i codes_even = _mm256_and_si256(packed, low_mask);
       const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
       const __m128i lut128 = _mm_loadu_si128(
-          reinterpret_cast<const __m128i*>(&q.int_lut[static_cast<size_t>(b) * 16]));
+          reinterpret_cast<const __m128i*>(&q.lut_int8[static_cast<size_t>(b) * 16]));
       const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
-      const __m256i scores_even_u8 = _mm256_shuffle_epi8(lut256, codes_even);
-      const __m256i scores_odd_u8 = _mm256_shuffle_epi8(lut256, codes_odd);
-      acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepu8_epi16(scores_even_u8));
-      acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepu8_epi16(scores_odd_u8));
+      const __m256i scores_even_i8 = _mm256_shuffle_epi8(lut256, codes_even);
+      const __m256i scores_odd_i8 = _mm256_shuffle_epi8(lut256, codes_odd);
+      acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepi8_epi16(scores_even_i8));
+      acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepi8_epi16(scores_odd_i8));
     }
-
-    alignas(64) uint16_t raw_even[32];
-    alignas(64) uint16_t raw_odd[32];
+    alignas(64) int16_t raw_even[32], raw_odd[32];
     _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
     _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
-
-    const __m512 scale_v = _mm512_set1_ps(q.scale);
-    const __m512 min_base_v = _mm512_set1_ps(q.min_dist * static_cast<float>(q.num_blocks));
-    const __m512 scale_q_v = _mm512_set1_ps(q.scale_q);
-    const __m512 sqn_q_v = _mm512_set1_ps(q.unquantized_squared_norm);
-
-    alignas(64) float decoded_even[32];
-    alignas(64) float decoded_odd[32];
-    __m256i re0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(raw_even));
-    __m256i re1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(raw_even + 16));
-    __m256i ro0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(raw_odd));
-    __m256i ro1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(raw_odd + 16));
-    __m512 fe0 = _mm512_add_ps(
-        min_base_v, _mm512_mul_ps(scale_v, _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(re0))));
-    __m512 fe1 = _mm512_add_ps(
-        min_base_v, _mm512_mul_ps(scale_v, _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(re1))));
-    __m512 fo0 = _mm512_add_ps(
-        min_base_v, _mm512_mul_ps(scale_v, _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(ro0))));
-    __m512 fo1 = _mm512_add_ps(
-        min_base_v, _mm512_mul_ps(scale_v, _mm512_cvtepi32_ps(_mm512_cvtepu16_epi32(ro1))));
-    _mm512_storeu_ps(decoded_even, fe0);
-    _mm512_storeu_ps(decoded_even + 16, fe1);
-    _mm512_storeu_ps(decoded_odd, fo0);
-    _mm512_storeu_ps(decoded_odd + 16, fo1);
-
-    for (int chunk = 0; chunk < 2; ++chunk) {
-      const int base = chunk * 32;
-      __m512 de = _mm512_loadu_ps(decoded_even + chunk * 16);
-      __m512 dob = _mm512_loadu_ps(decoded_odd + chunk * 16);
-      __m512 decoded_lo = _mm512_unpacklo_ps(de, dob);
-      __m512 decoded_hi = _mm512_unpackhi_ps(de, dob);
-      __m512 ns_lo = _mm512_loadu_ps(norms_sqrt_64 + base);
-      __m512 ns_hi = _mm512_loadu_ps(norms_sqrt_64 + base + 16);
-      __m512 sq_lo = _mm512_loadu_ps(squared_norms_64 + base);
-      __m512 sq_hi = _mm512_loadu_ps(squared_norms_64 + base + 16);
+    const float alpha = q.alpha;
+    for (int i = 0; i < 32; ++i) {
+      const float dot0 = ns_ptr[2 * i] * alpha * static_cast<float>(raw_even[i]);
+      const float dot1 = ns_ptr[2 * i + 1] * alpha * static_cast<float>(raw_odd[i]);
       if constexpr (Metric) {
-        __m512 qs_lo = _mm512_div_ps(sq_lo, _mm512_mul_ps(ns_lo, ns_lo));
-        __m512 qs_hi = _mm512_div_ps(sq_hi, _mm512_mul_ps(ns_hi, ns_hi));
-        __m512 re_lo = _mm512_mul_ps(_mm512_sub_ps(qs_lo, decoded_lo), _mm512_set1_ps(0.5f));
-        __m512 re_hi = _mm512_mul_ps(_mm512_sub_ps(qs_hi, decoded_hi), _mm512_set1_ps(0.5f));
-        __m512 dist_lo = _mm512_add_ps(sqn_q_v, _mm512_sub_ps(sq_lo, _mm512_add_ps(re_lo, re_lo)));
-        __m512 dist_hi = _mm512_add_ps(sqn_q_v, _mm512_sub_ps(sq_hi, _mm512_add_ps(re_hi, re_hi)));
-        _mm512_storeu_ps(results + base, dist_lo);
-        _mm512_storeu_ps(results + base + 16, dist_hi);
+        results[2 * i] = sq_ptr[2 * i] + q.unquantized_squared_norm - 2.0f * dot0;
+        results[2 * i + 1] = sq_ptr[2 * i + 1] + q.unquantized_squared_norm - 2.0f * dot1;
       } else {
-        __m512 dist_lo = _mm512_mul_ps(_mm512_mul_ps(decoded_lo, scale_q_v), ns_lo);
-        __m512 dist_hi = _mm512_mul_ps(_mm512_mul_ps(decoded_hi, scale_q_v), ns_hi);
-        _mm512_storeu_ps(results + base, dist_lo);
-        _mm512_storeu_ps(results + base + 16, dist_hi);
+        results[2 * i] = -dot0;
+        results[2 * i + 1] = -dot1;
       }
     }
+  }
+
+  void scan_64_chunk_vnni(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
+                         float* results, const float* ns_ptr, const float* sq_ptr) const {
+    const size_t nb = num_blocks_for_scan();
+    alignas(64) uint8_t onehot[64 * 16];
+    alignas(64) int32_t acc32[64];
+    for (int i = 0; i < 64; ++i) acc32[i] = 0;
+    for (size_t b = 0; b < nb; ++b) {
+      for (int i = 0; i < 32; ++i) {
+        uint8_t byte = codes_ptr[i], lo = byte & 0x0F, hi = byte >> 4;
+        std::memcpy(onehot + (2 * i) * 16, internal::kOneHot[lo], 16);
+        std::memcpy(onehot + (2 * i + 1) * 16, internal::kOneHot[hi], 16);
+      }
+      codes_ptr += 32;
+      const int8_t* lut = &q.lut_int8[b * 16];
+      for (int p = 0; p < 4; ++p) {
+        __m512i b_acc = _mm512_setzero_si512();
+        for (int t = 0; t < 4; ++t) {
+          const __m512i a = _mm512_loadu_si512(onehot + p * 256 + t * 64);
+          const __m512i bv = _mm512_set1_epi32(*reinterpret_cast<const int32_t*>(lut + t * 4));
+          b_acc = _mm512_dpbusd_epi32(b_acc, a, bv);
+        }
+        __m512i run = _mm512_loadu_si512(acc32 + p * 16);
+        _mm512_storeu_si512(acc32 + p * 16, _mm512_add_epi32(run, b_acc));
+      }
+    }
+    const float alpha = q.alpha;
+    for (int i = 0; i < 64; ++i) {
+      const float dot = ns_ptr[i] * alpha * static_cast<float>(acc32[i]);
+      results[i] = Metric ? (sq_ptr[i] + q.unquantized_squared_norm - 2.0f * dot) : -dot;
+    }
+  }
+
+  void scan_64_running_min(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
+                           const float* ns_ptr, const float* sq_ptr,
+                           RunningMinV& cur_min) const {
+    alignas(64) float res[64];
+    scan_64_chunk(q, codes_ptr, res, ns_ptr, sq_ptr);
+    for (int i = 0; i < 4; ++i)
+      cur_min.v[i] = _mm512_min_ps(cur_min.v[i], _mm512_load_ps(res + i * 16));
+  }
+
+  void scan_64_dual_query(const Quantized_Query<Metric, BlockSize>& q1,
+                         const Quantized_Query<Metric, BlockSize>& q2, const uint8_t* codes_ptr,
+                         const float* ns_ptr, const float* sq_ptr, RunningMinV& m1,
+                         RunningMinV& m2) const {
+    alignas(64) float r1[64], r2[64];
+    scan_64_chunk(q1, codes_ptr, r1, ns_ptr, sq_ptr);
+    scan_64_chunk(q2, codes_ptr, r2, ns_ptr, sq_ptr);
+    for (int i = 0; i < 4; ++i) {
+      m1.v[i] = _mm512_min_ps(m1.v[i], _mm512_load_ps(r1 + i * 16));
+      m2.v[i] = _mm512_min_ps(m2.v[i], _mm512_load_ps(r2 + i * 16));
+    }
+  }
+#elif defined(__AVX2__)
+  void scan_64_chunk(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
+                     float* results, const float* ns_ptr, const float* sq_ptr) const {
+    const size_t nb = num_blocks_for_scan();
+    __m256i acc_even_lo = _mm256_setzero_si256(), acc_even_hi = _mm256_setzero_si256();
+    __m256i acc_odd_lo = _mm256_setzero_si256(), acc_odd_hi = _mm256_setzero_si256();
+    const __m256i low_mask = _mm256_set1_epi8(0x0F);
+    for (size_t b = 0; b < nb; ++b) {
+      const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+      codes_ptr += 32;
+      const __m256i c_even = _mm256_and_si256(packed, low_mask);
+      const __m256i c_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+      const __m256i lut256 = _mm256_broadcastsi128_si256(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(&q.lut_int8[b * 16])));
+      const __m256i s_even = _mm256_shuffle_epi8(lut256, c_even);
+      const __m256i s_odd = _mm256_shuffle_epi8(lut256, c_odd);
+      acc_even_lo =
+          _mm256_add_epi16(acc_even_lo, _mm256_cvtepi8_epi16(_mm256_castsi256_si128(s_even)));
+      acc_even_hi =
+          _mm256_add_epi16(acc_even_hi, _mm256_cvtepi8_epi16(_mm256_extracti128_si256(s_even, 1)));
+      acc_odd_lo = _mm256_add_epi16(acc_odd_lo, _mm256_cvtepi8_epi16(_mm256_castsi256_si128(s_odd)));
+      acc_odd_hi =
+          _mm256_add_epi16(acc_odd_hi, _mm256_cvtepi8_epi16(_mm256_extracti128_si256(s_odd, 1)));
+    }
+    alignas(64) int16_t r_even[32], r_odd[32];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(r_even), acc_even_lo);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(r_even + 16), acc_even_hi);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(r_odd), acc_odd_lo);
+    _mm256_store_si256(reinterpret_cast<__m256i*>(r_odd + 16), acc_odd_hi);
+    const float alpha = q.alpha;
+    for (int i = 0; i < 32; ++i) {
+      float d0 = ns_ptr[2 * i] * alpha * r_even[i], d1 = ns_ptr[2 * i + 1] * alpha * r_odd[i];
+      results[2 * i] = Metric ? (sq_ptr[2 * i] + q.unquantized_squared_norm - 2.0f * d0) : -d0;
+      results[2 * i + 1] =
+          Metric ? (sq_ptr[2 * i + 1] + q.unquantized_squared_norm - 2.0f * d1) : -d1;
+    }
+  }
+
+  void scan_64_running_min(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
+                           const float* ns_ptr, const float* sq_ptr,
+                           RunningMinV& cur_min) const {
+    alignas(64) float res[64];
+    scan_64_chunk(q, codes_ptr, res, ns_ptr, sq_ptr);
+    for (int i = 0; i < 8; ++i) cur_min.v[i] = _mm256_min_ps(cur_min.v[i], _mm256_load_ps(res + i * 8));
+  }
+
+  void scan_64_dual_query(const Quantized_Query<Metric, BlockSize>& q1,
+                         const Quantized_Query<Metric, BlockSize>& q2, const uint8_t* codes_ptr,
+                         const float* ns_ptr, const float* sq_ptr, RunningMinV& m1,
+                         RunningMinV& m2) const {
+    alignas(64) float r1[64], r2[64];
+    scan_64_chunk(q1, codes_ptr, r1, ns_ptr, sq_ptr);
+    scan_64_chunk(q2, codes_ptr, r2, ns_ptr, sq_ptr);
+    for (int i = 0; i < 8; ++i) {
+      m1.v[i] = _mm256_min_ps(m1.v[i], _mm256_load_ps(r1 + i * 8));
+      m2.v[i] = _mm256_min_ps(m2.v[i], _mm256_load_ps(r2 + i * 8));
+    }
+  }
+#else
+  void scan_64_chunk(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
+                     float* results, const float* ns_ptr, const float* sq_ptr) const {
+    const size_t nb = num_blocks_for_scan();
+    for (int lane = 0; lane < 64; ++lane) {
+      int32_t acc = 0;
+      for (size_t b = 0; b < nb; ++b) {
+        uint8_t packed = codes_ptr[b * 32 + (lane / 2)];
+        uint8_t code = (lane % 2 == 0) ? (packed & 0x0F) : (packed >> 4);
+        acc += q.lut_int32[b * 16 + code];
+      }
+      const float dot =
+          (static_cast<float>(acc) * q.norm_scaling_factor * ns_ptr[lane]) / q.centroid_scale;
+      results[lane] = Metric ? (sq_ptr[lane] + q.unquantized_squared_norm - 2.0f * dot) : -dot;
+    }
+  }
+
+  void scan_64_running_min(const Quantized_Query<Metric, BlockSize>& q, const uint8_t* codes_ptr,
+                           const float* ns_ptr, const float* sq_ptr,
+                           RunningMinV& cur_min) const {
+    alignas(64) float res[64];
+    scan_64_chunk(q, codes_ptr, res, ns_ptr, sq_ptr);
+    for (int i = 0; i < 64; ++i)
+      if (res[i] < cur_min.data[i]) cur_min.data[i] = res[i];
+  }
+
+  void scan_64_dual_query(const Quantized_Query<Metric, BlockSize>& q1,
+                         const Quantized_Query<Metric, BlockSize>& q2, const uint8_t* codes_ptr,
+                         const float* ns_ptr, const float* sq_ptr, RunningMinV& m1,
+                         RunningMinV& m2) const {
+    scan_64_running_min(q1, codes_ptr, ns_ptr, sq_ptr, m1);
+    scan_64_running_min(q2, codes_ptr, ns_ptr, sq_ptr, m2);
   }
 #endif
 
@@ -605,7 +760,7 @@ class Model {
     const float inv_norm = 1.0f / norm;
     const float hadamard_scale = std::sqrt(static_cast<float>(padded_dim));
     for (size_t i = 0; i < padded_dim; ++i)
-      ws[i] *= inv_norm * hadamard_scale;
+      ws[i] *= inv_norm * hadamard_scale * signs[i];
 
     float quantized_sq_norm = 0.0f;
     for (size_t b = 0; b < num_blocks; ++b) {
@@ -767,6 +922,7 @@ class Model {
     Quantized_Query<Metric, BlockSize> qq;
     qq.num_blocks = num_blocks;
     qq.num_bytes_per_datapoint = num_bytes_per_datapoint;
+    qq.centroid_scale = codebook_scale_;
     qq.lut_int32.assign(num_blocks * 16, 0);
     qq.lut_int8.assign(num_blocks * 16, 0);
     std::vector<float> q_rot(padded_dim);
@@ -782,7 +938,7 @@ class Model {
     const float norm = std::sqrt(sqr_norm);
     const float hadamard_scale = std::sqrt(static_cast<float>(padded_dim));
     for (size_t i = 0; i < padded_dim; ++i)
-      q_rot[i] *= (1.0f / norm) * hadamard_scale;
+      q_rot[i] *= (1.0f / norm) * hadamard_scale * signs[i];
 
     // Clamp in TurboQuant space, same as turboquant_4bit.
     for (size_t i = 0; i < padded_dim; ++i)
@@ -798,11 +954,14 @@ class Model {
       max_value = std::max(max_value, std::abs(q_rot[i]));
     const float s_q_global = 127.0f / max_value;
 
+    int32_t total_byte_sum = 0;
     const int8_t* c_all = codebook_int8_.data();
     for (size_t b = 0; b < num_blocks; ++b) {
       for (size_t d = 0; d < BlockSize; ++d) {
         const float v = q_rot[b * BlockSize + d] * s_q_global;
-        q_int8[b * BlockSize + d] = static_cast<int8_t>(std::clamp(std::round(v), -127.0f, 127.0f));
+        int8_t snapped = static_cast<int8_t>(std::clamp(std::round(v), -127.0f, 127.0f));
+        q_int8[b * BlockSize + d] = snapped;
+        total_byte_sum += static_cast<int32_t>(snapped);
       }
       const int8_t* q_b = q_int8.data() + b * BlockSize;
       for (size_t k = 0; k < K; ++k) {
@@ -812,11 +971,9 @@ class Model {
         qq.lut_int32[b * 16 + k] = dot;
       }
     }
+    qq.byte_sum = total_byte_sum;
 
     // Build an 8-bit compressed LUT from lut_int32 for fast SIMD scoring.
-    // We use a single global scale per query so that:
-    //   lut_int32[b,k] ≈ lut_int8[b,k] * lut_int8_scale,
-    // with lut_int8 in [-127,127].
     int32_t max_abs = 0;
     for (size_t i = 0; i < qq.lut_int32.size(); ++i)
       max_abs = std::max<int32_t>(max_abs, std::abs(qq.lut_int32[i]));
@@ -844,6 +1001,8 @@ class Model {
     } else {
       qq.norm_scaling_factor = 0.0f;
     }
+
+    qq.alpha = (qq.norm_scaling_factor * qq.lut_int8_scale) / qq.centroid_scale;
     return qq;
   }
 

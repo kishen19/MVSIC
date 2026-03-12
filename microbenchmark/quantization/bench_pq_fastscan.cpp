@@ -706,6 +706,32 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
               << check_db << " db) ===\n";
     std::cout << "TQ 4b max |approx - exact|: " << tq_max_ae
               << "  mean |approx - exact|: " << tq_mean_ae << "\n";
+
+    // TQ-PQ (B=8)
+    double tqpq_max_ae = 0.0;
+    double tqpq_mean_ae = 0.0;
+    size_t bi_8 = 0;
+    bool found_8 = false;
+    for (size_t bi = 0; bi < num_tqpq; ++bi) {
+      if (tqpq_blocks[bi] == 8) { bi_8 = bi; found_8 = true; break; }
+    }
+    if (found_8) {
+      for (size_t qi = 0; qi < check_queries; ++qi) {
+        tqpq_q[bi_8][qi].distances_all(tqpq_models[bi_8], tq_out.data());
+        const float* q = reinterpret_cast<const float*>(queries.location(qi));
+        for (size_t i = 0; i < check_db; ++i) {
+          static thread_local efanna2e::DistanceInnerProduct distfunc;
+          float exact = -distfunc.compare(q, reinterpret_cast<const float*>(db.location(i)), D);
+          float approx = tq_out[i];
+          double ae = std::fabs(static_cast<double>(exact) - static_cast<double>(approx));
+          tqpq_max_ae = std::max(tqpq_max_ae, ae);
+          tqpq_mean_ae += ae;
+        }
+      }
+      tqpq_mean_ae /= static_cast<double>(check_count);
+      std::cout << "TQ-PQ (B=8) max |approx - exact|: " << tqpq_max_ae
+                << "  mean |approx - exact|: " << tqpq_mean_ae << "\n";
+    }
   }
 
   std::cout << "\n(sink=" << sink << ")\n";
