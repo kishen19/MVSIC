@@ -75,6 +75,15 @@ cc_library(
 )
 
 cc_library(
+    name = "turboquant_pq_sym_scalar",
+    hdrs = [
+        "turboquant_pq_codebooks.h",
+        "turboquant_pq_sym_scalar.h",
+    ],
+    deps = ["@rabitq//:rabitqlib"],
+)
+
+cc_library(
     name = "turboquant_byte",
     hdrs = ["turboquant_byte.h"],
     deps = [
@@ -97,8 +106,8 @@ cc_library(
     hdrs = ["wrapper.h"],
     deps = [
         ":turboquant_4bit",
-        ":turboquant_pq_4bit",
         ":turboquant_byte",
+        ":turboquant_pq_4bit",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
     ],

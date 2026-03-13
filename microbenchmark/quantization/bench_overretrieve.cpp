@@ -58,6 +58,7 @@
 #include "mvsic/core/quantization/turboquant_byte.h"
 #include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/turboquant_pq_4bit_scalar.h"
+#include "mvsic/core/quantization/turboquant_pq_sym_scalar.h"
 
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/types/l2_point.h"
@@ -139,6 +140,24 @@ struct IbinGroundTruth {
   std::vector<float> distances;  // [num_queries * k]
 };
 
+// Method-selection flags: which quantization methods / block sizes to run.
+struct MethodFlags {
+  // TQ-4bit (TurboQuant 4-bit main method).
+  bool run_tq = true;
+
+  // TQ-PQ fast path (AVX-512) per block size.
+  bool run_tqpq_B1 = true;
+  bool run_tqpq_B2 = true;
+  bool run_tqpq_B4 = true;
+  bool run_tqpq_B8 = true;
+
+  // Symmetric scalar TQ-PQ per block size (B = 1,2,4,8).
+  bool run_tqpq_sym_B1 = true;
+  bool run_tqpq_sym_B2 = true;
+  bool run_tqpq_sym_B4 = true;
+  bool run_tqpq_sym_B8 = true;
+};
+
 // ParlayANN ground-truth format ("ibin", used by big-ann-benchmarks):
 // int32 num_queries, int32 k, then num_queries*k int32 ids, then num_queries*k float distances.
 static IbinGroundTruth load_ibin_ground_truth(const char* path) {
@@ -175,8 +194,8 @@ static IbinGroundTruth load_ibin_ground_truth(const char* path) {
 template<bool Metric, typename DBRange, typename QRange>
 static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_block,
                          uint32_t rbits, uint32_t tqpq_block, uint32_t Kmax, float rec99,
-                         const IbinGroundTruth* gt = nullptr, bool run_pq = true,
-                         bool run_rabitq = true) {
+                         const IbinGroundTruth* gt, bool run_pq, bool run_rabitq,
+                         const MethodFlags& mflags) {
   const size_t N = db.size();
   const size_t Q = queries.size();
   const uint32_t D = static_cast<uint32_t>(db.get_dims());
@@ -221,12 +240,16 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
   }
 
   turboquant_4bit::Model<Metric> tq_model;
-  tq_model.train(db);
-  auto tq_db = tq_model.encode(db);
+  decltype(tq_model.encode(db)) tq_db;
+  if (mflags.run_tq) {
+    tq_model.train(db);
+    tq_db = tq_model.encode(db);
+  }
 
   turboquant_byte::Model<Metric> btq_model;
-  btq_model.train(db);
-  auto btq_db = btq_model.encode(db);
+  // Byte TQ path is currently disabled below; keep training gated if re-enabled.
+  // btq_model.train(db);
+  // auto btq_db = btq_model.encode(db);
 
   std::vector<std::pair<uint32_t, float>> approx_scores(N);
   std::vector<float> approx_distances(N);
@@ -241,16 +264,24 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
     TQPQ16_2 = 5,
     TQPQ16_4 = 6,
     TQPQ16_8 = 7,
-    TQPQ_SCALAR_1 = 8,
-    TQPQ_SCALAR_2 = 9,
-    TQPQ_SCALAR_4 = 10,
-    TQPQ_SCALAR_8 = 11,
+    TQPQ_SYM_SCALAR_1 = 8,
+    TQPQ_SYM_SCALAR_2 = 9,
+    TQPQ_SYM_SCALAR_4 = 10,
+    TQPQ_SYM_SCALAR_8 = 11,
     NUM_METHODS = 12
   };
-  const char* method_names[NUM_METHODS] = {
-      "FastScan",        "RaBitQ",          "TQ-4bit",        "Byte TQ",
-      "TQ-PQ-16-1",      "TQ-PQ-16-2",      "TQ-PQ-16-4",     "TQ-PQ-16-8",
-      "TQ-PQ-scalar-B1", "TQ-PQ-scalar-B2", "TQ-PQ-scalar-B4","TQ-PQ-scalar-B8"};
+  const char* method_names[NUM_METHODS] = {"FastScan",
+                                           "RaBitQ",
+                                           "TQ-4bit",
+                                           "Byte TQ",
+                                           "TQ-PQ-16-1",
+                                           "TQ-PQ-16-2",
+                                           "TQ-PQ-16-4",
+                                           "TQ-PQ-16-8",
+                                           "TQ-PQ-sym-scalar-B1",
+                                           "TQ-PQ-sym-scalar-B2",
+                                           "TQ-PQ-sym-scalar-B4",
+                                           "TQ-PQ-sym-scalar-B8"};
 
   std::vector<double> sum_M(NUM_METHODS * Kgrid.size(), 0.0);
   auto idx2 = [&](Method m, size_t k_i) { return static_cast<size_t>(m) * Kgrid.size() + k_i; };
@@ -336,7 +367,7 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
         tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
       run_method(RABITQ);
     }
-    {
+    if (mflags.run_tq) {
       auto qq = tq_model.quantize_query(q);
       qq.distances_contiguous(tq_db.packed_codes.data(), tq_db.norm_scaling_factors.data(),
                               tq_db.unquantized_squared_norms.data(), tq_db.stride, N,
@@ -345,14 +376,15 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
         tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
       run_method(TQ4BIT);
     }
-    {
-      auto qq = btq_model.quantize_query(q);
-      for (size_t i = 0; i < N; ++i)
-        tl_dists[i] = qq.distance(btq_db[i]);
-      for (size_t i = 0; i < N; ++i)
-        tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
-      run_method(BYTETQ);
-    }
+    // Byte TQ (currently disabled).
+    // if (false) {
+    //   auto qq = btq_model.quantize_query(q);
+    //   for (size_t i = 0; i < N; ++i)
+    //     tl_dists[i] = qq.distance(btq_db[i]);
+    //   for (size_t i = 0; i < N; ++i)
+    //     tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
+    //   run_method(BYTETQ);
+    // }
   });
 
   for (size_t qi = 0; qi < Q; ++qi)
@@ -384,75 +416,81 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
         }
       }
     };
-    // auto run_scalar_tqpq = [&](auto& tqpq_m, Method meth) {
-    //   const size_t pdim = tqpq_m.padded_dim;
-    //   std::vector<turboquant_pq_scalar::EncodedVec> scalar_db(N);
-    //   std::vector<float> ws;
-    //   for (size_t i = 0; i < N; ++i) {
-    //     const float* p = reinterpret_cast<const float*>(db.location(i));
-    //     scalar_db[i] = turboquant_pq_scalar::encode_single<
-    //         std::decay_t<decltype(tqpq_m)>::block_size>(tqpq_m, p, ws);
-    //   }
-    //   for (size_t qi = 0; qi < Q; ++qi) {
-    //     const float* q = reinterpret_cast<const float*>(queries.location(qi));
-    //     auto qq = turboquant_pq_scalar::prepare_query<
-    //         std::decay_t<decltype(tqpq_m)>::block_size>(tqpq_m, q);
-    //     for (size_t i = 0; i < N; ++i) {
-    //       approx_scores[i] = {
-    //           static_cast<uint32_t>(i),
-    //           turboquant_pq_scalar::distance<std::decay_t<decltype(tqpq_m)>::block_size>(
-    //               scalar_db[i], qq, pdim, Metric)};
-    //     }
-    //     parlay::sort_inplace(approx_scores,
-    //                         [](const auto& a, const auto& b) { return a.second < b.second; });
-    //     std::vector<uint32_t> approx_ids;
-    //     approx_ids.reserve(N);
-    //     for (const auto& p : approx_scores)
-    //       approx_ids.push_back(p.first);
-    //     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
-    //       const size_t K = static_cast<size_t>(Kgrid[k_i]);
-    //       const size_t need = static_cast<size_t>(std::ceil(rec99 * static_cast<float>(K)));
-    //       const size_t M = min_M_for_recall(approx_ids, exact_sets_per_query[qi][k_i], need);
-    //       sum_M[idx2(meth, k_i)] += static_cast<double>(M);
-    //     }
-    //   }
-    // };
+    auto run_sym_scalar_tqpq = [&](auto& tqpq_m, Method meth) {
+      using ModelT = std::decay_t<decltype(tqpq_m)>;
+      constexpr size_t B = ModelT::block_size;
+      const size_t pdim = tqpq_m.padded_dim;
 
-    if (D >= 1 && (D % 1 == 0)) {
+      std::vector<mvsic::turboquant_pq_sym_scalar::EncodedVec> scalar_db(N);
+      std::vector<float> ws;
+      for (size_t i = 0; i < N; ++i) {
+        const float* p = reinterpret_cast<const float*>(db.location(i));
+        scalar_db[i] = mvsic::turboquant_pq_sym_scalar::encode_single<B>(tqpq_m, p, ws);
+      }
+
+      std::vector<float> ws_q;
+      for (size_t qi = 0; qi < Q; ++qi) {
+        const float* q = reinterpret_cast<const float*>(queries.location(qi));
+        auto qq = mvsic::turboquant_pq_sym_scalar::prepare_query<B>(tqpq_m, q, ws_q);
+        for (size_t i = 0; i < N; ++i) {
+          approx_scores[i] = {
+              static_cast<uint32_t>(i),
+              mvsic::turboquant_pq_sym_scalar::distance<B>(scalar_db[i], qq, pdim, Metric)};
+        }
+        parlay::sort_inplace(approx_scores,
+                             [](const auto& a, const auto& b) { return a.second < b.second; });
+        std::vector<uint32_t> approx_ids;
+        approx_ids.reserve(N);
+        for (const auto& p : approx_scores)
+          approx_ids.push_back(p.first);
+        for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
+          const size_t K = static_cast<size_t>(Kgrid[k_i]);
+          const size_t need = K;  // full recall@K
+          const size_t M = min_M_for_recall(approx_ids, exact_sets_per_query[qi][k_i], need);
+          sum_M[idx2(meth, k_i)] += static_cast<double>(M);
+        }
+      }
+    };
+
+    if (D >= 1 && (D % 1 == 0) &&
+        (mflags.run_tqpq_B1 || mflags.run_tqpq_sym_B1)) {
       turboquant_pq_4bit::Model<Metric, 1> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_1);
+      if (mflags.run_tqpq_B1) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_1);
 #endif
-      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_1);
+      if (mflags.run_tqpq_sym_B1) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_1);
     }
-    if (D >= 2 && (D % 2 == 0)) {
+    if (D >= 2 && (D % 2 == 0) &&
+        (mflags.run_tqpq_B2 || mflags.run_tqpq_sym_B2)) {
       turboquant_pq_4bit::Model<Metric, 2> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_2);
+      if (mflags.run_tqpq_B2) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_2);
 #endif
-      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_2);
+      if (mflags.run_tqpq_sym_B2) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_2);
     }
-    if (D >= 4 && (D % 4 == 0)) {
+    if (D >= 4 && (D % 4 == 0) &&
+        (mflags.run_tqpq_B4 || mflags.run_tqpq_sym_B4)) {
       turboquant_pq_4bit::Model<Metric, 4> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_4);
+      if (mflags.run_tqpq_B4) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_4);
 #endif
-      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_4);
+      if (mflags.run_tqpq_sym_B4) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_4);
     }
-    if (D >= 8 && (D % 8 == 0)) {
+    if (D >= 8 && (D % 8 == 0) &&
+        (mflags.run_tqpq_B8 || mflags.run_tqpq_sym_B8)) {
       turboquant_pq_4bit::Model<Metric, 8> tqpq_m;
       tqpq_m.train(db);
       auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_8);
+      if (mflags.run_tqpq_B8) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_8);
 #endif
-      // run_scalar_tqpq(tqpq_m, TQPQ_SCALAR_8);
+      if (mflags.run_tqpq_sym_B8) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_8);
     }
   }
 
@@ -470,7 +508,23 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
   std::cout << "\n";
   std::cout << std::string(method_w + int(col_w * Kgrid.size()), '-') << "\n";
 
+  // Decide which methods were actually enabled.
+  bool method_enabled[NUM_METHODS] = {};
+  method_enabled[FASTSCAN] = true;
+  method_enabled[RABITQ] = run_rabitq;
+  method_enabled[TQ4BIT] = mflags.run_tq;
+  // BYTETQ currently disabled.
+  method_enabled[TQPQ16_1] = run_pq && mflags.run_tqpq_B1;
+  method_enabled[TQPQ16_2] = run_pq && mflags.run_tqpq_B2;
+  method_enabled[TQPQ16_4] = run_pq && mflags.run_tqpq_B4;
+  method_enabled[TQPQ16_8] = run_pq && mflags.run_tqpq_B8;
+  method_enabled[TQPQ_SYM_SCALAR_1] = mflags.run_tqpq_sym_B1;
+  method_enabled[TQPQ_SYM_SCALAR_2] = mflags.run_tqpq_sym_B2;
+  method_enabled[TQPQ_SYM_SCALAR_4] = mflags.run_tqpq_sym_B4;
+  method_enabled[TQPQ_SYM_SCALAR_8] = mflags.run_tqpq_sym_B8;
+
   for (int meth = 0; meth < NUM_METHODS; ++meth) {
+    if (!method_enabled[meth]) continue;
     std::cout << std::left << std::setw(method_w) << method_names[meth];
     for (size_t k_i = 0; k_i < Kgrid.size(); ++k_i) {
       const double avg_M = sum_M[idx2(static_cast<Method>(meth), k_i)] / std::max<size_t>(1, Q);
@@ -487,7 +541,11 @@ int main(int argc, char** argv) {
                 "[-i <dbFile>] [-q <qFile>] [-gt <gtFile>] "
                 "[-N <n>] [-Q <q>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-fs_block <b>] [-rbits <b>] [-tqpq_block <b>] "
-                "[-Kmax <k>] [-rec99 <f>] [-pq] [-rabitq]");
+                "[-Kmax <k>] [-rec99 <f>] "
+                "[-pq] [-rabitq] "
+                "[-tq] "
+                "[-tqpq] [-tqpq1] [-tqpq2] [-tqpq4] [-tqpq8] "
+                "[-tqpqsym]");
 
   std::string df = P.getOptionValue("-dist_func", "IP");
   uint32_t fs_block = static_cast<uint32_t>(P.getOptionIntValue("-fs_block", 8));
@@ -497,6 +555,48 @@ int main(int argc, char** argv) {
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
   bool run_pq = P.getOption("-pq");
   bool run_rabitq = P.getOption("-rabitq");
+
+  // New method-selection flags.
+  bool flag_tq = P.getOption("-tq");
+  bool flag_tqpq = P.getOption("-tqpq");
+  bool flag_tqpq1 = P.getOption("-tqpq1");
+  bool flag_tqpq2 = P.getOption("-tqpq2");
+  bool flag_tqpq4 = P.getOption("-tqpq4");
+  bool flag_tqpq8 = P.getOption("-tqpq8");
+  bool flag_tqpqsym = P.getOption("-tqpqsym");
+
+  bool any_new_flag =
+      flag_tq || flag_tqpq || flag_tqpq1 || flag_tqpq2 || flag_tqpq4 || flag_tqpq8 || flag_tqpqsym;
+
+  MethodFlags mflags;
+  if (!any_new_flag) {
+    // Default: preserve original behavior (all methods on).
+    mflags.run_tq = true;
+    mflags.run_tqpq_B1 = true;
+    mflags.run_tqpq_B2 = true;
+    mflags.run_tqpq_B4 = true;
+    mflags.run_tqpq_B8 = true;
+    mflags.run_tqpq_sym_B1 = true;
+    mflags.run_tqpq_sym_B2 = true;
+    mflags.run_tqpq_sym_B4 = true;
+    mflags.run_tqpq_sym_B8 = true;
+  } else {
+    // If any new flags are given, they define exactly what to run.
+    mflags.run_tq = flag_tq;
+
+    bool any_tqpq_block_flag = flag_tqpq1 || flag_tqpq2 || flag_tqpq4 || flag_tqpq8;
+
+    mflags.run_tqpq_B1 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq1;
+    mflags.run_tqpq_B2 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq2;
+    mflags.run_tqpq_B4 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq4;
+    mflags.run_tqpq_B8 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq8;
+
+    // Symmetric scalar TQ-PQ: one flag controls all supported block sizes.
+    mflags.run_tqpq_sym_B1 = flag_tqpqsym;
+    mflags.run_tqpq_sym_B2 = flag_tqpqsym;
+    mflags.run_tqpq_sym_B4 = flag_tqpqsym;
+    mflags.run_tqpq_sym_B8 = flag_tqpqsym;
+  }
 
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);
   const char* gt_file = P.getOptionValue("-gt");
@@ -537,7 +637,7 @@ int main(int argc, char** argv) {
         }
       }
       return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr,
-                                 run_pq, run_rabitq);
+                                 run_pq, run_rabitq, mflags);
     }
 
     mvsic::PointRange<float, mvsic::IP_Point<float>> db(const_cast<char*>(db_file));
@@ -558,7 +658,7 @@ int main(int argc, char** argv) {
       }
     }
     return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, gt_ptr,
-                                run_pq, run_rabitq);
+                                run_pq, run_rabitq, mflags);
   }
 
   // Synthetic mode
@@ -577,8 +677,8 @@ int main(int argc, char** argv) {
 
   if (df == "L2" || df == "l2") {
     return run_benchmark<true>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr,
-                               run_pq, run_rabitq);
+                               run_pq, run_rabitq, mflags);
   }
   return run_benchmark<false>(db, queries, fs_block, rbits, tqpq_block, Kmax, rec99, nullptr,
-                              run_pq, run_rabitq);
+                              run_pq, run_rabitq, mflags);
 }
