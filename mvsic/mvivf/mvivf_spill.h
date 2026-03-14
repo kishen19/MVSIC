@@ -39,7 +39,7 @@ namespace mvsic {
 */
 
 template<bool metric>
-class IndexMVIVF : public Index<metric> {
+class IndexMVIVFSpill : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Index<metric>::d;                           // Embedding dimension
@@ -120,8 +120,8 @@ class IndexMVIVF : public Index<metric> {
   // Stats
   size_t kmeanstree_height = 0;
 
-  IndexMVIVF(size_t d_) noexcept : params(IndexParams::mvivf()) { d = d_; }
-  IndexMVIVF(size_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
+  IndexMVIVFSpill(size_t d_) noexcept : params(IndexParams::mvivf()) { d = d_; }
+  IndexMVIVFSpill(size_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
 
   void init_center_quantizer(const PointCloudSet<ChPoint> &points) {
     center_quantizer = nullptr;
@@ -179,7 +179,7 @@ class IndexMVIVF : public Index<metric> {
     }
   }
 
-  // Recursive kmeans tree builder
+  // Recursive kmeans tree builder (used for all levels below the root).
   void recursive_build(node_t *node, const PointCloudSet<ChPoint> &points) {
     size_t n = points.size();
     // Number of centers: Dynamic
@@ -238,6 +238,10 @@ class IndexMVIVF : public Index<metric> {
   }
 
   // Builds the index given PointCloudSet object.
+  // For IndexMVIVFSpill, we modify only the **first level** of the tree:
+  // every point cloud is assigned to its closest and second-closest root center,
+  // effectively duplicating it across two top-level subtrees. All deeper levels
+  // are built using the standard recursive_build().
   void build(const PointCloudSet<ChPoint> &points) override {
     root = new node_t();
     if (params.compress_input) {
@@ -277,7 +281,7 @@ class IndexMVIVF : public Index<metric> {
           quantizer.template emplace<TQPQ8_Model>();
           std::get<TQPQ8_Model>(quantizer).train(points);
         } else {
-          std::cerr << "IndexMVIVF: TurboQuantPQ4Bit currently supports block_size 4 or 8 "
+          std::cerr << "IndexMVIVFSpill: TurboQuantPQ4Bit currently supports block_size 4 or 8 "
                     << "(got " << params.pq.block_size << ")." << std::endl;
           abort();
         }
@@ -289,8 +293,104 @@ class IndexMVIVF : public Index<metric> {
     // Center quantization (internal-node / leaf-center scoring): always TQ4.
     init_center_quantizer(points);
 
-    // Recursively build k-means tree
-    recursive_build(root, points);
+    // ---------- First level (root) with spill ----------
+    size_t n = points.size();
+    size_t auto_nc = (params.k_per_level > 0)
+                         ? params.k_per_level
+                         : static_cast<size_t>(std::ceil(std::sqrt(static_cast<double>(n))));
+    size_t small_nc = 4 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
+    size_t num_clusters = std::max(static_cast<size_t>(4), std::min({auto_nc, small_nc, n}));
+    if (params.verbose >= 1) {
+      std::cout << "IndexMVIVFSpill: building root with " << n
+                << " points, num_clusters: " << num_clusters << std::endl;
+    }
+
+    // Run MV-Lloyds once on the full dataset to get root centers.
+    MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+    Clus.train(points);
+    PointCloudSet<ChPoint> &centers = Clus.centers;
+    size_t C = centers.size();
+
+    // For each point, compute distances to all centers (as in compute_cluster_ids_naive)
+    // and record both the best and second-best center indices.
+    parlay::sequence<uint32_t> best_idx(n);
+    parlay::sequence<uint32_t> second_idx(n);
+    parlay::parallel_for(0, n, [&](uint32_t i) {
+      auto dist =
+          parlay::delayed_tabulate(C, [&](uint32_t j) { return points[i].distance(centers[j]); });
+      uint32_t best = 0, second = 0;
+      float best_d = std::numeric_limits<float>::infinity();
+      float second_d = std::numeric_limits<float>::infinity();
+      for (uint32_t j = 0; j < C; ++j) {
+        float d_ij = dist[j];
+        if (d_ij < best_d) {
+          second_d = best_d;
+          second = best;
+          best_d = d_ij;
+          best = j;
+        } else if (d_ij < second_d) {
+          second_d = d_ij;
+          second = j;
+        }
+      }
+      best_idx[i] = best;
+      // Spill to second-best only when distances are very close.
+      const float ratio = params.spill_ratio;
+      bool spill = (second != best) && (ratio > 0.0f) &&
+                   (best_d <= 1e-9f || second_d <= best_d * (1.0f + ratio));
+      second_idx[i] = spill ? second : UINT32_MAX;
+    });
+
+    // Build (center_id, point_id) pairs for both best and second-best assignments.
+    auto id_pt =
+        parlay::sequence<std::pair<uint32_t, uint32_t>>::from_function(2 * n, [&](size_t t) {
+          uint32_t i = static_cast<uint32_t>(t / 2);
+          bool is_second = (t % 2 == 1);
+          if (!is_second) {
+            return std::make_pair(best_idx[i], i);
+          }
+          uint32_t s = second_idx[i];
+          if (s == UINT32_MAX) {
+            return std::make_pair(UINT32_MAX, i);
+          }
+          return std::make_pair(s, i);
+        });
+    auto id_pt_valid = parlay::filter(
+        id_pt, [&](const std::pair<uint32_t, uint32_t> &p) { return p.first != UINT32_MAX; });
+    auto grouped = group_by_key_inplace(id_pt_valid);
+
+    // Root stores centers corresponding to active (non-empty) groups.
+    root->children.resize(grouped.size());
+    if (grouped.size() < centers.size()) {
+      auto active_centers_ind = parlay::delayed_seq<uint32_t>(
+          grouped.size(), [&](size_t i) { return grouped[i][0].first; });
+      root->data = PointCloudSet<ChPoint>(centers.filter(active_centers_ind), d);
+    } else {
+      root->data = std::move(centers);
+    }
+    if (params.quantize_centers) {
+      root->quantized_data = encode_centers_tq(root->data);
+    }
+
+    // Build subtrees below each root child using standard recursive_build().
+    parlay::parallel_for(
+        0, grouped.size(),
+        [&](size_t i) {
+          auto group = parlay::delayed_seq<uint32_t>(
+              grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
+          PointCloudSet<ChPoint> child_points(points.filter(group), d);
+          node_t *child = new node_t();
+          root->children[i] = child;
+          if (child_points.size() > params.max_leaf_size) {
+            recursive_build(child, child_points);
+          } else {
+            child->data = std::move(child_points);
+            if (active_quantizer != QT::None) {
+              child->quantized_data = encode_points_quantized(child->data);
+            }
+          }
+        },
+        1);
 
     // Build flat leaf index and leaf centers for optional flat-leaf search
     leaves_flat.clear();
@@ -649,6 +749,21 @@ class IndexMVIVF : public Index<metric> {
     }
 
     t.start();
+    // First, sort by (id, distance) so that duplicates (caused by spill at the root)
+    // are adjacent and the smallest-distance copy comes first.
+    parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
+      if (a.first != b.first) return a.first < b.first;
+      return a.second < b.second;
+    });
+    // Deduplicate in-place by id, keeping the closest occurrence.
+    size_t write = 0;
+    for (size_t read = 0; read < visited.size(); ++read) {
+      if (read == 0 || visited[read].first != visited[read - 1].first) {
+        visited[write++] = visited[read];
+      }
+    }
+    visited.resize(write);
+    // Now sort by distance for downstream ranking.
     parlay::sort_inplace(visited, [](const auto &a, const auto &b) { return a.second < b.second; });
     t_rest += t.stop();
     t.reset();
@@ -821,63 +936,6 @@ class IndexMVIVF : public Index<metric> {
     });
 
     return leaf_of_point;
-  }
-
-  // Returns, for each point id, the index of the root-level child subtree that contains it.
-  //
-  // The output is a sequence `root_child_of_point` such that:
-  //   - `root_child_of_point[id]` is the (0-based) index of the direct child of the root whose
-  //     subtree contains point with global id `id`.
-  //   - If a point id does not appear in the tree (should not happen for a well-formed index),
-  //     its entry will be UINT32_MAX.
-  //
-  // Assumes that point ids are 0..N-1 and match the ids stored in the leaf PointCloudSets.
-  parlay::sequence<uint32_t> get_root_child_clustering() const {
-    parlay::sequence<uint32_t> empty;
-    if (root == nullptr) return empty;
-    if (root->children.empty()) return empty;
-
-    std::vector<std::pair<uint32_t, uint32_t>> assignments;
-    assignments.reserve(1024);
-    size_t max_id = 0;
-
-    std::function<void(const node_t *, uint32_t)> visit =
-        [&](const node_t *node, uint32_t root_child_idx) {
-          if (node->children.empty()) {
-            size_t n = node->data.size();
-            for (size_t j = 0; j < n; ++j) {
-              uint32_t id = node->data.get_id(j);
-              assignments.emplace_back(id, root_child_idx);
-              if (id > max_id) max_id = id;
-            }
-          } else {
-            for (size_t i = 0; i < node->children.size(); ++i) {
-              uint32_t next_root_child_idx = root_child_idx;
-              if (node == root) {
-                next_root_child_idx = static_cast<uint32_t>(i);
-              }
-              visit(node->children[i], next_root_child_idx);
-            }
-          }
-        };
-
-    for (size_t i = 0; i < root->children.size(); ++i) {
-      const node_t *child = root->children[i];
-      if (child != nullptr) visit(child, static_cast<uint32_t>(i));
-    }
-
-    if (assignments.empty()) return empty;
-
-    parlay::sequence<uint32_t> root_child_of_point(max_id + 1);
-    parlay::parallel_for(0, root_child_of_point.size(),
-                         [&](size_t i) { root_child_of_point[i] = UINT32_MAX; });
-
-    parlay::parallel_for(0, assignments.size(), [&](size_t i) {
-      auto [pid, rid] = assignments[i];
-      root_child_of_point[pid] = rid;
-    });
-
-    return root_child_of_point;
   }
 
   // Traversing the k-means tree: returns the height of the tree
@@ -1216,7 +1274,7 @@ class IndexMVIVF : public Index<metric> {
 
   size_t get_height() const noexcept override { return kmeanstree_height; }
 
-  ~IndexMVIVF() {
+  ~IndexMVIVFSpill() {
     if (root != nullptr) {
       traverse_and_delete(root);
       delete root;
@@ -1224,7 +1282,7 @@ class IndexMVIVF : public Index<metric> {
   }
 };
 
-using IndexMVIVFL2 = IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)
-using IndexMVIVFIP = IndexMVIVF<false>;  // Instantiates for MIPS      (metric = false)
+using IndexMVIVFSpillL2 = IndexMVIVFSpill<true>;   // Instantiates for L2 metric (metric = true)
+using IndexMVIVFSpillIP = IndexMVIVFSpill<false>;  // Instantiates for MIPS      (metric = false)
 
 }  // namespace mvsic

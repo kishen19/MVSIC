@@ -6,6 +6,7 @@
 #include "mvsic/core/utils/parse_command_line.h"
 #include "mvsic/core/stats.h"
 #include "mvivf.h"
+#include "mvivf_spill.h"
 #include "mvivf_flat.h"
 
 using namespace mvsic;
@@ -44,6 +45,9 @@ void bench(mvsic::commandLine &P) {
 
   // Flat params
   bool is_flat = P.getOption("-flat");
+  // Spill variant (root-level second-nearest assignment)
+  bool use_spill = P.getOption("-spill");
+  float spill_ratio = static_cast<float>(P.getOptionDoubleValue("-spill_ratio", 0.05));
 
   // PQ params
   std::string pq_method = P.getOptionValue("-pq_method", "None");
@@ -89,7 +93,7 @@ void bench(mvsic::commandLine &P) {
         k_per_level, max_leaf_size, compress_input, verbose, niters, max_point_clouds_per_cluster,
         max_points_per_centroid_inner_kmeans, "Random", 0, use_weighted_inner_kmeans, 0,
         pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
-        quantize_centers);
+        quantize_centers, use_spill ? spill_ratio : 0.0f);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
 
@@ -196,8 +200,13 @@ void bench(mvsic::commandLine &P) {
     IndexMVIVFFlat<metric> index(points.get_dims(), index_params);
     run_bench(index);
   } else {
-    IndexMVIVF<metric> index(points.get_dims(), index_params);
-    run_bench(index);
+    if (use_spill) {
+      IndexMVIVFSpill<metric> index(points.get_dims(), index_params);
+      run_bench(index);
+    } else {
+      IndexMVIVF<metric> index(points.get_dims(), index_params);
+      run_bench(index);
+    }
   }
 }
 

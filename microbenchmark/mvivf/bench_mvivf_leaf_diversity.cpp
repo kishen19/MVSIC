@@ -135,18 +135,29 @@ static int run_leaf_diversity(commandLine& P) {
     return 1;
   }
 
+  // Root-level clustering: map point id -> root child (subtree) id.
+  auto root_child_of_point = index.get_root_child_clustering();
+  if (root_child_of_point.size() == 0) {
+    std::cerr << "ERROR: root-child clustering is empty; index may not be built correctly.\n";
+    return 1;
+  }
+
   // For each query, count distinct leaves among its top-k GT neighbors.
   const size_t num_queries = queries.size();
   std::vector<size_t> leaf_counts(num_queries, 0);
+  std::vector<size_t> root_child_counts(num_queries, 0);
 
   size_t missing_ids = 0;
   size_t max_seen_leaf = 0;
+  size_t max_seen_root_child = 0;
 
   for (size_t qi = 0; qi < num_queries; ++qi) {
     const auto& row = gt[qi];
     const size_t kk = std::min<size_t>(k, row.size());
     std::unordered_set<uint32_t> leaves;
     leaves.reserve(kk);
+    std::unordered_set<uint32_t> root_children;
+    root_children.reserve(kk);
 
     for (size_t j = 0; j < kk; ++j) {
       uint32_t pid = row[j].first;
@@ -157,8 +168,15 @@ static int run_leaf_diversity(commandLine& P) {
       uint32_t lid = leaf_of_point[pid];
       leaves.insert(lid);
       if (lid != UINT32_MAX && lid > max_seen_leaf) max_seen_leaf = lid;
+
+       if (pid < root_child_of_point.size()) {
+        uint32_t rid = root_child_of_point[pid];
+        root_children.insert(rid);
+        if (rid != UINT32_MAX && rid > max_seen_root_child) max_seen_root_child = rid;
+      }
     }
     leaf_counts[qi] = leaves.size();
+    root_child_counts[qi] = root_children.size();
   }
 
   if (missing_ids > 0) {
@@ -172,29 +190,55 @@ static int run_leaf_diversity(commandLine& P) {
     return 1;
   }
 
-  double sum = std::accumulate(leaf_counts.begin(), leaf_counts.end(), 0.0);
-  double avg = sum / static_cast<double>(num_queries);
+  // Leaf-level diversity stats.
+  double sum_leaf = std::accumulate(leaf_counts.begin(), leaf_counts.end(), 0.0);
+  double avg_leaf = sum_leaf / static_cast<double>(num_queries);
 
-  std::vector<size_t> sorted_counts = leaf_counts;
-  std::sort(sorted_counts.begin(), sorted_counts.end());
-  size_t min_val = sorted_counts.front();
-  size_t max_val = sorted_counts.back();
-  double median;
+  std::vector<size_t> sorted_leaf_counts = leaf_counts;
+  std::sort(sorted_leaf_counts.begin(), sorted_leaf_counts.end());
+  size_t min_leaf = sorted_leaf_counts.front();
+  size_t max_leaf = sorted_leaf_counts.back();
+  double median_leaf;
   if (num_queries % 2 == 1) {
-    median = static_cast<double>(sorted_counts[num_queries / 2]);
+    median_leaf = static_cast<double>(sorted_leaf_counts[num_queries / 2]);
   } else {
-    size_t a = sorted_counts[num_queries / 2 - 1];
-    size_t b = sorted_counts[num_queries / 2];
-    median = 0.5 * (static_cast<double>(a) + static_cast<double>(b));
+    size_t a = sorted_leaf_counts[num_queries / 2 - 1];
+    size_t b = sorted_leaf_counts[num_queries / 2];
+    median_leaf = 0.5 * (static_cast<double>(a) + static_cast<double>(b));
   }
 
   std::cout << "\n=== MVIVF leaf diversity for top-" << k << " GT neighbors ===\n";
   std::cout << "Distinct leaves per query (over " << num_queries << " queries):\n";
-  std::cout << "  avg   : " << avg << "\n";
-  std::cout << "  median: " << median << "\n";
-  std::cout << "  min   : " << min_val << "\n";
-  std::cout << "  max   : " << max_val << "\n";
+  std::cout << "  avg   : " << avg_leaf << "\n";
+  std::cout << "  median: " << median_leaf << "\n";
+  std::cout << "  min   : " << min_leaf << "\n";
+  std::cout << "  max   : " << max_leaf << "\n";
   std::cout << "  total leaves seen: " << (max_seen_leaf + 1) << "\n";
+
+  // Root-child (subtree) diversity stats.
+  double sum_root = std::accumulate(root_child_counts.begin(), root_child_counts.end(), 0.0);
+  double avg_root = sum_root / static_cast<double>(num_queries);
+
+  std::vector<size_t> sorted_root_counts = root_child_counts;
+  std::sort(sorted_root_counts.begin(), sorted_root_counts.end());
+  size_t min_root = sorted_root_counts.front();
+  size_t max_root = sorted_root_counts.back();
+  double median_root;
+  if (num_queries % 2 == 1) {
+    median_root = static_cast<double>(sorted_root_counts[num_queries / 2]);
+  } else {
+    size_t a = sorted_root_counts[num_queries / 2 - 1];
+    size_t b = sorted_root_counts[num_queries / 2];
+    median_root = 0.5 * (static_cast<double>(a) + static_cast<double>(b));
+  }
+
+  std::cout << "\n=== MVIVF root-child (subtree) diversity for top-" << k << " GT neighbors ===\n";
+  std::cout << "Distinct root children per query (over " << num_queries << " queries):\n";
+  std::cout << "  avg   : " << avg_root << "\n";
+  std::cout << "  median: " << median_root << "\n";
+  std::cout << "  min   : " << min_root << "\n";
+  std::cout << "  max   : " << max_root << "\n";
+  std::cout << "  total root children seen: " << (max_seen_root_child + 1) << "\n";
 
   return 0;
 }

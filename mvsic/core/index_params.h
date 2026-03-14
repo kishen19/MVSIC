@@ -18,6 +18,10 @@ struct IndexParams {
   uint32_t max_leaf_size = 200;   // Maximum size of leaves (enforced)
   bool quantize_centers = false;  // Quantize center point clouds
 
+  // MVIVFSpill: spill to second-best root center only when distances are "very close"
+  // Spill iff second_d <= best_d * (1 + spill_ratio). 0 = no spill.
+  float spill_ratio = 0.0f;
+
   // MVClustering params
   MVClusteringConfig mvclus = MVClusteringConfig();
   uint32_t s = 0;  // Size of each centroid point cloud (0 = avg input point cloud size)
@@ -76,12 +80,13 @@ struct IndexParams {
                            uint32_t pq_method = 0, uint32_t block_size = 64,
                            uint32_t num_clusters_per_block = 256,
                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                           bool quantize_centers = false) {
+                           bool quantize_centers = false, float spill_ratio = 0.0f) {
     IndexParams params;
     params.method = "mvivf";
     params.k_per_level = k_per_level;
     params.max_leaf_size = max_leaf_size;
     params.quantize_centers = quantize_centers;
+    params.spill_ratio = spill_ratio;
     params.compress_input = compress_input;
     params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
                  num_points_per_cluster, rabitq_bits};

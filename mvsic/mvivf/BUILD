@@ -20,6 +20,23 @@ cc_library(
 )
 
 cc_library(
+    name = "mvivf_spill",
+    hdrs = ["mvivf_spill.h"],
+    deps = [
+        "//mvsic/core:index",
+        "//mvsic/core/distance_measures:many_to_many",
+        "//mvsic/core/mvclustering",
+        "//mvsic/core/quantization:fastscan",
+        "//mvsic/core/quantization:pq",
+        "//mvsic/core/quantization:rabitq",
+        "//mvsic/core/quantization:turboquant_4bit",
+        "//mvsic/core/quantization:wrapper",
+        "//mvsic/core/utils:util",
+        "@com_google_absl//absl/container:btree",
+    ],
+)
+
+cc_library(
     name = "mvivf_flat",
     hdrs = ["mvivf_flat.h"],
     deps = [
@@ -38,6 +55,7 @@ cc_binary(
     srcs = ["bench.cpp"],
     deps = [
         ":mvivf",
+        ":mvivf_spill",
         ":mvivf_flat",
         "//mvsic/core:stats",
         "//mvsic/core/types:chamfer_ip_point",
