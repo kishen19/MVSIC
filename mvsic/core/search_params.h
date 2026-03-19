@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cassert>
+#include <string>
+
 namespace mvsic {
 
 struct SearchParams {
@@ -23,6 +26,19 @@ struct SearchParams {
   static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0) {
     SearchParams params;
     params.method = "mvivf";
+    params.k = k;
+    assert(k > 0);
+    params.nprobes = nprobes;
+    assert(nprobes > 0);
+    params.num_rerank = num_rerank;
+    assert(num_rerank == 0 || num_rerank >= k);
+    return params;
+  }
+
+  // mvivf_spill search params
+  static SearchParams mvivf_spill(size_t k, size_t nprobes, size_t num_rerank = 0) {
+    SearchParams params;
+    params.method = "mvivf_spill";
     params.k = k;
     assert(k > 0);
     params.nprobes = nprobes;

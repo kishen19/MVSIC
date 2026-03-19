@@ -59,6 +59,7 @@ struct PointCloudSet {
   inline auto get_offsets() const noexcept {
     return parlay::make_slice(offsets.begin(), offsets.end());
   }
+  inline auto get_ids() const noexcept { return parlay::make_slice(ids.begin(), ids.end()); }
   // Returns ChPoint type object on the embeddings of point cloud i
   inline ChPoint operator[](size_t i) const {
     return ChPoint(get_size(i), dims, data(i), get_id(i));

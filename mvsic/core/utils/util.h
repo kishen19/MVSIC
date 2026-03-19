@@ -58,7 +58,7 @@ union DoubleConverter {
  - The function converts the float to a double, then overwrites the lowest 28 bits of the double's
    mantissa with the provided integer value.
 */
-double packFloatAndInt(float float_val, uint32_t int_val) {
+inline double packFloatAndInt(float float_val, uint32_t int_val) {
   DoubleConverter converter;
   // 1. Start by converting the float to a double. This sets the sign,
   //    exponent, and the most significant bits of the mantissa correctly.
@@ -79,7 +79,7 @@ double packFloatAndInt(float float_val, uint32_t int_val) {
   return converter.d;
 }
 
-double packFloatAndInt(float float_val, size_t int_val) {
+inline double packFloatAndInt(float float_val, size_t int_val) {
   uint32_t int_val_32 = static_cast<uint32_t>(int_val);
   return packFloatAndInt(float_val, int_val_32);
 }
@@ -88,7 +88,7 @@ double packFloatAndInt(float float_val, size_t int_val) {
   - Unpacks a double back into a float and a 28-bit integer.
   - returns an std::pair containing the extracted float and the 28-bit integer as a uint32_t.
  */
-std::pair<float, uint32_t> unpackDouble(double packed_val) {
+inline std::pair<float, uint32_t> unpackDouble(double packed_val) {
   DoubleConverter converter;
   converter.d = packed_val;
   // 1. Define the mask to extract the lowest 28 bits.
@@ -103,9 +103,194 @@ std::pair<float, uint32_t> unpackDouble(double packed_val) {
   return {extracted_float, extracted_int};
 }
 
-std::pair<float, size_t> unpackDoubletoSizeT(double packed_val) {
+inline std::pair<float, size_t> unpackDoubletoSizeT(double packed_val) {
   std::pair<float, uint32_t> unpacked = unpackDouble(packed_val);
   return {unpacked.first, static_cast<size_t>(unpacked.second)};
+}
+
+// Deduplicate by key, keeping the smallest value per key, and return results
+// sorted by (value, key). Specialized for (uint32_t, float) pairs.
+//
+// Strategy:
+//  - For small n, use VQSort on packed (value,key) keys, then deduplicate via
+//    pack_index on ids.
+//  - For larger n, fall back to Parlay sort + pack_index by key.
+//
+// This matches the best-performing hybrid variant from the microbenchmark
+// microbenchmark/mvivf/bench_dedup.cpp.
+inline parlay::sequence<std::pair<uint32_t, float>> deduplicate(
+    parlay::sequence<std::pair<uint32_t, float>>& seq) {
+  const size_t n = seq.size();
+  if (n == 0) return seq;
+  constexpr size_t kHybridThresholdN = 60000;
+  if (n <= kHybridThresholdN) {
+    parlay::sequence<double> packed = parlay::sequence<double>::uninitialized(n);
+    parlay::parallel_for(
+        0, n, [&](size_t i) { packed[i] = packFloatAndInt(seq[i].second, seq[i].first); });
+    VQSort(packed.begin(), packed.end());
+
+    parlay::sequence<uint32_t> ids = parlay::sequence<uint32_t>::uninitialized(n);
+    parlay::parallel_for(0, n, [&](size_t i) {
+      auto unpacked = unpackDoubletoSizeT(packed[i]);
+      ids[i] = static_cast<uint32_t>(unpacked.second);
+    });
+
+    auto starts = parlay::delayed_tabulate(n, [&](size_t i) {
+      if (i == 0) return true;
+      return ids[i] != ids[i - 1];
+    });
+    auto offsets = parlay::pack_index(starts);
+
+    parlay::sequence<std::pair<uint32_t, float>> out =
+        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(offsets.size());
+    parlay::parallel_for(0, offsets.size(), [&](size_t j) {
+      auto [dist, id_sz] = unpackDoubletoSizeT(packed[offsets[j]]);
+      out[j] = {static_cast<uint32_t>(id_sz), dist};
+    });
+    return out;
+  }
+  // Fallback / large-n path: Parlay sort + pack_index by key.
+  parlay::sort_inplace(seq, [](const auto& a, const auto& b) {
+    if (a.second != b.second) return a.second < b.second;
+    return a.first < b.first;
+  });
+  auto starts = parlay::delayed_tabulate(n, [&](size_t i) {
+    if (i == 0) return true;
+    return seq[i].first != seq[i - 1].first;
+  });
+  auto offsets = parlay::pack_index(starts);
+  parlay::sequence<std::pair<uint32_t, float>> out =
+      parlay::sequence<std::pair<uint32_t, float>>::uninitialized(offsets.size());
+  parlay::parallel_for(0, offsets.size(), [&](size_t i) { out[i] = seq[offsets[i]]; });
+  return out;
+}
+
+inline parlay::sequence<std::pair<uint32_t, float>> deduplicate_and_topC(
+    parlay::sequence<std::pair<uint32_t, float>>& seq, size_t C) {
+  const size_t n = seq.size();
+  if (n == 0) return seq;
+  constexpr size_t kHybridThresholdN = 60000;
+  if (n <= kHybridThresholdN) {
+    parlay::sequence<double> packed = parlay::sequence<double>::uninitialized(n);
+    parlay::parallel_for(
+        0, n, [&](size_t i) { packed[i] = packFloatAndInt(seq[i].second, seq[i].first); });
+    VQSort(packed.begin(), packed.end());
+
+    parlay::sequence<uint32_t> ids = parlay::sequence<uint32_t>::uninitialized(n);
+    parlay::parallel_for(0, n, [&](size_t i) {
+      auto unpacked = unpackDoubletoSizeT(packed[i]);
+      ids[i] = static_cast<uint32_t>(unpacked.second);
+    });
+
+    auto starts = parlay::delayed_tabulate(n, [&](size_t i) {
+      if (i == 0) return true;
+      return ids[i] != ids[i - 1];
+    });
+    auto offsets = parlay::pack_index(starts);
+    C = std::min(C, offsets.size());
+    parlay::sequence<std::pair<uint32_t, float>> out =
+        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(C);
+    parlay::parallel_for(0, C, [&](size_t j) {
+      auto [dist, id_sz] = unpackDoubletoSizeT(packed[offsets[j]]);
+      out[j] = {static_cast<uint32_t>(id_sz), dist};
+    });
+    return out;
+  }
+  // Fallback / large-n path: Parlay sort + pack_index by key.
+  parlay::sort_inplace(seq, [](const auto& a, const auto& b) {
+    if (a.second != b.second) return a.second < b.second;
+    return a.first < b.first;
+  });
+  auto starts = parlay::delayed_tabulate(n, [&](size_t i) {
+    if (i == 0) return true;
+    return seq[i].first != seq[i - 1].first;
+  });
+  auto offsets = parlay::pack_index(starts);
+  C = std::min(C, offsets.size());
+  parlay::sequence<std::pair<uint32_t, float>> out =
+      parlay::sequence<std::pair<uint32_t, float>>::uninitialized(C);
+  parlay::parallel_for(0, C, [&](size_t i) { out[i] = seq[offsets[i]]; });
+  return out;
+}
+
+// Deduplicate by key, keeping the smallest value per key, and return results
+// sorted by (value, key). This assumes V is totally ordered and K is equality-
+// comparable and ordered.
+//
+// Strategy:
+//  - For small n (when K = uint32_t and V = float), use VQSort on packed
+//    (value,key) keys, then deduplicate via pack_index.
+//  - Otherwise (or for large n / other types), fall back to Parlay sort +
+//    pack_index by key.
+//
+// This matches the best-performing hybrid variant from the microbenchmark
+// microbenchmark/mvivf/bench_dedup.cpp.
+template<typename K, typename V>
+parlay::sequence<std::pair<K, V>> deduplicate(parlay::sequence<std::pair<K, V>> seq) {
+  const size_t n = seq.size();
+  if (n == 0) return seq;
+  constexpr size_t kHybridThresholdN = 60000;
+  if constexpr (std::is_same_v<K, uint32_t> && std::is_same_v<V, float>) {
+    if (n <= kHybridThresholdN) {
+      parlay::sequence<double> packed = parlay::sequence<double>::uninitialized(n);
+      parlay::parallel_for(
+          0, n, [&](size_t i) { packed[i] = packFloatAndInt(seq[i].second, seq[i].first); });
+      VQSort(packed.begin(), packed.end());
+      parlay::sequence<uint32_t> ids = parlay::sequence<uint32_t>::uninitialized(n);
+      parlay::parallel_for(0, n, [&](size_t i) {
+        auto unpacked = unpackDoubletoSizeT(packed[i]);
+        ids[i] = static_cast<uint32_t>(unpacked.second);
+      });
+      auto starts = parlay::delayed_tabulate(n, [&](size_t i) {
+        if (i == 0) return true;
+        return ids[i] != ids[i - 1];
+      });
+      auto offsets = parlay::pack_index(starts);
+      parlay::sequence<std::pair<K, V>> out =
+          parlay::sequence<std::pair<K, V>>::uninitialized(offsets.size());
+      parlay::parallel_for(0, offsets.size(), [&](size_t j) {
+        auto [dist, id_sz] = unpackDoubletoSizeT(packed[offsets[j]]);
+        out[j] = {static_cast<uint32_t>(id_sz), dist};
+      });
+      return out;
+    }
+  }
+  // Fallback / large-n path: Parlay sort + pack_index by key.
+  parlay::sort_inplace(seq, [](const auto& a, const auto& b) {
+    if (a.second != b.second) return a.second < b.second;
+    return a.first < b.first;
+  });
+  auto starts = parlay::delayed_tabulate(n, [&](size_t i) {
+    if (i == 0) return true;
+    return seq[i].first != seq[i - 1].first;
+  });
+  auto offsets = parlay::pack_index(starts);
+  parlay::sequence<std::pair<K, V>> out =
+      parlay::sequence<std::pair<K, V>>::uninitialized(offsets.size());
+  parlay::parallel_for(0, offsets.size(), [&](size_t i) { out[i] = seq[offsets[i]]; });
+  return out;
+}
+
+// Sort a sequence of (uint32_t, float) pairs by (value, key), choosing the
+// fastest method based on size: VQSort for small n, Parlay sort for large n.
+inline void sort_inplace_kv(parlay::sequence<std::pair<uint32_t, float>>& seq) {
+  const size_t n = seq.size();
+  if (n == 0) return;
+  constexpr size_t kSortHybridThresholdN = 32000;
+  if (n <= kSortHybridThresholdN) {
+    parlay::sequence<double> packed = parlay::sequence<double>::uninitialized(n);
+    parlay::parallel_for(
+        0, n, [&](size_t i) { packed[i] = packFloatAndInt(seq[i].second, seq[i].first); });
+    VQSort(packed.begin(), packed.end());
+    parlay::parallel_for(0, n, [&](size_t i) {
+      auto [dist, id_sz] = unpackDoubletoSizeT(packed[i]);
+      seq[i] = {static_cast<uint32_t>(id_sz), dist};
+    });
+    return;
+  }
+  parlay::sort_inplace(seq, [](const auto& a, const auto& b) {
+    return (a.second != b.second) ? a.second < b.second : a.first < b.first;
+  });
 }
 
 }  // namespace mvsic

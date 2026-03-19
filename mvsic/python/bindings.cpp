@@ -12,6 +12,7 @@
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/mvivf/mvivf.h"
 #include "mvsic/mvivf/mvivf_flat.h"
+#include "mvsic/mvivf/mvivf_spill.h"
 #include "mvsic/muvera/muvera.h"
 #include "mvsic/vamana/vamana.h"
 #include "mvsic/mpool/mpool.h"
@@ -84,7 +85,8 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("verbose", &mvsic::MVClusteringConfig::verbose)
       .def_readwrite("init", &mvsic::MVClusteringConfig::init)
       .def_readwrite("seed", &mvsic::MVClusteringConfig::seed)
-      .def_readwrite("use_weighted_inner_kmeans", &mvsic::MVClusteringConfig::use_weighted_inner_kmeans);
+      .def_readwrite("use_weighted_inner_kmeans",
+                     &mvsic::MVClusteringConfig::use_weighted_inner_kmeans);
 
   py::class_<mvsic::IndexParams>(m, "IndexParams")
       .def(py::init([]() { return mvsic::IndexParams(); }))
@@ -94,6 +96,7 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("k_per_level", &mvsic::IndexParams::k_per_level)
       .def_readwrite("max_leaf_size", &mvsic::IndexParams::max_leaf_size)
       .def_readwrite("quantize_centers", &mvsic::IndexParams::quantize_centers)
+      .def_readwrite("num_spill", &mvsic::IndexParams::num_spill)
       .def_readwrite("mvclus", &mvsic::IndexParams::mvclus)
       .def_readwrite("s", &mvsic::IndexParams::s)
       .def_readwrite("fde", &mvsic::IndexParams::fde)
@@ -115,6 +118,15 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
                   py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
+                  py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
+                  py::arg("max_point_clouds_per_cluster") = 0,
+                  py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
+                  py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
+                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
+                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
+                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+      .def_static("mvivf_spill", &mvsic::IndexParams::mvivf_spill, py::arg("k_per_level") = 0,
+                  py::arg("max_leaf_size") = 200, py::arg("num_spill") = 2,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
@@ -169,6 +181,8 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("norerank", &mvsic::SearchParams::norerank)
       .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
                   py::arg("num_rerank") = 0)
+      .def_static("mvivf_spill", &mvsic::SearchParams::mvivf_spill, py::arg("k"),
+                  py::arg("nprobes"), py::arg("num_rerank") = 0)
       .def_static("mvivf_flat", &mvsic::SearchParams::mvivf_flat, py::arg("k"), py::arg("nprobes"),
                   py::arg("num_rerank") = 0)
       .def_static("vamana", &mvsic::SearchParams::vamana, py::arg("k"), py::arg("L"),
@@ -195,7 +209,7 @@ PYBIND11_MODULE(mvsic, m) {
       .def("get_id", &mvsic::ChamferIP_Point::get_id);
 
   py::class_<mvsic::PointCloudSet<mvsic::ChamferL2_Point>>(m, "PointCloudSetL2")
-      .def(py::init<const char *, bool>(), py::arg("filename"), py::arg("is_mmap") = false)
+      .def(py::init<const char*, bool>(), py::arg("filename"), py::arg("is_mmap") = false)
       .def(py::init([](py::array_t<float> data, py::array_t<size_t> offsets,
                        py::array_t<uint32_t> ids, uint32_t dim) {
              py::buffer_info data_buf = data.request();
@@ -207,17 +221,17 @@ PYBIND11_MODULE(mvsic, m) {
              }
 
              return new mvsic::PointCloudSet<mvsic::ChamferL2_Point>(
-                 ids_buf.shape[0], dim, static_cast<const float *>(data_buf.ptr),
-                 static_cast<const size_t *>(offsets_buf.ptr),
-                 static_cast<const uint32_t *>(ids_buf.ptr));
+                 ids_buf.shape[0], dim, static_cast<const float*>(data_buf.ptr),
+                 static_cast<const size_t*>(offsets_buf.ptr),
+                 static_cast<const uint32_t*>(ids_buf.ptr));
            }),
            py::arg("data"), py::arg("offsets"), py::arg("ids"), py::arg("dim"))
-      .def("__getitem__", [](const mvsic::PointCloudSet<mvsic::ChamferL2_Point> &self,
+      .def("__getitem__", [](const mvsic::PointCloudSet<mvsic::ChamferL2_Point>& self,
                              size_t i) { return self[i]; })
       .def("size", &mvsic::PointCloudSet<mvsic::ChamferL2_Point>::size);
 
   py::class_<mvsic::PointCloudSet<mvsic::ChamferIP_Point>>(m, "PointCloudSetIP")
-      .def(py::init<const char *, bool>(), py::arg("filename"), py::arg("is_mmap") = false)
+      .def(py::init<const char*, bool>(), py::arg("filename"), py::arg("is_mmap") = false)
       .def(py::init([](py::array_t<float> data, py::array_t<size_t> offsets,
                        py::array_t<uint32_t> ids, uint32_t dim) {
              py::buffer_info data_buf = data.request();
@@ -229,12 +243,12 @@ PYBIND11_MODULE(mvsic, m) {
              }
 
              return new mvsic::PointCloudSet<mvsic::ChamferIP_Point>(
-                 ids_buf.shape[0], dim, static_cast<const float *>(data_buf.ptr),
-                 static_cast<const size_t *>(offsets_buf.ptr),
-                 static_cast<const uint32_t *>(ids_buf.ptr));
+                 ids_buf.shape[0], dim, static_cast<const float*>(data_buf.ptr),
+                 static_cast<const size_t*>(offsets_buf.ptr),
+                 static_cast<const uint32_t*>(ids_buf.ptr));
            }),
            py::arg("data"), py::arg("offsets"), py::arg("ids"), py::arg("dim"))
-      .def("__getitem__", [](const mvsic::PointCloudSet<mvsic::ChamferIP_Point> &self,
+      .def("__getitem__", [](const mvsic::PointCloudSet<mvsic::ChamferIP_Point>& self,
                              size_t i) { return self[i]; })
       .def("size", &mvsic::PointCloudSet<mvsic::ChamferIP_Point>::size);
 
@@ -244,32 +258,32 @@ PYBIND11_MODULE(mvsic, m) {
 
 #define BIND_INDEX(index_type, point_type, class_name_str)                                         \
   py::class_<mvsic::index_type>(m, class_name_str)                                                 \
-      .def(py::init<size_t, const mvsic::IndexParams &>(), py::arg("dim"), py::arg("params"))      \
+      .def(py::init<size_t, const mvsic::IndexParams&>(), py::arg("dim"), py::arg("params"))       \
       .def("build", &mvsic::index_type::build, "Build the index.", py::arg("points"))              \
       .def(                                                                                        \
           "search",                                                                                \
-          [](mvsic::index_type &index, const mvsic::point_type &query_point,                       \
-             const mvsic::PointCloudSet<mvsic::point_type> &points,                                \
-             const mvsic::SearchParams &params) {                                                  \
+          [](mvsic::index_type& index, const mvsic::point_type& query_point,                       \
+             const mvsic::PointCloudSet<mvsic::point_type>& points,                                \
+             const mvsic::SearchParams& params) {                                                  \
             auto result = index.search(query_point, points, params);                               \
             return result;                                                                         \
           },                                                                                       \
           "Search the index.", py::arg("query_point"), py::arg("points"), py::arg("params"))       \
       .def(                                                                                        \
           "search_with_stats",                                                                     \
-          [](mvsic::index_type &index, const mvsic::point_type &query_point,                       \
-             const mvsic::PointCloudSet<mvsic::point_type> &points,                                \
-             const mvsic::SearchParams &params) {                                                  \
+          [](mvsic::index_type& index, const mvsic::point_type& query_point,                       \
+             const mvsic::PointCloudSet<mvsic::point_type>& points,                                \
+             const mvsic::SearchParams& params) {                                                  \
             auto result = index.search_with_stats(query_point, points, params);                    \
             return result;                                                                         \
           },                                                                                       \
           "Returns some stats.", py::arg("query_point"), py::arg("points"), py::arg("params"))     \
       .def(                                                                                        \
           "search_all",                                                                            \
-          [](mvsic::index_type &index,                                                             \
-             const mvsic::PointCloudSet<mvsic::point_type> &query_points,                          \
-             const mvsic::PointCloudSet<mvsic::point_type> &points,                                \
-             const mvsic::SearchParams &params) {                                                  \
+          [](mvsic::index_type& index,                                                             \
+             const mvsic::PointCloudSet<mvsic::point_type>& query_points,                          \
+             const mvsic::PointCloudSet<mvsic::point_type>& points,                                \
+             const mvsic::SearchParams& params) {                                                  \
             auto result = index.search_all(query_points, points, params);                          \
             return result;                                                                         \
           },                                                                                       \
@@ -287,7 +301,7 @@ PYBIND11_MODULE(mvsic, m) {
   // trigger "object with that name is already defined" in some pybind11 builds).
   m.def(
       "get_mvivf_tree_stats",
-      [](mvsic::IndexMVIVFL2 &index) {
+      [](mvsic::IndexMVIVFL2& index) {
         auto s = index.get_tree_stats();
         py::dict d;
         d["num_internal_nodes"] = s.num_internal_nodes;
@@ -301,7 +315,7 @@ PYBIND11_MODULE(mvsic, m) {
       py::arg("index"), "Returns tree stats for an MVIVF L2 index.");
   m.def(
       "get_mvivf_tree_stats",
-      [](mvsic::IndexMVIVFIP &index) {
+      [](mvsic::IndexMVIVFIP& index) {
         auto s = index.get_tree_stats();
         py::dict d;
         d["num_internal_nodes"] = s.num_internal_nodes;
@@ -316,6 +330,8 @@ PYBIND11_MODULE(mvsic, m) {
 
   BIND_INDEX(IndexMVIVFFlatL2, ChamferL2_Point, "IndexMVIVFFlatL2")
   BIND_INDEX(IndexMVIVFFlatIP, ChamferIP_Point, "IndexMVIVFFlatIP")
+  BIND_INDEX(IndexMVIVFSpillL2, ChamferL2_Point, "IndexMVIVFSpillL2")
+  BIND_INDEX(IndexMVIVFSpillIP, ChamferIP_Point, "IndexMVIVFSpillIP")
   BIND_INDEX(IndexMUVERAL2, ChamferL2_Point, "IndexMUVERAL2")
   BIND_INDEX(IndexMUVERAIP, ChamferIP_Point, "IndexMUVERAIP")
   BIND_INDEX(IndexVamanaL2, ChamferL2_Point, "IndexVamanaL2")
@@ -353,18 +369,18 @@ PYBIND11_MODULE(mvsic, m) {
 
   m.def(
       "compute_scores",
-      [](const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
+      [](const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& pred,
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
          size_t k) { return compute_scores(pred, gt, k); },
       "Compute scores given predictions");
 
 #define BIND_COMPUTE_STATS(index_type, point_type, index_name_str)                                 \
   m.def(                                                                                           \
       "compute_stats",                                                                             \
-      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
-         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
-         const mvsic::SearchParams &params) {                                                      \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const mvsic::SearchParams& params) {                                                      \
         return compute_stats(index, points, query_points, gt, params);                             \
       },                                                                                           \
       "Compute stats for " index_name_str " index", py::arg("index"), py::arg("points"),           \
@@ -372,10 +388,10 @@ PYBIND11_MODULE(mvsic, m) {
                                                                                                    \
   m.def(                                                                                           \
       "compute_stats",                                                                             \
-      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
-         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
-         const parlay::sequence<mvsic::SearchParams> &params) {                                    \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const parlay::sequence<mvsic::SearchParams>& params) {                                    \
         return compute_stats(index, points, query_points, gt, params);                             \
       },                                                                                           \
       "Compute stats for " index_name_str " index for a sequence of params", py::arg("index"),     \
@@ -383,10 +399,10 @@ PYBIND11_MODULE(mvsic, m) {
                                                                                                    \
   m.def(                                                                                           \
       "compute_stats_extended",                                                                    \
-      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
-         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
-         const mvsic::SearchParams &params) {                                                      \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const mvsic::SearchParams& params) {                                                      \
         return compute_stats_extended(index, points, query_points, gt, params);                    \
       },                                                                                           \
       "Compute extended stats for " index_name_str " index", py::arg("index"), py::arg("points"),  \
@@ -394,10 +410,10 @@ PYBIND11_MODULE(mvsic, m) {
                                                                                                    \
   m.def(                                                                                           \
       "compute_stats_extended",                                                                    \
-      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
-         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
-         const parlay::sequence<mvsic::SearchParams> &params) {                                    \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const parlay::sequence<mvsic::SearchParams>& params) {                                    \
         return compute_stats_extended(index, points, query_points, gt, params);                    \
       },                                                                                           \
       "Compute extended stats for " index_name_str " index for a sequence of params",              \
@@ -405,10 +421,10 @@ PYBIND11_MODULE(mvsic, m) {
       py::arg("params"));                                                                          \
   m.def(                                                                                           \
       "compute_stats_extended_p_threaded",                                                         \
-      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
-         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
-         const mvsic::SearchParams &params, size_t num_threads) {                                  \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const mvsic::SearchParams& params, size_t num_threads) {                                  \
         return compute_stats_extended_p_threaded(index, points, query_points, gt, params,          \
                                                  num_threads);                                     \
       },                                                                                           \
@@ -418,10 +434,10 @@ PYBIND11_MODULE(mvsic, m) {
                                                                                                    \
   m.def(                                                                                           \
       "compute_stats_extended_p_threaded",                                                         \
-      [](mvsic::index_type &index, const mvsic::PointCloudSet<mvsic::point_type> &points,          \
-         const mvsic::PointCloudSet<mvsic::point_type> &query_points,                              \
-         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,                 \
-         const parlay::sequence<mvsic::SearchParams> &params, size_t num_threads) {                \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const parlay::sequence<mvsic::SearchParams>& params, size_t num_threads) {                \
         return compute_stats_extended_p_threaded(index, points, query_points, gt, params,          \
                                                  num_threads);                                     \
       },                                                                                           \
@@ -434,6 +450,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_COMPUTE_STATS(IndexMVIVFL2, ChamferL2_Point, "MVIVFL2")
   BIND_COMPUTE_STATS(IndexMVIVFFlatIP, ChamferIP_Point, "MVIVFFlatIP")
   BIND_COMPUTE_STATS(IndexMVIVFFlatL2, ChamferL2_Point, "MVIVFFlatL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillIP, ChamferIP_Point, "MVIVFSpillIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillL2, ChamferL2_Point, "MVIVFSpillL2")
   BIND_COMPUTE_STATS(IndexMUVERAIP, ChamferIP_Point, "MUVERAIP")
   BIND_COMPUTE_STATS(IndexMUVERAL2, ChamferL2_Point, "MUVERAL2")
   BIND_COMPUTE_STATS(IndexVamanaIP, ChamferIP_Point, "VamanaIP")

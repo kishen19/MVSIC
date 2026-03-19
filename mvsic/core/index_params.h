@@ -18,9 +18,8 @@ struct IndexParams {
   uint32_t max_leaf_size = 200;   // Maximum size of leaves (enforced)
   bool quantize_centers = false;  // Quantize center point clouds
 
-  // MVIVFSpill: spill to second-best root center only when distances are "very close"
-  // Spill iff second_d <= best_d * (1 + spill_ratio). 0 = no spill.
-  float spill_ratio = 0.0f;
+  // MVIVFSpill: assign each point to its top num_spill nearest root centers.
+  uint32_t num_spill = 2;
 
   // MVClustering params
   MVClusteringConfig mvclus = MVClusteringConfig();
@@ -65,7 +64,6 @@ struct IndexParams {
     uint32_t num_clusters_per_block = 256;       // Number of clusters per block
     uint32_t num_points_per_cluster = 20;        // Subsample size*k
     uint32_t rabitq_bits = 8;                    // Total bits for RaBitQ
-    // float scann_threshold = 0.2f;                // Threshold for ScaNN
   };
   pq_config pq = pq_config();
 
@@ -80,13 +78,12 @@ struct IndexParams {
                            uint32_t pq_method = 0, uint32_t block_size = 64,
                            uint32_t num_clusters_per_block = 256,
                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
-                           bool quantize_centers = false, float spill_ratio = 0.0f) {
+                           bool quantize_centers = false) {
     IndexParams params;
     params.method = "mvivf";
     params.k_per_level = k_per_level;
     params.max_leaf_size = max_leaf_size;
     params.quantize_centers = quantize_centers;
-    params.spill_ratio = spill_ratio;
     params.compress_input = compress_input;
     params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
                  num_points_per_cluster, rabitq_bits};
@@ -111,6 +108,31 @@ struct IndexParams {
     IndexParams params;
     params.method = "mvivf_flat";
     params.k_per_level = k_per_level;
+    params.quantize_centers = quantize_centers;
+    params.compress_input = compress_input;
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
+    params.verbose = verbose;
+    params.mvclus = MVClusteringConfig(
+        niters, max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans,
+        (params.verbose > 0) ? params.verbose - 1 : 0, init, seed, use_weighted_inner_kmeans);
+    params.s = s;
+    return params;
+  }
+
+  static IndexParams mvivf_spill(
+      uint32_t k_per_level = 0, uint32_t max_leaf_size = 200, uint32_t num_spill = 2,
+      bool compress_input = false, uint32_t verbose = 0, uint32_t niters = 5,
+      uint32_t max_point_clouds_per_cluster = 0, uint32_t max_points_per_centroid_inner_kmeans = 20,
+      std::string init = "Random", uint32_t seed = 0, bool use_weighted_inner_kmeans = true,
+      uint32_t s = 0, uint32_t pq_method = 0, uint32_t block_size = 64,
+      uint32_t num_clusters_per_block = 256, uint32_t num_points_per_cluster = 20,
+      uint32_t rabitq_bits = 8, bool quantize_centers = false) {
+    IndexParams params;
+    params.method = "mvivf_spill";
+    params.k_per_level = k_per_level;
+    params.max_leaf_size = max_leaf_size;
+    params.num_spill = num_spill;
     params.quantize_centers = quantize_centers;
     params.compress_input = compress_input;
     params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,

@@ -108,7 +108,6 @@ cc_library(
         ":turboquant_4bit",
         ":turboquant_byte",
         ":turboquant_pq_4bit",
-        "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:sequence",
+        "@parlaylib//parlay:primitives",
     ],
 )

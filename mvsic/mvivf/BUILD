@@ -7,15 +7,8 @@ cc_library(
     hdrs = ["mvivf.h"],
     deps = [
         "//mvsic/core:index",
-        "//mvsic/core/distance_measures:many_to_many",
         "//mvsic/core/mvclustering",
-        "//mvsic/core/quantization:fastscan",
-        "//mvsic/core/quantization:pq",
-        "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:turboquant_4bit",
-        "//mvsic/core/quantization:wrapper",
         "//mvsic/core/utils:util",
-        "@com_google_absl//absl/container:btree",
     ],
 )
 
@@ -55,8 +48,8 @@ cc_binary(
     srcs = ["bench.cpp"],
     deps = [
         ":mvivf",
-        ":mvivf_spill",
         ":mvivf_flat",
+        ":mvivf_spill",
         "//mvsic/core:stats",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",

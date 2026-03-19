@@ -85,6 +85,32 @@ class MVClustering {
     train(points);
   }
 
+  auto& get_centers() { return centers; }
+  auto get_clustering(const PointCloudSet<ChPoint>& points) {
+    size_t n = points.size();
+    auto clustering = parlay::sequence<uint32_t>(n);
+    compute_cluster_ids(points, clustering);
+    return clustering;
+  }
+  auto get_topC(const PointCloudSet<ChPoint>& points, uint32_t C) {
+    size_t n = points.size();
+    C = std::min(C, k);
+    if (C == 0) {
+      std::cerr << "[MVClustering]: C is 0; need at least 1 in get_topC." << std::endl;
+      abort();
+    }
+    parlay::sequence<uint32_t> assignment(n * C);
+    parlay::parallel_for(0, n, [&](uint32_t i) {
+      auto dist_idx = parlay::sequence<std::pair<float, uint32_t>>::from_function(
+          k, [&](uint32_t j) { return std::make_pair(points[i].distance(centers[j]), j); });
+      std::partial_sort(dist_idx.begin(), dist_idx.begin() + C, dist_idx.end());
+      for (size_t r = 0; r < C; ++r) {
+        assignment[i * C + r] = dist_idx[r].second;
+      }
+    });
+    return assignment;
+  }
+
   // Computes cluster ids for each doc point cloud given centroid-point clouds
   void compute_cluster_ids(const PointCloudSet<ChPoint>& points,
                            parlay::sequence<uint32_t>& cluster_ids);
@@ -101,12 +127,14 @@ class MVClustering {
 
 // Data given as a PointCloudSet Object: Main Implementation
 template<bool metric>
-void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
+void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
+  std::optional<PointCloudSet<ChPoint>> subsampled_points;
+  const PointCloudSet<ChPoint>* points_ptr;
   // Subsample if dataset is too large
   if (params.max_point_clouds_per_cluster > 0 &&
-      points.size() > params.max_point_clouds_per_cluster * k && points.size() > 2048) {
+      points_.size() > params.max_point_clouds_per_cluster * k && points_.size() > 2048) {
     if (params.verbose >= 1) {
-      std::cout << "[MVClustering] Subsampling from " << points.size() << " to "
+      std::cout << "[MVClustering] Subsampling from " << points_.size() << " to "
                 << params.max_point_clouds_per_cluster * k << " point clouds for training"
                 << std::endl;
     }
@@ -116,43 +144,22 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
     auto sampled_ids =
         parlay::sequence<uint32_t>::uninitialized(params.max_point_clouds_per_cluster * k);
     parlay::parallel_for(0, params.max_point_clouds_per_cluster * k, [&](size_t i) {
-      sampled_ids[i] = parlay::hash32(params.seed + i) % points.size();
+      sampled_ids[i] = parlay::hash32(params.seed + i) % points_.size();
     });
     auto sampled_pcs = parlay::delayed_tabulate(sampled_ids.size(),
-                                                [&](size_t i) { return points[sampled_ids[i]]; });
-    PointCloudSet<ChPoint> sampled_points(sampled_pcs, d);
+                                                [&](size_t i) { return points_[sampled_ids[i]]; });
+    subsampled_points = PointCloudSet<ChPoint>(sampled_pcs, d);
+    points_ptr = &(*subsampled_points);
     _subt.stop();
     if (params.verbose >= 1) {
       std::cout << "[MVClustering] Subsampling time: " << _subt.total_time() << " seconds"
                 << std::endl;
     }
     _subt.reset();
-    // Train
-    _subt.start();
-    train(sampled_points);
-    _subt.stop();
-    if (params.verbose >= 1) {
-      std::cout << "[MVClustering] Training on subsampled dataset time: " << _subt.total_time()
-                << " seconds" << std::endl;
-    }
-    _subt.reset();
-    // Assign all points to clusters
-    _subt.start();
-    cluster_ids.resize(points.size());
-    compute_cluster_ids(points, cluster_ids);
-    _subt.stop();
-
-    if (params.verbose >= 1) {
-      std::cout << "[MVClustering] Assignment time for full dataset: " << _subt.total_time()
-                << " seconds";
-      if (params.verbose >= 2) {
-        auto full_cost = compute_cost(points, cluster_ids);
-        std::cout << ", cost = " << full_cost;
-      }
-      std::cout << std::endl;
-    }
-    return;
+  } else {
+    points_ptr = &points_;
   }
+  const PointCloudSet<ChPoint>& points = *points_ptr;
 
   uint32_t n = points.size();
   if (s == 0) {  // Default
@@ -166,7 +173,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   // Step 1: Initialization
   parlay::internal::timer _st;
   _st.start();
-  if (params.verbose >= 1)
+  if (params.verbose >= 2)
     std::cout << "[MVClustering] Seeding algorithm: " << params.init << std::endl;
   if (params.init == "Random") {
     centers = UniformlyRandomMV(points, k, params.seed);
@@ -177,29 +184,30 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
   _st.stop();
   _iteration_stats[0].centroid_update_time = _st.total_time();
   _st.reset();
-  _st.start();
-  compute_cluster_ids(points, cluster_ids);
-  _st.stop();
-  _iteration_stats[0].assignment_time = _st.total_time();
   if (params.verbose >= 1) {
     std::cout << "[MVClustering] Seeding time: " << _iteration_stats[0].total_time() << " seconds"
               << std::endl;
-    if (params.verbose >= 2) {
-      _iteration_stats[0].cost = compute_cost(points, cluster_ids);
-      std::cout << "[MVClustering] Seeding cost: " << _iteration_stats[0].cost << std::endl;
-    }
   }
   if (params.niters == 0) {
     if (params.verbose >= 1) std::cout << "[MVClustering] Completed: 0 iterations";
     return;
   }
-  // Reset to uninitialized fixed size point clouds
-  centers = PointCloudSet<ChPoint>(k, s, d);
 
   // Step 2: Lloyd's Iterations
   parlay::internal::timer _it_timer;
   for (long it = 1; it <= params.niters; it++) {
-    // Step 2A: Compute new centers
+    // Step 2A: Assign points
+    _it_timer.start();
+    compute_cluster_ids(points, cluster_ids);
+    _it_timer.stop();
+    _iteration_stats[it].assignment_time = _it_timer.total_time();
+    if (it == 1) {  // Reset to uninitialized fixed size point clouds
+      centers = PointCloudSet<ChPoint>(k, s, d);
+    }
+    if (params.verbose >= 2) {
+      _iteration_stats[it].cost = compute_cost(points, cluster_ids);
+    }
+    // Step 2B: Compute new centers
     _it_timer.start();
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
@@ -295,20 +303,15 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points) {
     _it_timer.stop();
     _iteration_stats[it].centroid_update_time = _it_timer.total_time();
     _it_timer.reset();
-    // Step 2B: Reassign points
-    _it_timer.start();
-    compute_cluster_ids(points, cluster_ids);
-    _it_timer.stop();
-    _iteration_stats[it].assignment_time = _it_timer.total_time();
+
     if (params.verbose >= 1) {
       std::cout << "[MVClustering] Iteration " << it << ": "
-                << "centroid update time = " << _iteration_stats[it].centroid_update_time
-                << ", assignment time = " << _iteration_stats[it].assignment_time;
+                << "assignment time = " << _iteration_stats[it].assignment_time;
       if (params.verbose >= 2) {
-        _iteration_stats[it].cost = compute_cost(points, cluster_ids);
         std::cout << ", cost = " << _iteration_stats[it].cost;
       }
-      std::cout << std::endl;
+      std::cout << ", centroid update time = " << _iteration_stats[it].centroid_update_time
+                << std::endl;
     }
   }
   if (params.verbose >= 1) {

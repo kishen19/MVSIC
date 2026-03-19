@@ -1,4 +1,3 @@
-// mvsic/core/quantization/wrapper.h
 #pragma once
 
 #include <algorithm>
@@ -12,10 +11,8 @@
 #include <utility>
 #include <vector>
 
-#include "parlay/parallel.h"
-#include "parlay/sequence.h"
+#include "parlay/primitives.h"
 #include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/turboquant_byte.h"
 
 namespace mvsic {
@@ -245,9 +242,7 @@ class Quantized_Query_Point_Cloud {
     return {this->distance(cloud), vec_queries.size()};
   }
 
-  static constexpr bool is_metric() {
-    return Metric;
-  }
+  static constexpr bool is_metric() { return Metric; }
 };
 
 // ---------------------------------------------------------
@@ -260,20 +255,25 @@ class Quantized_Point_Cloud_Set {
  public:
   EncRange vec_db;
   parlay::sequence<size_t> offsets;  // vector-index offsets into flattened DB (size n_clouds+1)
+  parlay::sequence<uint32_t> ids = {};
   parlay::sequence<uint32_t> sizes_unpadded;  // size = n_clouds (only meaningful for fastscan)
 
   uint32_t n_clouds = 0;
 
   Quantized_Point_Cloud_Set() = default;
 
-  Quantized_Point_Cloud_Set(EncRange&& enc, parlay::sequence<size_t>&& offs) :
-      vec_db(std::move(enc)), offsets(std::move(offs)) {
+  Quantized_Point_Cloud_Set(EncRange&& enc, parlay::sequence<size_t>&& offs,
+                            parlay::sequence<uint32_t>&& ids) :
+      vec_db(std::move(enc)), offsets(std::move(offs)), ids(std::move(ids)) {
     n_clouds = static_cast<uint32_t>(offsets.size() ? offsets.size() - 1 : 0);
   }
 
   Quantized_Point_Cloud_Set(EncRange&& enc, parlay::sequence<size_t>&& offs,
-                            parlay::sequence<uint32_t>&& sizes) :
-      vec_db(std::move(enc)), offsets(std::move(offs)), sizes_unpadded(std::move(sizes)) {
+                            parlay::sequence<uint32_t>&& ids, parlay::sequence<uint32_t>&& sizes) :
+      vec_db(std::move(enc)),
+      offsets(std::move(offs)),
+      ids(std::move(ids)),
+      sizes_unpadded(std::move(sizes)) {
     n_clouds = static_cast<uint32_t>(offsets.size() ? offsets.size() - 1 : 0);
   }
 
@@ -288,6 +288,9 @@ class Quantized_Point_Cloud_Set {
     }
     return Quantized_Point_Cloud<EncRange, Metric>(&vec_db, start, end);
   }
+
+  // Returns id of pointcloud i
+  inline uint32_t get_id(size_t i) const noexcept { return (ids.size() > 0) ? ids[i] : i; }
 
   template<typename QuantizedQueryTy, typename Seq>
   size_t distances(const QuantizedQueryTy& q_query, const Seq& indices, size_t n,
@@ -308,11 +311,11 @@ class Quantized_Point_Cloud_Set {
         }
         const size_t num_q = q_query.vec_queries.size();
         if (num_q == 0) {
-          results[i] = {cloud_id, 0.0f};
+          results[i] = {get_id(cloud_id), 0.0f};
           return;
         }
         if (cloud_size == 0) {
-          results[i] = {cloud_id, std::numeric_limits<float>::max()};
+          results[i] = {get_id(cloud_id), std::numeric_limits<float>::max()};
           return;
         }
         const size_t true_end = start + cloud_size;
@@ -404,13 +407,13 @@ class Quantized_Point_Cloud_Set {
           }
           total_chamfer += min_d;
         }
-        results[i] = {cloud_id, total_chamfer / static_cast<float>(num_q)};
+        results[i] = {get_id(cloud_id), total_chamfer / static_cast<float>(num_q)};
       });
       return q_query.vec_queries.size();
 #else
       parlay::parallel_for(0, n, [&](size_t i) {
         uint32_t cloud_id = indices[i];
-        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+        results[i] = {get_id(cloud_id), q_query.distance((*this)[cloud_id])};
       });
       return q_query.vec_queries.size();
 #endif
@@ -436,11 +439,11 @@ class Quantized_Point_Cloud_Set {
         const size_t cloud_size = (end > start) ? (end - start) : 0;
 
         if (num_q == 0) {
-          results[i] = {cloud_id, 0.0f};
+          results[i] = {get_id(cloud_id), 0.0f};
           return;
         }
         if (cloud_size == 0) {
-          results[i] = {cloud_id, std::numeric_limits<float>::max()};
+          results[i] = {get_id(cloud_id), std::numeric_limits<float>::max()};
           return;
         }
 
@@ -624,20 +627,20 @@ class Quantized_Point_Cloud_Set {
           }
         }
 
-        results[i] = {cloud_id, total / static_cast<float>(num_q)};
+        results[i] = {get_id(cloud_id), total / static_cast<float>(num_q)};
       });
       return q_query.vec_queries.size();
 #else
       parlay::parallel_for(0, n, [&](size_t i) {
         const uint32_t cloud_id = indices[i];
-        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+        results[i] = {get_id(cloud_id), q_query.distance((*this)[cloud_id])};
       });
       return q_query.vec_queries.size();
 #endif
     } else {
       parlay::parallel_for(0, n, [&](size_t i) {
         uint32_t cloud_id = indices[i];
-        results[i] = {cloud_id, q_query.distance((*this)[cloud_id])};
+        results[i] = {get_id(cloud_id), q_query.distance((*this)[cloud_id])};
       });
       return q_query.vec_queries.size();
     }
@@ -663,11 +666,11 @@ class Quantized_Point_Cloud_Set {
           cloud_size = (end_padded > start) ? (end_padded - start) : 0;
         }
         if (num_q == 0) {
-          results[cid] = {cloud_id, 0.0f};
+          results[cid] = {get_id(cloud_id), 0.0f};
           return;
         }
         if (cloud_size == 0) {
-          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
+          results[cid] = {get_id(cloud_id), std::numeric_limits<float>::max()};
           return;
         }
         const size_t true_end = start + cloud_size;
@@ -761,12 +764,12 @@ class Quantized_Point_Cloud_Set {
           }
           total += min_d;
         }
-        results[cid] = {cloud_id, total / float(num_q)};
+        results[cid] = {get_id(cloud_id), total / float(num_q)};
       });
       return num_q;
 #else
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
-        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+        results[cid] = {get_id(cid), q_query.distance((*this)[cid])};
       });
       return num_q;
 #endif
@@ -794,11 +797,11 @@ class Quantized_Point_Cloud_Set {
         const size_t cloud_size = (end > start) ? (end - start) : 0;
 
         if (num_q == 0) {
-          results[cid] = {cloud_id, 0.0f};
+          results[cid] = {get_id(cloud_id), 0.0f};
           return;
         }
         if (cloud_size == 0) {
-          results[cid] = {cloud_id, std::numeric_limits<float>::max()};
+          results[cid] = {get_id(cloud_id), std::numeric_limits<float>::max()};
           return;
         }
 
@@ -982,27 +985,25 @@ class Quantized_Point_Cloud_Set {
             total += min_q[qi];
         }
 
-        results[cid] = {cloud_id, total * inv_num_q};
+        results[cid] = {get_id(cloud_id), total * inv_num_q};
       });
       return num_q;
 #else
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
-        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+        results[cid] = {get_id(cid), q_query.distance((*this)[cid])};
       });
       return num_q;
 #endif
     } else {
       parlay::parallel_for(0, n_clouds, [&](size_t cid) {
-        results[cid] = {static_cast<uint32_t>(cid), q_query.distance((*this)[cid])};
+        results[cid] = {get_id(cid), q_query.distance((*this)[cid])};
       });
       return num_q;
     }
   }
 
   // TODO: fix this
-  inline size_t get_dist_cmps() const {
-    return 0;
-  }
+  inline size_t get_dist_cmps() const { return 0; }
 
   void save(std::ofstream& out) const {
     out.write(reinterpret_cast<const char*>(&n_clouds), sizeof(n_clouds));
@@ -1073,6 +1074,8 @@ class MultiVecQuantizer {
 
     // offsets are in FLOAT indices into flattened float buffer
     const auto pcs_offsets_float = pcs.get_offsets();
+    const auto pcs_ids = pcs.get_ids();
+    parlay::sequence<uint32_t> ids(pcs_ids.begin(), pcs_ids.end());
 
     if constexpr (VecModel::is_fastscan) {
       auto enc = vec_model.encode(flat, pcs_offsets_float);
@@ -1087,7 +1090,7 @@ class MultiVecQuantizer {
         sizes[c] = static_cast<uint32_t>((end_f - start_f) / dim);  // UNPADDED vectors
       });
       return Quantized_Point_Cloud_Set<EncRange, Metric>(std::move(enc), std::move(offs),
-                                                         std::move(sizes));
+                                                         std::move(ids), std::move(sizes));
     } else {
       auto enc = vec_model.encode(flat);
       using EncRange = decltype(enc);
@@ -1096,7 +1099,8 @@ class MultiVecQuantizer {
       if (dim > 0) {
         parlay::parallel_for(0, offs.size(), [&](size_t i) { offs[i] /= dim; });
       }
-      return Quantized_Point_Cloud_Set<EncRange, Metric>(std::move(enc), std::move(offs));
+      return Quantized_Point_Cloud_Set<EncRange, Metric>(std::move(enc), std::move(offs),
+                                                         std::move(ids));
     }
   }
 

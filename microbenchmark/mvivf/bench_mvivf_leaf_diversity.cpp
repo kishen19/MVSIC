@@ -128,24 +128,29 @@ static int run_leaf_diversity(commandLine& P) {
   }
   std::cout << "\n";
 
-  // Flat clustering: map point id -> leaf id.
-  auto leaf_of_point = index.get_flat_clustering();
-  if (leaf_of_point.size() == 0) {
-    std::cerr << "ERROR: flat clustering is empty; index may not be built correctly.\n";
+  // Multi-leaf/root-child clustering (supports spill: 1 or 2 leaves/root-children per point).
+  auto leaves_of_point = index.get_leaves_of_point();
+  auto root_children_of_point = index.get_root_children_of_point();
+  if (leaves_of_point.empty()) {
+    std::cerr << "ERROR: leaves_of_point is empty; index may not be built correctly.\n";
+    return 1;
+  }
+  if (root_children_of_point.empty()) {
+    std::cerr << "ERROR: root_children_of_point is empty; index may not be built correctly.\n";
     return 1;
   }
 
-  // Root-level clustering: map point id -> root child (subtree) id.
-  auto root_child_of_point = index.get_root_child_clustering();
-  if (root_child_of_point.size() == 0) {
-    std::cerr << "ERROR: root-child clustering is empty; index may not be built correctly.\n";
-    return 1;
-  }
-
-  // For each query, count distinct leaves among its top-k GT neighbors.
   const size_t num_queries = queries.size();
+  // Distinct counts (original metric).
   std::vector<size_t> leaf_counts(num_queries, 0);
   std::vector<size_t> root_child_counts(num_queries, 0);
+  // Greedy set-cover size and best/second-best counts (in greedy order).
+  std::vector<size_t> greedy_leaf_cover_size(num_queries, 0);
+  std::vector<size_t> greedy_root_cover_size(num_queries, 0);
+  std::vector<size_t> best_leaf_count(num_queries, 0);
+  std::vector<size_t> second_best_leaf_count(num_queries, 0);
+  std::vector<size_t> best_root_child_count(num_queries, 0);
+  std::vector<size_t> second_best_root_child_count(num_queries, 0);
 
   size_t missing_ids = 0;
   size_t max_seen_leaf = 0;
@@ -154,34 +159,103 @@ static int run_leaf_diversity(commandLine& P) {
   for (size_t qi = 0; qi < num_queries; ++qi) {
     const auto& row = gt[qi];
     const size_t kk = std::min<size_t>(k, row.size());
-    std::unordered_set<uint32_t> leaves;
-    leaves.reserve(kk);
-    std::unordered_set<uint32_t> root_children;
-    root_children.reserve(kk);
 
+    // Point IDs for this query's top-k.
+    std::vector<uint32_t> pids;
+    pids.reserve(kk);
+    std::unordered_set<uint32_t> leaves_distinct;
+    std::unordered_set<uint32_t> root_children_distinct;
     for (size_t j = 0; j < kk; ++j) {
       uint32_t pid = row[j].first;
-      if (pid >= leaf_of_point.size()) {
+      if (pid >= leaves_of_point.size()) {
         ++missing_ids;
         continue;
       }
-      uint32_t lid = leaf_of_point[pid];
-      leaves.insert(lid);
-      if (lid != UINT32_MAX && lid > max_seen_leaf) max_seen_leaf = lid;
-
-       if (pid < root_child_of_point.size()) {
-        uint32_t rid = root_child_of_point[pid];
-        root_children.insert(rid);
+      const auto& lids = leaves_of_point[pid];
+      const auto& rids = root_children_of_point[pid];
+      if (lids.empty()) continue;
+      pids.push_back(pid);
+      for (uint32_t lid : lids) {
+        leaves_distinct.insert(lid);
+        if (lid > max_seen_leaf) max_seen_leaf = lid;
+      }
+      for (uint32_t rid : rids) {
+        root_children_distinct.insert(rid);
         if (rid != UINT32_MAX && rid > max_seen_root_child) max_seen_root_child = rid;
       }
     }
-    leaf_counts[qi] = leaves.size();
-    root_child_counts[qi] = root_children.size();
+    leaf_counts[qi] = leaves_distinct.size();
+    root_child_counts[qi] = root_children_distinct.size();
+
+    // Greedy set cover for leaves: repeatedly pick the leaf covering the most uncovered points.
+    std::vector<size_t> picked_leaf_counts;
+    std::unordered_set<size_t> uncovered_leaf;
+    for (size_t j = 0; j < pids.size(); ++j) uncovered_leaf.insert(j);
+    while (!uncovered_leaf.empty()) {
+      size_t best_cover = 0;
+      uint32_t best_leaf = UINT32_MAX;
+      for (uint32_t lid : leaves_distinct) {
+        size_t count = 0;
+        for (size_t j : uncovered_leaf) {
+          const auto& lids_j = leaves_of_point[pids[j]];
+          if (std::find(lids_j.begin(), lids_j.end(), lid) != lids_j.end()) ++count;
+        }
+        if (count > best_cover) {
+          best_cover = count;
+          best_leaf = lid;
+        }
+      }
+      if (best_leaf == UINT32_MAX || best_cover == 0) break;
+      picked_leaf_counts.push_back(best_cover);
+      for (size_t j = 0; j < pids.size(); ++j) {
+        if (uncovered_leaf.count(j)) {
+          const auto& lids_j = leaves_of_point[pids[j]];
+          if (std::find(lids_j.begin(), lids_j.end(), best_leaf) != lids_j.end())
+            uncovered_leaf.erase(j);
+        }
+      }
+    }
+    greedy_leaf_cover_size[qi] = picked_leaf_counts.size();
+    best_leaf_count[qi] = picked_leaf_counts.empty() ? 0 : picked_leaf_counts[0];
+    second_best_leaf_count[qi] = picked_leaf_counts.size() >= 2 ? picked_leaf_counts[1] : 0;
+
+    // Greedy set cover for root children.
+    std::vector<size_t> picked_root_counts;
+    std::unordered_set<size_t> uncovered_root;
+    for (size_t j = 0; j < pids.size(); ++j) uncovered_root.insert(j);
+    while (!uncovered_root.empty()) {
+      size_t best_cover = 0;
+      uint32_t best_rid = UINT32_MAX;
+      for (uint32_t rid : root_children_distinct) {
+        size_t count = 0;
+        for (size_t j : uncovered_root) {
+          const auto& rids_j = root_children_of_point[pids[j]];
+          if (std::find(rids_j.begin(), rids_j.end(), rid) != rids_j.end()) ++count;
+        }
+        if (count > best_cover) {
+          best_cover = count;
+          best_rid = rid;
+        }
+      }
+      if (best_rid == UINT32_MAX || best_cover == 0) break;
+      picked_root_counts.push_back(best_cover);
+      for (size_t j = 0; j < pids.size(); ++j) {
+        if (uncovered_root.count(j)) {
+          const auto& rids_j = root_children_of_point[pids[j]];
+          if (std::find(rids_j.begin(), rids_j.end(), best_rid) != rids_j.end())
+            uncovered_root.erase(j);
+        }
+      }
+    }
+    greedy_root_cover_size[qi] = picked_root_counts.size();
+    best_root_child_count[qi] = picked_root_counts.empty() ? 0 : picked_root_counts[0];
+    second_best_root_child_count[qi] =
+        picked_root_counts.size() >= 2 ? picked_root_counts[1] : 0;
   }
 
   if (missing_ids > 0) {
     std::cout << "WARNING: encountered " << missing_ids << " GT ids outside [0, "
-              << (leaf_of_point.size() - 1) << "]; those neighbors were ignored.\n";
+              << (leaves_of_point.size() - 1) << "]; those neighbors were ignored.\n";
   }
 
   // Aggregate statistics.
@@ -215,6 +289,38 @@ static int run_leaf_diversity(commandLine& P) {
   std::cout << "  max   : " << max_leaf << "\n";
   std::cout << "  total leaves seen: " << (max_seen_leaf + 1) << "\n";
 
+  // Greedy set-cover size and best/second-best leaf counts (in greedy order).
+  auto agg = [num_queries](const std::vector<size_t>& v, double& avg, double& median,
+                           size_t& min_v, size_t& max_v) {
+    double sum = std::accumulate(v.begin(), v.end(), 0.0);
+    avg = sum / static_cast<double>(num_queries);
+    std::vector<size_t> s = v;
+    std::sort(s.begin(), s.end());
+    min_v = s.front();
+    max_v = s.back();
+    if (num_queries % 2 == 1) {
+      median = static_cast<double>(s[num_queries / 2]);
+    } else {
+      median = 0.5 * (static_cast<double>(s[num_queries / 2 - 1]) + s[num_queries / 2]);
+    }
+  };
+  double avg_greedy_leaf, median_greedy_leaf, avg_best_leaf, median_best_leaf;
+  double avg_second_leaf, median_second_leaf;
+  size_t min_greedy_leaf, max_greedy_leaf, min_best_leaf, max_best_leaf;
+  size_t min_second_leaf, max_second_leaf;
+  agg(greedy_leaf_cover_size, avg_greedy_leaf, median_greedy_leaf, min_greedy_leaf, max_greedy_leaf);
+  agg(best_leaf_count, avg_best_leaf, median_best_leaf, min_best_leaf, max_best_leaf);
+  agg(second_best_leaf_count, avg_second_leaf, median_second_leaf, min_second_leaf, max_second_leaf);
+  std::cout << "Greedy min-cover size (leaves, estimate):\n";
+  std::cout << "  avg   : " << avg_greedy_leaf << "  median: " << median_greedy_leaf
+            << "  min: " << min_greedy_leaf << "  max: " << max_greedy_leaf << "\n";
+  std::cout << "Best leaf (1st in greedy order) – count of top-" << k << " in that leaf:\n";
+  std::cout << "  avg   : " << avg_best_leaf << "  median: " << median_best_leaf
+            << "  min: " << min_best_leaf << "  max: " << max_best_leaf << "\n";
+  std::cout << "Second-best leaf (2nd in greedy order) – count of top-" << k << " in that leaf:\n";
+  std::cout << "  avg   : " << avg_second_leaf << "  median: " << median_second_leaf
+            << "  min: " << min_second_leaf << "  max: " << max_second_leaf << "\n";
+
   // Root-child (subtree) diversity stats.
   double sum_root = std::accumulate(root_child_counts.begin(), root_child_counts.end(), 0.0);
   double avg_root = sum_root / static_cast<double>(num_queries);
@@ -239,6 +345,24 @@ static int run_leaf_diversity(commandLine& P) {
   std::cout << "  min   : " << min_root << "\n";
   std::cout << "  max   : " << max_root << "\n";
   std::cout << "  total root children seen: " << (max_seen_root_child + 1) << "\n";
+
+  double avg_greedy_root, median_greedy_root, avg_best_root, median_best_root;
+  double avg_second_root, median_second_root;
+  size_t min_greedy_root, max_greedy_root, min_best_root, max_best_root;
+  size_t min_second_root, max_second_root;
+  agg(greedy_root_cover_size, avg_greedy_root, median_greedy_root, min_greedy_root, max_greedy_root);
+  agg(best_root_child_count, avg_best_root, median_best_root, min_best_root, max_best_root);
+  agg(second_best_root_child_count, avg_second_root, median_second_root, min_second_root,
+      max_second_root);
+  std::cout << "Greedy min-cover size (root children, estimate):\n";
+  std::cout << "  avg   : " << avg_greedy_root << "  median: " << median_greedy_root
+            << "  min: " << min_greedy_root << "  max: " << max_greedy_root << "\n";
+  std::cout << "Best root child (1st in greedy order) – count of top-" << k << " in that subtree:\n";
+  std::cout << "  avg   : " << avg_best_root << "  median: " << median_best_root
+            << "  min: " << min_best_root << "  max: " << max_best_root << "\n";
+  std::cout << "Second-best root child (2nd in greedy order) – count of top-" << k << ":\n";
+  std::cout << "  avg   : " << avg_second_root << "  median: " << median_second_root
+            << "  min: " << min_second_root << "  max: " << max_second_root << "\n";
 
   return 0;
 }

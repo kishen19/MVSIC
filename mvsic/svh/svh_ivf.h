@@ -31,7 +31,9 @@ class IndexSVHIVF : public Index<metric> {
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Point = std::conditional_t<metric, mvsic::L2_Point<float>, mvsic::IP_Point<float>>;
   using Range = mvsic::PointRange<float, Point>;
-  using Index<metric>::d;  // Embedding dimension
+  using Index<metric>::d;       // Embedding dimension
+  using Index<metric>::params;  // Index Params
+  using Index<metric>::quantization_mode;
 
   // Quantizer Types
   using PQ_Range = pq::Quantized_Point_Range<Range, metric>;
@@ -64,15 +66,19 @@ class IndexSVHIVF : public Index<metric> {
     inline size_t get_id(size_t i) const noexcept { return ids[i].first; }
   };
 
-  IndexParams params;
   node_t* root = nullptr;  // Root of the k-means tree
 
   // Quantizer Storage
   QuantModel quantizer = std::monostate{};
-  QT active_quantizer = QT::None;
 
-  IndexSVHIVF(size_t d_) noexcept : params(IndexParams::svh_ivf()) { d = d_; }
-  IndexSVHIVF(size_t d_, const IndexParams& params) noexcept : params(params) { d = d_; }
+  IndexSVHIVF(size_t d_) noexcept {
+    d = d_;
+    params = IndexParams::svh_ivf();
+  }
+  IndexSVHIVF(size_t d_, const IndexParams& params_) noexcept {
+    d = d_;
+    params = params_;
+  }
 
   // Recursively builds the kmeans tree
   void recursive_build(node_t* node, const parlay::sequence<parlay::sequence<float>>& points,
@@ -105,7 +111,7 @@ class IndexSVHIVF : public Index<metric> {
     }
     // Quantize centers: Encoding
     if (params.quantize_centers) {
-      switch (active_quantizer) {
+      switch (quantization_mode) {
         case QT::PQ: {
           auto& m = std::get<PQ_Model>(quantizer);
           node->quantized_data = m.encode(node->data);
@@ -140,7 +146,7 @@ class IndexSVHIVF : public Index<metric> {
             child->data = Range(child_points, d);
             child->ids = child_ids;
             // Quantization: Encoding
-            switch (active_quantizer) {
+            switch (quantization_mode) {
               case QT::PQ: {
                 auto& m = std::get<PQ_Model>(quantizer);
                 child->quantized_data = m.encode(child->data);
@@ -185,8 +191,8 @@ class IndexSVHIVF : public Index<metric> {
     });
 
     // Quantization: Training
-    active_quantizer = params.pq.method;
-    switch (active_quantizer) {
+    quantization_mode = params.pq.method;
+    switch (quantization_mode) {
       case QT::RaBitQ:
         if (params.verbose >= 1) std::cout << "Training RaBitQ..." << std::endl;
         quantizer.template emplace<RQ_Model>();
@@ -254,7 +260,7 @@ class IndexSVHIVF : public Index<metric> {
           child_dists[i] = dist;
         });
       } else {
-        switch (active_quantizer) {
+        switch (quantization_mode) {
           case QT::RaBitQ: {
             auto& q_query = std::get<RQ_Point>(q_query_point_var);
             auto& qleaf = std::get<RQ_Range>(current_node->quantized_data);
@@ -324,7 +330,7 @@ class IndexSVHIVF : public Index<metric> {
     double t_quantize = 0.0;
     t.start();
     QuantQuery q_query_point_var;
-    switch (active_quantizer) {
+    switch (quantization_mode) {
       case QT::RaBitQ: {
         auto& m = std::get<RQ_Model>(quantizer);
         q_query_point_var = m.quantize_query(query_point);
@@ -371,7 +377,7 @@ class IndexSVHIVF : public Index<metric> {
 
     // --- quantize + distances ---
     double t_distances = 0.0;
-    switch (active_quantizer) {
+    switch (quantization_mode) {
       case QT::RaBitQ: {
         t.start();
         auto& q_query = std::get<RQ_Point>(q_query_point_var);
@@ -629,9 +635,9 @@ class IndexSVHIVF : public Index<metric> {
                   point_ids.size() * sizeof(std::pair<size_t, size_t>));
 
     // Write quantization model
-    int type_id = static_cast<int>(active_quantizer);
+    int type_id = static_cast<int>(quantization_mode);
     outfile.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
-    switch (active_quantizer) {
+    switch (quantization_mode) {
       case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
       case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
       case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
@@ -672,8 +678,8 @@ class IndexSVHIVF : public Index<metric> {
 
     int type_id;
     infile.read(reinterpret_cast<char*>(&type_id), sizeof(int));
-    active_quantizer = static_cast<QT>(type_id);
-    switch (active_quantizer) {
+    quantization_mode = static_cast<QT>(type_id);
+    switch (quantization_mode) {
       case QT::PQ:
         quantizer.template emplace<PQ_Model>();
         std::get<PQ_Model>(quantizer).load(infile);
@@ -739,7 +745,7 @@ class IndexSVHIVF : public Index<metric> {
           node_t* node = ind_to_node[i];
           if ((!node->children.empty() && params.quantize_centers) ||
               (node->children.empty() && !node->ids.empty())) {
-            switch (active_quantizer) {
+            switch (quantization_mode) {
               case QT::PQ:
                 node->quantized_data = std::get<PQ_Model>(quantizer).encode(node->data);
                 break;

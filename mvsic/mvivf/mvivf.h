@@ -2,27 +2,15 @@
 
 #include <algorithm>
 #include <functional>
-#include <optional>
-#include <queue>
 #include <set>
 #include <type_traits>
+#include <unordered_set>
 #include <variant>
 #include <vector>
-
-// #include "absl/container/btree_set.h"
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
 #include "mvsic/core/utils/util.h"
-#include "mvsic/core/distance_measures/many_to_many.h"
-
-// Quantization Headers
-#include "mvsic/core/quantization/pq.h"
-#include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/wrapper.h"
 
 namespace mvsic {
 
@@ -42,145 +30,68 @@ template<bool metric>
 class IndexMVIVF : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  using Index<metric>::d;                           // Embedding dimension
-
-  // Multi-Vector Quantizer Types using the Wrapper
-  using FlatRange = FlattenedPCRange<PointCloudSet<ChPoint>>;
-  using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
-  using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
-  using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
-  using TQ4_Enc = turboquant_4bit::Quantized_Point_Range<FlatRange, metric>;
-  using TQPQ4_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 4>;
-  using TQPQ8_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 8>;
-
-  using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
-  using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
-  using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
-  using TQ4_Set = Quantized_Point_Cloud_Set<TQ4_Enc, metric>;
-  using TQPQ4_Set = Quantized_Point_Cloud_Set<TQPQ4_Enc, metric>;
-  using TQPQ8_Set = Quantized_Point_Cloud_Set<TQPQ8_Enc, metric>;
-  using QuantSet =
-      std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ4_Set, TQPQ4_Set, TQPQ8_Set>;
-
-  using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
-  using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
-  using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
-  using TQ4_Model = MultiVecQuantizer<turboquant_4bit::Model<metric>, metric>;
-  using TQPQ4_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 4>, metric>;
-  using TQPQ8_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 8>, metric>;
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ4_Model,
-                                  TQPQ4_Model, TQPQ8_Model>;
-
-  // helper for decltype
-  template<class M, class Q>
-  using QQueryT = decltype(std::declval<M &>().quantize_query(std::declval<Q const &>()));
-  using PQ_Q = QQueryT<PQ_Model, ChPoint>;
-  using FS_Q = QQueryT<FS_Model, ChPoint>;
-  using RQ_Q = QQueryT<RQ_Model, ChPoint>;
-  using TQ4_Q = QQueryT<TQ4_Model, ChPoint>;
-  using TQPQ4_Q = QQueryT<TQPQ4_Model, ChPoint>;
-  using TQPQ8_Q = QQueryT<TQPQ8_Model, ChPoint>;
-  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q, TQ4_Q, TQPQ4_Q, TQPQ8_Q>;
-
-  using QT = IndexParams::QuantizerType;
+  using MVQT = typename Index<metric>::MVQT;
+  using QuantSet = typename MVQT::QuantSet;
+  using QuantQuery = typename MVQT::QuantQuery;
+  using QuantModel = typename MVQT::QuantModel;
+  using TQ4_Set = typename MVQT::TQ4_Set;
+  using TQ4_Q = typename MVQT::TQ4_Q;
+  using TQ4_Model = typename MVQT::TQ4_Model;
+  using QT = typename Index<metric>::QT;
+  using Index<metric>::d;       // Embedding dimension
+  using Index<metric>::params;  // Index Params
+  using Index<metric>::quantization_mode;
 
   // kmeans tree nodes
   struct node_t {
-    parlay::sequence<node_t *> children;
+    parlay::sequence<node_t*> children;
     // For internal nodes: data = centers of children
     // For leaves:         data = points in the cluster
     PointCloudSet<ChPoint> data;
     QuantSet quantized_data;  // std::monostate for inner nodes and unquantized leaves.
-
     node_t() noexcept : children(), data(), quantized_data(std::monostate{}) {}
     ~node_t() noexcept {}
-
     inline size_t get_size() const noexcept { return data.size(); }
   };
 
-  IndexParams params;
-  node_t *root = nullptr;  // Root of the k-means tree
+  node_t* root = nullptr;  // Root of the k-means tree
 
   // Leaf Data: Accessed directly during search when nprobes is large
-  std::vector<node_t *> leaves_flat;    // Flat list of leaves for large-nprobes search
-  PointCloudSet<ChPoint> leaf_centers;  // One representative center per leaf
-  QuantSet leaf_centers_quant;          // Quantized centers for flat search (when enabled)
-
-  // Quantizer Storage
-  QuantModel quantizer = std::monostate{};
-  QT active_quantizer = QT::None;
-
+  parlay::sequence<node_t*> leaves_flat;  // Flat list of leaves for large-nprobes search
+  PointCloudSet<ChPoint> leaf_centers;    // One representative center per leaf
+  QuantSet leaf_centers_quant;            // Quantized centers for flat search (when enabled)
   // Center quantization: when params.quantize_centers is enabled, we *always* use TurboQuant4Bit
   // (TQ4) for internal-node / leaf-center scoring, regardless of the leaf quantizer.
-  //
-  // If the leaf quantizer is already TQ4, we reuse the same model instance (no duplicate training).
-  std::optional<TQ4_Model> center_quantizer_owned;
-  TQ4_Model *center_quantizer = nullptr;  // points to either owned model or leaf model
+  // This is because greedy search/flat search requires high-quality scores
+  TQ4_Model center_quantizer;
+  QuantModel quantizer = std::monostate{};
 
   // Stats
   size_t kmeanstree_height = 0;
+  // For each leaf index, the root-level child index (for diversity stats).
+  std::vector<uint32_t> leaf_to_root_child_;
 
-  IndexMVIVF(size_t d_) noexcept : params(IndexParams::mvivf()) { d = d_; }
-  IndexMVIVF(size_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
+  IndexMVIVF(size_t d_) noexcept {
+    d = d_;
+    params = IndexParams::mvivf();
+  }
+  IndexMVIVF(size_t d_, const IndexParams& params_) noexcept {
+    d = d_;
+    params = params_;
+  }
 
-  void init_center_quantizer(const PointCloudSet<ChPoint> &points) {
-    center_quantizer = nullptr;
-    center_quantizer_owned.reset();
+  // Quantization Helpers
+  void init_tq4_quantizer(const PointCloudSet<ChPoint>& points) {
     if (!params.quantize_centers) return;
-
-    if (active_quantizer == QT::TurboQuant4Bit) {
-      center_quantizer = &std::get<TQ4_Model>(quantizer);
-      return;
-    }
-
-    // Train a dedicated TQ4 model for center scoring.
-    center_quantizer_owned.emplace();
-    center_quantizer_owned->train(points);
-    center_quantizer = &(*center_quantizer_owned);
+    center_quantizer.train(points);
   }
 
-  QuantSet encode_points_quantized(const PointCloudSet<ChPoint> &points) {
-    switch (active_quantizer) {
-      case QT::PQ: return std::get<PQ_Model>(quantizer).encode(points);
-      case QT::FastScan: return std::get<FS_Model>(quantizer).encode(points);
-      case QT::RaBitQ: return std::get<RQ_Model>(quantizer).encode(points);
-      case QT::TurboQuant4Bit: return std::get<TQ4_Model>(quantizer).encode(points);
-      case QT::TurboQuantPQ4Bit:
-        if (params.pq.block_size == 4) return std::get<TQPQ4_Model>(quantizer).encode(points);
-        return std::get<TQPQ8_Model>(quantizer).encode(points);
-      case QT::None:
-      default: return std::monostate{};
-    }
-  }
-
-  QuantSet encode_centers_tq(const PointCloudSet<ChPoint> &points) {
-    if (!center_quantizer) return std::monostate{};
-    return center_quantizer->encode(points);  // returns TQ4_Set (wrapped in QuantSet)
-  }
-
-  void quant_distances_all(const QuantQuery &q_var, const QuantSet &s_var,
-                           std::pair<uint32_t, float> *out) const {
-    switch (active_quantizer) {
-      case QT::PQ: std::get<PQ_Set>(s_var).distances_all(std::get<PQ_Q>(q_var), out); break;
-      case QT::FastScan: std::get<FS_Set>(s_var).distances_all(std::get<FS_Q>(q_var), out); break;
-      case QT::RaBitQ: std::get<RQ_Set>(s_var).distances_all(std::get<RQ_Q>(q_var), out); break;
-      case QT::TurboQuant4Bit:
-        std::get<TQ4_Set>(s_var).distances_all(std::get<TQ4_Q>(q_var), out);
-        break;
-      case QT::TurboQuantPQ4Bit:
-        if (params.pq.block_size == 4) {
-          std::get<TQPQ4_Set>(s_var).distances_all(std::get<TQPQ4_Q>(q_var), out);
-        } else {
-          std::get<TQPQ8_Set>(s_var).distances_all(std::get<TQPQ8_Q>(q_var), out);
-        }
-        break;
-      case QT::None:
-      default: break;
-    }
+  TQ4_Set encode_tq4(const PointCloudSet<ChPoint>& points) {
+    return center_quantizer.encode(points);  // returns TQ4_Set
   }
 
   // Recursive kmeans tree builder
-  void recursive_build(node_t *node, const PointCloudSet<ChPoint> &points) {
+  void recursive_build(node_t* node, const PointCloudSet<ChPoint>& points) {
     size_t n = points.size();
     // Number of centers: Dynamic
     // main_val: either k_per_level or sqrt(n)
@@ -190,14 +101,14 @@ class IndexMVIVF : public Index<metric> {
     size_t small_nc = 4 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
     size_t num_clusters = std::max(static_cast<size_t>(4), std::min({auto_nc, small_nc, n}));
     if (params.verbose >= 1) {
-      std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
+      std::cout << "[MVIVF] Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
     // Step 1: Run MV-Lloyds on points
     MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
     Clus.train(points);
-    PointCloudSet<ChPoint> &centers = Clus.centers;
-    parlay::sequence<uint32_t> &cluster_ids = Clus.cluster_ids;
+    PointCloudSet<ChPoint>& centers = Clus.get_centers();
+    parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
     // Step 2: Collect Clusters
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
@@ -210,9 +121,9 @@ class IndexMVIVF : public Index<metric> {
     } else {
       node->data = std::move(centers);
     }
-    // Quantize internal-node centers if requested (always using TQ4).
+    // Quantize internal-node centers if enabled.
     if (params.quantize_centers) {
-      node->quantized_data = encode_centers_tq(node->data);
+      node->quantized_data = encode_tq4(node->data);
     }
     parlay::parallel_for(
         0, grouped.size(),
@@ -221,118 +132,90 @@ class IndexMVIVF : public Index<metric> {
           auto group = parlay::delayed_seq<uint32_t>(
               grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
           PointCloudSet<ChPoint> child_points = PointCloudSet<ChPoint>(points.filter(group), d);
-          node_t *child = new node_t();
+          node_t* child = new node_t();
           node->children[i] = child;
           if (child_points.size() > params.max_leaf_size) {  // Recurse
             recursive_build(child, child_points);
           } else {  // Leaf Node
             child->data = std::move(child_points);
-            // Always quantize leaf nodes when a quantizer is active; Step 2 of search assumes
-            // that leaf->quantized_data holds encoded points whenever active_quantizer != None.
-            if (active_quantizer != QT::None) {
-              child->quantized_data = encode_points_quantized(child->data);
-            }
+            child->quantized_data = this->encode_points_quantized(child->data, quantizer);
           }
         },
         1);
   }
 
   // Builds the index given PointCloudSet object.
-  void build(const PointCloudSet<ChPoint> &points) override {
+  void build(const PointCloudSet<ChPoint>& points) override {
+    parlay::internal::timer t;
     root = new node_t();
-    if (params.compress_input) {
-      // TODO: run Ward's HAC to compress input point clouds
-    }
-
     // Quantization
-    active_quantizer = params.pq.method;
-    switch (active_quantizer) {
-      case QT::PQ: {
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).train(points, params.pq.block_size,
-                                            params.pq.num_clusters_per_block,
-                                            params.pq.num_points_per_cluster);
-        break;
-      }
-      case QT::FastScan: {
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).train(points, params.pq.block_size);
-        break;
-      }
-      case QT::RaBitQ: {
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
-        break;
-      }
-      case QT::TurboQuant4Bit: {
-        quantizer.template emplace<TQ4_Model>();
-        std::get<TQ4_Model>(quantizer).train(points);
-        break;
-      }
-      case QT::TurboQuantPQ4Bit: {
-        if (params.pq.block_size == 4) {
-          quantizer.template emplace<TQPQ4_Model>();
-          std::get<TQPQ4_Model>(quantizer).train(points);
-        } else if (params.pq.block_size == 8) {
-          quantizer.template emplace<TQPQ8_Model>();
-          std::get<TQPQ8_Model>(quantizer).train(points);
-        } else {
-          std::cerr << "IndexMVIVF: TurboQuantPQ4Bit currently supports block_size 4 or 8 "
-                    << "(got " << params.pq.block_size << ")." << std::endl;
-          abort();
-        }
-        break;
-      }
-      default: quantizer = std::monostate{}; break;
-    }
-
+    t.start();
+    quantization_mode = params.pq.method;
+    this->train_quantizer(points, quantizer);
     // Center quantization (internal-node / leaf-center scoring): always TQ4.
-    init_center_quantizer(points);
-
+    init_tq4_quantizer(points);
+    if (params.verbose >= 1 && quantization_mode != QT::None) {
+      std::cout << "[MVIVF] Quantizers Trained: " << t.stop() << " sec" << std::endl;
+    }
+    t.reset();
     // Recursively build k-means tree
+    t.start();
     recursive_build(root, points);
+    if (params.verbose >= 1) {
+      std::cout << "[MVIVF] MV-Kmeans-Tree Built: " << t.stop() << " sec" << std::endl;
+    }
+    t.reset();
 
     // Build flat leaf index and leaf centers for optional flat-leaf search
+    t.start();
     leaves_flat.clear();
     leaf_centers_quant = std::monostate{};
+    leaf_to_root_child_.clear();
     if (root) {
       std::vector<ChPoint> center_points;
-      std::function<void(node_t *, node_t *, size_t)> visit = [&](node_t *node, node_t *parent,
-                                                                  size_t child_idx) {
-        if (node->children.empty()) {
-          leaves_flat.push_back(node);
-          auto &centers_pc = parent->data;
-          center_points.push_back(centers_pc[child_idx]);
-        } else {
-          for (size_t i = 0; i < node->children.size(); ++i) {
-            visit(node->children[i], node, i);
-          }
-        }
-      };
-      visit(root, nullptr, 0);
+      std::vector<uint32_t> root_child_for_leaf;
+      std::function<void(node_t*, node_t*, size_t, uint32_t)> visit =
+          [&](node_t* node, node_t* parent, size_t child_idx, uint32_t root_child_idx) {
+            if (node->children.empty()) {
+              leaves_flat.push_back(node);
+              auto& centers_pc = parent->data;
+              center_points.push_back(centers_pc[child_idx]);
+              root_child_for_leaf.push_back(root_child_idx);
+            } else {
+              for (size_t i = 0; i < node->children.size(); ++i) {
+                visit(node->children[i], node, i,
+                      (parent == root) ? static_cast<uint32_t>(i) : root_child_idx);
+              }
+            }
+          };
+      visit(root, nullptr, 0, 0);
 
+      leaf_to_root_child_ = std::move(root_child_for_leaf);
       if (!center_points.empty()) {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
 
         if (params.quantize_centers) {
-          leaf_centers_quant = encode_centers_tq(leaf_centers);
+          leaf_centers_quant = encode_tq4(leaf_centers);
         }
       }
+    }
+    if (params.verbose >= 1) {
+      std::cout << "[MVIVF] Leaf-data computed: " << t.stop() << " sec" << std::endl;
     }
   }
 
   // Output type of Greedy Search
   struct GreedySearchResult {
-    parlay::sequence<std::pair<float, node_t *>> probe_list;
+    parlay::sequence<std::pair<float, node_t*>> probe_list;
     size_t dist_cmps = 0;
     std::vector<double> timings = {};
   };
 
-  // Simple Beam Search using std::set
-  GreedySearchResult greedy_search(const ChPoint &query, const QuantQuery &q_query_var,
-                                   const TQ4_Q *q_center_query, size_t nprobes) const {
-    using score_node = std::pair<float, node_t *>;
-    auto less = [](const score_node &a, const score_node &b) {
+  // Simple Beam Search with early exit
+  GreedySearchResult greedy_search(const ChPoint& query, const TQ4_Q& q_query,
+                                   size_t nprobes) const {
+    using score_node = std::pair<float, node_t*>;
+    auto less = [](const score_node& a, const score_node& b) {
       return a.first < b.first || (a.first == b.first && a.second < b.second);
     };
     // Modifying this doesn't affect performance significantly, as beam management is not the
@@ -353,12 +236,11 @@ class IndexMVIVF : public Index<metric> {
     t_rest += t.stop();
     t.reset();
 
-    // Initial seed
+    // Initial
     t.start();
     beam.insert({0.0f, root});
     t_beam += t.stop();
     t.reset();
-
     while (!beam.empty()) {
       // Pop the best node (smallest distance)
       t.start();
@@ -368,36 +250,27 @@ class IndexMVIVF : public Index<metric> {
       t_beam += t.stop();
       t.reset();
       t.start();
-      node_t *current_node = best.second;
+      node_t* current_node = best.second;
       // Check if current score is worse than the worst in top_probes
       if (top_probes.size() == nprobes && best.first >= top_probes.front().first) {
         break;  // Beam has converged
       }
-      auto &children = current_node->children;
-      if (children.empty()) continue;
+      auto& children = current_node->children;
       // Compute distances to children
       child_dists.resize(children.size());
       dist_cmps += children.size();
-      if (!params.quantize_centers) {
-        auto &centers = current_node->data;
-        centers.distances(query, child_dists.data());
+      if (params.quantize_centers) {  // Center scoring always uses TQ4 when enabled.
+        std::get<TQ4_Set>(current_node->quantized_data).distances_all(q_query, child_dists.data());
       } else {
-        // Center scoring always uses TQ4 when enabled.
-        if (q_center_query) {
-          std::get<TQ4_Set>(current_node->quantized_data)
-              .distances_all(*q_center_query, child_dists.data());
-        } else {
-          // Should not happen in practice; fall back to exact.
-          auto &centers = current_node->data;
-          centers.distances(query, child_dists.data());
-        }
+        auto& centers = current_node->data;
+        centers.distances(query, child_dists.data());
       }
       t_dists += t.stop();
       t.reset();
 
       for (size_t i = 0; i < children.size(); ++i) {
         float d = child_dists[i].second;
-        node_t *child = children[i];
+        node_t* child = children[i];
         if (child->children.empty()) {
           t.start();
           // It's a leaf node: add to probe candidates if better than current worst
@@ -438,11 +311,10 @@ class IndexMVIVF : public Index<metric> {
     return out;
   }
 
-  // Flat leaf scoring: score all leaves by distance to a precomputed representative center and
-  // pick the best nprobes leaves.
-  GreedySearchResult flat_leaf_search(const ChPoint &query, const QuantQuery &q_query_var,
-                                      const TQ4_Q *q_center_query, size_t nprobes) const {
-    using score_node = std::pair<float, node_t *>;
+  // Flat leaf scoring: score all leaves and pick the best nprobes leaves.
+  GreedySearchResult flat_leaf_search(const ChPoint& query, const TQ4_Q& q_query,
+                                      size_t nprobes) const {
+    using score_node = std::pair<float, node_t*>;
     GreedySearchResult out;
     if (leaves_flat.empty() || leaf_centers.size() == 0 || nprobes == 0) {
       return out;
@@ -460,19 +332,13 @@ class IndexMVIVF : public Index<metric> {
     auto centers_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
     auto scores = parlay::sequence<score_node>::uninitialized(L);
 
-    if (!params.quantize_centers) {
-      // Exact Chamfer distance to the representative centers.
-      leaf_centers.distances(query, centers_dists.data());
+    if (params.quantize_centers) {
+      std::get<TQ4_Set>(leaf_centers_quant).distances_all(q_query, centers_dists.data());
     } else {
-      if (q_center_query) {
-        std::get<TQ4_Set>(leaf_centers_quant).distances_all(*q_center_query, centers_dists.data());
-      } else {
-        leaf_centers.distances(query, centers_dists.data());
-      }
+      leaf_centers.distances(query, centers_dists.data());
     }
-    parlay::parallel_for(0, L, [&](size_t i) {
-      scores[i] = {centers_dists[i].second, leaves_flat[i]};
-    });
+    parlay::parallel_for(0, L,
+                         [&](size_t i) { scores[i] = {centers_dists[i].second, leaves_flat[i]}; });
     t_dists += t.stop();
     t.reset();
 
@@ -480,7 +346,7 @@ class IndexMVIVF : public Index<metric> {
     t.start();
     if (use_nprobes < L) {
       std::nth_element(scores.begin(), scores.begin() + use_nprobes, scores.end(),
-                       [](const score_node &a, const score_node &b) { return a.first < b.first; });
+                       [](const score_node& a, const score_node& b) { return a.first < b.first; });
       scores.resize(use_nprobes);
     }
     t_rest += t.stop();
@@ -492,9 +358,64 @@ class IndexMVIVF : public Index<metric> {
     return out;
   }
 
+  inline auto process_probes(const ChPoint& query, const QuantQuery& q_query_var,
+                             parlay::sequence<std::pair<float, node_t*>>& probe_list) {
+    const size_t nprobes = probe_list.size();
+    auto sizes = parlay::delayed_tabulate(
+        nprobes, [&](size_t i) { return probe_list[i].second->get_size(); });
+    auto scan_result = parlay::scan(sizes);
+    auto& offsets = scan_result.first;
+    size_t& total_size = scan_result.second;
+    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+
+    auto process_probes_quant = [&]<typename SetType>(const auto& q_query) {
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        node_t* leaf = probe_list[i].second;
+        auto* leaf_data = std::get_if<SetType>(&leaf->quantized_data);
+        if (!leaf_data) UNREACHABLE();
+        leaf_data->distances_all(q_query, &visited[offsets[i]]);
+      });
+    };
+
+    switch (quantization_mode) {
+      case QT::PQ:
+        process_probes_quant.template operator()<typename MVQT::PQ_Set>(
+            std::get<typename MVQT::PQ_Q>(q_query_var));
+        break;
+      case QT::RaBitQ:
+        process_probes_quant.template operator()<typename MVQT::RQ_Set>(
+            std::get<typename MVQT::RQ_Q>(q_query_var));
+        break;
+      case QT::FastScan:
+        process_probes_quant.template operator()<typename MVQT::FS_Set>(
+            std::get<typename MVQT::FS_Q>(q_query_var));
+        break;
+      case QT::TurboQuant4Bit:
+        process_probes_quant.template operator()<typename MVQT::TQ4_Set>(
+            std::get<typename MVQT::TQ4_Q>(q_query_var));
+        break;
+      case QT::TurboQuantPQ4Bit:
+        if (params.pq.block_size == 4) {
+          process_probes_quant.template operator()<typename MVQT::TQPQ4_Set>(
+              std::get<typename MVQT::TQPQ4_Q>(q_query_var));
+        } else {
+          process_probes_quant.template operator()<typename MVQT::TQPQ8_Set>(
+              std::get<typename MVQT::TQPQ8_Q>(q_query_var));
+        }
+        break;
+      case QT::None:
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t* leaf_node = probe_list[i].second;
+          leaf_node->data.distances(query, &visited[offsets[i]]);
+        });
+        break;
+    }
+    return visited;
+  }
+
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
-  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
-                    const SearchParams &search_params) override {
+  search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                    const SearchParams& search_params) override {
     parlay::internal::timer t;
     std::vector<double> timings;
 
@@ -509,30 +430,11 @@ class IndexMVIVF : public Index<metric> {
     // -------------------------
     // Step 0: Quantize Query
     // -------------------------
-    QuantQuery q_query_var;
+    QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
     TQ4_Q q_center_query;
-    const TQ4_Q *q_center_query_ptr = nullptr;
     t.start();
-    switch (active_quantizer) {
-      case QT::PQ: q_query_var = std::get<PQ_Model>(quantizer).quantize_query(query); break;
-      case QT::FastScan: q_query_var = std::get<FS_Model>(quantizer).quantize_query(query); break;
-      case QT::RaBitQ: q_query_var = std::get<RQ_Model>(quantizer).quantize_query(query); break;
-      case QT::TurboQuant4Bit:
-        q_query_var = std::get<TQ4_Model>(quantizer).quantize_query(query);
-        break;
-      case QT::TurboQuantPQ4Bit:
-        if (params.pq.block_size == 4) {
-          q_query_var = std::get<TQPQ4_Model>(quantizer).quantize_query(query);
-        } else {
-          q_query_var = std::get<TQPQ8_Model>(quantizer).quantize_query(query);
-        }
-        break;
-      case QT::None:
-      default: q_query_var = std::monostate{}; break;
-    }
-    if (params.quantize_centers && center_quantizer) {
-      q_center_query = center_quantizer->quantize_query(query);
-      q_center_query_ptr = &q_center_query;
+    if (params.quantize_centers) {
+      q_center_query = center_quantizer.quantize_query(query);
     }
     t_quantize = t.stop();
     t.reset();
@@ -545,119 +447,34 @@ class IndexMVIVF : public Index<metric> {
     const double alpha = 1.0;  // heuristic threshold: TODO: set this
     bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
     if (use_flat) {
-      gs = flat_leaf_search(query, q_query_var, q_center_query_ptr, nprobes);
+      gs = flat_leaf_search(query, q_center_query, nprobes);
     } else {
-      gs = greedy_search(query, q_query_var, q_center_query_ptr, nprobes);
+      gs = greedy_search(query, q_center_query, nprobes);
     }
-    auto probe_list = std::move(gs.probe_list);
+    auto& probe_list = gs.probe_list;
     dist_cmps += gs.dist_cmps;
     nprobes = std::min(nprobes, probe_list.size());
+    timings.push_back(dist_cmps);
+    for (double time : gs.timings) {
+      timings.push_back(time);
+    }
 
     // -------------------------
     // Step 2: Probe clusters in probe_list
     // -------------------------
+
     t.start();
-    auto sizes = parlay::delayed_tabulate(
-        nprobes, [&](size_t i) { return probe_list[i].second->get_size(); });
-    auto scan_result = parlay::scan(sizes);
-    auto &offsets = scan_result.first;
-    size_t total_size = scan_result.second;
-    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+    auto visited = process_probes(query, q_query_var, probe_list);
+    t_distances = t.stop();
+    t.reset();
+
+    dist_cmps += visited.size();
+
+    t.start();
+    mvsic::sort_inplace_kv(visited);
     t_rest += t.stop();
     t.reset();
 
-    if (active_quantizer == QT::None) {
-      t_quantize = 0.0;
-      t.start();
-      parlay::parallel_for(0, nprobes, [&](size_t i) {
-        node_t *leaf_node = probe_list[i].second;
-        leaf_node->data.distances(query, &visited[offsets[i]]);
-      });
-      t_distances = t.stop();
-      t.reset();
-    } else {
-      t.start();
-      switch (active_quantizer) {
-        case QT::PQ:
-          parlay::parallel_for(0, nprobes, [&](size_t i) {
-            node_t *leaf = probe_list[i].second;
-            std::get<PQ_Set>(leaf->quantized_data)
-                .distances_all(std::get<PQ_Q>(q_query_var), &visited[offsets[i]]);
-            const size_t leaf_k = leaf->get_size();
-            parlay::parallel_for(
-                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
-          });
-          break;
-        case QT::FastScan:
-          parlay::parallel_for(0, nprobes, [&](size_t i) {
-            node_t *leaf = probe_list[i].second;
-            std::get<FS_Set>(leaf->quantized_data)
-                .distances_all(std::get<FS_Q>(q_query_var), &visited[offsets[i]]);
-            const size_t leaf_k = leaf->get_size();
-            parlay::parallel_for(
-                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
-          });
-          break;
-        case QT::RaBitQ:
-          parlay::parallel_for(0, nprobes, [&](size_t i) {
-            node_t *leaf = probe_list[i].second;
-            std::get<RQ_Set>(leaf->quantized_data)
-                .distances_all(std::get<RQ_Q>(q_query_var), &visited[offsets[i]]);
-            const size_t leaf_k = leaf->get_size();
-            parlay::parallel_for(
-                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
-          });
-          break;
-        case QT::TurboQuant4Bit:
-          parlay::parallel_for(0, nprobes, [&](size_t i) {
-            node_t *leaf = probe_list[i].second;
-            std::get<TQ4_Set>(leaf->quantized_data)
-                .distances_all(std::get<TQ4_Q>(q_query_var), &visited[offsets[i]]);
-            const size_t leaf_k = leaf->get_size();
-            parlay::parallel_for(
-                0, leaf_k, [&](size_t j) { visited[offsets[i] + j].first = leaf->data.get_id(j); });
-          });
-          break;
-        case QT::TurboQuantPQ4Bit:
-          if (params.pq.block_size == 4) {
-            parlay::parallel_for(0, nprobes, [&](size_t i) {
-              node_t *leaf = probe_list[i].second;
-              std::get<TQPQ4_Set>(leaf->quantized_data)
-                  .distances_all(std::get<TQPQ4_Q>(q_query_var), &visited[offsets[i]]);
-              const size_t leaf_k = leaf->get_size();
-              parlay::parallel_for(0, leaf_k, [&](size_t j) {
-                visited[offsets[i] + j].first = leaf->data.get_id(j);
-              });
-            });
-          } else {
-            parlay::parallel_for(0, nprobes, [&](size_t i) {
-              node_t *leaf = probe_list[i].second;
-              std::get<TQPQ8_Set>(leaf->quantized_data)
-                  .distances_all(std::get<TQPQ8_Q>(q_query_var), &visited[offsets[i]]);
-              const size_t leaf_k = leaf->get_size();
-              parlay::parallel_for(0, leaf_k, [&](size_t j) {
-                visited[offsets[i] + j].first = leaf->data.get_id(j);
-              });
-            });
-          }
-          break;
-        case QT::None:
-        default: break;
-      }
-      t_distances = t.stop();
-      t.reset();
-    }
-
-    t.start();
-    parlay::sort_inplace(visited, [](const auto &a, const auto &b) { return a.second < b.second; });
-    t_rest += t.stop();
-    t.reset();
-
-    timings.push_back(dist_cmps);
-    dist_cmps += total_size;
-    for (double time : gs.timings) {
-      timings.push_back(time);
-    }
     timings.push_back(t_quantize);
     timings.push_back(t_distances);
     timings.push_back(t_rest);
@@ -682,6 +499,327 @@ class IndexMVIVF : public Index<metric> {
     return std::make_tuple(final_results, dist_cmps, timings);
   }
 
+  // Traversing the k-means tree: returns the height of the tree
+  size_t traverse_tree(node_t* node, parlay::sequence<node_t*>& ind_to_node,
+                       std::unordered_map<node_t*, size_t>& node_to_ind,
+                       parlay::sequence<size_t>& center_offsets,
+                       parlay::sequence<size_t>& children_offsets,
+                       parlay::sequence<size_t>& point_offsets, size_t height) {
+    node_to_ind[node] = ind_to_node.size();
+    ind_to_node.push_back(node);
+    if (node->children.size() == 0) {              // leaves
+      point_offsets.push_back(node->data.size());  // Always add point IDs
+    } else {                                       // Internal nodes
+      point_offsets.push_back(0);
+      size_t dims = node->data.get_dims();
+      for (size_t i = 0; i < node->children.size(); i++) {
+        center_offsets.push_back(node->data.get_size(i) * dims);  // # embeddings in center[i]
+      }
+    }
+    children_offsets.push_back(node->children.size());
+    size_t h = height + 1;
+    for (node_t* child : node->children) {
+      h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, center_offsets,
+                                    children_offsets, point_offsets, height + 1));
+    }
+    return h;
+  }
+
+  // Write the index to a file in disk
+  void save(const std::string& filename) override {
+    std::ofstream outfile(filename, std::ios::binary);
+    std::cout << "Saving index to " << filename << std::endl;
+    if (!outfile.is_open()) {
+      std::cerr << "Error opening file for writing: " << filename << std::endl;
+      return;
+    }
+
+    // Collect data
+    parlay::sequence<node_t*> ind_to_node;
+    std::unordered_map<node_t*, size_t> node_to_ind;
+    parlay::sequence<size_t> center_offsets;
+    parlay::sequence<size_t> children_offsets;
+    parlay::sequence<size_t> point_offsets;
+
+    size_t height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, children_offsets,
+                                  point_offsets, 0);
+    kmeanstree_height = height;
+    std::cout << "Height of tree: " << height << std::endl;
+
+    size_t total_center_sizes = parlay::scan_inplace(center_offsets);
+    center_offsets.push_back(total_center_sizes);
+    size_t total_children_sizes = parlay::scan_inplace(children_offsets);
+    children_offsets.push_back(total_children_sizes);
+    size_t total_point_sizes = parlay::scan_inplace(point_offsets);
+    point_offsets.push_back(total_point_sizes);
+
+    // Write num
+    size_t num = ind_to_node.size();
+    outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
+    // Write center offsets
+    size_t num_center_offsets = center_offsets.size();
+    outfile.write(reinterpret_cast<const char*>(&num_center_offsets), sizeof(size_t));
+    outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
+                  center_offsets.size() * sizeof(size_t));
+    // Write centers values
+    for (size_t i = 0; i < num; ++i) {
+      node_t* node = ind_to_node[i];
+      if (node->children.size() > 0) {  // Internal Nodes only
+        auto coords = node->data.data();
+        size_t num_entries = (node->data.total_size()) * (node->data.get_dims());
+        outfile.write(reinterpret_cast<const char*>(coords), num_entries * sizeof(float));
+      }
+    }
+    // Write children offsets
+    outfile.write(reinterpret_cast<const char*>(children_offsets.begin()),
+                  children_offsets.size() * sizeof(size_t));
+    // Write children values
+    for (size_t i = 0; i < num; ++i) {
+      node_t* node = ind_to_node[i];
+      parlay::sequence<node_t*> children = node->children;
+      for (size_t j = 0; j < children.size(); ++j) {  // TODO: make parallel
+        node_t* child = children[j];
+        size_t child_id = node_to_ind[child];
+        outfile.write(reinterpret_cast<const char*>(&child_id), sizeof(size_t));
+      }
+    }
+    // Write point offsets
+    outfile.write(reinterpret_cast<const char*>(point_offsets.begin()),
+                  point_offsets.size() * sizeof(size_t));
+    // Write point values
+    for (size_t i = 0; i < num; ++i) {
+      node_t* node = ind_to_node[i];
+      if (node->children.size() == 0) {  // <-- UPDATED: leaves only
+        PointCloudSet<ChPoint> points = node->data;
+        for (size_t j = 0; j < points.size(); ++j) {  // TODO: make parallel
+          uint32_t point_id = points.get_id(j);
+          outfile.write(reinterpret_cast<const char*>(&point_id), sizeof(uint32_t));
+        }
+      }
+    }
+
+    // Quantization: save only the MODEL (leaf encodings are reconstructed on load)
+    int type_id = static_cast<int>(quantization_mode);
+    outfile.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
+
+    std::visit(
+        [&](auto& model) {
+          // Get the concrete type of the model the variant is currently holding
+          using ModelType = std::decay_t<decltype(model)>;
+
+          // If it's a dummy type or uninitialized, do nothing (handles QT::None)
+          if constexpr (std::is_same_v<ModelType, std::monostate>) {
+            return;
+          } else {
+            if constexpr (std::is_same_v<ModelType, typename MVQT::TQPQ4_Model> ||
+                          std::is_same_v<ModelType, typename MVQT::TQPQ8_Model>) {
+              int block_size = std::is_same_v<ModelType, typename MVQT::TQPQ4_Model> ? 4 : 8;
+              outfile.write(reinterpret_cast<const char*>(&block_size), sizeof(block_size));
+            }
+            model.save(outfile);
+          }
+        },
+        quantizer);
+
+    outfile.close();
+  }
+
+  // Read the index from a file in disk
+  // TODO: Change this to a constructor, and also save the index_params.
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+    std::ifstream infile(filename, std::ios::binary);
+    std::cout << "Loading index from " << filename << std::endl;
+    if (!infile.is_open()) {
+      std::cerr << "Error opening file for reading: " << filename << std::endl;
+      return;
+    }
+
+    // Read number of nodes
+    size_t num = 0;
+    infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
+    // Read center offsets
+    size_t num_center_offsets = 0;
+    infile.read(reinterpret_cast<char*>(&num_center_offsets), sizeof(size_t));
+    parlay::sequence<size_t> center_offsets(num_center_offsets);
+    infile.read(reinterpret_cast<char*>(center_offsets.begin()),
+                center_offsets.size() * sizeof(size_t));
+    // Read centers values
+    parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(center_values.begin()),
+                center_values.size() * sizeof(float));
+    // Read children offsets
+    parlay::sequence<size_t> children_offsets(num + 1);
+    infile.read(reinterpret_cast<char*>(children_offsets.begin()),
+                children_offsets.size() * sizeof(size_t));
+    // Read children values
+    parlay::sequence<size_t> children_values(children_offsets[children_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(children_values.begin()),
+                children_values.size() * sizeof(size_t));
+    // Read point offsets
+    parlay::sequence<size_t> point_offsets(num + 1);
+    infile.read(reinterpret_cast<char*>(point_offsets.begin()),
+                point_offsets.size() * sizeof(size_t));
+    // Read point values
+    parlay::sequence<uint32_t> point_values(point_offsets[point_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(point_values.begin()),
+                point_values.size() * sizeof(uint32_t));
+
+    // Quantization
+    int type_id = 0;
+    infile.read(reinterpret_cast<char*>(&type_id), sizeof(int));
+    quantization_mode = static_cast<QT>(type_id);
+
+    switch (quantization_mode) {
+      case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(infile); break;
+      case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(infile); break;
+      case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(infile); break;
+      case QT::TurboQuant4Bit:
+        quantizer.template emplace<typename MVQT::TQ4_Model>().load(infile);
+        break;
+      case QT::TurboQuantPQ4Bit: {
+        // Read and restore the TQPQ block size used when the model was trained.
+        int tqpq_block_size = 0;
+        infile.read(reinterpret_cast<char*>(&tqpq_block_size), sizeof(int));
+        params.pq.block_size = tqpq_block_size;
+        if (tqpq_block_size == 4) {
+          quantizer.template emplace<typename MVQT::TQPQ4_Model>().load(infile);
+        } else if (tqpq_block_size == 8) {
+          quantizer.template emplace<typename MVQT::TQPQ8_Model>().load(infile);
+        } else {
+          std::cerr << "IndexMVIVF::load: TurboQuantPQ4Bit model with unsupported block_size="
+                    << tqpq_block_size << " (expected 4 or 8)." << std::endl;
+          abort();
+        }
+        break;
+      }
+      case QT::None:
+      default: quantizer = std::monostate{}; break;
+    }
+    infile.close();
+
+    // Center quantization (internal-node / leaf-center scoring): always TQ4.
+    init_tq4_quantizer(points);
+
+    // Build the index
+    size_t dim = points.get_dims();
+    auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
+    parlay::parallel_for(0, points.size(),
+                         [&](uint32_t i) { point_id_to_data_id[points.get_id(i)] = i; });
+    parlay::sequence<size_t> children_sizes = parlay::sequence<size_t>::from_function(
+        num, [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
+    parlay::sequence<size_t> children_sizes_scan;
+    size_t total_children_sizes;
+    std::tie(children_sizes_scan, total_children_sizes) = parlay::scan(children_sizes);
+    children_sizes_scan.push_back(total_children_sizes);
+    parlay::sequence<size_t> point_sizes = parlay::sequence<size_t>::from_function(
+        num, [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
+    parlay::sequence<node_t*> ind_to_node =
+        parlay::sequence<node_t*>::from_function(num, [&](size_t i) {
+          node_t* node = new node_t();
+          if (children_sizes[i] > 0) {  // Internal Nodes
+            size_t start_offset = children_sizes_scan[i];
+            parlay::sequence<size_t> node_center_offsets =
+                parlay::sequence<size_t>::from_function(children_sizes[i] + 1, [&](size_t j) {
+                  return center_offsets[start_offset + j] - center_offsets[start_offset];
+                });
+
+            node->data = PointCloudSet<ChPoint>(children_sizes[i], dim,
+                                                center_values.data() + center_offsets[start_offset],
+                                                node_center_offsets.data(), nullptr);
+          }
+          node->children.resize(children_sizes[i]);
+          if (point_sizes[i] > 0) {
+            parlay::sequence<uint32_t> point_group =
+                parlay::sequence<uint32_t>::from_function(point_sizes[i], [&](size_t j) {
+                  uint32_t point_id = point_values[point_offsets[i] + j];
+                  return point_id_to_data_id[point_id];
+                });
+            node->data = PointCloudSet<ChPoint>(points.filter(point_group), dim);
+          }
+          return node;
+        });
+
+    // Set children pointers
+    parlay::parallel_for(0, num, [&](size_t i) {
+      node_t* node = ind_to_node[i];
+      parlay::sequence<node_t*>& children = node->children;
+      parlay::parallel_for(0, children.size(), [&](size_t j) {
+        size_t child_id = children_values[children_offsets[i] + j];
+        children[j] = ind_to_node[child_id];
+      });
+    });
+    root = ind_to_node[0];
+
+    // Rebuild flat leaf index and leaf centers
+    leaves_flat.clear();
+    leaf_centers_quant = std::monostate{};
+    leaf_to_root_child_.clear();
+    if (root) {
+      std::vector<ChPoint> center_points;
+      std::vector<uint32_t> root_child_for_leaf;
+      std::function<void(node_t*, node_t*, size_t, uint32_t)> visit =
+          [&](node_t* node, node_t* parent, size_t child_idx, uint32_t root_child_idx) {
+            if (node->children.empty()) {
+              leaves_flat.push_back(node);
+              auto& centers_pc = parent->data;
+              center_points.push_back(centers_pc[child_idx]);
+              root_child_for_leaf.push_back(root_child_idx);
+            } else {
+              for (size_t i = 0; i < node->children.size(); ++i) {
+                visit(node->children[i], node, i,
+                      (parent == root) ? static_cast<uint32_t>(i) : root_child_idx);
+              }
+            }
+          };
+      visit(root, nullptr, 0, 0);
+
+      leaf_to_root_child_ = std::move(root_child_for_leaf);
+      if (!center_points.empty()) {
+        leaf_centers = PointCloudSet<ChPoint>(center_points, d);
+        if (params.quantize_centers) {
+          leaf_centers_quant = encode_tq4(leaf_centers);
+        }
+      }
+    }
+
+    // Re-encode nodes (since we only saved the model)
+    parlay::parallel_for(
+        0, num,
+        [&](size_t i) {
+          node_t* node = ind_to_node[i];
+          if (!node) return;
+          if (node->data.size() == 0) return;
+          if (!node->children.empty()) {  // internal node
+            if (params.quantize_centers) {
+              node->quantized_data = encode_tq4(node->data);
+            }
+            return;
+          }
+          // leaf node
+          if (quantization_mode != QT::None) {
+            node->quantized_data = this->encode_points_quantized(node->data, quantizer);
+          }
+        },
+        /*granularity=*/1);
+  }
+
+  // Traversing the tree and deleting nodes
+  void traverse_and_delete(node_t* node) {
+    for (size_t i = 0; i < node->children.size(); i++) {
+      node_t* child = node->children[i];
+      traverse_and_delete(child);
+      delete child;
+    }
+  }
+
+  ~IndexMVIVF() {
+    if (root != nullptr) {
+      traverse_and_delete(root);
+      delete root;
+    }
+  }
+
+  // Computing Tree Stats
   // Stats from a single tree traversal (number of nodes, leaves, sizes, height).
   struct TreeStats {
     size_t num_internal_nodes = 0;
@@ -719,8 +857,8 @@ class IndexMVIVF : public Index<metric> {
     size_t num_internal_balance_nodes = 0;
 
     // Returns the total number of leaf point clouds in the subtree rooted at `node`.
-    std::function<size_t(const node_t *, size_t)> visit = [&](const node_t *node,
-                                                              size_t depth) -> size_t {
+    std::function<size_t(const node_t*, size_t)> visit = [&](const node_t* node,
+                                                             size_t depth) -> size_t {
       if (node->children.empty()) {
         s.num_leaves++;
         size_t leaf_size = node->get_size();
@@ -737,7 +875,7 @@ class IndexMVIVF : public Index<metric> {
       std::vector<size_t> child_subtree_sizes;
       child_subtree_sizes.reserve(node->children.size());
       size_t subtree_total = 0;
-      for (const node_t *child : node->children) {
+      for (const node_t* child : node->children) {
         size_t child_size = visit(child, depth + 1);
         child_subtree_sizes.push_back(child_size);
         subtree_total += child_size;
@@ -793,7 +931,7 @@ class IndexMVIVF : public Index<metric> {
     size_t max_id = 0;
     size_t leaf_idx = 0;
 
-    std::function<void(const node_t *)> visit = [&](const node_t *node) {
+    std::function<void(const node_t*)> visit = [&](const node_t* node) {
       if (node->children.empty()) {
         size_t n = node->data.size();
         for (size_t j = 0; j < n; ++j) {
@@ -803,7 +941,7 @@ class IndexMVIVF : public Index<metric> {
         }
         ++leaf_idx;
       } else {
-        for (const node_t *child : node->children) {
+        for (const node_t* child : node->children) {
           if (child != nullptr) visit(child);
         }
       }
@@ -841,28 +979,28 @@ class IndexMVIVF : public Index<metric> {
     assignments.reserve(1024);
     size_t max_id = 0;
 
-    std::function<void(const node_t *, uint32_t)> visit =
-        [&](const node_t *node, uint32_t root_child_idx) {
-          if (node->children.empty()) {
-            size_t n = node->data.size();
-            for (size_t j = 0; j < n; ++j) {
-              uint32_t id = node->data.get_id(j);
-              assignments.emplace_back(id, root_child_idx);
-              if (id > max_id) max_id = id;
-            }
-          } else {
-            for (size_t i = 0; i < node->children.size(); ++i) {
-              uint32_t next_root_child_idx = root_child_idx;
-              if (node == root) {
-                next_root_child_idx = static_cast<uint32_t>(i);
-              }
-              visit(node->children[i], next_root_child_idx);
-            }
+    std::function<void(const node_t*, uint32_t)> visit = [&](const node_t* node,
+                                                             uint32_t root_child_idx) {
+      if (node->children.empty()) {
+        size_t n = node->data.size();
+        for (size_t j = 0; j < n; ++j) {
+          uint32_t id = node->data.get_id(j);
+          assignments.emplace_back(id, root_child_idx);
+          if (id > max_id) max_id = id;
+        }
+      } else {
+        for (size_t i = 0; i < node->children.size(); ++i) {
+          uint32_t next_root_child_idx = root_child_idx;
+          if (node == root) {
+            next_root_child_idx = static_cast<uint32_t>(i);
           }
-        };
+          visit(node->children[i], next_root_child_idx);
+        }
+      }
+    };
 
     for (size_t i = 0; i < root->children.size(); ++i) {
-      const node_t *child = root->children[i];
+      const node_t* child = root->children[i];
       if (child != nullptr) visit(child, static_cast<uint32_t>(i));
     }
 
@@ -880,348 +1018,60 @@ class IndexMVIVF : public Index<metric> {
     return root_child_of_point;
   }
 
-  // Traversing the k-means tree: returns the height of the tree
-  size_t traverse_tree(node_t *node, parlay::sequence<node_t *> &ind_to_node,
-                       std::unordered_map<node_t *, size_t> &node_to_ind,
-                       parlay::sequence<size_t> &center_offsets,
-                       parlay::sequence<size_t> &children_offsets,
-                       parlay::sequence<size_t> &point_offsets, size_t height) {
-    node_to_ind[node] = ind_to_node.size();
-    ind_to_node.push_back(node);
-    if (node->children.size() == 0) {              // leaves
-      point_offsets.push_back(node->data.size());  // Always add point IDs
-    } else {                                       // Internal nodes
-      point_offsets.push_back(0);
-      size_t dims = node->data.get_dims();
-      for (size_t i = 0; i < node->children.size(); i++) {
-        center_offsets.push_back(node->data.get_size(i) * dims);  // # embeddings in center[i]
+  // Returns, for each point id, the list of leaf indices (0-based) that contain it.
+  // Non-spill: 1 leaf per point. Spill: 1 or 2 leaves per point.
+  // Used for greedy set-cover diversity and best/second-best leaf metrics.
+  std::vector<std::vector<uint32_t>> get_leaves_of_point() const {
+    std::vector<std::vector<uint32_t>> out;
+    if (root == nullptr) return out;
+
+    std::vector<std::pair<uint32_t, uint32_t>> assignments;
+    assignments.reserve(1024);
+    size_t max_id = 0;
+    size_t leaf_idx = 0;
+
+    std::function<void(const node_t*)> visit = [&](const node_t* node) {
+      if (node->children.empty()) {
+        size_t n = node->data.size();
+        for (size_t j = 0; j < n; ++j) {
+          uint32_t id = node->data.get_id(j);
+          assignments.emplace_back(id, static_cast<uint32_t>(leaf_idx));
+          if (id > max_id) max_id = id;
+        }
+        ++leaf_idx;
+      } else {
+        for (const node_t* child : node->children) {
+          if (child != nullptr) visit(child);
+        }
       }
+    };
+    visit(root);
+    if (assignments.empty()) return out;
+
+    out.resize(max_id + 1);
+    for (const auto& [pid, lid] : assignments) {
+      out[pid].push_back(lid);
     }
-    children_offsets.push_back(node->children.size());
-    size_t h = height + 1;
-    for (node_t *child : node->children) {
-      h = std::max(h, traverse_tree(child, ind_to_node, node_to_ind, center_offsets,
-                                    children_offsets, point_offsets, height + 1));
-    }
-    return h;
+    return out;
   }
 
-  // Write the index to a file in disk
-  void save(const std::string &filename) override {
-    std::ofstream outfile(filename, std::ios::binary);
-    std::cout << "Saving index to " << filename << std::endl;
-    if (!outfile.is_open()) {
-      std::cerr << "Error opening file for writing: " << filename << std::endl;
-      return;
-    }
-
-    // Collect data
-    parlay::sequence<node_t *> ind_to_node;
-    std::unordered_map<node_t *, size_t> node_to_ind;
-    parlay::sequence<size_t> center_offsets;
-    parlay::sequence<size_t> children_offsets;
-    parlay::sequence<size_t> point_offsets;
-
-    size_t height = traverse_tree(root, ind_to_node, node_to_ind, center_offsets, children_offsets,
-                                  point_offsets, 0);
-    kmeanstree_height = height;
-    std::cout << "Height of tree: " << height << std::endl;
-
-    size_t total_center_sizes = parlay::scan_inplace(center_offsets);
-    center_offsets.push_back(total_center_sizes);
-    size_t total_children_sizes = parlay::scan_inplace(children_offsets);
-    children_offsets.push_back(total_children_sizes);
-    size_t total_point_sizes = parlay::scan_inplace(point_offsets);
-    point_offsets.push_back(total_point_sizes);
-
-    // Write num
-    size_t num = ind_to_node.size();
-    outfile.write(reinterpret_cast<const char *>(&num), sizeof(size_t));
-    // Write center offsets
-    size_t num_center_offsets = center_offsets.size();
-    outfile.write(reinterpret_cast<const char *>(&num_center_offsets), sizeof(size_t));
-    outfile.write(reinterpret_cast<const char *>(center_offsets.begin()),
-                  center_offsets.size() * sizeof(size_t));
-    // Write centers values
-    for (size_t i = 0; i < num; ++i) {  // TODO: make parallel
-      node_t *node = ind_to_node[i];
-      if (node->children.size() > 0) {  // Internal Nodes only
-        auto coords = node->data.data();
-        size_t num_entries = (node->data.total_size()) * (node->data.get_dims());
-        outfile.write(reinterpret_cast<const char *>(coords), num_entries * sizeof(float));
+  // Returns, for each point id, the list of root-child indices that contain it (1 or 2 with spill).
+  // Derived from get_leaves_of_point() and leaf_to_root_child_. Call after build/load.
+  std::vector<std::vector<uint32_t>> get_root_children_of_point() const {
+    auto leaves_of_point = get_leaves_of_point();
+    if (leaves_of_point.empty() || leaf_to_root_child_.empty()) return {};
+    std::vector<std::vector<uint32_t>> out(leaves_of_point.size());
+    for (size_t pid = 0; pid < leaves_of_point.size(); ++pid) {
+      std::unordered_set<uint32_t> rids;
+      for (uint32_t lid : leaves_of_point[pid]) {
+        if (lid < leaf_to_root_child_.size()) rids.insert(leaf_to_root_child_[lid]);
       }
+      out[pid].assign(rids.begin(), rids.end());
     }
-    // Write children offsets
-    outfile.write(reinterpret_cast<const char *>(children_offsets.begin()),
-                  children_offsets.size() * sizeof(size_t));
-    // Write children values
-    for (size_t i = 0; i < num; ++i) {
-      node_t *node = ind_to_node[i];
-      parlay::sequence<node_t *> children = node->children;
-      for (size_t j = 0; j < children.size(); ++j) {  // TODO: make parallel
-        node_t *child = children[j];
-        size_t child_id = node_to_ind[child];
-        outfile.write(reinterpret_cast<const char *>(&child_id), sizeof(size_t));
-      }
-    }
-    // Write point offsets
-    outfile.write(reinterpret_cast<const char *>(point_offsets.begin()),
-                  point_offsets.size() * sizeof(size_t));
-    // Write point values
-    for (size_t i = 0; i < num; ++i) {
-      node_t *node = ind_to_node[i];
-      if (node->children.size() == 0) {  // <-- UPDATED: leaves only
-        PointCloudSet<ChPoint> points = node->data;
-        for (size_t j = 0; j < points.size(); ++j) {  // TODO: make parallel
-          uint32_t point_id = points.get_id(j);
-          outfile.write(reinterpret_cast<const char *>(&point_id), sizeof(uint32_t));
-        }
-      }
-    }
-
-    // Quantization: save only the MODEL (leaf encodings are reconstructed on load)
-    int type_id = static_cast<int>(active_quantizer);
-    outfile.write(reinterpret_cast<const char *>(&type_id), sizeof(int));
-
-    switch (active_quantizer) {
-      case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
-      case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
-      case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
-      case QT::TurboQuant4Bit: std::get<TQ4_Model>(quantizer).save(outfile); break;
-      case QT::TurboQuantPQ4Bit: {
-        // Persist the actual TQPQ block size used by the model (4 or 8).
-        int tqpq_block_size = 0;
-        if (std::holds_alternative<TQPQ4_Model>(quantizer)) {
-          tqpq_block_size = 4;
-        } else if (std::holds_alternative<TQPQ8_Model>(quantizer)) {
-          tqpq_block_size = 8;
-        } else {
-          std::cerr << "IndexMVIVF::save: TurboQuantPQ4Bit active, but quantizer variant is "
-                       "neither TQPQ4_Model nor TQPQ8_Model.\n";
-          abort();
-        }
-        outfile.write(reinterpret_cast<const char *>(&tqpq_block_size), sizeof(int));
-        if (tqpq_block_size == 4) {
-          std::get<TQPQ4_Model>(quantizer).save(outfile);
-        } else {
-          std::get<TQPQ8_Model>(quantizer).save(outfile);
-        }
-        break;
-      }
-      case QT::None:
-      default:
-        // nothing
-        break;
-    }
-
-    outfile.close();
-  }
-
-  // Read the index from a file in disk
-  void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override {
-    std::ifstream infile(filename, std::ios::binary);
-    std::cout << "Loading index from " << filename << std::endl;
-    if (!infile.is_open()) {
-      std::cerr << "Error opening file for reading: " << filename << std::endl;
-      return;
-    }
-
-    // Read number of nodes
-    size_t num = 0;
-    infile.read(reinterpret_cast<char *>(&num), sizeof(size_t));
-    // Read center offsets
-    size_t num_center_offsets = 0;
-    infile.read(reinterpret_cast<char *>(&num_center_offsets), sizeof(size_t));
-    parlay::sequence<size_t> center_offsets(num_center_offsets);
-    infile.read(reinterpret_cast<char *>(center_offsets.begin()),
-                center_offsets.size() * sizeof(size_t));
-    // Read centers values
-    parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
-    infile.read(reinterpret_cast<char *>(center_values.begin()),
-                center_values.size() * sizeof(float));
-    // Read children offsets
-    parlay::sequence<size_t> children_offsets(num + 1);
-    infile.read(reinterpret_cast<char *>(children_offsets.begin()),
-                children_offsets.size() * sizeof(size_t));
-    // Read children values
-    parlay::sequence<size_t> children_values(children_offsets[children_offsets.size() - 1]);
-    infile.read(reinterpret_cast<char *>(children_values.begin()),
-                children_values.size() * sizeof(size_t));
-    // Read point offsets
-    parlay::sequence<size_t> point_offsets(num + 1);
-    infile.read(reinterpret_cast<char *>(point_offsets.begin()),
-                point_offsets.size() * sizeof(size_t));
-    // Read point values
-    parlay::sequence<uint32_t> point_values(point_offsets[point_offsets.size() - 1]);
-    infile.read(reinterpret_cast<char *>(point_values.begin()),
-                point_values.size() * sizeof(uint32_t));
-
-    // Quantization
-    int type_id = 0;
-    infile.read(reinterpret_cast<char *>(&type_id), sizeof(int));
-    active_quantizer = static_cast<QT>(type_id);
-
-    switch (active_quantizer) {
-      case QT::PQ:
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).load(infile);
-        break;
-      case QT::FastScan:
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).load(infile);
-        break;
-      case QT::RaBitQ:
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).load(infile);
-        break;
-      case QT::TurboQuant4Bit:
-        quantizer.template emplace<TQ4_Model>();
-        std::get<TQ4_Model>(quantizer).load(infile);
-        break;
-      case QT::TurboQuantPQ4Bit: {
-        // Read and restore the TQPQ block size used when the model was trained.
-        int tqpq_block_size = 0;
-        infile.read(reinterpret_cast<char *>(&tqpq_block_size), sizeof(int));
-        params.pq.block_size = tqpq_block_size;
-        if (tqpq_block_size == 4) {
-          quantizer.template emplace<TQPQ4_Model>();
-          std::get<TQPQ4_Model>(quantizer).load(infile);
-        } else if (tqpq_block_size == 8) {
-          quantizer.template emplace<TQPQ8_Model>();
-          std::get<TQPQ8_Model>(quantizer).load(infile);
-        } else {
-          std::cerr << "IndexMVIVF::load: TurboQuantPQ4Bit model with unsupported block_size="
-                    << tqpq_block_size << " (expected 4 or 8)." << std::endl;
-          abort();
-        }
-        break;
-      }
-      case QT::None:
-      default: quantizer = std::monostate{}; break;
-    }
-    infile.close();
-
-    // Center quantization (internal-node / leaf-center scoring): always TQ4.
-    init_center_quantizer(points);
-
-    // Build the index
-    size_t dim = points.get_dims();
-    auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
-    parlay::parallel_for(0, points.size(),
-                         [&](uint32_t i) { point_id_to_data_id[points.get_id(i)] = i; });
-    parlay::sequence<size_t> children_sizes = parlay::sequence<size_t>::from_function(
-        num, [&](size_t i) { return children_offsets[i + 1] - children_offsets[i]; });
-    parlay::sequence<size_t> children_sizes_scan;
-    size_t total_children_sizes;
-    std::tie(children_sizes_scan, total_children_sizes) = parlay::scan(children_sizes);
-    children_sizes_scan.push_back(total_children_sizes);
-    parlay::sequence<size_t> point_sizes = parlay::sequence<size_t>::from_function(
-        num, [&](size_t i) { return point_offsets[i + 1] - point_offsets[i]; });
-    parlay::sequence<node_t *> ind_to_node =
-        parlay::sequence<node_t *>::from_function(num, [&](size_t i) {
-          node_t *node = new node_t();
-          if (children_sizes[i] > 0) {  // Internal Nodes
-            size_t start_offset = children_sizes_scan[i];
-            parlay::sequence<size_t> node_center_offsets =
-                parlay::sequence<size_t>::from_function(children_sizes[i] + 1, [&](size_t j) {
-                  return center_offsets[start_offset + j] - center_offsets[start_offset];
-                });
-
-            node->data = PointCloudSet<ChPoint>(children_sizes[i], dim,
-                                                center_values.data() + center_offsets[start_offset],
-                                                node_center_offsets.data(), nullptr);
-          }
-          node->children.resize(children_sizes[i]);
-          if (point_sizes[i] > 0) {
-            parlay::sequence<uint32_t> point_group =
-                parlay::sequence<uint32_t>::from_function(point_sizes[i], [&](size_t j) {
-                  uint32_t point_id = point_values[point_offsets[i] + j];
-                  return point_id_to_data_id[point_id];
-                });
-            node->data = PointCloudSet<ChPoint>(points.filter(point_group), dim);
-          }
-          return node;
-        });
-
-    // Set children pointers
-    parlay::parallel_for(0, num, [&](size_t i) {
-      node_t *node = ind_to_node[i];
-      parlay::sequence<node_t *> &children = node->children;
-      parlay::parallel_for(0, children.size(), [&](size_t j) {
-        size_t child_id = children_values[children_offsets[i] + j];
-        children[j] = ind_to_node[child_id];
-      });
-    });
-    root = ind_to_node[0];
-
-    // Rebuild flat leaf index and leaf centers
-    leaves_flat.clear();
-    leaf_centers_quant = std::monostate{};
-    if (root) {
-      std::vector<ChPoint> center_points;
-      std::function<void(node_t *, node_t *, size_t)> visit = [&](node_t *node, node_t *parent,
-                                                                  size_t child_idx) {
-        if (node->children.empty()) {
-          leaves_flat.push_back(node);
-          auto &centers_pc = parent->data;
-          center_points.push_back(centers_pc[child_idx]);
-        } else {
-          for (size_t i = 0; i < node->children.size(); ++i) {
-            visit(node->children[i], node, i);
-          }
-        }
-      };
-      visit(root, nullptr, 0);
-
-      if (!center_points.empty()) {
-        leaf_centers = PointCloudSet<ChPoint>(center_points, d);
-
-        if (params.quantize_centers) {
-          leaf_centers_quant = encode_centers_tq(leaf_centers);
-        }
-      }
-    }
-
-    // Re-encode nodes (since we only saved the model)
-    parlay::parallel_for(
-        0, num,
-        [&](size_t i) {
-          node_t *node = ind_to_node[i];
-          if (!node) return;
-          if (node->data.size() == 0) return;
-
-          if (!node->children.empty()) {  // internal node
-            if (params.quantize_centers) {
-              node->quantized_data = encode_centers_tq(node->data);
-            }
-            return;
-          }
-
-          // leaf node
-          if (active_quantizer != QT::None) {
-            node->quantized_data = encode_points_quantized(node->data);
-          }
-        },
-        /*granularity=*/1);
-  }
-
-  // Traversing the tree and deleting nodes
-  void traverse_and_delete(node_t *node) {
-    for (size_t i = 0; i < node->children.size(); i++) {
-      node_t *child = node->children[i];
-      traverse_and_delete(child);
-      delete child;
-    }
+    return out;
   }
 
   size_t get_height() const noexcept override { return kmeanstree_height; }
-
-  ~IndexMVIVF() {
-    if (root != nullptr) {
-      traverse_and_delete(root);
-      delete root;
-    }
-  }
 };
 
 using IndexMVIVFL2 = IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)

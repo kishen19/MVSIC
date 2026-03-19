@@ -16,3 +16,23 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "bench_dedup",
+    srcs = ["bench_dedup.cpp"],
+    deps = [
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/core/utils:util",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
+    name = "bench_sort",
+    srcs = ["bench_sort.cpp"],
+    deps = [
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/core/utils:util",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+

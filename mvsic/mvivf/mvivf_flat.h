@@ -1,18 +1,12 @@
 #pragma once
 
-#include <queue>
-#include <set>
+#include <fstream>
+#include <type_traits>
+#include <variant>
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
 #include "mvsic/core/utils/util.h"
-
-// New Quantization & Wrapper Headers
-#include "mvsic/core/quantization/pq.h"
-#include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/wrapper.h"
 
 namespace mvsic {
 
@@ -31,113 +25,85 @@ template<bool metric>
 class IndexMVIVFFlat : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  using Index<metric>::d;                           // Embedding dimension
-
-  // Multi-Vector Quantizer Types using the Wrapper
-  using FlatRange = FlattenedPCRange<PointCloudSet<ChPoint>>;
-  using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
-  using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
-  using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
-  using TQPQ4_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 4>;
-  using TQPQ8_Enc = turboquant_pq_4bit::Quantized_Point_Range<FlatRange, metric, 8>;
-
-  using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
-  using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
-  using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
-  using TQPQ4_Set = Quantized_Point_Cloud_Set<TQPQ4_Enc, metric>;
-  using TQPQ8_Set = Quantized_Point_Cloud_Set<TQPQ8_Enc, metric>;
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQPQ4_Set, TQPQ8_Set>;
-
-  using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
-  using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
-  using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
-  using TQPQ4_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 4>, metric>;
-  using TQPQ8_Model = MultiVecQuantizer<turboquant_pq_4bit::Model<metric, 8>, metric>;
-
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQPQ4_Model, TQPQ8_Model>;
-  using QT = IndexParams::QuantizerType;
+  using MVQT = typename Index<metric>::MVQT;
+  using QuantSet = typename MVQT::QuantSet;
+  using QuantQuery = typename MVQT::QuantQuery;
+  using QuantModel = typename MVQT::QuantModel;
+  using TQ4_Set = typename MVQT::TQ4_Set;
+  using TQ4_Q = typename MVQT::TQ4_Q;
+  using TQ4_Model = typename MVQT::TQ4_Model;
+  using QT = typename Index<metric>::QT;
+  using Index<metric>::d;       // Embedding dimension
+  using Index<metric>::params;  // Index Params
+  using Index<metric>::quantization_mode;
 
   struct node_t {
     PointCloudSet<ChPoint> data;
     QuantSet quantized_data;
 
     node_t() noexcept : data(), quantized_data(std::monostate{}) {}
-    size_t size() const noexcept { return data.size(); }
+    inline size_t get_size() const noexcept { return data.size(); }
   };
 
-  IndexParams params;
   PointCloudSet<ChPoint> centers;  // Centers of clusters
+  TQ4_Set centers_quant;
   parlay::sequence<node_t> clusters = {};
-
   // Quantizer Storage
   QuantModel quantizer = std::monostate{};
-  QT active_quantizer = QT::None;
+  TQ4_Model center_quantizer;
 
-  IndexMVIVFFlat(uint32_t d_) noexcept : params(IndexParams::mvivf_flat()) { d = d_; }
-  IndexMVIVFFlat(uint32_t d_, const IndexParams &params) noexcept : params(params) { d = d_; }
+  IndexMVIVFFlat(uint32_t d_) noexcept {
+    d = d_;
+    params = IndexParams::mvivf_flat();
+  }
+  IndexMVIVFFlat(uint32_t d_, const IndexParams& params_) noexcept {
+    d = d_;
+    params = params_;
+  }
 
-  inline uint32_t get_size(size_t i) const noexcept { return clusters[i].size(); }
+  inline uint32_t get_size(size_t i) const noexcept { return clusters[i].get_size(); }
 
   inline size_t num_leaves() const noexcept { return centers.size(); }
 
+  // Quantization Helpers
+  void init_tq4_quantizer(const PointCloudSet<ChPoint>& points) {
+    if (!params.quantize_centers) return;
+    center_quantizer.train(points);
+  }
+
+  TQ4_Set encode_tq4(const PointCloudSet<ChPoint>& points) {
+    return center_quantizer.encode(points);  // returns TQ4_Set
+  }
+
   // Builds the index given PointCloudSet object.
-  void build(const PointCloudSet<ChPoint> &points) override {
+  void build(const PointCloudSet<ChPoint>& points) override {
+    parlay::internal::timer t;
     size_t n = points.size();
     size_t num_clusters = (params.k_per_level > 0) ? params.k_per_level : std::ceil(std::sqrt(n));
     if (params.verbose >= 1) {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
-    if (params.compress_input) {
-      // TODO: run Ward's HAC to compress input point clouds
-    }
 
     // Quantization
-    active_quantizer = params.pq.method;
-    switch (active_quantizer) {
-      case QT::PQ: {
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).train(points, params.pq.block_size,
-                                            params.pq.num_clusters_per_block,
-                                            params.pq.num_points_per_cluster);
-        break;
-      }
-      case QT::FastScan: {
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).train(points, params.pq.block_size);
-        break;
-      }
-      case QT::RaBitQ: {
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
-        break;
-      }
-      case QT::TurboQuantPQ4Bit: {
-        if (params.pq.block_size == 4) {
-          quantizer.template emplace<TQPQ4_Model>();
-          std::get<TQPQ4_Model>(quantizer).train(points);
-        } else if (params.pq.block_size == 8) {
-          quantizer.template emplace<TQPQ8_Model>();
-          std::get<TQPQ8_Model>(quantizer).train(points);
-        } else {
-          std::cerr << "IndexMVIVFFlat: TurboQuantPQ4Bit currently supports block_size 4 or 8 "
-                    << "(got " << params.pq.block_size << ")." << std::endl;
-          abort();
-        }
-        break;
-      }
-      default: quantizer = std::monostate{}; break;
+    t.start();
+    quantization_mode = params.pq.method;
+    this->train_quantizer(points, quantizer);
+    init_tq4_quantizer(points);
+    if (params.verbose >= 1 && quantization_mode != QT::None) {
+      std::cout << "[MVIVF Flat] Quantizers Trained: " << t.stop() << " sec" << std::endl;
     }
+    t.reset();
 
     // Run MV-Lloyds on points
+    t.start();
     MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
     Clus.train(points);
-    centers = std::move(Clus.centers);
-    parlay::sequence<uint32_t> &cluster_ids = Clus.cluster_ids;
+    parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
+    centers = std::move(Clus.get_centers());  // Stealing from Clus, as we don't use it anymore
     // Collect Clusters
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
-
     // Collect point clouds by clusters
     clusters.resize(num_clusters);
     parlay::parallel_for(
@@ -148,214 +114,155 @@ class IndexMVIVFFlat : public Index<metric> {
               grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
           PointCloudSet<ChPoint> cluster_points = PointCloudSet<ChPoint>(points.filter(group), d);
           clusters[cluster_id].data = std::move(cluster_points);
-          switch (active_quantizer) {
-            case QT::PQ: {
-              auto &m = std::get<PQ_Model>(quantizer);
-              clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
-              break;
-            }
-            case QT::FastScan: {
-              auto &m = std::get<FS_Model>(quantizer);
-              clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
-              break;
-            }
-            case QT::RaBitQ: {
-              auto &m = std::get<RQ_Model>(quantizer);
-              clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
-              break;
-            }
-            case QT::TurboQuantPQ4Bit: {
-              if (params.pq.block_size == 4) {
-                auto &m = std::get<TQPQ4_Model>(quantizer);
-                clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
-              } else {
-                auto &m = std::get<TQPQ8_Model>(quantizer);
-                clusters[cluster_id].quantized_data = m.encode(clusters[cluster_id].data);
-              }
-              break;
-            }
-            case QT::None:
-            default: clusters[cluster_id].quantized_data = std::monostate{}; break;
-          }
+          clusters[cluster_id].quantized_data =
+              this->encode_points_quantized(clusters[cluster_id].data, quantizer);
         },
         1);
-
     if (params.verbose >= 1) {
-      std::cout << "Index built. Mean cluster size: " << mean_cluster_size()
+      std::cout << "[MVIVF Flat] Index Built: " << t.stop() << " sec" << std::endl;
+      std::cout << "[MVIVF Flat] Mean cluster size: " << mean_cluster_size()
                 << ", Max cluster size: " << max_cluster_size() << std::endl;
     }
+    t.reset();
+
+    if (params.quantize_centers) {
+      t.start();
+      centers_quant = encode_tq4(centers);
+      std::cout << "[MVIVF Flat] Encoding Centers: " << t.stop() << " sec" << std::endl;
+    }
+  }
+
+  inline auto process_probes(const ChPoint& query, const QuantQuery& q_query_var,
+                             parlay::sequence<std::pair<uint32_t, float>>& probe_list) {
+    const size_t nprobes = probe_list.size();
+    auto sizes = parlay::delayed_tabulate(
+        nprobes, [&](size_t i) { return clusters[probe_list[i].first].get_size(); });
+    auto scan_result = parlay::scan(sizes);
+    auto& offsets = scan_result.first;
+    size_t& total_size = scan_result.second;
+    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+
+    auto process_probes_quant = [&]<typename SetType>(const auto& q_query) {
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        node_t& node = clusters[probe_list[i].first];
+        auto* node_data = std::get_if<SetType>(&node.quantized_data);
+        if (!node_data) UNREACHABLE();
+        node_data->distances_all(q_query, &visited[offsets[i]]);
+      });
+    };
+
+    switch (quantization_mode) {
+      case QT::PQ:
+        process_probes_quant.template operator()<typename MVQT::PQ_Set>(
+            std::get<typename MVQT::PQ_Q>(q_query_var));
+        break;
+      case QT::RaBitQ:
+        process_probes_quant.template operator()<typename MVQT::RQ_Set>(
+            std::get<typename MVQT::RQ_Q>(q_query_var));
+        break;
+      case QT::FastScan:
+        process_probes_quant.template operator()<typename MVQT::FS_Set>(
+            std::get<typename MVQT::FS_Q>(q_query_var));
+        break;
+      case QT::TurboQuant4Bit:
+        process_probes_quant.template operator()<typename MVQT::TQ4_Set>(
+            std::get<typename MVQT::TQ4_Q>(q_query_var));
+        break;
+      case QT::TurboQuantPQ4Bit:
+        if (params.pq.block_size == 4) {
+          process_probes_quant.template operator()<typename MVQT::TQPQ4_Set>(
+              std::get<typename MVQT::TQPQ4_Q>(q_query_var));
+        } else {
+          process_probes_quant.template operator()<typename MVQT::TQPQ8_Set>(
+              std::get<typename MVQT::TQPQ8_Q>(q_query_var));
+        }
+        break;
+      case QT::None:
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t& node = clusters[probe_list[i].first];
+          node.data.distances(query, &visited[offsets[i]]);
+        });
+        break;
+    }
+    return visited;
   }
 
   // Returns the top-k point clouds for the query point cloud
   // Output format: < [<id, distance>, ...], # distance comparisons>
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
-  search_with_stats(const ChPoint &query, const PointCloudSet<ChPoint> &points,
-                    const SearchParams &search_params) override {
+  search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                    const SearchParams& search_params) override {
     parlay::internal::timer t;
     std::vector<double> timings;
 
     size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
     size_t dist_cmps = 0;
-    // Step 1: Compute distances to centers
-    t.start();
-    parlay::sequence<std::pair<uint32_t, float>> id_dist;
-    std::tie(id_dist, dist_cmps) = centers.distances(query);
-    parlay::sort_inplace(id_dist, [](const auto &a, const auto &b) { return a.second < b.second; });
-    timings.push_back(t.stop());
-    t.reset();
 
-    // Step 2: Probe top nprobe clusters
     double t_quantize = 0.0;
     double t_distances = 0.0;
     double t_rest = 0.0;
+
+    // -------------------------
+    // Step 0: Quantize Query
+    // -------------------------
+    QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
+    TQ4_Q q_center_query;
     t.start();
-    // Find the minimum number of probes needed to obtain k neighbors
-    size_t nprobes_minimal = 0, cur = 0;
-    while (nprobes_minimal < id_dist.size() && cur < k) {
-      cur += get_size(id_dist[nprobes_minimal].first);  // size of cluster
-      nprobes_minimal++;
+    if (params.quantize_centers) {
+      q_center_query = center_quantizer.quantize_query(query);
     }
-    nprobes = std::min(id_dist.size(), std::max(nprobes, nprobes_minimal));
-    // Allocate space for storing results of each probe cluster
-    auto sizes =
-        parlay::delayed_tabulate(nprobes, [&](size_t i) { return get_size(id_dist[i].first); });
-    auto scan_result = parlay::scan(sizes);
-    auto &offsets = scan_result.first;
-    size_t total_size = scan_result.second;
-    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+    t_quantize = t.stop();
+    t.reset();
+
+    // -------------------------
+    // Step 1: Compute distances to centers
+    // -------------------------
+    t.start();
+    const size_t L = centers.size();
+    nprobes = std::min(nprobes, L);
+    auto probe_list = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
+
+    if (params.quantize_centers) {
+      centers_quant.distances_all(q_center_query, probe_list.data());
+    } else {
+      centers.distances(query, probe_list.data());
+    }
+
+    std::nth_element(probe_list.begin(), probe_list.begin() + nprobes, probe_list.end(),
+                     [](const auto& a, const auto& b) { return a.second < b.second; });
+    probe_list.resize(nprobes);
+    timings.push_back(t.stop());
+    dist_cmps += L;
+    t.reset();
+
+    // -------------------------
+    // Step 2: Probe top nprobe clusters
+    // -------------------------
+    t.start();
+    auto visited = process_probes(query, q_query_var, probe_list);
+    t_distances = t.stop();
+
+    t.start();
+    mvsic::sort_inplace_kv(visited);
     t_rest += t.stop();
     t.reset();
 
-    // --- quantize + distances ---
-    switch (active_quantizer) {
-      case QT::RaBitQ: {
-        t.start();
-        auto &m = std::get<RQ_Model>(quantizer);
-        auto q_query = m.quantize_query(query);
-        t_quantize += t.stop();
-        t.reset();
-        t.start();
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          uint32_t cluster_id = id_dist[i].first;
-          auto &qleaf = std::get<RQ_Set>(clusters[cluster_id].quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
-            visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
-          });
-        });
-        t_distances += t.stop();
-        t.reset();
-        break;
-      }
-      case QT::TurboQuantPQ4Bit: {
-        t.start();
-        if (params.pq.block_size == 4) {
-          auto &m = std::get<TQPQ4_Model>(quantizer);
-          auto q_query = m.quantize_query(query);
-          t_quantize += t.stop();
-          t.reset();
-          t.start();
-          parlay::parallel_for(0, nprobes, [&](size_t i) {
-            uint32_t cluster_id = id_dist[i].first;
-            auto &qleaf = std::get<TQPQ4_Set>(clusters[cluster_id].quantized_data);
-            qleaf.distances_all(q_query, &visited[offsets[i]]);
-            parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
-              visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
-            });
-          });
-        } else {
-          auto &m = std::get<TQPQ8_Model>(quantizer);
-          auto q_query = m.quantize_query(query);
-          t_quantize += t.stop();
-          t.reset();
-          t.start();
-          parlay::parallel_for(0, nprobes, [&](size_t i) {
-            uint32_t cluster_id = id_dist[i].first;
-            auto &qleaf = std::get<TQPQ8_Set>(clusters[cluster_id].quantized_data);
-            qleaf.distances_all(q_query, &visited[offsets[i]]);
-            parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
-              visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
-            });
-          });
-        }
-        t_distances += t.stop();
-        t.reset();
-        break;
-      }
-      case QT::PQ: {
-        t.start();
-        auto &m = std::get<PQ_Model>(quantizer);
-        auto q_query = m.quantize_query(query);
-        t_quantize += t.stop();
-        t.reset();
-        t.start();
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          uint32_t cluster_id = id_dist[i].first;
-          auto &qleaf = std::get<PQ_Set>(clusters[cluster_id].quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
-            visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
-          });
-        });
-        t_distances += t.stop();
-        t.reset();
-        break;
-      }
-      case QT::FastScan: {
-        t.start();
-        auto &m = std::get<FS_Model>(quantizer);
-        auto q_query = m.quantize_query(query);
-        t_quantize += t.stop();
-        t.reset();
-        t.start();
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          uint32_t cluster_id = id_dist[i].first;
-          auto &qleaf = std::get<FS_Set>(clusters[cluster_id].quantized_data);
-          qleaf.distances_all(q_query, &visited[offsets[i]]);
-          parlay::parallel_for(0, clusters[cluster_id].size(), [&](size_t j) {
-            visited[offsets[i] + j].first = clusters[cluster_id].data.get_id(j);
-          });
-        });
-        t_distances += t.stop();
-        t.reset();
-        break;
-      }
-      case QT::None: {
-        t_quantize = 0.0;
-        t.start();
-        auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(nprobes);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          uint32_t cluster_id = id_dist[i].first;
-          leaf_dist_cmps[i] = clusters[cluster_id].data.distances(query, &visited[offsets[i]]);
-        });
-        dist_cmps += parlay::reduce(leaf_dist_cmps);  // Add total non-PQ distance comparisons
-        t_distances += t.stop();
-        t.reset();
-        break;
-      }
-      default: {
-        std::cout << "Error: Unknown quantization method." << std::endl;
-        abort();
-      }
-    }
-    t.start();
-    parlay::sort_inplace(visited, [](const auto &a, const auto &b) {
-      return a.second < b.second;  // Sort by distance
-    });
-    t_rest += t.stop();
-    t.reset();
+    dist_cmps += visited.size();
     timings.push_back(t_quantize);
     timings.push_back(t_distances);
     timings.push_back(t_rest);
 
+    // -------------------------
     // Step 3: Re-ranking
+    // -------------------------
     t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
+      this->rerank(query, points, visited, num_rerank, final_results);
+      dist_cmps += num_rerank;
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -367,7 +274,7 @@ class IndexMVIVFFlat : public Index<metric> {
   }
 
   // Write the index to a file in disk
-  void save(const std::string &filename) override {
+  void save(const std::string& filename) override {
     std::ofstream outfile(filename, std::ios::binary);
     std::cout << "Saving index to " << filename << std::endl;
     if (!outfile.is_open()) {
@@ -383,68 +290,57 @@ class IndexMVIVFFlat : public Index<metric> {
 
     // Write num
     size_t num = centers.size();
-    outfile.write(reinterpret_cast<const char *>(&num), sizeof(size_t));
+    outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
     // Write center offsets
-    outfile.write(reinterpret_cast<const char *>(center_offsets.begin()),
+    outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
                   center_offsets.size() * sizeof(size_t));
     // Write centers values
     auto coords = centers.data();
     size_t num_entries = (centers.total_size()) * (centers.get_dims());
-    outfile.write(reinterpret_cast<const char *>(coords), num_entries * sizeof(float));
+    outfile.write(reinterpret_cast<const char*>(coords), num_entries * sizeof(float));
 
     parlay::sequence<size_t> clusters_offsets = parlay::sequence<size_t>::from_function(
-        clusters.size(), [&](size_t i) { return clusters[i].size(); });
+        clusters.size(), [&](size_t i) { return clusters[i].get_size(); });
     size_t total_clusters_size = parlay::scan_inplace(clusters_offsets);
     clusters_offsets.push_back(total_clusters_size);
     // Write clusters offsets
-    outfile.write(reinterpret_cast<const char *>(clusters_offsets.begin()),
+    outfile.write(reinterpret_cast<const char*>(clusters_offsets.begin()),
                   clusters_offsets.size() * sizeof(size_t));
     // Write clusters values
     for (size_t i = 0; i < num; ++i) {
-      if (clusters[i].size() > 0) {
-        for (size_t j = 0; j < clusters[i].size(); ++j) {
+      if (clusters[i].get_size() > 0) {
+        for (size_t j = 0; j < clusters[i].get_size(); ++j) {
           uint32_t point_id = clusters[i].data.get_id(j);
-          outfile.write(reinterpret_cast<const char *>(&point_id), sizeof(uint32_t));
+          outfile.write(reinterpret_cast<const char*>(&point_id), sizeof(uint32_t));
         }
       }
     }
 
-  // quantizer MODEL only
-  const int type_id = static_cast<int>(active_quantizer);
-  outfile.write(reinterpret_cast<const char *>(&type_id), sizeof(int));
+    // quantizer MODEL only
+    const int type_id = static_cast<int>(quantization_mode);
+    outfile.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
 
-  switch (active_quantizer) {
-    case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
-    case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
-    case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
-    case QT::TurboQuantPQ4Bit: {
-      int tqpq_block_size = 0;
-      if (std::holds_alternative<TQPQ4_Model>(quantizer)) {
-        tqpq_block_size = 4;
-      } else if (std::holds_alternative<TQPQ8_Model>(quantizer)) {
-        tqpq_block_size = 8;
-      } else {
-        std::cerr << "IndexMVIVFFlat::save: TurboQuantPQ4Bit active, but quantizer variant is "
-                     "neither TQPQ4_Model nor TQPQ8_Model.\n";
-        abort();
-      }
-      outfile.write(reinterpret_cast<const char *>(&tqpq_block_size), sizeof(int));
-      if (tqpq_block_size == 4) {
-        std::get<TQPQ4_Model>(quantizer).save(outfile);
-      } else {
-        std::get<TQPQ8_Model>(quantizer).save(outfile);
-      }
-      break;
-    }
-    case QT::None:
-    default: break;
-  }
+    std::visit(
+        [&](auto& model) {
+          using ModelType = std::decay_t<decltype(model)>;
+          if constexpr (std::is_same_v<ModelType, std::monostate>) {
+            return;
+          } else {
+            if constexpr (std::is_same_v<ModelType, typename MVQT::TQPQ4_Model> ||
+                          std::is_same_v<ModelType, typename MVQT::TQPQ8_Model>) {
+              int block_size = std::is_same_v<ModelType, typename MVQT::TQPQ4_Model> ? 4 : 8;
+              outfile.write(reinterpret_cast<const char*>(&block_size), sizeof(block_size));
+            }
+            model.save(outfile);
+          }
+        },
+        quantizer);
 
     outfile.close();
   }
 
   // Read the index from a file in disk
-  void load(const std::string &filename, const PointCloudSet<ChPoint> &points) override {
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
     std::ifstream infile(filename, std::ios::binary);
     std::cout << "Loading index from " << filename << std::endl;
     if (!infile.is_open()) {
@@ -454,15 +350,15 @@ class IndexMVIVFFlat : public Index<metric> {
 
     // Read number of nodes
     size_t num = 0;
-    infile.read(reinterpret_cast<char *>(&num), sizeof(size_t));
+    infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
     // Read center offsets
     size_t num_center_offsets = num + 1;
     parlay::sequence<size_t> center_offsets(num_center_offsets);
-    infile.read(reinterpret_cast<char *>(center_offsets.begin()),
+    infile.read(reinterpret_cast<char*>(center_offsets.begin()),
                 center_offsets.size() * sizeof(size_t));
     // Read centers values
     parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
-    infile.read(reinterpret_cast<char *>(center_values.begin()),
+    infile.read(reinterpret_cast<char*>(center_values.begin()),
                 center_values.size() * sizeof(float));
 
     size_t dim = points.get_dims();
@@ -471,41 +367,33 @@ class IndexMVIVFFlat : public Index<metric> {
 
     // Read clusters offsets
     parlay::sequence<size_t> clusters_offsets(num + 1);
-    infile.read(reinterpret_cast<char *>(clusters_offsets.begin()),
+    infile.read(reinterpret_cast<char*>(clusters_offsets.begin()),
                 clusters_offsets.size() * sizeof(size_t));
     // Read clusters values
     parlay::sequence<uint32_t> clusters_values(clusters_offsets[clusters_offsets.size() - 1]);
-    infile.read(reinterpret_cast<char *>(clusters_values.begin()),
+    infile.read(reinterpret_cast<char*>(clusters_values.begin()),
                 clusters_values.size() * sizeof(uint32_t));
 
     // quantizer model
     int type_id = 0;
-    infile.read(reinterpret_cast<char *>(&type_id), sizeof(int));
-    active_quantizer = static_cast<QT>(type_id);
+    infile.read(reinterpret_cast<char*>(&type_id), sizeof(int));
+    quantization_mode = static_cast<QT>(type_id);
 
-    switch (active_quantizer) {
-      case QT::PQ:
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).load(infile);
-        break;
-      case QT::FastScan:
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).load(infile);
-        break;
-      case QT::RaBitQ:
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).load(infile);
+    switch (quantization_mode) {
+      case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(infile); break;
+      case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(infile); break;
+      case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(infile); break;
+      case QT::TurboQuant4Bit:
+        quantizer.template emplace<typename MVQT::TQ4_Model>().load(infile);
         break;
       case QT::TurboQuantPQ4Bit: {
         int tqpq_block_size = 0;
-        infile.read(reinterpret_cast<char *>(&tqpq_block_size), sizeof(int));
+        infile.read(reinterpret_cast<char*>(&tqpq_block_size), sizeof(int));
         params.pq.block_size = tqpq_block_size;
         if (tqpq_block_size == 4) {
-          quantizer.template emplace<TQPQ4_Model>();
-          std::get<TQPQ4_Model>(quantizer).load(infile);
+          quantizer.template emplace<typename MVQT::TQPQ4_Model>().load(infile);
         } else if (tqpq_block_size == 8) {
-          quantizer.template emplace<TQPQ8_Model>();
-          std::get<TQPQ8_Model>(quantizer).load(infile);
+          quantizer.template emplace<typename MVQT::TQPQ8_Model>().load(infile);
         } else {
           std::cerr << "IndexMVIVFFlat::load: TurboQuantPQ4Bit model with unsupported block_size="
                     << tqpq_block_size << " (expected 4 or 8).\n";
@@ -513,12 +401,16 @@ class IndexMVIVFFlat : public Index<metric> {
         }
         break;
       }
-      case QT::None: quantizer = std::monostate{}; break;
-      default:
-        std::cerr << "IndexMVIVFFlat: Unsupported quantizer in load.\n";
-        abort();
+      case QT::None:
+      default: quantizer = std::monostate{}; break;
     }
     infile.close();
+
+    // Center quantization (internal-node / leaf-center scoring): always TQ4.
+    init_tq4_quantizer(points);
+    if (params.quantize_centers) {
+      centers_quant = encode_tq4(centers);
+    }
 
     // Build the index
     auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
@@ -534,35 +426,7 @@ class IndexMVIVFFlat : public Index<metric> {
           return point_id_to_data_id[point_id];
         });
         clusters[i].data = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
-          switch (active_quantizer) {
-            case QT::PQ: {
-              auto &m = std::get<PQ_Model>(quantizer);
-              clusters[i].quantized_data = m.encode(clusters[i].data);
-              break;
-            }
-            case QT::FastScan: {
-              auto &m = std::get<FS_Model>(quantizer);
-              clusters[i].quantized_data = m.encode(clusters[i].data);
-              break;
-            }
-            case QT::RaBitQ: {
-              auto &m = std::get<RQ_Model>(quantizer);
-              clusters[i].quantized_data = m.encode(clusters[i].data);
-              break;
-            }
-            case QT::TurboQuantPQ4Bit: {
-              if (params.pq.block_size == 4) {
-                auto &m = std::get<TQPQ4_Model>(quantizer);
-                clusters[i].quantized_data = m.encode(clusters[i].data);
-              } else {
-                auto &m = std::get<TQPQ8_Model>(quantizer);
-                clusters[i].quantized_data = m.encode(clusters[i].data);
-              }
-              break;
-            }
-            case QT::None:
-            default: clusters[i].quantized_data = std::monostate{}; break;
-          }
+        clusters[i].quantized_data = this->encode_points_quantized(clusters[i].data, quantizer);
       }
     });
   }

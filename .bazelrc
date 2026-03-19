@@ -1,10 +1,10 @@
 # This is so we understand failures better
 build --verbose_failures
 
-# By default build in C++17 mode using the Homegrown scheduler for parallelism.
+# By default build in C++20 mode using the Homegrown scheduler for parallelism.
 # build --repo_env=CC=g++
 build --repo_env=CC=clang++
-build --cxxopt=-std=c++17
+build --cxxopt=-std=c++20
 build --cxxopt=-mcx16        # 16 byte CAS
 build --cxxopt=-DHOMEGROWN   # use the homegrown scheduler
 # build --cxxopt=-DPARLAY_USE_STD_ALLOC # TODO: Try removing this

@@ -1,17 +1,9 @@
 #pragma once
 
-#include <set>
 #include <variant>
-#include <optional>
 #include <fstream>
 
 #include "mvsic/core/index.h"
-
-// Quantization Headers
-#include "mvsic/core/quantization/pq.h"
-#include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/wrapper.h"
 
 #include "graph.h"
 #include "beam_search.h"
@@ -26,45 +18,30 @@ class IndexVamana : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using pid = std::pair<uint32_t, float>;
-  using Index<metric>::d;  // Embedding dimension
+  using MVQT = typename Index<metric>::MVQT;
+  using QuantSet = typename MVQT::QuantSet;
+  using QuantQuery = typename MVQT::QuantQuery;
+  using QuantModel = typename MVQT::QuantModel;
+  using QT = typename Index<metric>::QT;
+  using Index<metric>::d;       // Embedding dimension
+  using Index<metric>::params;  // Index Params
+  using Index<metric>::quantization_mode;
 
-  // Multi-Vector Quantizer Types using the Wrapper
-  using FlatRange = FlattenedPCRange<PointCloudSet<ChPoint>>;
-  using PQ_Enc = pq::Quantized_Point_Range<FlatRange, metric>;
-  using FS_Enc = fastscan::Quantized_Point_Range<FlatRange, metric>;
-  using RQ_Enc = rabitq::Quantized_Point_Range<FlatRange, metric>;
-
-  using PQ_Set = Quantized_Point_Cloud_Set<PQ_Enc, metric>;
-  using FS_Set = Quantized_Point_Cloud_Set<FS_Enc, metric>;
-  using RQ_Set = Quantized_Point_Cloud_Set<RQ_Enc, metric>;
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set>;
-
-  using PQ_Model = MultiVecQuantizer<pq::Model<metric>, metric>;
-  using FS_Model = MultiVecQuantizer<fastscan::Model<metric>, metric>;
-  using RQ_Model = MultiVecQuantizer<rabitq::Model<metric>, metric>;
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model>;
-
-  // helper for decltype
-  template<class M, class Q>
-  using QQueryT = decltype(std::declval<M&>().quantize_query(std::declval<Q const&>()));
-  using PQ_Q = QQueryT<PQ_Model, ChPoint>;
-  using FS_Q = QQueryT<FS_Model, ChPoint>;
-  using RQ_Q = QQueryT<RQ_Model, ChPoint>;
-  using QuantQuery = std::variant<std::monostate, PQ_Q, FS_Q, RQ_Q>;
-
-  using QT = IndexParams::QuantizerType;
-
-  IndexParams params;
   vamana::Graph<uint32_t> G;  // Vamana Graph
   uint32_t start_point;       // Starting Point of the graph
 
   // Quantizer Storage
   QuantModel quantizer = std::monostate{};
   QuantSet quantized_points = std::monostate{};
-  QT active_quantizer = QT::None;
 
-  IndexVamana(uint32_t d_) noexcept : params(IndexParams::vamana()) { d = d_; }
-  IndexVamana(uint32_t d_, const IndexParams& params) noexcept : params(params) { d = d_; }
+  IndexVamana(uint32_t d_) noexcept {
+    d = d_;
+    params = IndexParams::vamana();
+  }
+  IndexVamana(uint32_t d_, const IndexParams& params_) noexcept {
+    d = d_;
+    params = params_;
+  }
 
   inline void set_start() noexcept { start_point = 0; }
 
@@ -264,39 +241,13 @@ class IndexVamana : public Index<metric> {
   // Builds the index given PointCloudSet object.
   void build(const PointCloudSet<ChPoint>& points) override {
     // Step 1: Train Quantizer
-    active_quantizer = params.pq.method;
-    switch (active_quantizer) {
-      case QT::PQ: {
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).train(points, params.pq.block_size,
-                                            params.pq.num_clusters_per_block,
-                                            params.pq.num_points_per_cluster);
-        break;
-      }
-      case QT::FastScan: {
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).train(points, params.pq.block_size);
-        break;
-      }
-      case QT::RaBitQ: {
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).train(points, params.pq.rabitq_bits);
-        break;
-      }
-      default: quantizer = std::monostate{}; break;
-    }
+    quantization_mode = params.pq.method;
+    this->train_quantizer(points, quantizer);
 
     // Step 2: Encode Data
-    if (active_quantizer != QT::None) {
-      switch (active_quantizer) {
-        case QT::PQ: quantized_points = std::get<PQ_Model>(quantizer).encode(points); break;
-        case QT::FastScan: quantized_points = std::get<FS_Model>(quantizer).encode(points); break;
-        case QT::RaBitQ: quantized_points = std::get<RQ_Model>(quantizer).encode(points); break;
-        default: break;
-      }
-    }
+    quantized_points = this->encode_points_quantized(points, quantizer);
 
-    // Step 3: Build Graph (uses exact distances as requested)
+    // Step 3: Build Graph (uses exact distances)
     if (params.verbose >= 1) std::cout << "Building graph..." << std::endl;
     set_start();
     G = vamana::Graph<uint32_t>(params.R, points.size());
@@ -324,51 +275,69 @@ class IndexVamana : public Index<metric> {
 
     // Step 1: Quantize Query
     t.start();
-    QuantQuery q_query;
-    switch (active_quantizer) {
-      case QT::PQ: q_query = std::get<PQ_Model>(quantizer).quantize_query(query); break;
-      case QT::FastScan: q_query = std::get<FS_Model>(quantizer).quantize_query(query); break;
-      case QT::RaBitQ: q_query = std::get<RQ_Model>(quantizer).quantize_query(query); break;
-      default: break;
-    }
+    QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
     timings.push_back(t.stop());
     t.reset();
 
     // Step 2: Run beam search
     t.start();
     parlay::sequence<pid> visited;
-    if (active_quantizer == QT::None) {
-      auto [result, cmps] = vamana::beam_search(query, G, points, start_point, search_params);
-      visited = result.second;
-      dist_cmps = cmps;
-    } else {
-      switch (active_quantizer) {
-        case QT::PQ: {
-          auto& q = std::get<PQ_Q>(q_query);
-          auto& d = std::get<PQ_Set>(quantized_points);
-          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
-          visited = result.second;
-          dist_cmps = cmps;
-          break;
-        }
-        case QT::FastScan: {
-          auto& q = std::get<FS_Q>(q_query);
-          auto& d = std::get<FS_Set>(quantized_points);
-          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
-          visited = result.second;
-          dist_cmps = cmps;
-          break;
-        }
-        case QT::RaBitQ: {
-          auto& q = std::get<RQ_Q>(q_query);
-          auto& d = std::get<RQ_Set>(quantized_points);
-          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
-          visited = result.second;
-          dist_cmps = cmps;
-          break;
-        }
-        default: break;
+
+    switch (quantization_mode) {
+      case QT::PQ: {
+        auto& q = std::get<typename MVQT::PQ_Q>(q_query_var);
+        auto& d = std::get<typename MVQT::PQ_Set>(quantized_points);
+        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        visited = result.second;
+        dist_cmps = cmps;
+        break;
       }
+      case QT::RaBitQ: {
+        auto& q = std::get<typename MVQT::RQ_Q>(q_query_var);
+        auto& d = std::get<typename MVQT::RQ_Set>(quantized_points);
+        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        visited = result.second;
+        dist_cmps = cmps;
+        break;
+      }
+      case QT::FastScan: {
+        auto& q = std::get<typename MVQT::FS_Q>(q_query_var);
+        auto& d = std::get<typename MVQT::FS_Set>(quantized_points);
+        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        visited = result.second;
+        dist_cmps = cmps;
+        break;
+      }
+      case QT::TurboQuant4Bit: {
+        auto& q = std::get<typename MVQT::TQ4_Q>(q_query_var);
+        auto& d = std::get<typename MVQT::TQ4_Set>(quantized_points);
+        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        visited = result.second;
+        dist_cmps = cmps;
+        break;
+      }
+      case QT::TurboQuantPQ4Bit: {
+        if (params.pq.block_size == 4) {
+          auto& q = std::get<typename MVQT::TQPQ4_Q>(q_query_var);
+          auto& d = std::get<typename MVQT::TQPQ4_Set>(quantized_points);
+          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+          visited = result.second;
+          dist_cmps = cmps;
+        } else {
+          auto& q = std::get<typename MVQT::TQPQ8_Q>(q_query_var);
+          auto& d = std::get<typename MVQT::TQPQ8_Set>(quantized_points);
+          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+          visited = result.second;
+          dist_cmps = cmps;
+        }
+        break;
+      }
+      case QT::None: {
+        auto [result, cmps] = vamana::beam_search(query, G, points, start_point, search_params);
+        visited = result.second;
+        dist_cmps = cmps;
+      }
+      default: break;
     }
     timings.push_back(t.stop());
     t.reset();
@@ -379,7 +348,8 @@ class IndexVamana : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
+      this->rerank(query, points, visited, num_rerank, final_results);
+      dist_cmps += num_rerank;
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -399,12 +369,26 @@ class IndexVamana : public Index<metric> {
     // 1. Save graph
     G.save(out);
     // 2. Save Quantizer Model
-    int type_id = static_cast<int>(active_quantizer);
+    int type_id = static_cast<int>(quantization_mode);
     out.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
-    switch (active_quantizer) {
-      case QT::PQ: std::get<PQ_Model>(quantizer).save(out); break;
-      case QT::FastScan: std::get<FS_Model>(quantizer).save(out); break;
-      case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(out); break;
+    switch (quantization_mode) {
+      case QT::PQ: std::get<typename MVQT::PQ_Model>(quantizer).save(out); break;
+      case QT::FastScan: std::get<typename MVQT::FS_Model>(quantizer).save(out); break;
+      case QT::RaBitQ: std::get<typename MVQT::RQ_Model>(quantizer).save(out); break;
+      case QT::TurboQuant4Bit: std::get<typename MVQT::TQ4_Model>(quantizer).save(out); break;
+      case QT::TurboQuantPQ4Bit: {
+        if (params.pq.block_size == 4) {
+          out.write(reinterpret_cast<const char*>(&params.pq.block_size),
+                    sizeof(params.pq.block_size));
+          std::get<typename MVQT::TQPQ4_Model>(quantizer).save(out);
+        } else {
+          out.write(reinterpret_cast<const char*>(&params.pq.block_size),
+                    sizeof(params.pq.block_size));
+          std::get<typename MVQT::TQPQ8_Model>(quantizer).save(out);
+        }
+        break;
+      }
+      case QT::None: break;
       default: break;
     }
     out.close();
@@ -423,33 +407,32 @@ class IndexVamana : public Index<metric> {
     // 2. Load Quantizer Model
     int type_id;
     in.read(reinterpret_cast<char*>(&type_id), sizeof(int));
-    active_quantizer = static_cast<QT>(type_id);
-    switch (active_quantizer) {
-      case QT::PQ:
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).load(in);
+    quantization_mode = static_cast<QT>(type_id);
+    switch (quantization_mode) {
+      case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(in); break;
+      case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(in); break;
+      case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(in); break;
+      case QT::TurboQuant4Bit:
+        quantizer.template emplace<typename MVQT::TQ4_Model>().load(in);
         break;
-      case QT::FastScan:
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).load(in);
+      case QT::TurboQuantPQ4Bit: {
+        int tqpq_block_size = 0;
+        in.read(reinterpret_cast<char*>(&tqpq_block_size), sizeof(int));
+        params.pq.block_size = tqpq_block_size;
+        if (tqpq_block_size == 4) {
+          quantizer.template emplace<typename MVQT::TQPQ4_Model>().load(in);
+        } else {
+          quantizer.template emplace<typename MVQT::TQPQ8_Model>().load(in);
+        }
         break;
-      case QT::RaBitQ:
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).load(in);
-        break;
-      default: quantizer = std::monostate{}; break;
+      }
+      case QT::None: break;
+      default: break;
     }
     in.close();
 
     // 3. Re-encode data
-    if (active_quantizer != QT::None) {
-      switch (active_quantizer) {
-        case QT::PQ: quantized_points = std::get<PQ_Model>(quantizer).encode(points); break;
-        case QT::FastScan: quantized_points = std::get<FS_Model>(quantizer).encode(points); break;
-        case QT::RaBitQ: quantized_points = std::get<RQ_Model>(quantizer).encode(points); break;
-        default: break;
-      }
-    }
+    quantized_points = this->encode_points_quantized(points, quantizer);
   }
 };
 
