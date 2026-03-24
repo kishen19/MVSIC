@@ -1,8 +1,10 @@
 #pragma once
 
-#include <set>
-#include <queue>
+#include <fstream>
 #include <optional>
+#include <queue>
+#include <set>
+#include <unordered_map>
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/utils/util.h"
@@ -10,11 +12,6 @@
 #include "mvsic/core/types/point_range.h"
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/types/l2_point.h"
-
-// Quantization Headers
-#include "mvsic/core/quantization/pq.h"
-#include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/fastscan.h"
 
 namespace mvsic {
 
@@ -31,25 +28,18 @@ class IndexSVHIVF : public Index<metric> {
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using Point = std::conditional_t<metric, mvsic::L2_Point<float>, mvsic::IP_Point<float>>;
   using Range = mvsic::PointRange<float, Point>;
+  using FlatRange = FlattenedPCRange<PointCloudSet<ChPoint>>;
+  using SVQT = QuantTypes<metric, Range>;
+  using QuantRange = typename SVQT::QuantRange;
+  using QuantQuery = typename SVQT::QuantQuery;
+  using QuantModel = typename SVQT::QuantModel;
+  using TQ_Range = typename SVQT::TQ_Range;
+  using TQ_Query = typename SVQT::TQ_Query;
+  using TQ_Model = typename SVQT::TQ_Model;
+  using QT = typename Index<metric>::QT;
   using Index<metric>::d;       // Embedding dimension
   using Index<metric>::params;  // Index Params
   using Index<metric>::quantization_mode;
-
-  // Quantizer Types
-  using PQ_Range = pq::Quantized_Point_Range<Range, metric>;
-  using PQ_Point = pq::Quantized_Query<metric>;
-  using RQ_Range = rabitq::Quantized_Point_Range<Range, metric>;
-  using RQ_Point = rabitq::Quantized_Query<metric>;
-  using FS_Range = fastscan::Quantized_Point_Range<Range, metric>;
-  using FS_Point = fastscan::Quantized_Query<metric>;
-  using PQ_Model = pq::Model<metric>;
-  using RQ_Model = rabitq::Model<metric>;
-  using FS_Model = fastscan::Model<metric>;
-
-  using QuantModel = std::variant<std::monostate, PQ_Model, RQ_Model, FS_Model>;
-  using QuantRange = std::variant<std::monostate, PQ_Range, RQ_Range, FS_Range>;
-  using QuantQuery = std::variant<std::monostate, PQ_Point, RQ_Point, FS_Point>;
-  using QT = IndexParams::QuantizerType;
 
   struct node_t {
     parlay::sequence<node_t*> children;
@@ -58,10 +48,8 @@ class IndexSVHIVF : public Index<metric> {
     Range data;
     QuantRange quantized_data;
     parlay::sequence<std::pair<size_t, size_t>> ids;  // Only leaf nodes have ids
-
     node_t() noexcept : children(), data(), quantized_data(std::monostate()), ids() {}
     ~node_t() noexcept {}
-
     inline size_t get_size() const noexcept { return data.size(); }
     inline size_t get_id(size_t i) const noexcept { return ids[i].first; }
   };
@@ -70,6 +58,7 @@ class IndexSVHIVF : public Index<metric> {
 
   // Quantizer Storage
   QuantModel quantizer = std::monostate{};
+  TQ_Model center_quantizer;
 
   IndexSVHIVF(size_t d_) noexcept {
     d = d_;
@@ -80,13 +69,28 @@ class IndexSVHIVF : public Index<metric> {
     params = params_;
   }
 
+  // Quantization Helpers
+  template<typename PR>
+  void init_tq_quantizer(const PR& points) {
+    if (!params.quantize_centers) return;
+    center_quantizer.train(points);
+  }
+
+  template<typename PR>
+  TQ_Range encode_tq(const PR& points) {
+    return center_quantizer.encode(points);  // returns TQ_Set
+  }
+
   // Recursively builds the kmeans tree
   void recursive_build(node_t* node, const parlay::sequence<parlay::sequence<float>>& points,
                        const parlay::sequence<std::pair<size_t, size_t>>& ids) {
     size_t n = points.size();
-    size_t num_clusters = (params.k_per_level > 0) ? params.k_per_level : std::ceil(std::sqrt(n));
+    size_t auto_nc = (params.k_per_level > 0) ? params.k_per_level
+                                              : static_cast<size_t>(std::ceil(std::sqrt(n)));
+    size_t small_nc = 4 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
+    size_t num_clusters = std::max(static_cast<size_t>(4), std::min({auto_nc, small_nc, n}));
     if (params.verbose >= 1) {
-      std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
+      std::cout << "[SVHIVF] Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
     // Step 1: Run k-means on data and collect clusters
@@ -111,25 +115,7 @@ class IndexSVHIVF : public Index<metric> {
     }
     // Quantize centers: Encoding
     if (params.quantize_centers) {
-      switch (quantization_mode) {
-        case QT::PQ: {
-          auto& m = std::get<PQ_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::FastScan: {
-          auto& m = std::get<FS_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::RaBitQ: {
-          auto& m = std::get<RQ_Model>(quantizer);
-          node->quantized_data = m.encode(node->data);
-          break;
-        }
-        case QT::None:
-        default: node->quantized_data = std::monostate{}; break;
-      }
+      node->quantized_data = encode_tq(node->data);
     }
     parlay::parallel_for(
         0, active_indices.size(),
@@ -145,26 +131,8 @@ class IndexSVHIVF : public Index<metric> {
           } else {  // Leaf Node
             child->data = Range(child_points, d);
             child->ids = child_ids;
-            // Quantization: Encoding
-            switch (quantization_mode) {
-              case QT::PQ: {
-                auto& m = std::get<PQ_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::RaBitQ: {
-                auto& m = std::get<RQ_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::FastScan: {
-                auto& m = std::get<FS_Model>(quantizer);
-                child->quantized_data = m.encode(child->data);
-                break;
-              }
-              case QT::None:
-              default: child->quantized_data = std::monostate{}; break;
-            }
+            child->quantized_data =
+                this->template encode_range_quantized<SVQT>(child->data, quantizer);
           }
           node->children[id] = child;
         },
@@ -172,11 +140,9 @@ class IndexSVHIVF : public Index<metric> {
   }
 
   void build(const PointCloudSet<ChPoint>& points) override {
+    parlay::internal::timer t;
+    t.start();
     root = new node_t();
-    if (params.compress_input) {
-      // TODO: run Ward's HAC to compress input point clouds
-    }
-
     // Prepare data for building
     size_t n = points.size();
     auto iota = parlay::iota(n);
@@ -192,251 +158,220 @@ class IndexSVHIVF : public Index<metric> {
 
     // Quantization: Training
     quantization_mode = params.pq.method;
-    switch (quantization_mode) {
-      case QT::RaBitQ:
-        if (params.verbose >= 1) std::cout << "Training RaBitQ..." << std::endl;
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).train(Range(data, d), params.pq.rabitq_bits);
-        break;
-      case QT::PQ:
-        if (params.verbose >= 1) std::cout << "Training Standard PQ..." << std::endl;
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).train(Range(data, d), params.pq.block_size,
-                                            params.pq.num_clusters_per_block,
-                                            params.pq.num_points_per_cluster);
-        break;
-      case QT::FastScan:
-        if (params.verbose >= 1) std::cout << "Training FastScan PQ..." << std::endl;
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).train(Range(data, d), params.pq.block_size);
-        break;
-      case QT::None: quantizer = std::monostate{}; break;
-      default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
-    }
+    FlatRange flat_points(points);
+    this->template train_quantizer<SVQT>(flat_points, quantizer);
+    init_tq_quantizer(flat_points);
 
     recursive_build(root, data, ids);
+    if (params.verbose >= 1) {
+      std::cout << "[SVHIVF] Leaf-data computed: " << t.stop() << " sec" << std::endl;
+    }
   }
 
   // Output type of Greedy Search
   struct GreedySearchResult {
     parlay::sequence<std::pair<float, node_t*>> probe_list;
     size_t dist_cmps = 0;
-    double time = 0.0;
+    std::vector<double> timings = {};
   };
 
   // Simple Beam Search using std::set
-  GreedySearchResult greedy_search(const Point& query_point, const QuantQuery& q_query_point_var,
+  GreedySearchResult greedy_search(const Point& query_point, const TQ_Query& q_query,
                                    size_t nprobes) const {
     using score_node = std::pair<float, node_t*>;
-    auto less = [](const score_node& a, const score_node& b) {
-      return a.first < b.first || (a.first == b.first && a.second < b.second);
-    };
     const size_t beam_length = 2 * nprobes;
     parlay::internal::timer t;
-    t.start();
+    double t_dists = 0.0;
+    double t_beam = 0.0;
+    double t_rest = 0.0;
 
+    t.start();
     size_t dist_cmps = 0;
     std::set<score_node> beam;
-    std::vector<score_node> probe_vec;  // To collect leaf nodes
-    std::vector<float> child_dists;     // Scratch memory
+    parlay::sequence<score_node> top_probes;
+    top_probes.reserve(nprobes + 1);
+    std::vector<float> child_dists;
+    child_dists.reserve(root->children.size());
+    t_rest += t.stop();
+    t.reset();
 
-    // Initial seed
+    // Initial
+    t.start();
     beam.insert({0.0f, root});
-
+    t_beam += t.stop();
+    t.reset();
     while (!beam.empty()) {
       // Pop the best node (smallest distance)
+      t.start();
       auto it = beam.begin();
       score_node best = *it;
       beam.erase(it);
+      t_beam += t.stop();
+      t.reset();
+      t.start();
       node_t* current_node = best.second;
+      // Check if current score is worse than the worst in top_probes
+      if (top_probes.size() == nprobes && best.first >= top_probes.front().first) {
+        break;  // Beam has converged
+      }
       auto& children = current_node->children;
-      if (children.empty()) continue;
       // Compute distances to children
       child_dists.resize(children.size());
-      if (!params.quantize_centers) {
-        auto& centers = current_node->data;
-        parlay::parallel_for(0, children.size(), [&](uint32_t i) {
-          auto [dist, d_c] = query_point.distance_w_cmps(centers[i]);
-          child_dists[i] = dist;
-        });
+      dist_cmps += children.size();
+      if (params.quantize_centers) {  // Center scoring always uses TQ when enabled.
+        q_query.distances_all(std::get<TQ_Range>(current_node->quantized_data), child_dists.data());
       } else {
-        switch (quantization_mode) {
-          case QT::RaBitQ: {
-            auto& q_query = std::get<RQ_Point>(q_query_point_var);
-            auto& qleaf = std::get<RQ_Range>(current_node->quantized_data);
-            q_query.distances_all(qleaf, child_dists.data());
-            break;
-          }
-          case QT::PQ: {
-            auto& q_query = std::get<PQ_Point>(q_query_point_var);
-            auto& qleaf = std::get<PQ_Range>(current_node->quantized_data);
-            q_query.distances_all(qleaf, child_dists.data());
-            break;
-          }
-          case QT::FastScan: {
-            auto& q_query = std::get<FS_Point>(q_query_point_var);
-            auto& qleaf = std::get<FS_Range>(current_node->quantized_data);
-            q_query.distances_all(qleaf, child_dists.data());
-            break;
-          }
-          case QT::None:
-          default:
-            std::cerr << "Error: Invalid quantizer type in greedy search." << std::endl;
-            abort();
+        auto& centers = current_node->data;
+        const size_t nc = centers.size();
+        for (size_t j = 0; j < nc; ++j) {
+          child_dists[j] = query_point.distance(centers[j]);
         }
       }
+      t_dists += t.stop();
+      t.reset();
 
       for (size_t i = 0; i < children.size(); ++i) {
         float d = child_dists[i];
         node_t* child = children[i];
         if (child->children.empty()) {
-          // It's a leaf node: add to probe candidates
-          probe_vec.push_back({d, child});
-        } else {
-          // Internal node: add to beam if it's better than the current worst
-          if (beam.size() < beam_length || d < beam.rbegin()->first) {
-            beam.insert({d, child});
-            if (beam.size() > beam_length) {
-              beam.erase(std::prev(beam.end()));  // Prune the farthest node
+          t.start();
+          // It's a leaf node: add to probe candidates if better than current worst
+          if (top_probes.size() < nprobes || d < top_probes.front().first) {
+            top_probes.push_back({d, child});
+            std::push_heap(top_probes.begin(), top_probes.end());
+            if (top_probes.size() > nprobes) {
+              std::pop_heap(top_probes.begin(), top_probes.end());
+              top_probes.pop_back();  // Prune the farthest node
             }
           }
+          t_rest += t.stop();
+          t.reset();
+        } else {
+          t.start();
+          // Internal node: add to beam if it's better than the current worst
+          const size_t beam_size = beam.size();
+          if (beam_size < beam_length) {
+            beam.insert({d, child});
+          } else {
+            // Only check worst if beam is full
+            auto worst_it = std::prev(beam.end());
+            if (d < worst_it->first) {
+              beam.erase(worst_it);
+              beam.insert({d, child});
+            }
+          }
+          t_beam += t.stop();
+          t.reset();
         }
       }
     }
-    // Finalize probes: take best nprobes leaves
-    if (probe_vec.size() > nprobes) {
-      std::nth_element(probe_vec.begin(), probe_vec.begin() + nprobes, probe_vec.end(), less);
-      probe_vec.resize(nprobes);
-    }
-    parlay::sort_inplace(probe_vec, less);
 
     GreedySearchResult out;
     out.dist_cmps = dist_cmps;
-    out.time = t.stop();
-    out.probe_list = parlay::sequence<score_node>::from_function(
-        probe_vec.size(), [&](size_t i) { return probe_vec[i]; });
+    out.timings = {t_dists, t_beam, t_rest};
+    out.probe_list = std::move(top_probes);
     return out;
   }
 
+  inline auto process_probes(const Point& query_point, const QuantQuery& q_query_var,
+                             parlay::sequence<std::pair<float, node_t*>>& probe_list) {
+    const size_t nprobes = probe_list.size();
+    auto sizes = parlay::delayed_tabulate(
+        nprobes, [&](size_t i) { return probe_list[i].second->get_size(); });
+    auto scan_result = parlay::scan(sizes);
+    auto& offsets = scan_result.first;
+    size_t& total_size = scan_result.second;
+    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+    auto tmp_dists = parlay::sequence<float>::uninitialized(total_size);
+
+    auto process_probes_quant = [&]<typename RangeType>(const auto& q_query) {
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        node_t* leaf = probe_list[i].second;
+        auto* leaf_data = std::get_if<RangeType>(&leaf->quantized_data);
+        if (!leaf_data) UNREACHABLE();
+        q_query.distances_all(*leaf_data, tmp_dists.begin() + offsets[i]);
+      });
+    };
+
+    switch (quantization_mode) {
+      case QT::PQ:
+        process_probes_quant.template operator()<typename SVQT::PQ_Range>(
+            std::get<typename SVQT::PQ_Query>(q_query_var));
+        break;
+      case QT::RaBitQ:
+        process_probes_quant.template operator()<typename SVQT::RQ_Range>(
+            std::get<typename SVQT::RQ_Query>(q_query_var));
+        break;
+      case QT::FastScan:
+        process_probes_quant.template operator()<typename SVQT::FS_Range>(
+            std::get<typename SVQT::FS_Query>(q_query_var));
+        break;
+      case QT::TurboQuant:
+        process_probes_quant.template operator()<typename SVQT::TQ_Range>(
+            std::get<typename SVQT::TQ_Query>(q_query_var));
+        break;
+      case QT::None:
+        parlay::parallel_for(0, nprobes, [&](size_t i) {
+          node_t* leaf_node = probe_list[i].second;
+          const size_t off = offsets[i];
+          const size_t sz = leaf_node->get_size();
+          for (size_t j = 0; j < sz; ++j) {
+            tmp_dists[off + j] = query_point.distance(leaf_node->data[j]);
+          }
+        });
+        break;
+    }
+
+    parlay::parallel_for(0, nprobes, [&](size_t i) {
+      node_t* leaf = probe_list[i].second;
+      const size_t off = offsets[i];
+      const size_t sz = leaf->get_size();
+      for (size_t j = 0; j < sz; ++j) {
+        visited[off + j] = {static_cast<uint32_t>(leaf->get_id(j)), tmp_dists[off + j]};
+      }
+    });
+    return visited;
+  }
+
   // Search for nearest neighbors of a single query point
-  std::tuple<size_t, std::vector<double>> search_each(const Point& query_point, size_t nprobes,
-                                                      size_t num_rerank,
-                                                      std::pair<uint32_t, float>* output) {
+  auto search_each(const Point& query_point, size_t nprobes, size_t num_rerank,
+                   std::pair<uint32_t, float>* output) {
     parlay::internal::timer t;
     std::vector<double> timings;
     size_t dist_cmps = 0;
 
-    // Step 0: Quantize Query
     double t_quantize = 0.0;
+    double t_distances = 0.0;
+    double t_rest = 0.0;
+
+    // Step 0: Quantize Query
+    QuantQuery q_query_point_var =
+        this->template quantize_query_point<SVQT>(query_point, quantizer);
+    TQ_Query q_center_query;
     t.start();
-    QuantQuery q_query_point_var;
-    switch (quantization_mode) {
-      case QT::RaBitQ: {
-        auto& m = std::get<RQ_Model>(quantizer);
-        q_query_point_var = m.quantize_query(query_point);
-        break;
-      }
-      case QT::PQ: {
-        auto& m = std::get<PQ_Model>(quantizer);
-        q_query_point_var = m.quantize_query(query_point);
-        break;
-      }
-      case QT::FastScan: {
-        auto& m = std::get<FS_Model>(quantizer);
-        q_query_point_var = m.quantize_query(query_point);
-        break;
-      }
-      case QT::None: {
-        q_query_point_var = std::monostate{};
-        break;
-      }
-      default: abort();
+    if (params.quantize_centers) {
+      q_center_query = center_quantizer.quantize_query(query_point);
     }
     t_quantize = t.stop();
     t.reset();
 
     // Step 1: Greedy search to find candidate probe clusters
-    auto gs = greedy_search(query_point, q_query_point_var, nprobes);
-    auto probe_list = std::move(gs.probe_list);
+    auto gs = greedy_search(query_point, q_center_query, nprobes);
+    auto& probe_list = gs.probe_list;
     dist_cmps += gs.dist_cmps;
-    timings.push_back(gs.time);
     nprobes = std::min(nprobes, probe_list.size());
+    timings.push_back(dist_cmps);
+    for (double time : gs.timings) {
+      timings.push_back(time);
+    }
 
     // Step 2: Probe clusters in probe_list
-    double t_rest = 0.0;
     t.start();
-    auto sizes = parlay::delayed_tabulate(
-        nprobes, [&](size_t i) { return probe_list[i].second->get_size(); });
-    auto scan_result = parlay::scan(sizes);
-    auto& offsets = scan_result.first;
-    size_t total_size = scan_result.second;
-    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
-    auto calc_dists = parlay::sequence<float>::uninitialized(total_size);
-    t_rest += t.stop();
+    auto visited = process_probes(query_point, q_query_point_var, probe_list);
+    t_distances = t.stop();
     t.reset();
 
-    // --- quantize + distances ---
-    double t_distances = 0.0;
-    switch (quantization_mode) {
-      case QT::RaBitQ: {
-        t.start();
-        auto& q_query = std::get<RQ_Point>(q_query_point_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t* leaf = probe_list[i].second;
-          auto& qleaf = std::get<RQ_Range>(leaf->quantized_data);
-          q_query.distances_all(qleaf, &calc_dists[offsets[i]]);
-          parlay::parallel_for(0, leaf->get_size(), [&](size_t j) {
-            visited[offsets[i] + j] = {leaf->get_id(j), calc_dists[offsets[i] + j]};
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::PQ: {
-        t.start();
-        auto& q_query = std::get<PQ_Point>(q_query_point_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t* leaf = probe_list[i].second;
-          auto& qleaf = std::get<PQ_Range>(leaf->quantized_data);
-          q_query.distances_all(qleaf, &calc_dists[offsets[i]]);
-          parlay::parallel_for(0, leaf->get_size(), [&](size_t j) {
-            visited[offsets[i] + j] = {leaf->get_id(j), calc_dists[offsets[i] + j]};
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::FastScan: {
-        t.start();
-        auto& q_query = std::get<FS_Point>(q_query_point_var);
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t* leaf = probe_list[i].second;
-          auto& qleaf = std::get<FS_Range>(leaf->quantized_data);
-          q_query.distances_all(qleaf, &calc_dists[offsets[i]]);
-          parlay::parallel_for(0, leaf->get_size(), [&](size_t j) {
-            visited[offsets[i] + j] = {leaf->get_id(j), calc_dists[offsets[i] + j]};
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-      case QT::None: {
-        t.start();
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t* leaf_node = probe_list[i].second;
-          auto& leaf_points = leaf_node->data;
-          parlay::parallel_for(0, leaf_node->get_size(), [&](size_t j) {
-            visited[offsets[i] + j] = {leaf_node->get_id(j), query_point.distance(leaf_points[j])};
-          });
-        });
-        t_distances = t.stop();
-        t.reset();
-        break;
-      }
-    }
+    dist_cmps += visited.size();
 
     t.start();
     parlay::sort_inplace(visited, [](const auto& a, const auto& b) { return a.second < b.second; });
@@ -462,7 +397,7 @@ class IndexSVHIVF : public Index<metric> {
       return false;
     };
     size_t count = 0;
-    for (size_t i = 0; i < total_size && count < num_rerank; i++) {
+    for (size_t i = 0; i < visited.size() && count < num_rerank; i++) {
       auto [id, dist] = visited[i];
       if (!has_been_seen(id)) {
         output[count++] = {id, dist};
@@ -487,12 +422,11 @@ class IndexSVHIVF : public Index<metric> {
     size_t num_rerank = search_params.num_rerank;
     size_t dist_cmps = 0;
     size_t q = query.size();
-
     // Step 1: Search each query independently to obtain candidates
     t.start();
     auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q * num_rerank);
     auto in_dist_cmps = parlay::sequence<size_t>::uninitialized(q);
-    auto timings_each = parlay::sequence<std::vector<double>>::uninitialized(q);
+    auto timings_each = parlay::sequence<std::vector<double>>(q);
     parlay::parallel_for(0, q, [&](size_t i) {
       std::tie(in_dist_cmps[i], timings_each[i]) =
           search_each(query[i], nprobes, num_rerank, &results[i * num_rerank]);
@@ -530,9 +464,10 @@ class IndexSVHIVF : public Index<metric> {
     t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
-    if (!search_params.norerank) {
+    if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      dist_cmps += this->rerank(query, points, visited, num_rerank, final_results);
+      this->rerank(query, points, visited, num_rerank, final_results);
+      dist_cmps += num_rerank;
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -540,29 +475,23 @@ class IndexSVHIVF : public Index<metric> {
     timings.push_back(t.stop());
     t.reset();
 
-    // Add timings_each
-    double t_search = 0.0;
-    double t_quantize = 0.0;
-    double t_distances = 0.0;
-    double t_rest = 0.0;
-    double t_dedup = 0.0;
-    for (auto& v : timings_each) {
-      t_search += v[0];
-      t_quantize += v[1];
-      t_distances += v[2];
-      t_rest += v[3];
-      t_dedup += v[4];
+    size_t cur = timings.size();
+    for (size_t i = 0; i < timings_each[0].size(); i++) {
+      timings.push_back(0.0);
     }
-    timings.push_back(t_search);
-    timings.push_back(t_quantize);
-    timings.push_back(t_distances);
-    timings.push_back(t_rest);
-    timings.push_back(t_dedup);
-
+    for (auto& v : timings_each) {
+      for (size_t i = 0; i < v.size(); i++) {
+        timings[cur + i] += v[i];
+      }
+    }
     return std::make_tuple(final_results, dist_cmps, timings);
   }
 
   void save(const std::string& filename) override {
+    if (root == nullptr) {
+      std::cerr << "IndexSVHIVF::save: root is null (index not built).\n";
+      return;
+    }
     std::ofstream outfile(filename, std::ios::binary);
     if (!outfile.is_open()) {
       std::cerr << "Error opening file for writing: " << filename << std::endl;
@@ -634,13 +563,15 @@ class IndexSVHIVF : public Index<metric> {
     outfile.write(reinterpret_cast<const char*>(point_ids.data()),
                   point_ids.size() * sizeof(std::pair<size_t, size_t>));
 
-    // Write quantization model
+    // Leaf / flat-vector quantization model (SVQT, same as build).
     int type_id = static_cast<int>(quantization_mode);
     outfile.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
     switch (quantization_mode) {
-      case QT::PQ: std::get<PQ_Model>(quantizer).save(outfile); break;
-      case QT::FastScan: std::get<FS_Model>(quantizer).save(outfile); break;
-      case QT::RaBitQ: std::get<RQ_Model>(quantizer).save(outfile); break;
+      case QT::PQ: std::get<typename SVQT::PQ_Model>(quantizer).save(outfile); break;
+      case QT::FastScan: std::get<typename SVQT::FS_Model>(quantizer).save(outfile); break;
+      case QT::RaBitQ: std::get<typename SVQT::RQ_Model>(quantizer).save(outfile); break;
+      case QT::TurboQuant: std::get<typename SVQT::TQ_Model>(quantizer).save(outfile); break;
+      case QT::None:
       default: break;
     }
     outfile.close();
@@ -681,18 +612,23 @@ class IndexSVHIVF : public Index<metric> {
     quantization_mode = static_cast<QT>(type_id);
     switch (quantization_mode) {
       case QT::PQ:
-        quantizer.template emplace<PQ_Model>();
-        std::get<PQ_Model>(quantizer).load(infile);
+        quantizer.template emplace<typename SVQT::PQ_Model>();
+        std::get<typename SVQT::PQ_Model>(quantizer).load(infile);
         break;
       case QT::FastScan:
-        quantizer.template emplace<FS_Model>();
-        std::get<FS_Model>(quantizer).load(infile);
+        quantizer.template emplace<typename SVQT::FS_Model>();
+        std::get<typename SVQT::FS_Model>(quantizer).load(infile);
         break;
       case QT::RaBitQ:
-        quantizer.template emplace<RQ_Model>();
-        std::get<RQ_Model>(quantizer).load(infile);
+        quantizer.template emplace<typename SVQT::RQ_Model>();
+        std::get<typename SVQT::RQ_Model>(quantizer).load(infile);
         break;
-      default: break;
+      case QT::TurboQuant:
+        quantizer.template emplace<typename SVQT::TQ_Model>();
+        std::get<typename SVQT::TQ_Model>(quantizer).load(infile);
+        break;
+      case QT::None:
+      default: quantizer = std::monostate{}; break;
     }
     infile.close();
 
@@ -738,25 +674,26 @@ class IndexSVHIVF : public Index<metric> {
 
     root = ind_to_node[0];
 
-    // Re-encode data
+    // Center TurboQuant is not serialized; retrain on the full dataset (same idea as MVIVF spill).
+    if (params.quantize_centers) {
+      FlatRange flat_points(points);
+      init_tq_quantizer(flat_points);
+    }
+
+    // Re-encode: internal nodes use center_quantizer (encode_tq); leaves use leaf quantizer.
     parlay::parallel_for(
         0, num_nodes,
         [&](size_t i) {
           node_t* node = ind_to_node[i];
-          if ((!node->children.empty() && params.quantize_centers) ||
-              (node->children.empty() && !node->ids.empty())) {
-            switch (quantization_mode) {
-              case QT::PQ:
-                node->quantized_data = std::get<PQ_Model>(quantizer).encode(node->data);
-                break;
-              case QT::FastScan:
-                node->quantized_data = std::get<FS_Model>(quantizer).encode(node->data);
-                break;
-              case QT::RaBitQ:
-                node->quantized_data = std::get<RQ_Model>(quantizer).encode(node->data);
-                break;
-              default: break;
+          if (!node->children.empty()) {
+            if (params.quantize_centers) {
+              node->quantized_data = encode_tq(node->data);
+            } else {
+              node->quantized_data = std::monostate{};
             }
+          } else if (!node->ids.empty()) {
+            node->quantized_data =
+                this->template encode_range_quantized<SVQT>(node->data, quantizer);
           }
         },
         1);

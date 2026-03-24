@@ -31,7 +31,7 @@
 
 #include "rabitqlib/utils/rotator.hpp"
 
-#include "mvsic/core/quantization/turboquant_pq_codebooks.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_codebooks.h"
 
 namespace mvsic {
 namespace turboquant_pq_4bit {
@@ -763,6 +763,31 @@ class Model {
   }
 
   Quantized_Query<Metric, BlockSize> quantize_query(const float* qptr) const {
+    return quantize_query_from_ptr(qptr);
+  }
+
+  template<typename PointTy>
+  typename std::enable_if<!std::is_pointer<PointTy>::value,
+                          Quantized_Query<Metric, BlockSize>>::type
+  quantize_query(const PointTy& query) const {
+    std::vector<float> tmp(dim);
+    for (size_t i = 0; i < dim; ++i)
+      tmp[i] = query[i];
+    return quantize_query_from_ptr(tmp.data());
+  }
+
+  template<typename PointCloudTy>
+  void quantize_query_batch(const PointCloudTy& qc,
+                            parlay::sequence<Quantized_Query<Metric, BlockSize>>& out) const {
+    out.clear();
+    out.reserve(qc.size());
+    const float* base = qc.data();
+    for (uint32_t i = 0; i < qc.size(); ++i)
+      out.emplace_back(quantize_query(base + static_cast<size_t>(i) * qc.get_dims()));
+  }
+
+ private:
+  Quantized_Query<Metric, BlockSize> quantize_query_from_ptr(const float* qptr) const {
     if (!rotator) return Quantized_Query<Metric, BlockSize>();
     Quantized_Query<Metric, BlockSize> qq;
     qq.num_blocks = num_blocks;
@@ -847,26 +872,7 @@ class Model {
     return qq;
   }
 
-  template<typename PointTy>
-  typename std::enable_if<!std::is_pointer<PointTy>::value,
-                          Quantized_Query<Metric, BlockSize>>::type
-  quantize_query(const PointTy& query) const {
-    std::vector<float> tmp(dim);
-    for (size_t i = 0; i < dim; ++i)
-      tmp[i] = query[i];
-    return quantize_query(tmp.data());
-  }
-
-  template<typename PointCloudTy>
-  void quantize_query_batch(const PointCloudTy& qc,
-                            parlay::sequence<Quantized_Query<Metric, BlockSize>>& out) const {
-    out.clear();
-    out.reserve(qc.size());
-    const float* base = qc.data();
-    for (uint32_t i = 0; i < qc.size(); ++i)
-      out.emplace_back(quantize_query(base + static_cast<size_t>(i) * qc.get_dims()));
-  }
-
+ public:
   void save(std::ofstream& out) const {
     out.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
     out.write(reinterpret_cast<const char*>(&padded_dim), sizeof(padded_dim));

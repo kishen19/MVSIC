@@ -1453,8 +1453,34 @@ class Model {
   }
 
   // ---- Quantize query ----
-  // Order: rotate → normalize → scale(√d) → clamp → int8 (matches tq_reference).
   Quantized_Query<Metric> quantize_query(const float* qptr) const {
+    return quantize_query_from_ptr(qptr);
+  }
+
+  template<typename PointTy>
+  typename std::enable_if<!std::is_pointer<PointTy>::value, Quantized_Query<Metric>>::type
+  quantize_query(const PointTy& query) const {
+    std::vector<float> tmp(dim);
+    for (size_t i = 0; i < dim; ++i)
+      tmp[i] = query[i];
+    return quantize_query_from_ptr(tmp.data());
+  }
+
+  template<typename PointCloudTy>
+  void quantize_query_batch(const PointCloudTy& qc,
+                            parlay::sequence<Quantized_Query<Metric>>& out) const {
+    const uint32_t nq = qc.size();
+    const uint32_t d = qc.get_dims();
+    const float* base = qc.data();
+    out.clear();
+    out.reserve(nq);
+    for (uint32_t i = 0; i < nq; ++i)
+      out.emplace_back(quantize_query(base + static_cast<size_t>(i) * d));
+  }
+
+ private:
+  // Order: rotate → normalize → scale(√d) → clamp → int8 (matches tq_reference).
+  Quantized_Query<Metric> quantize_query_from_ptr(const float* qptr) const {
     if (!rotator) return Quantized_Query<Metric>();
 
     Quantized_Query<Metric> qq;
@@ -1516,27 +1542,7 @@ class Model {
     return qq;
   }
 
-  template<typename PointTy>
-  typename std::enable_if<!std::is_pointer<PointTy>::value, Quantized_Query<Metric>>::type
-  quantize_query(const PointTy& query) const {
-    std::vector<float> tmp(dim);
-    for (size_t i = 0; i < dim; ++i)
-      tmp[i] = query[i];
-    return quantize_query(tmp.data());
-  }
-
-  template<typename PointCloudTy>
-  void quantize_query_batch(const PointCloudTy& qc,
-                            parlay::sequence<Quantized_Query<Metric>>& out) const {
-    const uint32_t nq = qc.size();
-    const uint32_t d = qc.get_dims();
-    const float* base = qc.data();
-    out.clear();
-    out.reserve(nq);
-    for (uint32_t i = 0; i < nq; ++i)
-      out.emplace_back(quantize_query(base + static_cast<size_t>(i) * d));
-  }
-
+ public:
   void save(std::ofstream& out) const {
     out.write(reinterpret_cast<const char*>(&dim), sizeof(dim));
     out.write(reinterpret_cast<const char*>(&padded_dim), sizeof(padded_dim));

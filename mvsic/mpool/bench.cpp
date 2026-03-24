@@ -10,12 +10,12 @@
 using namespace mvsic;
 
 template<typename ChPoint, bool metric>
-void bench(mvsic::commandLine &P) {
+void bench(mvsic::commandLine& P) {
   Eigen::setNbThreads(1);
   using PC = PointCloudSet<ChPoint>;
 
-  char *inFile = P.getOptionValue("-i");
-  char *qFile = P.getOptionValue("-q");
+  char* inFile = P.getOptionValue("-i");
+  char* qFile = P.getOptionValue("-q");
   std::string QFile;
   if (qFile != nullptr) {
     QFile = P.getOptionValue("-q");
@@ -38,16 +38,20 @@ void bench(mvsic::commandLine &P) {
   int num_pass = P.getOptionIntValue("-np", 1);
 
   // PQ params
-  std::string pq_method = P.getOptionValue("-pq_method", "None");
-  uint32_t pq_method_t = 0;
-  if (pq_method == "None") {
-    pq_method_t = 0;
-  } else if (pq_method == "PQ") {
-    pq_method_t = 1;
-  } else if (pq_method == "RabitQ") {
-    pq_method_t = 2;
+  std::string quant_method = P.getOptionValue("-quant_method", "None");
+  uint32_t quant_method_t = 0;
+  if (quant_method == "None") {
+    quant_method_t = 0;
+  } else if (quant_method == "PQ") {
+    quant_method_t = 1;
+  } else if (quant_method == "RQ") {
+    quant_method_t = 2;
+  } else if (quant_method == "FS") {
+    quant_method_t = 3;
+  } else if (quant_method == "TQ") {
+    quant_method_t = 4;
   } else {
-    std::cerr << "Unknown PQ method: " << pq_method << std::endl;
+    std::cerr << "Unknown PQ method: " << quant_method << std::endl;
     exit(1);
   }
   uint32_t block_size = P.getOptionIntValue("-m", 8);
@@ -64,7 +68,7 @@ void bench(mvsic::commandLine &P) {
 
   auto points = PC(inFile, is_mmap);
   IndexParams index_params = IndexParams::mpool(
-      R, L_build, alpha, num_pass, !not_normalized, compress_input, verbose, pq_method_t,
+      R, L_build, alpha, num_pass, !not_normalized, compress_input, verbose, quant_method_t,
       block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits);
   SearchParams search_params = SearchParams::mpool(k, L, num_rerank, cut, norerank);
   IndexMPool<metric> index(points.get_dims(), index_params);
@@ -108,7 +112,7 @@ void bench(mvsic::commandLine &P) {
   }
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
                        "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                        "[-data_type <tp>] [-dist_func <dist_func>]"

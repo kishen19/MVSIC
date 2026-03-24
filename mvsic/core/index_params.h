@@ -56,11 +56,11 @@ struct IndexParams {
   bool two_pass = false;
 
   // PQ params
-  enum class QuantizerType { None, PQ, RaBitQ, FastScan, TurboQuant4Bit, TurboQuantPQ4Bit };
+  enum class QuantizerType { None, PQ, RaBitQ, FastScan, TurboQuant };
 
   struct pq_config {
     QuantizerType method = QuantizerType::None;  // PQ method
-    uint32_t block_size = 64;                    // Number of blocks
+    uint32_t block_size = 8;                     // Number of blocks
     uint32_t num_clusters_per_block = 256;       // Number of clusters per block
     uint32_t num_points_per_cluster = 20;        // Subsample size*k
     uint32_t rabitq_bits = 8;                    // Total bits for RaBitQ
@@ -75,7 +75,7 @@ struct IndexParams {
                            uint32_t max_points_per_centroid_inner_kmeans = 20,
                            std::string init = "Random", uint32_t seed = 0,
                            bool use_weighted_inner_kmeans = true, uint32_t s = 0,
-                           uint32_t pq_method = 0, uint32_t block_size = 64,
+                           uint32_t pq_method = 0, uint32_t block_size = 8,
                            uint32_t num_clusters_per_block = 256,
                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
                            bool quantize_centers = false) {
@@ -101,7 +101,7 @@ struct IndexParams {
                                 uint32_t max_points_per_centroid_inner_kmeans = 20,
                                 std::string init = "Random", uint32_t seed = 0,
                                 bool use_weighted_inner_kmeans = true, uint32_t s = 0,
-                                uint32_t pq_method = 0, uint32_t block_size = 64,
+                                uint32_t pq_method = 0, uint32_t block_size = 8,
                                 uint32_t num_clusters_per_block = 256,
                                 uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
                                 bool quantize_centers = false) {
@@ -125,7 +125,7 @@ struct IndexParams {
       bool compress_input = false, uint32_t verbose = 0, uint32_t niters = 5,
       uint32_t max_point_clouds_per_cluster = 0, uint32_t max_points_per_centroid_inner_kmeans = 20,
       std::string init = "Random", uint32_t seed = 0, bool use_weighted_inner_kmeans = true,
-      uint32_t s = 0, uint32_t pq_method = 0, uint32_t block_size = 64,
+      uint32_t s = 0, uint32_t pq_method = 0, uint32_t block_size = 8,
       uint32_t num_clusters_per_block = 256, uint32_t num_points_per_cluster = 20,
       uint32_t rabitq_bits = 8, bool quantize_centers = false) {
     IndexParams params;
@@ -222,7 +222,7 @@ struct IndexParams {
 
   static IndexParams mpool(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2, int num_pass = 1,
                            bool normalize = true, bool compress_input = false, uint32_t verbose = 0,
-                           uint32_t pq_method = 0, uint32_t block_size = 64,
+                           uint32_t pq_method = 0, uint32_t block_size = 8,
                            uint32_t num_clusters_per_block = 256,
                            uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
@@ -238,7 +238,7 @@ struct IndexParams {
 
   static IndexParams vamana(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
                             bool two_pass = false, bool compress_input = false,
-                            uint32_t verbose = 0, uint32_t pq_method = 0, uint32_t block_size = 64,
+                            uint32_t verbose = 0, uint32_t pq_method = 0, uint32_t block_size = 8,
                             uint32_t num_clusters_per_block = 256,
                             uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
@@ -257,7 +257,7 @@ struct IndexParams {
   static IndexParams svh_ivf(uint32_t k_per_level = 0, uint32_t max_leaf_size = 500,
                              bool compress_input = false, uint32_t verbose = 0,
                              uint32_t max_points_per_centroid = 100, uint32_t pq_method = 0,
-                             uint32_t block_size = 64, uint32_t num_clusters_per_block = 256,
+                             uint32_t block_size = 8, uint32_t num_clusters_per_block = 256,
                              uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8,
                              bool quantize_centers = false) {
     IndexParams params;
@@ -273,12 +273,13 @@ struct IndexParams {
     return params;
   }
 
-  static IndexParams svh(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2, int num_pass = 1,
-                         bool compress_input = false, uint32_t verbose = 0, uint32_t pq_method = 0,
-                         uint32_t block_size = 64, uint32_t num_clusters_per_block = 256,
-                         uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
+  static IndexParams svh_graph(uint32_t R = 200, uint32_t L = 600, double alpha = 1.2,
+                               int num_pass = 1, bool compress_input = false, uint32_t verbose = 0,
+                               uint32_t pq_method = 0, uint32_t block_size = 8,
+                               uint32_t num_clusters_per_block = 256,
+                               uint32_t num_points_per_cluster = 20, uint32_t rabitq_bits = 8) {
     IndexParams params;
-    params.method = "svh_vamana";
+    params.method = "svh_graph";
     params.ann = ann_config{R, L, alpha, num_pass};
     params.compress_input = compress_input;
     params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,

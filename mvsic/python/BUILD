@@ -23,6 +23,7 @@ pybind_extension(
         "//mvsic/mvivf",
         "//mvsic/mvivf:mvivf_flat",
         "//mvsic/mvivf:mvivf_spill",
+        "//mvsic/svh:svh_graph",
         "//mvsic/svh:svh_ivf",
         "//mvsic/vamana",
         "@parlaylib//parlay:primitives",

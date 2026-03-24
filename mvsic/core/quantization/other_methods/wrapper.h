@@ -12,8 +12,10 @@
 #include <vector>
 
 #include "parlay/primitives.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_byte.h"
+#include "mvsic/core/types/point_cloud_set.h"
+#include "mvsic/core/quantization/other_methods/turboquant_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_byte.h"
 
 namespace mvsic {
 
@@ -34,27 +36,6 @@ template<typename EncRange>
 struct has_tqpq_fast_t<EncRange, std::void_t<decltype(EncRange::is_tqpq_fast)>> :
     std::bool_constant<EncRange::is_tqpq_fast> {};
 
-// ---------------------------------------------------------
-// Helper: Flatten PointCloudSet into a PointRange-like view
-// ---------------------------------------------------------
-template<typename PCSet>
-struct FlattenedPCRange {
-  const float* raw_data;
-  size_t _size;
-  uint32_t _dim;
-
-  explicit FlattenedPCRange(const PCSet& s) :
-      raw_data(s.data()), _size(s.total_size()), _dim(s.get_dims()) {}
-
-  size_t size() const { return _size; }
-  uint32_t get_dims() const { return _dim; }
-
-  const uint8_t* location(size_t i) const {
-    return reinterpret_cast<const uint8_t*>(raw_data + i * static_cast<size_t>(_dim));
-  }
-
-  const float* data() const { return raw_data; }
-};
 
 // ---------------------------------------------------------
 // Quantized Point Cloud: Aux Type (handle over encoded vectors)

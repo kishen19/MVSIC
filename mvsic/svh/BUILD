@@ -7,9 +7,6 @@ cc_library(
     hdrs = ["svh_ivf.h"],
     deps = [
         "//mvsic/core:index",
-        "//mvsic/core/quantization:fastscan",
-        "//mvsic/core/quantization:pq",
-        "//mvsic/core/quantization:rabitq",
         "//mvsic/core/types:ip_point",
         "//mvsic/core/types:l2_point",
         "//mvsic/core/types:point_range",
@@ -18,10 +15,25 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "svh_graph",
+    hdrs = ["svh_graph.h"],
+    deps = [
+        "//mvsic/core:index",
+        "//mvsic/core/types:io",
+        "//mvsic/core/utils:util",
+        "@parlayann//algorithms/utils:graph",
+        "@parlayann//algorithms/utils:stats",
+        "@parlayann//algorithms/utils:types",
+        "@parlayann//algorithms/vamana:index",
+    ],
+)
+
 cc_binary(
     name = "bench",
     srcs = ["bench.cpp"],
     deps = [
+        ":svh_graph",
         ":svh_ivf",
         "//mvsic/core:stats",
         "//mvsic/core/types:chamfer_ip_point",

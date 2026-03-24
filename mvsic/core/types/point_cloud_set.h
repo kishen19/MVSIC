@@ -101,6 +101,26 @@ struct PointCloudSet {
     return std::make_pair(results, cmps);
   }
 
+  // Distances to only a subset (possible non-contiguous)
+  template<typename Seq>
+  inline size_t distances_subset(const ChPoint& query, const Seq& indices,
+                                 std::pair<uint32_t, float>* results) const {
+    auto cmps = parlay::sequence<size_t>::uninitialized(n);
+    parlay::parallel_for(0, indices.size(), [&](uint32_t i) {
+      std::tie(results[i].second, cmps[i]) = query.distance_w_cmps((*this)[indices[i]]);
+      results[i].first = get_id(indices[i]);
+    });
+    return parlay::reduce(cmps);
+  }
+
+  template<typename Seq>
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> distances_subset(
+      const ChPoint& query, const Seq& indices) const {
+    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(indices.size());
+    auto cmps = distances_subset(query, indices, results.begin());
+    return std::make_pair(results, cmps);
+  }
+
   // Returns non-owning sequence of ChPoint type objects of the point
   // clouds whose indices are given in sequence cluster_ids
   template<typename Seq>
@@ -327,5 +347,27 @@ parlay::sequence<parlay::sequence<float>> PointCloudSet<ChPoint>::filter_flatten
   });
   return result;
 }
+
+// ---------------------------------------------------------
+// Helper: Flatten PointCloudSet into a PointRange-like view
+// ---------------------------------------------------------
+template<typename PCSet>
+struct FlattenedPCRange {
+  const float* raw_data;
+  size_t _size;
+  uint32_t _dim;
+
+  explicit FlattenedPCRange(const PCSet& s) :
+      raw_data(s.data()), _size(s.total_size()), _dim(s.get_dims()) {}
+
+  size_t size() const { return _size; }
+  uint32_t get_dims() const { return _dim; }
+
+  const uint8_t* location(size_t i) const {
+    return reinterpret_cast<const uint8_t*>(raw_data + i * static_cast<size_t>(_dim));
+  }
+
+  const float* data() const { return raw_data; }
+};
 
 }  // namespace mvsic

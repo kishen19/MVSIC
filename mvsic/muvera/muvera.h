@@ -203,22 +203,10 @@ class IndexMUVERA : public Index<metric> {
         std::get<typename SVQT::FS_Model>(quantizer).save(out);
         std::get<typename SVQT::FS_Range>(quantized_data).save(out);
         break;
-      case QT::TurboQuant4Bit:
-        std::get<typename SVQT::TQ4_Model>(quantizer).save(out);
-        std::get<typename SVQT::TQ4_Range>(quantized_data).save(out);
+      case QT::TurboQuant:
+        std::get<typename SVQT::TQ_Model>(quantizer).save(out);
+        std::get<typename SVQT::TQ_Range>(quantized_data).save(out);
         break;
-      case QT::TurboQuantPQ4Bit: {
-        int block_size = params.pq.block_size;
-        out.write(reinterpret_cast<const char*>(&block_size), sizeof(block_size));
-        if (block_size == 4) {
-          std::get<typename SVQT::TQPQ4_Model>(quantizer).save(out);
-          std::get<typename SVQT::TQPQ4_Range>(quantized_data).save(out);
-        } else {
-          std::get<typename SVQT::TQPQ8_Model>(quantizer).save(out);
-          std::get<typename SVQT::TQPQ8_Range>(quantized_data).save(out);
-        }
-        break;
-      }
       case QT::None: parlayANN::io::save_point_range(points_fdes, out); break;
     }
   }
@@ -258,32 +246,15 @@ class IndexMUVERA : public Index<metric> {
         quantized_data.template emplace<typename SVQT::FS_Range>();
         std::get<typename SVQT::FS_Range>(quantized_data).load(in);
         break;
-      case QT::TurboQuant4Bit:
-        quantizer.template emplace<typename SVQT::TQ4_Model>();
-        std::get<typename SVQT::TQ4_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::TQ4_Range>();
-        std::get<typename SVQT::TQ4_Range>(quantized_data).load(in);
+      case QT::TurboQuant:
+        quantizer.template emplace<typename SVQT::TQ_Model>();
+        std::get<typename SVQT::TQ_Model>(quantizer).load(in);
+        quantized_data.template emplace<typename SVQT::TQ_Range>();
+        std::get<typename SVQT::TQ_Range>(quantized_data).load(in);
         break;
-      case QT::TurboQuantPQ4Bit: {
-        // Read and restore the TQPQ block size used when the model was trained.
-        int tqpq_block_size = 0;
-        in.read(reinterpret_cast<char*>(&tqpq_block_size), sizeof(int));
-        params.pq.block_size = tqpq_block_size;
-        if (tqpq_block_size == 4) {
-          quantizer.template emplace<typename SVQT::TQPQ4_Model>();
-          std::get<typename SVQT::TQPQ4_Model>(quantizer).load(in);
-          quantized_data.template emplace<typename SVQT::TQPQ4_Range>();
-          std::get<typename SVQT::TQPQ4_Range>(quantized_data).load(in);
-        } else {
-          quantizer.template emplace<typename SVQT::TQPQ8_Model>();
-          std::get<typename SVQT::TQPQ8_Model>(quantizer).load(in);
-          quantized_data.template emplace<typename SVQT::TQPQ8_Range>();
-          std::get<typename SVQT::TQPQ8_Range>(quantized_data).load(in);
-        }
-        break;
-      }
       case QT::None:
         auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
+        assert(loaded_d_fde == d_fde);
         points_fdes = Range(fdes_data, d_fde);
         break;
     }

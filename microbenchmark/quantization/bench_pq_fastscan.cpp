@@ -4,9 +4,8 @@
 //   1) Exact (unquantized) float IP distance via efanna2e::DistanceInnerProduct (NSGDist)
 //   2) FastScan (K=16) using Quantized_Query::distances_all
 //   3) RaBitQ using Quantized_Query::distances_all
-//   4) TQ-4bit: Quantized_Query::distances_contiguous (batch strip scan)
-//   5) Byte TQ (int8): per-point distance only (no batch API)
-//   6) TQ-PQ-4bit: Quantized_Query::distances_all (FastScan-style shuffle scan)
+//   4) TurboQuant (turboquant.h): per-point distance (parallel over DB)
+//   5) TQ-PQ-4bit: Quantized_Query::distances_all (FastScan-style shuffle scan)
 //
 // Usage (Bazel):
 //   ... -- [-i <db_file>] [-q <query_file>] [-N <n>] [-Q <q>] [-D <d>]
@@ -40,9 +39,8 @@
 #include "mvsic/core/distance_measures/one_to_one.h"  // brings in NSGDist.h
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_byte.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/types/point_range.h"
 #include "mvsic/core/utils/parse_command_line.h"
@@ -228,34 +226,13 @@ static inline float scan_all_queries_tqpq_serial(const TQEnc& enc, const TQQuery
   return float(total);
 }
 
-// TQ-4bit: use distances_contiguous_parallel when available (parallel over strips; no generic
-// distances_all(enc) API).
+// TurboQuant (flat layout): parallel per-point distance.
 template<typename TQEnc, typename TQQueryVec>
-static inline float scan_all_queries_tq4bit_serial(const TQEnc& enc, const TQQueryVec& qvec,
-                                                   size_t Q, float* scratch, size_t N,
-                                                   parlay::sequence<double>& per_q_sum) {
+static inline float scan_all_queries_turboquant_serial(const TQEnc& enc, const TQQueryVec& qvec,
+                                                       size_t Q, float* scratch, size_t N,
+                                                       parlay::sequence<double>& per_q_sum) {
   for (size_t qi = 0; qi < Q; ++qi) {
-    qvec[qi].distances_contiguous_parallel(enc.packed_codes.data(), enc.norm_scaling_factors.data(),
-                                           enc.unquantized_squared_norms.data(), enc.stride, N,
-                                           scratch);
-    double s = 0.0;
-    for (size_t i = 0; i < N; ++i)
-      s += double(scratch[i]);
-    per_q_sum[qi] = s;
-  }
-  double total = 0.0;
-  for (size_t i = 0; i < Q; ++i)
-    total += per_q_sum[i];
-  return float(total);
-}
-
-// Byte TQ: per-point distance only (no batch distances_all API).
-template<typename BTQEnc, typename BTQQueryVec>
-static inline float scan_all_queries_byte_tq_serial(const BTQEnc& enc, const BTQQueryVec& qvec,
-                                                    size_t Q, float* scratch, size_t N,
-                                                    parlay::sequence<double>& per_q_sum) {
-  for (size_t qi = 0; qi < Q; ++qi) {
-    parlay::parallel_for(0, N, [&](size_t i) { scratch[i] = qvec[qi].distance(enc[i]); });
+    parlay::parallel_for(0, N, [&](size_t i) { scratch[i] = enc[i].distance(qvec[qi]); });
     double s = 0.0;
     for (size_t i = 0; i < N; ++i)
       s += double(scratch[i]);
@@ -318,23 +295,11 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     rq_build_s = t.sec();
   }
 
-  // ---------------------------
-  // Build turboquant_4bit (4-bit TQ) model + encode
-  // ---------------------------
   t.start();
-  mvsic::turboquant_4bit::Model<Metric> tq_model;
+  mvsic::turboquant::Model<Metric> tq_model;
   tq_model.train(db);
   auto tq = tq_model.encode(db);
   double tq_build_s = t.sec();
-
-  // ---------------------------
-  // Build turboquant_byte (int8) model + encode
-  // ---------------------------
-  t.start();
-  mvsic::turboquant_byte::Model<Metric> btq_model;
-  btq_model.train(db);
-  auto btq = btq_model.encode(db);
-  double btq_build_s = t.sec();
 
   // TurboQuant PQ 4-bit: build + LUT + scan for multiple block sizes. Requires AVX-512.
   static constexpr uint32_t tqpq_blocks[] = {1, 2, 4, 8};
@@ -451,8 +416,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   } else {
     std::cout << "RaBitQ:          (skipped, pass -rabitq to enable)\n";
   }
-  std::cout << "TQ-4bit(K=16):    " << tq_build_s << " s\n";
-  std::cout << "Byte TQ:          " << btq_build_s << " s\n";
+  std::cout << "TurboQuant:       " << tq_build_s << " s\n";
 #if defined(__AVX512F__)
   for (size_t bi = 0; bi < num_tqpq; ++bi) {
     std::cout << "TQ-PQ(K=16,B=" << tqpq_blocks[bi] << "): " << tqpq_build_s[bi] << " s\n";
@@ -469,13 +433,9 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 #endif
 
   std::vector<mvsic::rabitq::Quantized_Query<Metric>> rq_q;
-  if (run_rabitq) rq_q.reserve(Q);
 
-  std::vector<mvsic::turboquant_4bit::Quantized_Query<Metric>> tq_q;
+  std::vector<mvsic::turboquant::Quantized_Query<Metric>> tq_q;
   tq_q.reserve(Q);
-
-  std::vector<mvsic::turboquant_byte::Quantized_Query<Metric>> btq_q;
-  btq_q.reserve(Q);
 
 #if defined(__AVX512F__) || defined(__AVX2__)
   t.start();
@@ -487,6 +447,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
 
   double rq_lut_s = 0.0;
   if (run_rabitq) {
+    rq_q.reserve(Q);
     t.start();
     for (size_t i = 0; i < Q; ++i) {
       rq_q.push_back(rq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
@@ -499,12 +460,6 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     tq_q.push_back(tq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
   }
   double tq_lut_s = t.sec();
-
-  t.start();
-  for (size_t i = 0; i < Q; ++i) {
-    btq_q.push_back(btq_model.quantize_query(reinterpret_cast<const float*>(queries.location(i))));
-  }
-  double btq_lut_s = t.sec();
 
   const uint64_t num_dists = uint64_t(N) * uint64_t(Q);
 
@@ -520,8 +475,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   } else {
     std::cout << "RaBitQ:          (skipped, pass -rabitq to enable)\n";
   }
-  std::cout << "TQ-4bit: " << tq_lut_s << " s  (" << (tq_lut_s * 1e6 / Q) << " us/query)\n";
-  std::cout << "Byte TQ:  " << btq_lut_s << " s  (" << (btq_lut_s * 1e6 / Q) << " us/query)\n";
+  std::cout << "TurboQuant: " << tq_lut_s << " s  (" << (tq_lut_s * 1e6 / Q) << " us/query)\n";
 #if defined(__AVX512F__)
   for (size_t bi = 0; bi < num_tqpq; ++bi) {
     std::cout << "TQ-PQ-16-" << tqpq_blocks[bi] << ": " << tqpq_lut_s[bi] << " s  ("
@@ -538,7 +492,6 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   // scratch buffers for distances_all() / distances_contiguous()
   std::vector<float> rq_out(N);
   std::vector<float> tq_out(N);
-  std::vector<float> btq_out(N);
 
 #if defined(__AVX512F__) || defined(__AVX2__)
   const size_t fs_N_total = static_cast<size_t>(fs.size());
@@ -556,22 +509,15 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
       sink += fs_out[j];
 #endif
 
-    rq_q[i].distances_all(rq, rq_out.data());
-    for (size_t j = 0; j < N; ++j)
-      sink += rq_out[j];
+    if (run_rabitq) {
+      rq_q[i].distances_all(rq, rq_out.data());
+      for (size_t j = 0; j < N; ++j)
+        sink += rq_out[j];
+    }
 
-#if defined(__AVX512F__)
-    tq_q[i].distances_contiguous(tq.packed_codes.data(), tq.norm_scaling_factors.data(),
-                                 tq.unquantized_squared_norms.data(), tq.stride, N, tq_out.data());
-#else
-    parlay::parallel_for(0, N, [&](size_t j) { tq_out[j] = tq_q[i].distance(tq[j]); });
-#endif
+    parlay::parallel_for(0, N, [&](size_t j) { tq_out[j] = tq[j].distance(tq_q[i]); });
     for (size_t j = 0; j < N; ++j)
       sink += tq_out[j];
-
-    parlay::parallel_for(0, N, [&](size_t j) { btq_out[j] = btq_q[i].distance(btq[j]); });
-    for (size_t j = 0; j < N; ++j)
-      sink += btq_out[j];
   }
 #if defined(__AVX512F__)
   sink += tqpq_sink;
@@ -633,38 +579,19 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
     stats.push_back({"RaBitQ", best});
   }
 
-  // TQ-4bit: distances_contiguous when AVX512, else per-point (no batch API without AVX512)
   {
     double best = 1e100;
     float acc = 0.0f;
     for (int r = 0; r < REPS; ++r) {
       t.start();
-#if defined(__AVX512F__)
-      float local = scan_all_queries_tq4bit_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
-#else
-      float local = scan_all_queries_byte_tq_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
-#endif
+      float local =
+          scan_all_queries_turboquant_serial(tq, tq_q, Q, tq_out.data(), N, per_q_sum);
       double s = t.sec();
       best = std::min(best, s);
       acc = local;
     }
     sink += acc;
-    stats.push_back({"TQ-4bit (K=16)", best});
-  }
-
-  // Byte TQ: per-point distance
-  {
-    double best = 1e100;
-    float acc = 0.0f;
-    for (int r = 0; r < REPS; ++r) {
-      t.start();
-      float local = scan_all_queries_byte_tq_serial(btq, btq_q, Q, btq_out.data(), N, per_q_sum);
-      double s = t.sec();
-      best = std::min(best, s);
-      acc = local;
-    }
-    sink += acc;
-    stats.push_back({"Byte TQ", best});
+    stats.push_back({"TurboQuant", best});
   }
 
   // TQ-PQ-4bit (precomputed in build section)
@@ -686,8 +613,7 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   double tq_mean_ae = 0.0;
   uint64_t check_count = 0;
   for (size_t qi = 0; qi < check_queries; ++qi) {
-    tq_q[qi].distances_contiguous(tq.packed_codes.data(), tq.norm_scaling_factors.data(),
-                                  tq.unquantized_squared_norms.data(), tq.stride, N, tq_out.data());
+          parlay::parallel_for(0, N, [&](size_t j) { tq_out[j] = tq[j].distance(tq_q[qi]); });
     const float* q = reinterpret_cast<const float*>(queries.location(qi));
     for (size_t i = 0; i < check_db; ++i) {
       static thread_local efanna2e::DistanceInnerProduct distfunc;
@@ -702,9 +628,9 @@ static int run_bench(const DBRange& db, const QRange& queries, uint32_t fs_block
   }
   if (check_count > 0) {
     tq_mean_ae /= static_cast<double>(check_count);
-    std::cout << "\n=== Correctness (TurboQuant 4b vs exact IP, sample " << check_queries << " q x "
+    std::cout << "\n=== Correctness (TurboQuant vs exact IP, sample " << check_queries << " q x "
               << check_db << " db) ===\n";
-    std::cout << "TQ 4b max |approx - exact|: " << tq_max_ae
+    std::cout << "TurboQuant max |approx - exact|: " << tq_max_ae
               << "  mean |approx - exact|: " << tq_mean_ae << "\n";
   }
 

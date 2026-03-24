@@ -59,15 +59,14 @@
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
 
-#include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/pq.h"
 #ifdef __AVX512F__
-#include "mvsic/core/quantization/rabitq.h"
-#endif  // __AVX512F__
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/turboquant_byte.h"
-#include "mvsic/core/quantization/wrapper.h"
+#include "mvsic/core/quantization/rabitq_mv.h"
+#endif
+#include "mvsic/core/quantization/fastscan_mv.h"
+#include "mvsic/core/quantization/pq_mv.h"
+#include "mvsic/core/quantization/turboquant_mv.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/other_methods/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
@@ -360,12 +359,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   const uint32_t fs_block = 8;
   const uint32_t rbits = 4;
 
-  // PQ (K=16)
-  MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
+  pq_mv::Model<Metric> pq_model;
   double pq_train_s = 0.0, pq_encode_s = 0.0;
-  using PQ_DB = decltype(pq_model.encode(db));
-  std::vector<PQ_DB> pq_leaf_dbs;
-  PQ_DB pq_all_db;
+  std::vector<pq_mv::Quantized_Point_Cloud_Set<Metric>> pq_leaf_dbs;
+  pq_mv::Quantized_Point_Cloud_Set<Metric> pq_all_db;
   if (run_pq) {
     t.start();
     pq_model.train(db, pq_block, PQ_K, PQ_S);
@@ -381,12 +378,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   }
 
 #ifdef __AVX512F__
-  // RaBitQ (requires AVX-512)
-  MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
+  rabitq_mv::Model<Metric> rq_model;
   double rq_train_s = 0.0, rq_encode_s = 0.0;
-  using RQ_DB = decltype(rq_model.encode(db));
-  std::vector<RQ_DB> rq_leaf_dbs;
-  RQ_DB rq_all_db;
+  std::vector<rabitq_mv::Quantized_Point_Cloud_Set<Metric>> rq_leaf_dbs;
+  rabitq_mv::Quantized_Point_Cloud_Set<Metric> rq_all_db;
   if (run_rabitq) {
     t.start();
     rq_model.train(db, rbits);
@@ -400,18 +395,16 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     rq_all_db = rq_model.encode(all_leafs);
     rq_encode_s = t.sec();
   }
-#endif  // __AVX512F__
+#endif
 
 #if defined(__AVX512F__) || defined(__AVX2__)
-  // FastScan
-  MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
+  fastscan_mv::Model<Metric> fs_model;
   t.start();
   fs_model.train(db, fs_block);
   double fs_train_s = t.sec();
 
   t.start();
-  using FS_DB = decltype(fs_model.encode(db));
-  std::vector<FS_DB> fs_leaf_dbs;
+  std::vector<fastscan_mv::Quantized_Point_Cloud_Set<Metric>> fs_leaf_dbs;
   fs_leaf_dbs.reserve(num_leaf_blocks);
   for (size_t b = 0; b < num_leaf_blocks; ++b) {
     fs_leaf_dbs.emplace_back(fs_model.encode(leaves[b]));
@@ -420,15 +413,13 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   double fs_encode_s = t.sec();
 #endif
 
-  // TurboQuant (4-bit)
-  MultiVecQuantizer<turboquant_4bit::Model<Metric>, Metric> tq_model;
+  turboquant_mv::Model<Metric> tq_model;
   t.start();
   tq_model.train(db);
   double tq_train_s = t.sec();
 
   t.start();
-  using TQ4_DB = decltype(tq_model.encode(db));
-  std::vector<TQ4_DB> tq_leaf_dbs;
+  std::vector<turboquant_mv::Quantized_Point_Cloud_Set<Metric>> tq_leaf_dbs;
   tq_leaf_dbs.reserve(num_leaf_blocks);
   for (size_t b = 0; b < num_leaf_blocks; ++b) {
     tq_leaf_dbs.emplace_back(tq_model.encode(leaves[b]));
@@ -513,8 +504,8 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "FastScan train   : " << fs_train_s << " s\n";
   std::cout << "FastScan encode  : " << fs_encode_s << " s (leaves + all_leafs)\n";
 #endif
-  std::cout << "TurboQuant-4bit train : " << tq_train_s << " s\n";
-  std::cout << "TurboQuant-4bit encode: " << tq_encode_s << " s (leaves + all_leafs)\n";
+  std::cout << "TurboQuant_mv train : " << tq_train_s << " s\n";
+  std::cout << "TurboQuant_mv encode: " << tq_encode_s << " s (leaves + all_leafs)\n";
   std::cout << "TQ-PQ(K=16,B=1)       : " << (tqpq1_train_s + tqpq1_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=2)       : " << (tqpq2_train_s + tqpq2_encode_s) << " s\n";
   std::cout << "TQ-PQ(K=16,B=4)       : " << (tqpq4_train_s + tqpq4_encode_s) << " s\n";
@@ -548,17 +539,17 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::vector<BenchRow> seq_rows;
   seq_rows.push_back({"Exact", t_seq});
   if (run_pq) {
-    seq_rows.push_back({"PQ (K=16)", bench_seq(pq_model, pq_leaf_dbs)});
+    seq_rows.push_back({"PQ_mv (K=16)", bench_seq(pq_model, pq_leaf_dbs)});
   }
 #if defined(__AVX512F__) || defined(__AVX2__)
-  seq_rows.push_back({"FastScan (K=16)", bench_seq(fs_model, fs_leaf_dbs)});
+  seq_rows.push_back({"FastScan_mv (K=16)", bench_seq(fs_model, fs_leaf_dbs)});
 #endif
 #ifdef __AVX512F__
   if (run_rabitq) {
-    seq_rows.push_back({"RaBitQ", bench_seq(rq_model, rq_leaf_dbs)});
+    seq_rows.push_back({"RaBitQ_mv", bench_seq(rq_model, rq_leaf_dbs)});
   }
 #endif
-  seq_rows.push_back({"TQ-4bit (K=16)", bench_seq(tq_model, tq_leaf_dbs)});
+  seq_rows.push_back({"TurboQuant_mv", bench_seq(tq_model, tq_leaf_dbs)});
   seq_rows.push_back({"TQ-PQ (K=16,B=1)", bench_seq(tqpq1_model, tqpq1_leaf_dbs)});
   seq_rows.push_back({"TQ-PQ (K=16,B=2)", bench_seq(tqpq2_model, tqpq2_leaf_dbs)});
   seq_rows.push_back({"TQ-PQ (K=16,B=4)", bench_seq(tqpq4_model, tqpq4_leaf_dbs)});
@@ -589,17 +580,17 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::vector<BenchRow> all_rows;
   all_rows.push_back({"Exact", t_all});
   if (run_pq) {
-    all_rows.push_back({"PQ (K=16)", bench_all(pq_model, pq_all_db)});
+    all_rows.push_back({"PQ_mv (K=16)", bench_all(pq_model, pq_all_db)});
   }
 #if defined(__AVX512F__) || defined(__AVX2__)
-  all_rows.push_back({"FastScan (K=16)", bench_all(fs_model, fs_all_db)});
+  all_rows.push_back({"FastScan_mv (K=16)", bench_all(fs_model, fs_all_db)});
 #endif
 #ifdef __AVX512F__
   if (run_rabitq) {
-    all_rows.push_back({"RaBitQ", bench_all(rq_model, rq_all_db)});
+    all_rows.push_back({"RaBitQ_mv", bench_all(rq_model, rq_all_db)});
   }
 #endif
-  all_rows.push_back({"TQ-4bit (K=16)", bench_all(tq_model, tq_all_db)});
+  all_rows.push_back({"TurboQuant_mv", bench_all(tq_model, tq_all_db)});
   all_rows.push_back({"TQ-PQ (K=16,B=1)", bench_all(tqpq1_model, tqpq1_all_db)});
   all_rows.push_back({"TQ-PQ (K=16,B=2)", bench_all(tqpq2_model, tqpq2_all_db)});
   all_rows.push_back({"TQ-PQ (K=16,B=4)", bench_all(tqpq4_model, tqpq4_all_db)});

@@ -6,16 +6,17 @@
 #include "mvsic/core/utils/parse_command_line.h"
 #include "mvsic/core/stats.h"
 #include "svh_ivf.h"
+#include "svh_graph.h"
 
 using namespace mvsic;
 
 template<typename ChPoint, bool metric>
-void bench(mvsic::commandLine &P) {
+void bench(mvsic::commandLine& P) {
   Eigen::setNbThreads(1);
   using PC = PointCloudSet<ChPoint>;
 
-  char *inFile = P.getOptionValue("-i");
-  char *qFile = P.getOptionValue("-q");
+  char* inFile = P.getOptionValue("-i");
+  char* qFile = P.getOptionValue("-q");
   std::string QFile;
   if (qFile != nullptr) {
     QFile = P.getOptionValue("-q");
@@ -37,18 +38,20 @@ void bench(mvsic::commandLine &P) {
   uint32_t max_points_per_centroid = P.getOptionIntValue("-max_points_per_centroid", 100);
 
   // PQ params
-  std::string pq_method = P.getOptionValue("-pq_method", "None");
-  uint32_t pq_method_t = 0;
-  if (pq_method == "None") {
-    pq_method_t = 0;
-  } else if (pq_method == "PQ") {
-    pq_method_t = 1;
-  } else if (pq_method == "RabitQ") {
-    pq_method_t = 2;
-  } else if (pq_method == "FastScan") {
-    pq_method_t = 3;
+  std::string quant_method = P.getOptionValue("-quant_method", "None");
+  uint32_t quant_method_t = 0;
+  if (quant_method == "None") {
+    quant_method_t = 0;
+  } else if (quant_method == "PQ") {
+    quant_method_t = 1;
+  } else if (quant_method == "RQ") {
+    quant_method_t = 2;
+  } else if (quant_method == "FS") {
+    quant_method_t = 3;
+  } else if (quant_method == "TQ") {
+    quant_method_t = 4;
   } else {
-    std::cerr << "Unknown PQ method: " << pq_method << std::endl;
+    std::cerr << "Unknown PQ method: " << quant_method << std::endl;
     exit(1);
   }
   uint32_t block_size = P.getOptionIntValue("-m", 8);
@@ -62,15 +65,31 @@ void bench(mvsic::commandLine &P) {
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
   bool no_rerank = P.getOption("-no_rerank");
 
+  // Graph params
+  bool is_graph = P.getOption("-graph");
+  uint32_t R = P.getOptionIntValue("-R", 200);
+  uint32_t L_build = P.getOptionIntValue("-L_build", 600);
+  double alpha = P.getOptionDoubleValue("-a", 1.2);
+  int num_pass = P.getOptionIntValue("-np", 1);
+  size_t L_search = P.getOptionLongValue("-L", 16);
+  double cut = 1.35;
+
   auto points = PC(inFile, is_mmap);
   IndexParams index_params;
   SearchParams search_params;
-  index_params = IndexParams::svh_ivf(
-      k_per_level, max_leaf_size, compress_input, verbose, max_points_per_centroid, pq_method_t,
-      block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits, quantize_centers);
-  search_params = SearchParams::svh_ivf(k, nprobes, num_rerank, no_rerank);
+  if (is_graph) {
+    index_params = IndexParams::svh_graph(
+        R, L_build, alpha, num_pass, compress_input, verbose, quant_method_t,
+        block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits);
+    search_params = SearchParams::svh_graph(k, L_search, num_rerank, cut, no_rerank);
+  } else {
+    index_params = IndexParams::svh_ivf(
+        k_per_level, max_leaf_size, compress_input, verbose, max_points_per_centroid, quant_method_t,
+        block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits, quantize_centers);
+    search_params = SearchParams::svh_ivf(k, nprobes, num_rerank, no_rerank);
+  }
 
-  auto run_bench = [&](auto &index) {
+  auto run_bench = [&](auto& index) {
     if (indexFile != "") {
       std::cout << "Loading index from " << indexFile << std::endl;
       index.load(indexFile, points);
@@ -95,64 +114,6 @@ void bench(mvsic::commandLine &P) {
       double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
 
       // Compute Stats:
-      // parlay::internal::timer t;
-      // recall_1_k = 0.0;
-      // recall_k_k = 0.0;
-      // double query_time = 0.0;
-      // for (size_t i = 0; i < queries.size(); i++) {
-      //   if (i % 100 == 0) {
-      //     std::cout << queries.size() - i << " queries left" << std::endl;
-      //   }
-      //   std::unordered_set<size_t> out_set;
-      //   // Run Index search
-      //   t.start();
-      //   auto [results_new, _cmps] = index.search(queries[i], points, search_params);
-      //   t.stop();
-      //   query_time += t.total_time();
-      //   t.reset();
-      //   for (const auto &[id, dist] : results_new) {
-      //     out_set.insert(id);
-      //   }
-
-      //   // Run Brute-force search
-      //   auto [bf_results, dist_cmps] = mvsic::get_knn(queries[i], points, 2 * k);
-
-      //   // Calculate recall
-      //   size_t correct = 0;
-      //   for (size_t j = 0; j < k; j++) {
-      //     auto [id, dist] = bf_results[j];
-      //     if (out_set.find(id) != out_set.end()) {
-      //       correct++;
-      //     }
-      //   }
-      //   // Dealing with duplicates and near duplicates: fine to return
-      //   // any of the (near) duplicates of the last point
-      //   float last_dist = bf_results[k - 1].second;
-      //   for (size_t j = k; j < bf_results.size(); j++) {
-      //     auto [id, dist] = bf_results[j];
-      //     if (std::abs(dist - last_dist) < 1e-6) {
-      //       if (out_set.find(id) != out_set.end()) {
-      //         correct++;
-      //       }
-      //     } else {
-      //       break;
-      //     }
-      //   }
-      //   recall_k_k += static_cast<double>(correct) / k;
-      //   if (out_set.find(bf_results[0].first) != out_set.end()) {
-      //     recall_1_k += 1.0;
-      //   }
-      // }
-      // recall_1_k /= queries.size();
-      // recall_k_k /= queries.size();
-      // double QPS = queries.size() / query_time;
-      // double avg_query_time = 1 / QPS;
-      // std::cout << "Number of Queries: " << queries.size() << std::endl;
-      // std::cout << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl;
-      // std::cout << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-      // std::cout << "QPS: " << QPS << std::endl;
-      // std::cout << "Average time per query: " << avg_query_time << " seconds" << std::endl;
-      // Compute Stats:
       std::cout << "Computing stats..." << std::endl;
       Stats result = compute_stats(index, points, queries, gt, search_params);
       QPS_seq = result.QPS_seq;
@@ -168,11 +129,16 @@ void bench(mvsic::commandLine &P) {
                 << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
     }
   };
-  IndexSVHIVF<metric> index(points.get_dims(), index_params);
-  run_bench(index);
+  if (is_graph) {
+    IndexSVHGraph<metric> index(points.get_dims(), index_params);
+    run_bench(index);
+  } else {
+    IndexSVHIVF<metric> index(points.get_dims(), index_params);
+    run_bench(index);
+  }
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
                        "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
                        "[-data_type <tp>] [-dist_func <dist_func>]"

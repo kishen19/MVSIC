@@ -34,7 +34,6 @@ cc_library(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:wrapper",
     ],
 )
 

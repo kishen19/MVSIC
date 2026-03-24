@@ -1,6 +1,6 @@
 // bench_overretrieve.cpp
 //
-// Quality microbenchmark: Exact vs FastScan vs RaBitQ vs TQ-4bit vs Byte TQ vs TQ-PQ-4bit.
+// Quality microbenchmark: Exact vs FastScan vs RaBitQ vs TurboQuant vs TQ-PQ-4bit.
 // Reports average number of candidates (M) needed to retrieve *all* K true neighbors
 // (full recall@K) across queries.
 //
@@ -25,6 +25,9 @@
 //     -tqpq_block <u32>  (default 4)    // TQ-PQ-4bit block size (1, 2, 4, 8, or 16)
 //     -Kmax <u32>        (default 100)  // largest K evaluated; K grid is derived from this
 //     -rec99 <f>         (ignored; always full recall@K)
+//     -pq                // enable TQ-PQ-16 AVX-512 fast path (all B|D); default off
+//     -tqpqsym           // enable TQ-PQ symmetric scalar for all applicable B; default off
+//     -tq -tqpq -tqpq1..8  // optional selective mode (see main)
 //
 // Notes:
 // - K grid: {1, 5, 10, 20, 50, 100} intersected with [1..Kmax].
@@ -54,11 +57,9 @@
 #include "mvsic/core/distance_measures/one_to_one.h"
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_byte.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit_scalar.h"
-#include "mvsic/core/quantization/turboquant_pq_sym_scalar.h"
+#include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_sym_scalar.h"
 
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/types/l2_point.h"
@@ -239,41 +240,33 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
     rq_db = rq_model.encode(db);
   }
 
-  turboquant_4bit::Model<Metric> tq_model;
+  turboquant::Model<Metric> tq_model;
   decltype(tq_model.encode(db)) tq_db;
   if (mflags.run_tq) {
     tq_model.train(db);
     tq_db = tq_model.encode(db);
   }
 
-  turboquant_byte::Model<Metric> btq_model;
-  // Byte TQ path is currently disabled below; keep training gated if re-enabled.
-  // btq_model.train(db);
-  // auto btq_db = btq_model.encode(db);
-
   std::vector<std::pair<uint32_t, float>> approx_scores(N);
   std::vector<float> approx_distances(N);
 
   enum Method {
-    EXACT = 0,
     FASTSCAN = 0,
     RABITQ = 1,
-    TQ4BIT = 2,
-    BYTETQ = 3,
-    TQPQ16_1 = 4,
-    TQPQ16_2 = 5,
-    TQPQ16_4 = 6,
-    TQPQ16_8 = 7,
-    TQPQ_SYM_SCALAR_1 = 8,
-    TQPQ_SYM_SCALAR_2 = 9,
-    TQPQ_SYM_SCALAR_4 = 10,
-    TQPQ_SYM_SCALAR_8 = 11,
-    NUM_METHODS = 12
+    TURBOQUANT = 2,
+    TQPQ16_1 = 3,
+    TQPQ16_2 = 4,
+    TQPQ16_4 = 5,
+    TQPQ16_8 = 6,
+    TQPQ_SYM_SCALAR_1 = 7,
+    TQPQ_SYM_SCALAR_2 = 8,
+    TQPQ_SYM_SCALAR_4 = 9,
+    TQPQ_SYM_SCALAR_8 = 10,
+    NUM_METHODS = 11
   };
   const char* method_names[NUM_METHODS] = {"FastScan",
                                            "RaBitQ",
-                                           "TQ-4bit",
-                                           "Byte TQ",
+                                           "TurboQuant",
                                            "TQ-PQ-16-1",
                                            "TQ-PQ-16-2",
                                            "TQ-PQ-16-4",
@@ -369,22 +362,11 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
     }
     if (mflags.run_tq) {
       auto qq = tq_model.quantize_query(q);
-      qq.distances_contiguous(tq_db.packed_codes.data(), tq_db.norm_scaling_factors.data(),
-                              tq_db.unquantized_squared_norms.data(), tq_db.stride, N,
-                              tl_dists.data());
+      parlay::parallel_for(0, N, [&](size_t i) { tl_dists[i] = tq_db[i].distance(qq); });
       for (size_t i = 0; i < N; ++i)
         tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
-      run_method(TQ4BIT);
+      run_method(TURBOQUANT);
     }
-    // Byte TQ (currently disabled).
-    // if (false) {
-    //   auto qq = btq_model.quantize_query(q);
-    //   for (size_t i = 0; i < N; ++i)
-    //     tl_dists[i] = qq.distance(btq_db[i]);
-    //   for (size_t i = 0; i < N; ++i)
-    //     tl_approx[i] = {static_cast<uint32_t>(i), tl_dists[i]};
-    //   run_method(BYTETQ);
-    // }
   });
 
   for (size_t qi = 0; qi < Q; ++qi)
@@ -456,41 +438,57 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
         (mflags.run_tqpq_B1 || mflags.run_tqpq_sym_B1)) {
       turboquant_pq_4bit::Model<Metric, 1> tqpq_m;
       tqpq_m.train(db);
-      auto tqpq_enc = tqpq_m.encode(db);
+      if (!tqpq_m.rotator || tqpq_m.num_blocks == 0) {
+        std::cerr << "WARNING: TQ-PQ B=1 train failed or incompatible padded_dim; skipping B=1.\n";
+      } else {
+        auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      if (mflags.run_tqpq_B1) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_1);
+        if (mflags.run_tqpq_B1) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_1);
 #endif
-      if (mflags.run_tqpq_sym_B1) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_1);
+        if (mflags.run_tqpq_sym_B1) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_1);
+      }
     }
     if (D >= 2 && (D % 2 == 0) &&
         (mflags.run_tqpq_B2 || mflags.run_tqpq_sym_B2)) {
       turboquant_pq_4bit::Model<Metric, 2> tqpq_m;
       tqpq_m.train(db);
-      auto tqpq_enc = tqpq_m.encode(db);
+      if (!tqpq_m.rotator || tqpq_m.num_blocks == 0) {
+        std::cerr << "WARNING: TQ-PQ B=2 train failed or incompatible padded_dim; skipping B=2.\n";
+      } else {
+        auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      if (mflags.run_tqpq_B2) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_2);
+        if (mflags.run_tqpq_B2) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_2);
 #endif
-      if (mflags.run_tqpq_sym_B2) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_2);
+        if (mflags.run_tqpq_sym_B2) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_2);
+      }
     }
     if (D >= 4 && (D % 4 == 0) &&
         (mflags.run_tqpq_B4 || mflags.run_tqpq_sym_B4)) {
       turboquant_pq_4bit::Model<Metric, 4> tqpq_m;
       tqpq_m.train(db);
-      auto tqpq_enc = tqpq_m.encode(db);
+      if (!tqpq_m.rotator || tqpq_m.num_blocks == 0) {
+        std::cerr << "WARNING: TQ-PQ B=4 train failed or incompatible padded_dim; skipping B=4.\n";
+      } else {
+        auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      if (mflags.run_tqpq_B4) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_4);
+        if (mflags.run_tqpq_B4) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_4);
 #endif
-      if (mflags.run_tqpq_sym_B4) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_4);
+        if (mflags.run_tqpq_sym_B4) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_4);
+      }
     }
     if (D >= 8 && (D % 8 == 0) &&
         (mflags.run_tqpq_B8 || mflags.run_tqpq_sym_B8)) {
       turboquant_pq_4bit::Model<Metric, 8> tqpq_m;
       tqpq_m.train(db);
-      auto tqpq_enc = tqpq_m.encode(db);
+      if (!tqpq_m.rotator || tqpq_m.num_blocks == 0) {
+        std::cerr << "WARNING: TQ-PQ B=8 train failed or incompatible padded_dim; skipping B=8.\n";
+      } else {
+        auto tqpq_enc = tqpq_m.encode(db);
 #if defined(__AVX512F__)
-      if (mflags.run_tqpq_B8) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_8);
+        if (mflags.run_tqpq_B8) run_tqpq_queries(tqpq_m, tqpq_enc, TQPQ16_8);
 #endif
-      if (mflags.run_tqpq_sym_B8) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_8);
+        if (mflags.run_tqpq_sym_B8) run_sym_scalar_tqpq(tqpq_m, TQPQ_SYM_SCALAR_8);
+      }
     }
   }
 
@@ -512,8 +510,7 @@ static int run_benchmark(const DBRange& db, const QRange& queries, uint32_t fs_b
   bool method_enabled[NUM_METHODS] = {};
   method_enabled[FASTSCAN] = true;
   method_enabled[RABITQ] = run_rabitq;
-  method_enabled[TQ4BIT] = mflags.run_tq;
-  // BYTETQ currently disabled.
+  method_enabled[TURBOQUANT] = mflags.run_tq;
   method_enabled[TQPQ16_1] = run_pq && mflags.run_tqpq_B1;
   method_enabled[TQPQ16_2] = run_pq && mflags.run_tqpq_B2;
   method_enabled[TQPQ16_4] = run_pq && mflags.run_tqpq_B4;
@@ -555,47 +552,45 @@ int main(int argc, char** argv) {
   float rec99 = std::stof(P.getOptionValue("-rec99", "0.99"));
   bool run_pq = P.getOption("-pq");
   bool run_rabitq = P.getOption("-rabitq");
+  bool run_tqpqsym = P.getOption("-tqpqsym");
 
-  // New method-selection flags.
+  // Optional method-selection flags (if any are set, -tq is required to run TurboQuant).
   bool flag_tq = P.getOption("-tq");
   bool flag_tqpq = P.getOption("-tqpq");
   bool flag_tqpq1 = P.getOption("-tqpq1");
   bool flag_tqpq2 = P.getOption("-tqpq2");
   bool flag_tqpq4 = P.getOption("-tqpq4");
   bool flag_tqpq8 = P.getOption("-tqpq8");
-  bool flag_tqpqsym = P.getOption("-tqpqsym");
 
-  bool any_new_flag =
-      flag_tq || flag_tqpq || flag_tqpq1 || flag_tqpq2 || flag_tqpq4 || flag_tqpq8 || flag_tqpqsym;
+  bool any_selective =
+      flag_tq || flag_tqpq || flag_tqpq1 || flag_tqpq2 || flag_tqpq4 || flag_tqpq8 || run_tqpqsym;
 
   MethodFlags mflags;
-  if (!any_new_flag) {
-    // Default: preserve original behavior (all methods on).
+  if (!any_selective) {
+    // Default: FastScan + TurboQuant only. TQ-PQ AVX path needs -pq; symmetric scalar needs
+    // -tqpqsym (otherwise no TQ-PQ train/encode — avoids huge runtime and bad models when train
+    // aborts for some D×block combinations).
     mflags.run_tq = true;
-    mflags.run_tqpq_B1 = true;
-    mflags.run_tqpq_B2 = true;
-    mflags.run_tqpq_B4 = true;
-    mflags.run_tqpq_B8 = true;
-    mflags.run_tqpq_sym_B1 = true;
-    mflags.run_tqpq_sym_B2 = true;
-    mflags.run_tqpq_sym_B4 = true;
-    mflags.run_tqpq_sym_B8 = true;
+    mflags.run_tqpq_B1 = run_pq;
+    mflags.run_tqpq_B2 = run_pq;
+    mflags.run_tqpq_B4 = run_pq;
+    mflags.run_tqpq_B8 = run_pq;
+    mflags.run_tqpq_sym_B1 = run_tqpqsym;
+    mflags.run_tqpq_sym_B2 = run_tqpqsym;
+    mflags.run_tqpq_sym_B4 = run_tqpqsym;
+    mflags.run_tqpq_sym_B8 = run_tqpqsym;
   } else {
-    // If any new flags are given, they define exactly what to run.
     mflags.run_tq = flag_tq;
-
-    bool any_tqpq_block_flag = flag_tqpq1 || flag_tqpq2 || flag_tqpq4 || flag_tqpq8;
-
-    mflags.run_tqpq_B1 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq1;
-    mflags.run_tqpq_B2 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq2;
-    mflags.run_tqpq_B4 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq4;
-    mflags.run_tqpq_B8 = flag_tqpq || (!any_tqpq_block_flag && flag_tqpq) || flag_tqpq8;
-
-    // Symmetric scalar TQ-PQ: one flag controls all supported block sizes.
-    mflags.run_tqpq_sym_B1 = flag_tqpqsym;
-    mflags.run_tqpq_sym_B2 = flag_tqpqsym;
-    mflags.run_tqpq_sym_B4 = flag_tqpqsym;
-    mflags.run_tqpq_sym_B8 = flag_tqpqsym;
+    bool any_block_pick = flag_tqpq1 || flag_tqpq2 || flag_tqpq4 || flag_tqpq8;
+    // -tqpq alone enables all block sizes; -tqpq{N} selects one size (and does not imply others).
+    mflags.run_tqpq_B1 = run_pq || flag_tqpq1 || (flag_tqpq && !any_block_pick);
+    mflags.run_tqpq_B2 = run_pq || flag_tqpq2 || (flag_tqpq && !any_block_pick);
+    mflags.run_tqpq_B4 = run_pq || flag_tqpq4 || (flag_tqpq && !any_block_pick);
+    mflags.run_tqpq_B8 = run_pq || flag_tqpq8 || (flag_tqpq && !any_block_pick);
+    mflags.run_tqpq_sym_B1 = run_tqpqsym;
+    mflags.run_tqpq_sym_B2 = run_tqpqsym;
+    mflags.run_tqpq_sym_B4 = run_tqpqsym;
+    mflags.run_tqpq_sym_B8 = run_tqpqsym;
   }
 
   const bool file_mode = (P.getOptionValue("-i") != nullptr) || (P.getOptionValue("-q") != nullptr);

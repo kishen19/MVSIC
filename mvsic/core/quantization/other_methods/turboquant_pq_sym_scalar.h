@@ -22,7 +22,7 @@
 #include <vector>
 
 #include "rabitqlib/utils/rotator.hpp"
-#include "mvsic/core/quantization/turboquant_pq_codebooks.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_codebooks.h"
 
 namespace mvsic {
 namespace turboquant_pq_sym_scalar {

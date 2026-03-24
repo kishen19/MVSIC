@@ -54,12 +54,12 @@
 
 #include "parlay/parallel.h"
 
-#include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/pq.h"
-#include "mvsic/core/quantization/rabitq.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/wrapper.h"
+#include "mvsic/core/quantization/fastscan_mv.h"
+#include "mvsic/core/quantization/pq_mv.h"
+#include "mvsic/core/quantization/rabitq_mv.h"
+#include "mvsic/core/quantization/turboquant_mv.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/other_methods/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
@@ -115,7 +115,8 @@ static std::vector<uint32_t> default_kprime_grid(uint32_t k, uint32_t Nclouds_ca
 // Load pre-computed ground truth from binary file produced by compute_ground_truth.
 // File format: int k_gt (header), then for each query k_gt pairs of (float dist, uint32_t id)
 // sorted by ascending distance.
-// Returns per-query sorted (id, dist) pairs.
+// Returns per-query sorted (id, dist) pairs. Neighbor `id` must match PointCloudSet logical ids
+// (same as db.get_id(i) for cloud index i), unless -gt_neighbor_indices is set (then id is i).
 static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(const char* path,
                                                                               size_t num_queries,
                                                                               uint32_t k) {
@@ -164,7 +165,7 @@ static std::vector<std::vector<std::pair<uint32_t, float>>> load_ground_truth(co
 template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t pq_k, uint32_t fs_block, uint32_t rbits,
-                         uint32_t k, const char* gt_file = nullptr,
+                         uint32_t k, const char* gt_file = nullptr, bool gt_neighbor_indices = false,
                          bool run_pq = true, bool run_rabitq = true) {
   constexpr bool Metric = ChPoint::is_metric();
 
@@ -199,32 +200,34 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::cout << "k=" << k << "  k' grid: ";
   for (auto kp : kprime_grid) std::cout << kp << " ";
   std::cout << "\n";
-  if (gt_file) std::cout << "Ground truth: " << gt_file << "\n";
+  if (gt_file) {
+    std::cout << "Ground truth: " << gt_file;
+    if (gt_neighbor_indices) std::cout << " (neighbor ids = DB row indices, mapped with get_id)";
+    std::cout << "\n";
+  }
 
   // Train + Encode quantized DBs (same as bench_chamfer_pq_fastscan).
   const uint32_t PQ_S = 20;
 
-  MultiVecQuantizer<pq::Model<Metric>, Metric> pq_model;
-  using PQ_DB = decltype(pq_model.encode(db));
-  PQ_DB pq_db;
+  pq_mv::Model<Metric> pq_model;
+  pq_mv::Quantized_Point_Cloud_Set<Metric> pq_db;
   if (run_pq) {
     pq_model.train(db, pq_block, pq_k, PQ_S);
     pq_db = pq_model.encode(db);
   }
 
-  MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
+  fastscan_mv::Model<Metric> fs_model;
   fs_model.train(db, fs_block);
   auto fs_db = fs_model.encode(db);
 
-  MultiVecQuantizer<rabitq::Model<Metric>, Metric> rq_model;
-  using RQ_DB = decltype(rq_model.encode(db));
-  RQ_DB rq_db;
+  rabitq_mv::Model<Metric> rq_model;
+  rabitq_mv::Quantized_Point_Cloud_Set<Metric> rq_db;
   if (run_rabitq) {
     rq_model.train(db, rbits);
     rq_db = rq_model.encode(db);
   }
 
-  MultiVecQuantizer<turboquant_4bit::Model<Metric>, Metric> tq_model;
+  turboquant_mv::Model<Metric> tq_model;
   tq_model.train(db);
   auto tq_db = tq_model.encode(db);
 
@@ -255,7 +258,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     PQ = 0,
     FASTSCAN = 1,
     RABITQ = 2,
-    TURBOQUANT_4BIT = 3,
+    TURBOQUANT_MV = 3,
     TQPQ_B1 = 4,
     TQPQ_B2 = 5,
     TQPQ_B4 = 6,
@@ -266,7 +269,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       "PQ (K=16)",
       "FastScan (K=16)",
       "RaBitQ",
-      "TQ-4bit (K=16)",
+      "TurboQuant_mv",
       "TQ-PQ (K=16,B=1)",
       "TQ-PQ (K=16,B=2)",
       "TQ-PQ (K=16,B=4)",
@@ -290,18 +293,26 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
 
     std::unordered_set<uint32_t> exact_set;
     exact_set.reserve(static_cast<size_t>(k) * 2);
-    for (uint32_t j = 0; j < k; ++j) exact_set.insert(sorted_exact[j].first);
+    for (uint32_t j = 0; j < k; ++j) {
+      uint32_t nid = sorted_exact[j].first;
+      if (gt_file && gt_neighbor_indices) {
+        if (nid >= Nclouds) {
+          std::cerr << "ERROR: ground-truth neighbor index " << nid << " >= Nclouds " << Nclouds
+                    << " (query " << qi << ")\n";
+          return 1;
+        }
+        nid = db.get_id(static_cast<size_t>(nid));
+      }
+      exact_set.insert(nid);
+    }
 
     auto eval_method = [&](Method meth) {
       std::sort(approx_scores.begin(), approx_scores.end(),
                 [](const auto& a, const auto& b) { return a.second < b.second; });
-      // IMPORTANT: distances_all() reports cloud indices (cid) as ids, while the exact path uses
-      // PointCloudSet ids (db.get_id(cid)). Map to the same id space before computing recall.
+      // distances_all() already stores logical cloud ids (same as db.get_id(cid)) in .first.
       std::vector<uint32_t> approx_ids;
       approx_ids.reserve(Nclouds);
-      for (const auto& p : approx_scores) {
-        approx_ids.push_back(db.get_id(p.first));
-      }
+      for (const auto& p : approx_scores) approx_ids.push_back(p.first);
 
       for (size_t i = 0; i < kprime_grid.size(); ++i) {
         const size_t kp = static_cast<size_t>(kprime_grid[i]);
@@ -333,7 +344,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     {
       auto qq = tq_model.quantize_query(queries[qi]);
       tq_db.distances_all(qq, approx_scores.data());
-      eval_method(TURBOQUANT_4BIT);
+      eval_method(TURBOQUANT_MV);
     }
 
     // TQ-Scalar: same encoding as TQ4 but using per-point scalar distance
@@ -412,7 +423,7 @@ static int run_synth(uint32_t N_db, uint32_t N_q, uint32_t K_db, uint32_t D, uin
 
   std::cout << "Mode: synthetic (K_q fixed to 32)\n";
   return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, k,
-                                /*gt_file=*/nullptr, run_pq, run_rabitq);
+                                /*gt_file=*/nullptr, /*gt_neighbor_indices=*/false, run_pq, run_rabitq);
 }
 
 template<typename ChPoint>
@@ -442,13 +453,14 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
   std::cout << "Mode: file\n";
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
-  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, k, gt_file, run_pq,
-                                run_rabitq);
+  const bool gt_neighbor_indices = P.getOption("-gt_neighbor_indices");
+  return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, k, gt_file,
+                                gt_neighbor_indices, run_pq, run_rabitq);
 }
 
 int main(int argc, char** argv) {
   commandLine P(argc, argv,
-                "[-i <dbFile>] [-q <qFile>] [-mm] [-gt <gtFile>] "
+                "[-i <dbFile>] [-q <qFile>] [-mm] [-gt <gtFile>] [-gt_neighbor_indices] "
                 "[-N_db <n>] [-N_q <n>] [-K_db <k>] [-D <d>] [-seed_db <s>] [-seed_q <s>] "
                 "[-dist_func <L2|IP>] [-pq_block <b>] [-pq_k <k>] [-fs_block <b>] [-rbits <b>] "
                 "[-k <k>] [-pq] [-rabitq]");

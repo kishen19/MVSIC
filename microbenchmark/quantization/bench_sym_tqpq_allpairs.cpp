@@ -37,9 +37,9 @@
 #include "parlay/parallel.h"
 
 #include "mvsic/core/distance_measures/one_to_one.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_sym_scalar.h"
+#include "mvsic/core/quantization/other_methods/turboquant_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_sym_scalar.h"
 
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/types/l2_point.h"

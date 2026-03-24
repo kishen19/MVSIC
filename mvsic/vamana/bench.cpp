@@ -37,18 +37,20 @@ void bench(mvsic::commandLine& P) {
   bool two_pass = P.getOption("-tp");
 
   // PQ params
-  std::string pq_method = P.getOptionValue("-pq_method", "None");
-  uint32_t pq_method_t = 0;
-  if (pq_method == "None") {
-    pq_method_t = 0;
-  } else if (pq_method == "PQ") {
-    pq_method_t = 1;
-  } else if (pq_method == "RabitQ") {
-    pq_method_t = 2;
-  } else if (pq_method == "FastScan") {
-    pq_method_t = 3;
+  std::string quant_method = P.getOptionValue("-quant_method", "None");
+  uint32_t quant_method_t = 0;
+  if (quant_method == "None") {
+    quant_method_t = 0;
+  } else if (quant_method == "PQ") {
+    quant_method_t = 1;
+  } else if (quant_method == "RQ") {
+    quant_method_t = 2;
+  } else if (quant_method == "FS") {
+    quant_method_t = 3;
+  } else if (quant_method == "TQ") {
+    quant_method_t = 4;
   } else {
-    std::cerr << "Unknown PQ method: " << pq_method << std::endl;
+    std::cerr << "Unknown PQ method: " << quant_method << std::endl;
     exit(1);
   }
   uint32_t block_size = P.getOptionIntValue("-m", 8);
@@ -64,7 +66,7 @@ void bench(mvsic::commandLine& P) {
 
   auto points = PC(inFile, is_mmap);
   IndexParams index_params =
-      IndexParams::vamana(R, L_build, alpha, two_pass, compress_input, verbose, pq_method_t,
+      IndexParams::vamana(R, L_build, alpha, two_pass, compress_input, verbose, quant_method_t,
                           block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits);
   SearchParams search_params = SearchParams::vamana(k, L, cut, num_rerank);
   IndexVamana<metric> index(points.get_dims(), index_params);

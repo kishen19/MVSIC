@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "parlay/parallel.h"
-#include "parlay/primitives.h"
+#include "parlay/sequence.h"
 
 #include "rabitqlib/index/estimator.hpp"
 #include "rabitqlib/index/query.hpp"
@@ -342,8 +342,6 @@ class Model {
       std::cerr << "RabitQ::quantize_query called before train/load_model.\n";
       std::abort();
     }
-
-    // Defensive copy like your existing code
     std::vector<float> tmp(dim);
     for (size_t i = 0; i < dim; ++i)
       tmp[i] = query[i];

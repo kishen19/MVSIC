@@ -285,7 +285,7 @@ class IndexVamana : public Index<metric> {
 
     switch (quantization_mode) {
       case QT::PQ: {
-        auto& q = std::get<typename MVQT::PQ_Q>(q_query_var);
+        auto& q = std::get<typename MVQT::PQ_Query>(q_query_var);
         auto& d = std::get<typename MVQT::PQ_Set>(quantized_points);
         auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
         visited = result.second;
@@ -293,7 +293,7 @@ class IndexVamana : public Index<metric> {
         break;
       }
       case QT::RaBitQ: {
-        auto& q = std::get<typename MVQT::RQ_Q>(q_query_var);
+        auto& q = std::get<typename MVQT::RQ_Query>(q_query_var);
         auto& d = std::get<typename MVQT::RQ_Set>(quantized_points);
         auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
         visited = result.second;
@@ -301,35 +301,19 @@ class IndexVamana : public Index<metric> {
         break;
       }
       case QT::FastScan: {
-        auto& q = std::get<typename MVQT::FS_Q>(q_query_var);
+        auto& q = std::get<typename MVQT::FS_Query>(q_query_var);
         auto& d = std::get<typename MVQT::FS_Set>(quantized_points);
         auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
         break;
       }
-      case QT::TurboQuant4Bit: {
-        auto& q = std::get<typename MVQT::TQ4_Q>(q_query_var);
-        auto& d = std::get<typename MVQT::TQ4_Set>(quantized_points);
+      case QT::TurboQuant: {
+        auto& q = std::get<typename MVQT::TQ_Query>(q_query_var);
+        auto& d = std::get<typename MVQT::TQ_Set>(quantized_points);
         auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
-        break;
-      }
-      case QT::TurboQuantPQ4Bit: {
-        if (params.pq.block_size == 4) {
-          auto& q = std::get<typename MVQT::TQPQ4_Q>(q_query_var);
-          auto& d = std::get<typename MVQT::TQPQ4_Set>(quantized_points);
-          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
-          visited = result.second;
-          dist_cmps = cmps;
-        } else {
-          auto& q = std::get<typename MVQT::TQPQ8_Q>(q_query_var);
-          auto& d = std::get<typename MVQT::TQPQ8_Set>(quantized_points);
-          auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
-          visited = result.second;
-          dist_cmps = cmps;
-        }
         break;
       }
       case QT::None: {
@@ -375,19 +359,7 @@ class IndexVamana : public Index<metric> {
       case QT::PQ: std::get<typename MVQT::PQ_Model>(quantizer).save(out); break;
       case QT::FastScan: std::get<typename MVQT::FS_Model>(quantizer).save(out); break;
       case QT::RaBitQ: std::get<typename MVQT::RQ_Model>(quantizer).save(out); break;
-      case QT::TurboQuant4Bit: std::get<typename MVQT::TQ4_Model>(quantizer).save(out); break;
-      case QT::TurboQuantPQ4Bit: {
-        if (params.pq.block_size == 4) {
-          out.write(reinterpret_cast<const char*>(&params.pq.block_size),
-                    sizeof(params.pq.block_size));
-          std::get<typename MVQT::TQPQ4_Model>(quantizer).save(out);
-        } else {
-          out.write(reinterpret_cast<const char*>(&params.pq.block_size),
-                    sizeof(params.pq.block_size));
-          std::get<typename MVQT::TQPQ8_Model>(quantizer).save(out);
-        }
-        break;
-      }
+      case QT::TurboQuant: std::get<typename MVQT::TQ_Model>(quantizer).save(out); break;
       case QT::None: break;
       default: break;
     }
@@ -412,20 +384,7 @@ class IndexVamana : public Index<metric> {
       case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(in); break;
       case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(in); break;
       case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(in); break;
-      case QT::TurboQuant4Bit:
-        quantizer.template emplace<typename MVQT::TQ4_Model>().load(in);
-        break;
-      case QT::TurboQuantPQ4Bit: {
-        int tqpq_block_size = 0;
-        in.read(reinterpret_cast<char*>(&tqpq_block_size), sizeof(int));
-        params.pq.block_size = tqpq_block_size;
-        if (tqpq_block_size == 4) {
-          quantizer.template emplace<typename MVQT::TQPQ4_Model>().load(in);
-        } else {
-          quantizer.template emplace<typename MVQT::TQPQ8_Model>().load(in);
-        }
-        break;
-      }
+      case QT::TurboQuant: quantizer.template emplace<typename MVQT::TQ_Model>().load(in); break;
       case QT::None: break;
       default: break;
     }

@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <limits>
 
-#include "mvsic/core/quantization/fastscan.h"
+#include "mvsic/core/quantization/other_methods/fastscan.h"
 
 using namespace mvsic;
 

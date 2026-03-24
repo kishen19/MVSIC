@@ -50,22 +50,20 @@ void bench(mvsic::commandLine& P) {
   uint32_t num_spill = static_cast<uint32_t>(P.getOptionIntValue("-spill", 2));
 
   // PQ params
-  std::string pq_method = P.getOptionValue("-pq_method", "None");
-  uint32_t pq_method_t = 0;
-  if (pq_method == "None") {
-    pq_method_t = 0;
-  } else if (pq_method == "PQ") {
-    pq_method_t = 1;
-  } else if (pq_method == "RabitQ") {
-    pq_method_t = 2;
-  } else if (pq_method == "FastScan") {
-    pq_method_t = 3;
-  } else if (pq_method == "TQ4") {
-    pq_method_t = 4;
-  } else if (pq_method == "TQPQ") {
-    pq_method_t = 5;
+  std::string quant_method = P.getOptionValue("-quant_method", "None");
+  uint32_t quant_method_t = 0;
+  if (quant_method == "None") {
+    quant_method_t = 0;
+  } else if (quant_method == "PQ") {
+    quant_method_t = 1;
+  } else if (quant_method == "RQ") {
+    quant_method_t = 2;
+  } else if (quant_method == "FS") {
+    quant_method_t = 3;
+  } else if (quant_method == "TQ") {
+    quant_method_t = 4;
   } else {
-    std::cerr << "Unknown PQ method: " << pq_method << std::endl;
+    std::cerr << "Unknown PQ method: " << quant_method << std::endl;
     exit(1);
   }
   uint32_t block_size = P.getOptionIntValue("-m", 8);
@@ -85,21 +83,21 @@ void bench(mvsic::commandLine& P) {
     index_params = IndexParams::mvivf_flat(
         k_per_level, compress_input, verbose, niters, max_point_clouds_per_cluster,
         max_points_per_centroid_inner_kmeans, "Random", 0, use_weighted_inner_kmeans, 0,
-        pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
+        quant_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
         quantize_centers);
     search_params = SearchParams::mvivf_flat(k, nprobes, num_rerank);
   } else if (is_spill) {
     index_params = IndexParams::mvivf_spill(
         k_per_level, max_leaf_size, num_spill, compress_input, verbose, niters,
         max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans, "Random", 0,
-        use_weighted_inner_kmeans, 0, pq_method_t, block_size, num_clusters_per_block,
+        use_weighted_inner_kmeans, 0, quant_method_t, block_size, num_clusters_per_block,
         num_points_per_cluster, rabitq_bits, quantize_centers);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   } else {
     index_params = IndexParams::mvivf(
         k_per_level, max_leaf_size, compress_input, verbose, niters, max_point_clouds_per_cluster,
         max_points_per_centroid_inner_kmeans, "Random", 0, use_weighted_inner_kmeans, 0,
-        pq_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
+        quant_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
         quantize_centers);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }

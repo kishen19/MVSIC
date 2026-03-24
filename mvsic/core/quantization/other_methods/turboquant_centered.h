@@ -23,7 +23,7 @@
 #include <limits>
 #include <vector>
 
-#include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_4bit.h"
 
 namespace mvsic {
 namespace turboquant_centered {

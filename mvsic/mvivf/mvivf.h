@@ -34,9 +34,9 @@ class IndexMVIVF : public Index<metric> {
   using QuantSet = typename MVQT::QuantSet;
   using QuantQuery = typename MVQT::QuantQuery;
   using QuantModel = typename MVQT::QuantModel;
-  using TQ4_Set = typename MVQT::TQ4_Set;
-  using TQ4_Q = typename MVQT::TQ4_Q;
-  using TQ4_Model = typename MVQT::TQ4_Model;
+  using TQ_Set = typename MVQT::TQ_Set;
+  using TQ_Query = typename MVQT::TQ_Query;
+  using TQ_Model = typename MVQT::TQ_Model;
   using QT = typename Index<metric>::QT;
   using Index<metric>::d;       // Embedding dimension
   using Index<metric>::params;  // Index Params
@@ -60,10 +60,10 @@ class IndexMVIVF : public Index<metric> {
   parlay::sequence<node_t*> leaves_flat;  // Flat list of leaves for large-nprobes search
   PointCloudSet<ChPoint> leaf_centers;    // One representative center per leaf
   QuantSet leaf_centers_quant;            // Quantized centers for flat search (when enabled)
-  // Center quantization: when params.quantize_centers is enabled, we *always* use TurboQuant4Bit
-  // (TQ4) for internal-node / leaf-center scoring, regardless of the leaf quantizer.
+  // Center quantization: when params.quantize_centers is enabled, we *always* use TurboQuant
+  // (TQ) for internal-node / leaf-center scoring, regardless of the leaf quantizer.
   // This is because greedy search/flat search requires high-quality scores
-  TQ4_Model center_quantizer;
+  TQ_Model center_quantizer;
   QuantModel quantizer = std::monostate{};
 
   // Stats
@@ -81,13 +81,13 @@ class IndexMVIVF : public Index<metric> {
   }
 
   // Quantization Helpers
-  void init_tq4_quantizer(const PointCloudSet<ChPoint>& points) {
+  void init_tq_quantizer(const PointCloudSet<ChPoint>& points) {
     if (!params.quantize_centers) return;
     center_quantizer.train(points);
   }
 
-  TQ4_Set encode_tq4(const PointCloudSet<ChPoint>& points) {
-    return center_quantizer.encode(points);  // returns TQ4_Set
+  TQ_Set encode_tq(const PointCloudSet<ChPoint>& points) {
+    return center_quantizer.encode(points);  // returns TQ_Set
   }
 
   // Recursive kmeans tree builder
@@ -123,7 +123,7 @@ class IndexMVIVF : public Index<metric> {
     }
     // Quantize internal-node centers if enabled.
     if (params.quantize_centers) {
-      node->quantized_data = encode_tq4(node->data);
+      node->quantized_data = encode_tq(node->data);
     }
     parlay::parallel_for(
         0, grouped.size(),
@@ -152,8 +152,8 @@ class IndexMVIVF : public Index<metric> {
     t.start();
     quantization_mode = params.pq.method;
     this->train_quantizer(points, quantizer);
-    // Center quantization (internal-node / leaf-center scoring): always TQ4.
-    init_tq4_quantizer(points);
+    // Center quantization (internal-node / leaf-center scoring): always TQ.
+    init_tq_quantizer(points);
     if (params.verbose >= 1 && quantization_mode != QT::None) {
       std::cout << "[MVIVF] Quantizers Trained: " << t.stop() << " sec" << std::endl;
     }
@@ -195,7 +195,7 @@ class IndexMVIVF : public Index<metric> {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
 
         if (params.quantize_centers) {
-          leaf_centers_quant = encode_tq4(leaf_centers);
+          leaf_centers_quant = encode_tq(leaf_centers);
         }
       }
     }
@@ -212,7 +212,7 @@ class IndexMVIVF : public Index<metric> {
   };
 
   // Simple Beam Search with early exit
-  GreedySearchResult greedy_search(const ChPoint& query, const TQ4_Q& q_query,
+  GreedySearchResult greedy_search(const ChPoint& query, const TQ_Query& q_query,
                                    size_t nprobes) const {
     using score_node = std::pair<float, node_t*>;
     auto less = [](const score_node& a, const score_node& b) {
@@ -259,8 +259,8 @@ class IndexMVIVF : public Index<metric> {
       // Compute distances to children
       child_dists.resize(children.size());
       dist_cmps += children.size();
-      if (params.quantize_centers) {  // Center scoring always uses TQ4 when enabled.
-        std::get<TQ4_Set>(current_node->quantized_data).distances_all(q_query, child_dists.data());
+      if (params.quantize_centers) {  // Center scoring always uses TQ when enabled.
+        std::get<TQ_Set>(current_node->quantized_data).distances_all(q_query, child_dists.data());
       } else {
         auto& centers = current_node->data;
         centers.distances(query, child_dists.data());
@@ -312,7 +312,7 @@ class IndexMVIVF : public Index<metric> {
   }
 
   // Flat leaf scoring: score all leaves and pick the best nprobes leaves.
-  GreedySearchResult flat_leaf_search(const ChPoint& query, const TQ4_Q& q_query,
+  GreedySearchResult flat_leaf_search(const ChPoint& query, const TQ_Query& q_query,
                                       size_t nprobes) const {
     using score_node = std::pair<float, node_t*>;
     GreedySearchResult out;
@@ -333,7 +333,7 @@ class IndexMVIVF : public Index<metric> {
     auto scores = parlay::sequence<score_node>::uninitialized(L);
 
     if (params.quantize_centers) {
-      std::get<TQ4_Set>(leaf_centers_quant).distances_all(q_query, centers_dists.data());
+      std::get<TQ_Set>(leaf_centers_quant).distances_all(q_query, centers_dists.data());
     } else {
       leaf_centers.distances(query, centers_dists.data());
     }
@@ -380,28 +380,19 @@ class IndexMVIVF : public Index<metric> {
     switch (quantization_mode) {
       case QT::PQ:
         process_probes_quant.template operator()<typename MVQT::PQ_Set>(
-            std::get<typename MVQT::PQ_Q>(q_query_var));
+            std::get<typename MVQT::PQ_Query>(q_query_var));
         break;
       case QT::RaBitQ:
         process_probes_quant.template operator()<typename MVQT::RQ_Set>(
-            std::get<typename MVQT::RQ_Q>(q_query_var));
+            std::get<typename MVQT::RQ_Query>(q_query_var));
         break;
       case QT::FastScan:
         process_probes_quant.template operator()<typename MVQT::FS_Set>(
-            std::get<typename MVQT::FS_Q>(q_query_var));
+            std::get<typename MVQT::FS_Query>(q_query_var));
         break;
-      case QT::TurboQuant4Bit:
-        process_probes_quant.template operator()<typename MVQT::TQ4_Set>(
-            std::get<typename MVQT::TQ4_Q>(q_query_var));
-        break;
-      case QT::TurboQuantPQ4Bit:
-        if (params.pq.block_size == 4) {
-          process_probes_quant.template operator()<typename MVQT::TQPQ4_Set>(
-              std::get<typename MVQT::TQPQ4_Q>(q_query_var));
-        } else {
-          process_probes_quant.template operator()<typename MVQT::TQPQ8_Set>(
-              std::get<typename MVQT::TQPQ8_Q>(q_query_var));
-        }
+      case QT::TurboQuant:
+        process_probes_quant.template operator()<typename MVQT::TQ_Set>(
+            std::get<typename MVQT::TQ_Query>(q_query_var));
         break;
       case QT::None:
         parlay::parallel_for(0, nprobes, [&](size_t i) {
@@ -431,7 +422,7 @@ class IndexMVIVF : public Index<metric> {
     // Step 0: Quantize Query
     // -------------------------
     QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
-    TQ4_Q q_center_query;
+    TQ_Query q_center_query;
     t.start();
     if (params.quantize_centers) {
       q_center_query = center_quantizer.quantize_query(query);
@@ -611,11 +602,6 @@ class IndexMVIVF : public Index<metric> {
           if constexpr (std::is_same_v<ModelType, std::monostate>) {
             return;
           } else {
-            if constexpr (std::is_same_v<ModelType, typename MVQT::TQPQ4_Model> ||
-                          std::is_same_v<ModelType, typename MVQT::TQPQ8_Model>) {
-              int block_size = std::is_same_v<ModelType, typename MVQT::TQPQ4_Model> ? 4 : 8;
-              outfile.write(reinterpret_cast<const char*>(&block_size), sizeof(block_size));
-            }
             model.save(outfile);
           }
         },
@@ -673,32 +659,16 @@ class IndexMVIVF : public Index<metric> {
       case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(infile); break;
       case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(infile); break;
       case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(infile); break;
-      case QT::TurboQuant4Bit:
-        quantizer.template emplace<typename MVQT::TQ4_Model>().load(infile);
+      case QT::TurboQuant:
+        quantizer.template emplace<typename MVQT::TQ_Model>().load(infile);
         break;
-      case QT::TurboQuantPQ4Bit: {
-        // Read and restore the TQPQ block size used when the model was trained.
-        int tqpq_block_size = 0;
-        infile.read(reinterpret_cast<char*>(&tqpq_block_size), sizeof(int));
-        params.pq.block_size = tqpq_block_size;
-        if (tqpq_block_size == 4) {
-          quantizer.template emplace<typename MVQT::TQPQ4_Model>().load(infile);
-        } else if (tqpq_block_size == 8) {
-          quantizer.template emplace<typename MVQT::TQPQ8_Model>().load(infile);
-        } else {
-          std::cerr << "IndexMVIVF::load: TurboQuantPQ4Bit model with unsupported block_size="
-                    << tqpq_block_size << " (expected 4 or 8)." << std::endl;
-          abort();
-        }
-        break;
-      }
       case QT::None:
       default: quantizer = std::monostate{}; break;
     }
     infile.close();
 
-    // Center quantization (internal-node / leaf-center scoring): always TQ4.
-    init_tq4_quantizer(points);
+    // Center quantization (internal-node / leaf-center scoring): always TQ.
+    init_tq_quantizer(points);
 
     // Build the index
     size_t dim = points.get_dims();
@@ -777,7 +747,7 @@ class IndexMVIVF : public Index<metric> {
       if (!center_points.empty()) {
         leaf_centers = PointCloudSet<ChPoint>(center_points, d);
         if (params.quantize_centers) {
-          leaf_centers_quant = encode_tq4(leaf_centers);
+          leaf_centers_quant = encode_tq(leaf_centers);
         }
       }
     }
@@ -791,7 +761,7 @@ class IndexMVIVF : public Index<metric> {
           if (node->data.size() == 0) return;
           if (!node->children.empty()) {  // internal node
             if (params.quantize_centers) {
-              node->quantized_data = encode_tq4(node->data);
+              node->quantized_data = encode_tq(node->data);
             }
             return;
           }

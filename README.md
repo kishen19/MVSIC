@@ -6,7 +6,7 @@ MVSIC provides implementations of several state-of-the-art algorithms and also i
 
 ## Features
 
-*   Built in C++ for speed and efficiency, leveraging the [Parlay](https://github.com/cmuparlay/parlaylib/) library for parallelism.
+*   Built in C++ for speed and efficiency, leveraging the [ParlayLib](https://github.com/cmuparlay/parlaylib/) library for parallelism.
 *   A user-friendly Python API for easy integration into existing workflows, powered by [pybind11](https://github.com/pybind/pybind11).
 *   Implements several novel and baseline multi-vector ANN algorithms.
 *   Supports various quantization methods (PQ + FastScan, RaBitQ) to reduce memory footprint and accelerate search.

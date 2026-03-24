@@ -33,10 +33,10 @@
 #include "parlay/primitives.h"
 #include "parlay/parallel.h"
 
-#include "mvsic/core/quantization/fastscan.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
-#include "mvsic/core/quantization/turboquant_pq_4bit.h"
-#include "mvsic/core/quantization/wrapper.h"
+#include "mvsic/core/quantization/fastscan_mv.h"
+#include "mvsic/core/quantization/turboquant_mv.h"
+#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
+#include "mvsic/core/quantization/other_methods/wrapper.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
@@ -280,11 +280,10 @@ static int run_from_sets_topk(const PointCloudSet<ChPoint>& db,
   TimerTopk t;
 
 #if defined(__AVX512F__) || defined(__AVX2__)
-  MultiVecQuantizer<fastscan::Model<Metric>, Metric> fs_model;
+  fastscan_mv::Model<Metric> fs_model;
   double fs_train_s = 0.0;
   double fs_encode_s = 0.0;
-  using FS_DB = decltype(fs_model.encode(db));
-  std::vector<FS_DB> fs_leaf_dbs;
+  std::vector<fastscan_mv::Quantized_Point_Cloud_Set<Metric>> fs_leaf_dbs;
   t.start();
   fs_model.train(db, /*block_size=*/8);
   fs_train_s = t.sec();
@@ -296,11 +295,10 @@ static int run_from_sets_topk(const PointCloudSet<ChPoint>& db,
   fs_encode_s = t.sec();
 #endif
 
-  MultiVecQuantizer<turboquant_4bit::Model<Metric>, Metric> tq_model;
+  turboquant_mv::Model<Metric> tq_model;
   double tq_train_s = 0.0;
   double tq_encode_s = 0.0;
-  using TQ4_DB = decltype(tq_model.encode(db));
-  std::vector<TQ4_DB> tq_leaf_dbs;
+  std::vector<turboquant_mv::Quantized_Point_Cloud_Set<Metric>> tq_leaf_dbs;
   t.start();
   tq_model.train(db);
   tq_train_s = t.sec();
@@ -342,13 +340,13 @@ static int run_from_sets_topk(const PointCloudSet<ChPoint>& db,
   }
   tqpq8_encode_s = t.sec();
 
-  std::cout << "\n=== Train / Encode (FastScan/TQ/TQ-PQ) ===\n";
+  std::cout << "\n=== Train / Encode (FastScan_mv / TurboQuant_mv / TQ-PQ) ===\n";
 #if defined(__AVX512F__) || defined(__AVX2__)
-  std::cout << "FastScan train       : " << fs_train_s << " s\n";
-  std::cout << "FastScan encode      : " << fs_encode_s << " s (leaves)\n";
+  std::cout << "FastScan_mv train    : " << fs_train_s << " s\n";
+  std::cout << "FastScan_mv encode   : " << fs_encode_s << " s (leaves)\n";
 #endif
-  std::cout << "TQ-4bit train        : " << tq_train_s << " s\n";
-  std::cout << "TQ-4bit encode       : " << tq_encode_s << " s (leaves)\n";
+  std::cout << "TurboQuant_mv train  : " << tq_train_s << " s\n";
+  std::cout << "TurboQuant_mv encode : " << tq_encode_s << " s (leaves)\n";
   std::cout << "TQ-PQ (B=4)          : " << (tqpq4_train_s + tqpq4_encode_s) << " s\n";
   std::cout << "TQ-PQ (B=8)          : " << (tqpq8_train_s + tqpq8_encode_s) << " s\n";
 
@@ -427,11 +425,11 @@ static int run_from_sets_topk(const PointCloudSet<ChPoint>& db,
   MethodResults rows_tqpq8;
 
 #if defined(__AVX512F__) || defined(__AVX2__)
-  rows_fs.name = "FastScan (K=16)";
+  rows_fs.name = "FastScan_mv (K=16)";
   baseline_topk_for_method(fs_model, fs_leaf_dbs, rows_fs);
 #endif
 
-  rows_tq4.name = "TQ-4bit (K=16)";
+  rows_tq4.name = "TurboQuant_mv";
   baseline_topk_for_method(tq_model, tq_leaf_dbs, rows_tq4);
 
   rows_tqpq4.name = "TQ-PQ (K=16,B=4)";

@@ -16,20 +16,27 @@ auto kmeans_subsample(const parlay::sequence<parlay::sequence<float>>& data, uin
   using PointTy =
       std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
   using Range = parlayANN::PointRange<PointTy>;
+
+  const char* seed_algo;
+  if constexpr (metric) {
+    seed_algo = "PrefixDoubling";
+  } else {
+    seed_algo = "UniformlyRandom";
+  }
+
   size_t n = data.size();
   size_t dims = data[0].size();
   Range centers;
   if (max_points_per_centroid * k >= n) {
     Range data_range(data, dims);
-    centers = kmeans<float, PointTy>(data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(data_range, k, seed_algo, "Pairwise", 10, verbose);
   } else {
     auto sampled_points = parlay::delayed_tabulate(max_points_per_centroid * k, [&](size_t i) {
       size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
       return data[id];
     });
     Range sampled_data_range(sampled_points, dims);
-    centers =
-        kmeans<float, PointTy>(sampled_data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(sampled_data_range, k, seed_algo, "Pairwise", 10, verbose);
   }
   // // Convert centers_range to sequence of floats
   // parlay::sequence<parlay::sequence<float>> final_centers(k);
@@ -62,11 +69,18 @@ auto kmeans_weighted_subsample(const parlay::sequence<parlay::sequence<float>>& 
     abort();
   }
 
+  const char* seed_algo;
+  if constexpr (metric) {
+    seed_algo = "PrefixDoubling";
+  } else {
+    seed_algo = "UniformlyRandom";
+  }
+
   Range centers;
   if (max_points_per_centroid * k >= n) {
     Range data_range(data, dims);
-    centers = kmeans_weighted<float, PointTy>(data_range, weights, k, "UniformlyRandom", "Pairwise",
-                                              10, verbose);
+    centers =
+        kmeans_weighted<float, PointTy>(data_range, weights, k, seed_algo, "Pairwise", 10, verbose);
   } else {
     const size_t m = static_cast<size_t>(max_points_per_centroid) * static_cast<size_t>(k);
     auto sampled_points = parlay::delayed_tabulate(m, [&](size_t i) {
@@ -79,8 +93,8 @@ auto kmeans_weighted_subsample(const parlay::sequence<parlay::sequence<float>>& 
       sampled_weights[i] = weights[id];
     });
     Range sampled_data_range(sampled_points, dims);
-    centers = kmeans_weighted<float, PointTy>(sampled_data_range, sampled_weights, k,
-                                              "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans_weighted<float, PointTy>(sampled_data_range, sampled_weights, k, seed_algo,
+                                              "Pairwise", 10, verbose);
   }
   return centers;
 }
@@ -96,18 +110,25 @@ auto kmeans_subsample_assign(const parlay::sequence<parlay::sequence<float>>& da
   using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
+
+  const char* seed_algo;
+  if constexpr (metric) {
+    seed_algo = "PrefixDoubling";
+  } else {
+    seed_algo = "UniformlyRandom";
+  }
+
   Range data_range = Range(data, dims);
   Range centers;
   if (max_points_per_centroid * k >= n) {
-    centers = kmeans<float, PointTy>(data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(data_range, k, seed_algo, "Pairwise", 10, verbose);
   } else {
     auto sampled_points = parlay::delayed_tabulate(max_points_per_centroid * k, [&](size_t i) {
       size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
       return data[id];
     });
     Range sampled_data_range = Range(sampled_points, dims);
-    centers =
-        kmeans<float, PointTy>(sampled_data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(sampled_data_range, k, seed_algo, "Pairwise", 10, verbose);
   }
   parlay::sequence<uint32_t> cluster_ids_ =
       compute_cluster_ids_pairwise_blocked<PointTy>(data_range, centers);
@@ -142,24 +163,34 @@ auto kmeans_subsample_assign(const parlay::sequence<parlay::sequence<float>>& da
 // Returns centers and cluster_ids
 template<bool metric>
 auto kmeans_subsample_assign_only(const parlay::sequence<parlay::sequence<float>>& data, size_t k,
-                                  size_t max_points_per_centroid, bool verbose = false) {
+                                  size_t max_points_per_centroid, bool verbose = false,
+                                  size_t lloyds_iterations = 10) {
   using PointTy =
       std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
   using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
+
+  const char* seed_algo;
+  if constexpr (metric) {
+    seed_algo = "PrefixDoubling";
+  } else {
+    seed_algo = "UniformlyRandom";
+  }
+
   Range data_range = Range(data, dims);
   Range centers;
   if (max_points_per_centroid * k >= n) {
-    centers = kmeans<float, PointTy>(data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers =
+        kmeans<float, PointTy>(data_range, k, seed_algo, "Pairwise", lloyds_iterations, verbose);
   } else {
     auto sampled_points = parlay::delayed_tabulate(max_points_per_centroid * k, [&](size_t i) {
       size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
       return data[id];
     });
     Range sampled_data_range = Range(sampled_points, dims);
-    centers =
-        kmeans<float, PointTy>(sampled_data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(sampled_data_range, k, seed_algo, "Pairwise",
+                                     lloyds_iterations, verbose);
   }
   parlay::sequence<uint32_t> cluster_ids_ =
       compute_cluster_ids_pairwise_blocked<PointTy>(data_range, centers);
@@ -177,19 +208,25 @@ auto kmeans_subsample_top_n_assign(const parlay::sequence<parlay::sequence<float
   using Range = parlayANN::PointRange<PointTy>;
   size_t n = data.size();
   size_t dims = data[0].size();
+
+  const char* seed_algo;
+  if constexpr (metric) {
+    seed_algo = "PrefixDoubling";
+  } else {
+    seed_algo = "UniformlyRandom";
+  }
+
   Range data_range = Range(data, dims);
   Range centers;
-
   if (max_points_per_centroid * k >= n) {
-    centers = kmeans<float, PointTy>(data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(data_range, k, seed_algo, "Pairwise", 10, verbose);
   } else {
     auto sampled_points = parlay::delayed_tabulate(max_points_per_centroid * k, [&](size_t i) {
       size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
       return data[id];
     });
     Range sampled_data_range = Range(sampled_points, dims);
-    centers =
-        kmeans<float, PointTy>(sampled_data_range, k, "UniformlyRandom", "Pairwise", 10, verbose);
+    centers = kmeans<float, PointTy>(sampled_data_range, k, seed_algo, "Pairwise", 10, verbose);
   }
 
   // For each point, find the top N closest centers

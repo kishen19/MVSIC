@@ -8,9 +8,19 @@ cc_library(
     deps = [
         "//mvsic/core/utils:kmeans_util",
         "@eigen",
-        "@parlayann//algorithms/utils:point_range",
         "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_library(
+    name = "fastscan_mv",
+    hdrs = ["fastscan_mv.h"],
+    deps = [
+        "//mvsic/core/utils:kmeans_util",
+        "@eigen",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
     ],
 )
 
@@ -20,9 +30,19 @@ cc_library(
     deps = [
         "//mvsic/core/utils:kmeans_util",
         "@eigen",
-        "@parlayann//algorithms/utils:point_range",
         "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_library(
+    name = "pq_mv",
+    hdrs = ["pq_mv.h"],
+    deps = [
+        "//mvsic/core/utils:kmeans_util",
+        "@eigen",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
     ],
 )
 
@@ -31,14 +51,14 @@ cc_library(
     hdrs = ["rabitq.h"],
     deps = [
         "@parlaylib//parlay:parallel",
-        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay:sequence",
         "@rabitq//:rabitqlib",
     ],
 )
 
 cc_library(
-    name = "turboquant_4bit",
-    hdrs = ["turboquant_4bit.h"],
+    name = "rabitq_mv",
+    hdrs = ["rabitq_mv.h"],
     deps = [
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
@@ -47,10 +67,10 @@ cc_library(
 )
 
 cc_library(
-    name = "turboquant_pq_4bit",
+    name = "turboquant",
     hdrs = [
-        "turboquant_pq_4bit.h",
-        "turboquant_pq_codebooks.h",
+        "turboquant.h",
+        "turboquant_utils.h",
     ],
     deps = [
         "@parlaylib//parlay:parallel",
@@ -60,54 +80,13 @@ cc_library(
 )
 
 cc_library(
-    name = "turboquant_low_bit",
-    hdrs = ["turboquant_low_bit.h"],
-    deps = [],
-)
-
-cc_library(
-    name = "turboquant_pq_4bit_scalar",
+    name = "turboquant_mv",
     hdrs = [
-        "turboquant_pq_4bit_scalar.h",
-        "turboquant_pq_codebooks.h",
+        "turboquant_mv.h",
+        "turboquant_utils.h",
     ],
-    deps = ["@rabitq//:rabitqlib"],
-)
-
-cc_library(
-    name = "turboquant_pq_sym_scalar",
-    hdrs = [
-        "turboquant_pq_codebooks.h",
-        "turboquant_pq_sym_scalar.h",
-    ],
-    deps = ["@rabitq//:rabitqlib"],
-)
-
-cc_library(
-    name = "turboquant_byte",
-    hdrs = ["turboquant_byte.h"],
     deps = [
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
-        "@rabitq//:rabitqlib",
-    ],
-)
-
-cc_library(
-    name = "turboquant_centered",
-    hdrs = ["turboquant_centered.h"],
-    deps = [
-        ":turboquant_4bit",
-    ],
-)
-
-cc_library(
-    name = "wrapper",
-    hdrs = ["wrapper.h"],
-    deps = [
-        ":turboquant_4bit",
-        ":turboquant_byte",
-        ":turboquant_pq_4bit",
-        "@parlaylib//parlay:primitives",
     ],
 )

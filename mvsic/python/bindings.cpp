@@ -17,6 +17,7 @@
 #include "mvsic/vamana/vamana.h"
 #include "mvsic/mpool/mpool.h"
 #include "mvsic/svh/svh_ivf.h"
+#include "mvsic/svh/svh_graph.h"
 #include "parlay/primitives.h"
 
 namespace py = pybind11;
@@ -41,8 +42,7 @@ PYBIND11_MODULE(mvsic, m) {
       .value("PQ", mvsic::IndexParams::QuantizerType::PQ)
       .value("RaBitQ", mvsic::IndexParams::QuantizerType::RaBitQ)
       .value("FastScan", mvsic::IndexParams::QuantizerType::FastScan)
-      .value("TurboQuant4Bit", mvsic::IndexParams::QuantizerType::TurboQuant4Bit)
-      .value("TurboQuantPQ4Bit", mvsic::IndexParams::QuantizerType::TurboQuantPQ4Bit)
+      .value("TurboQuant", mvsic::IndexParams::QuantizerType::TurboQuant)
       .export_values();
 
   py::class_<mvsic::IndexParams::fde_config>(m, "fde_config")
@@ -168,7 +168,13 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("verbose") = 0, py::arg("max_points_per_centroid") = 100,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
                   py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false);
+                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+      .def_static("svh_graph", &mvsic::IndexParams::svh_graph, py::arg("R") = 200,
+                  py::arg("L") = 600, py::arg("alpha") = 1.2, py::arg("num_pass") = 1,
+                  py::arg("compress_input") = false, py::arg("verbose") = 0,
+                  py::arg("pq_method") = 0, py::arg("block_size") = 8,
+                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
+                  py::arg("rabitq_bits") = 8);
 
   py::class_<mvsic::SearchParams>(m, "SearchParams")
       .def(py::init([]() { return mvsic::SearchParams(); }))
@@ -192,7 +198,9 @@ PYBIND11_MODULE(mvsic, m) {
       .def_static("mpool", &mvsic::SearchParams::mpool, py::arg("k"), py::arg("L"),
                   py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
       .def_static("svh_ivf", &mvsic::SearchParams::svh_ivf, py::arg("k"), py::arg("nprobes"),
-                  py::arg("num_rerank"), py::arg("norerank") = false);
+                  py::arg("num_rerank"), py::arg("norerank") = false)
+      .def_static("svh_graph", &mvsic::SearchParams::svh_graph, py::arg("k"), py::arg("L"),
+                  py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false);
 
   //======================================
   // Point Cloud and Point Types
@@ -340,6 +348,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMPoolIP, ChamferIP_Point, "IndexMPoolIP")
   BIND_INDEX(IndexSVHIVFL2, ChamferL2_Point, "IndexSVHIVFL2")
   BIND_INDEX(IndexSVHIVFIP, ChamferIP_Point, "IndexSVHIVFIP")
+  BIND_INDEX(IndexSVHGraphL2, ChamferL2_Point, "IndexSVHGraphL2")
+  BIND_INDEX(IndexSVHGraphIP, ChamferIP_Point, "IndexSVHGraphIP")
 
   //======================================
   // Stats Functions
@@ -460,4 +470,6 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_COMPUTE_STATS(IndexMPoolL2, ChamferL2_Point, "MPoolL2")
   BIND_COMPUTE_STATS(IndexSVHIVFIP, ChamferIP_Point, "SVHIVFIP")
   BIND_COMPUTE_STATS(IndexSVHIVFL2, ChamferL2_Point, "SVHIVFL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphIP, ChamferIP_Point, "SVHGraphIP")
+  BIND_COMPUTE_STATS(IndexSVHGraphL2, ChamferL2_Point, "SVHGraphL2")
 }

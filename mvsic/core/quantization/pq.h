@@ -7,22 +7,22 @@
 #include <iostream>
 #include <limits>
 #include <random>
-#include <type_traits>
 #include <vector>
 
 #include <Eigen/Core>
 
 #include "parlay/parallel.h"
-#include "parlay/primitives.h"
+#include "parlay/sequence.h"
 
 #include "mvsic/core/utils/kmeans_util.h"
 
 namespace mvsic {
 namespace pq {
 
-// ---------------------------------------------------------
+// =========================================================================
 // Distance Kernels
-// ---------------------------------------------------------
+// =========================================================================
+namespace internal {
 inline float distance_generic_float(const float* lut, const uint8_t* codes, uint32_t m,
                                     uint32_t K) {
   float dist = 0.0f;
@@ -35,7 +35,6 @@ inline float distance_generic_float(const float* lut, const uint8_t* codes, uint
   return dist;
 }
 
-// Integer LUT: accumulate uint8 lookups, then decode with min_val and scale (FastScan-style).
 inline float distance_generic_int(const uint8_t* int_lut, const uint8_t* codes, uint32_t m,
                                   uint32_t K, float min_val, float scale) {
   uint32_t acc = 0;
@@ -47,10 +46,11 @@ inline float distance_generic_int(const uint8_t* int_lut, const uint8_t* codes, 
   }
   return min_val * static_cast<float>(m) + scale * static_cast<float>(acc);
 }
+}  // namespace internal
 
-// ---------------------------------------------------------
+// =========================================================================
 // Quantized Query Vector Type (owns LUT)
-// ---------------------------------------------------------
+// =========================================================================
 
 // Forward Declaration
 template<bool Metric>
@@ -61,7 +61,7 @@ class Quantized_Query {
  public:
   using distanceType = float;
 
-  // Scalar-quantized LUT (FastScan-style): 8-bit per entry, decode = min_val*m + scale*sum.
+  // Scalar-quantized LUT: 8-bit per entry, decode = min_val*m + scale*sum.
   alignas(64) std::vector<uint8_t> int_lut;  // [m * K]
   float min_val = 0.0f;
   float scale = 1.0f;
@@ -92,7 +92,8 @@ class Quantized_Query {
   }
 
   inline float distance(const Quantized_Point<Metric>& p) const {
-    return distance_generic_int(int_lut.data(), p.code_ptr, num_blocks, K, min_val, scale);
+    return internal::distance_generic_int(int_lut.data(), p.code_ptr, num_blocks, K, min_val,
+                                          scale);
   }
 
   // Compute distances to every encoded vector in an encoded range.
@@ -103,8 +104,8 @@ class Quantized_Query {
     const size_t stride = static_cast<size_t>(num_blocks);
 
     parlay::parallel_for(0, N, [&](size_t i) {
-      out[i] = distance_generic_int(int_lut.data(), base + i * stride, num_blocks, K, min_val,
-                                    scale);
+      out[i] = internal::distance_generic_int(int_lut.data(), base + i * stride, num_blocks, K,
+                                              min_val, scale);
     });
   }
 };
@@ -220,7 +221,6 @@ class Model {
 
   Model() = default;
 
-  // Convenience: train immediately.
   template<typename PointRange>
   Model(const PointRange& train_data, uint32_t block_size = 8, uint32_t k = 256,
         uint32_t subsample_mult = 20) {
@@ -260,6 +260,7 @@ class Model {
     parlay::parallel_for(0, num_blocks, [&](size_t b) {
       const size_t offset = b * dim_per_block;
 
+      // Subsample data for faster training
       parlay::sequence<parlay::sequence<float>> subsample(sample_size);
       std::mt19937 rng(static_cast<unsigned>(b + 1));
       std::uniform_int_distribution<size_t> distu(0, n_points - 1);
@@ -272,7 +273,9 @@ class Model {
         subsample[i] = std::move(vec);
       }
 
-      auto [centers, _] = mvsic::kmeans_subsample_assign_only<Metric>(
+      // Always use L2-based kmeans, even for Inner Product/Cosine Similarity
+      // as subvectors are not L2-normalized typically.
+      auto [centers, _] = mvsic::kmeans_subsample_assign_only<true>(
           subsample, num_clusters_per_block, sample_size, false);
 
       codebooks[b] = Eigen::MatrixXf(static_cast<Eigen::Index>(num_clusters_per_block),
@@ -290,11 +293,10 @@ class Model {
     });
   }
 
-  // Encode a dataset using current model into an encoded range object.
+  // Encode a dataset using current model into an encoded range object
   template<typename PointRange>
   Quantized_Point_Range<PointRange, Metric> encode(const PointRange& data) const {
     Quantized_Point_Range<PointRange, Metric> enc;
-
     enc.num_blocks = num_blocks;
     enc.num_clusters_per_block = num_clusters_per_block;
     enc.dim_per_block = static_cast<uint32_t>(dim_per_block);
@@ -455,7 +457,8 @@ class Model {
       dot_products.noalias() = codebooks[b] * Q_sub.transpose();
 
       for (uint32_t i = 0; i < num_q; ++i) {
-        float* lut_ptr = float_luts.data() + i * lut_size + static_cast<size_t>(b) * num_clusters_per_block;
+        float* lut_ptr =
+            float_luts.data() + i * lut_size + static_cast<size_t>(b) * num_clusters_per_block;
         const Eigen::Index col = static_cast<Eigen::Index>(i);
         if constexpr (Metric) {
           for (uint32_t c = 0; c < num_clusters_per_block; ++c) {

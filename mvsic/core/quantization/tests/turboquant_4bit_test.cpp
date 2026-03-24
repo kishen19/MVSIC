@@ -14,7 +14,7 @@
 
 #include "gtest/gtest.h"
 #include "parlay/parallel.h"
-#include "mvsic/core/quantization/turboquant_4bit.h"
+#include "mvsic/core/quantization/other_methods/turboquant_4bit.h"
 
 using namespace mvsic;
 using namespace mvsic::turboquant_4bit;

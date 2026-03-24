@@ -114,6 +114,21 @@ struct SearchParams {
     return params;
   }
 
+  // svh_graph search params
+  static SearchParams svh_graph(size_t k, size_t L, size_t num_rerank, double cut = 1.35,
+                                bool norerank = false) {
+    SearchParams params;
+    params.method = "svh_graph";
+    params.k = k;
+    assert(k > 0);
+    params.L = L;
+    params.cut = cut;
+    params.norerank = norerank;
+    params.num_rerank = num_rerank;
+    assert(num_rerank >= k);
+    return params;
+  }
+
   SearchParams() = default;
 };
 

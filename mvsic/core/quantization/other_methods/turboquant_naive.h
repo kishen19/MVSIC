@@ -595,8 +595,37 @@ class Model {
     return encode(data, cloud_offsets_float);
   }
 
-  // Primary overload: takes a pointer to float data
   Quantized_Query<Metric> quantize_query(const float* qptr) const {
+    return quantize_query_from_ptr(qptr);
+  }
+
+  // Template overload for array-like types (but not pointers - those use the const float* overload
+  // above). Uses quantize_query_from_ptr(tmp.data()) so a plain template cannot recurse via float*.
+  template<typename PointTy>
+  typename std::enable_if<!std::is_pointer<PointTy>::value, Quantized_Query<Metric>>::type
+  quantize_query(const PointTy& query) const {
+    std::vector<float> tmp(dim);
+    for (size_t i = 0; i < dim; ++i)
+      tmp[i] = query[i];
+    return quantize_query_from_ptr(tmp.data());
+  }
+
+  template<typename PointCloudTy>
+  void quantize_query_batch(const PointCloudTy& query_cloud,
+                            parlay::sequence<Quantized_Query<Metric>>& out_queries) const {
+    const uint32_t num_q = query_cloud.size();
+    const uint32_t dims = query_cloud.get_dims();
+    const float* base = query_cloud.data();
+
+    out_queries.clear();
+    out_queries.reserve(num_q);
+    for (uint32_t i = 0; i < num_q; ++i) {
+      out_queries.emplace_back(quantize_query(base + static_cast<size_t>(i) * dims));
+    }
+  }
+
+ private:
+  Quantized_Query<Metric> quantize_query_from_ptr(const float* qptr) const {
 #if !defined(TURBOQUANT_USE_IDENTITY_ROTATION)
     if (!rotator) {
       std::cerr << "TurboQuant::quantize_query: rotator is null. Call train() first.\n";
@@ -655,31 +684,7 @@ class Model {
     return qq;
   }
 
-  // Template overload for array-like types (but not pointers - those use the const float* overload
-  // above)
-  template<typename PointTy>
-  typename std::enable_if<!std::is_pointer<PointTy>::value, Quantized_Query<Metric>>::type
-  quantize_query(const PointTy& query) const {
-    std::vector<float> tmp(dim);
-    for (size_t i = 0; i < dim; ++i)
-      tmp[i] = query[i];
-    return quantize_query(tmp.data());
-  }
-
-  template<typename PointCloudTy>
-  void quantize_query_batch(const PointCloudTy& query_cloud,
-                            parlay::sequence<Quantized_Query<Metric>>& out_queries) const {
-    const uint32_t num_q = query_cloud.size();
-    const uint32_t dims = query_cloud.get_dims();
-    const float* base = query_cloud.data();
-
-    out_queries.clear();
-    out_queries.reserve(num_q);
-    for (uint32_t i = 0; i < num_q; ++i) {
-      out_queries.emplace_back(quantize_query(base + static_cast<size_t>(i) * dims));
-    }
-  }
-
+ public:
   void save(std::ofstream& out) const {
 #if !defined(TURBOQUANT_USE_IDENTITY_ROTATION)
     if (!rotator) return;

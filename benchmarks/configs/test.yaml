@@ -1,0 +1,251 @@
+name: "Arguana test"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    results: results/beir/arguana
+
+indices:
+  - name: mvivf
+    build_configs:
+      - name: mvivf_500
+        params: &mvivf_leaf
+          k_per_level: 0
+          max_leaf_size: 500
+        search_configs: &ivf_k10_nr0
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - name: mvivf_500_pq_8_256
+        params:
+          <<: *mvivf_leaf
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: &ivf_k10
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128]
+              k: [10]
+              config:
+                - {name: "nr20", num_rerank: 20}
+      - name: mvivf_500_rq_4
+        params:
+          <<: *mvivf_leaf
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *ivf_k10
+      - name: mvivf_500_fs_8
+        params:
+          <<: *mvivf_leaf
+          pq_method: 3
+          block_size: 8
+        search_configs: *ivf_k10
+      - name: mvivf_500_tq
+        params:
+          <<: *mvivf_leaf
+          pq_method: 4
+        search_configs: *ivf_k10
+
+  - name: mvivf_spill
+    build_configs:
+      - name: mvivf_spill_sp2_500
+        params: &spill_leaf
+          k_per_level: 0
+          max_leaf_size: 500
+          num_spill: 2
+        search_configs: *ivf_k10_nr0
+      - name: mvivf_spill_sp2_500_pq_8_256
+        params:
+          <<: *spill_leaf
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: *ivf_k10
+      - name: mvivf_spill_sp2_500_rq_4
+        params:
+          <<: *spill_leaf
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *ivf_k10
+      - name: mvivf_spill_sp2_500_fs_8
+        params:
+          <<: *spill_leaf
+          pq_method: 3
+          block_size: 8
+        search_configs: *ivf_k10
+      - name: mvivf_spill_sp2_500_tq
+        params:
+          <<: *spill_leaf
+          pq_method: 4
+        search_configs: *ivf_k10
+
+  - name: mvivf_flat
+    build_configs:
+      - name: mvivf_flat
+        params: &flat_base
+          k_per_level: 0
+        search_configs: *ivf_k10_nr0
+      - name: mvivf_flat_pq_8_256
+        params:
+          <<: *flat_base
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: *ivf_k10
+      - name: mvivf_flat_rq_4
+        params:
+          <<: *flat_base
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *ivf_k10
+      - name: mvivf_flat_fs_8
+        params:
+          <<: *flat_base
+          pq_method: 3
+          block_size: 8
+        search_configs: *ivf_k10
+      - name: mvivf_flat_tq
+        params:
+          <<: *flat_base
+          pq_method: 4
+        search_configs: *ivf_k10
+
+  - name: muvera
+    build_configs:
+      - name: muvera_2560
+        params: &muvera_base
+          d_fde: 2560
+        search_configs: &graph_k10
+          - name: k=10
+            params:
+              L: [32, 128, 512, 1024]
+              k: [10]
+              config:
+                - {name: "nr20", num_rerank: 20}
+      - name: muvera_2560_pq_8_256
+        params:
+          <<: *muvera_base
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: *graph_k10
+      - name: muvera_2560_rq_4
+        params:
+          <<: *muvera_base
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *graph_k10
+      - name: muvera_2560_fs_8
+        params:
+          <<: *muvera_base
+          pq_method: 3
+          block_size: 8
+        search_configs: *graph_k10
+      - name: muvera_2560_tq
+        params:
+          <<: *muvera_base
+          pq_method: 4
+        search_configs: *graph_k10
+
+  - name: vamana
+    build_configs:
+      - name: vamana_R200
+        params: &vamana_base
+          R: 200
+        search_configs: *graph_k10
+      - name: vamana_R200_pq_8_256
+        params:
+          <<: *vamana_base
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: *graph_k10
+      - name: vamana_R200_rq_4
+        params:
+          <<: *vamana_base
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *graph_k10
+      - name: vamana_R200_fs_8
+        params:
+          <<: *vamana_base
+          pq_method: 3
+          block_size: 8
+        search_configs: *graph_k10
+      - name: vamana_R200_tq
+        params:
+          <<: *vamana_base
+          pq_method: 4
+        search_configs: *graph_k10
+
+  - name: svh_ivf
+    build_configs:
+      - name: svh_ivf_500
+        params: &svh_leaf
+          k_per_level: 0
+          max_leaf_size: 500
+        search_configs: &svh_ivf_k10_nr1K
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 1024]
+              k: [10]
+              config:
+                - {name: "nr1000", num_rerank: 1000}
+      - name: svh_ivf_500_pq_8_256
+        params:
+          <<: *svh_leaf
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_500_rq_4
+        params:
+          <<: *svh_leaf
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_500_fs_8
+        params:
+          <<: *svh_leaf
+          pq_method: 3
+          block_size: 8
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_500_tq
+        params:
+          <<: *svh_leaf
+          pq_method: 4
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_5000
+        params: &svh_5K_leaf
+          k_per_level: 0
+          max_leaf_size: 5000
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_5000_pq_8_256
+        params:
+          <<: *svh_5K_leaf
+          pq_method: 1
+          block_size: 8
+          num_clusters_per_block: 256
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_5000_rq_4
+        params:
+          <<: *svh_5K_leaf
+          pq_method: 2
+          rabitq_bits: 4
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_5000_fs_8
+        params:
+          <<: *svh_5K_leaf
+          pq_method: 3
+          block_size: 8
+        search_configs: *svh_ivf_k10_nr1K
+      - name: svh_ivf_5000_tq
+        params:
+          <<: *svh_5K_leaf
+          pq_method: 4
+        search_configs: *svh_ivf_k10_nr1K
+    
