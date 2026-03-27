@@ -31,28 +31,38 @@ template<bool Metric>
 class Quantized_Point;
 
 // ---------------------------------------------------------
-// FastScan Quantized Query (8-bit Fixed Point)
+// FastScan Quantized Query
 // ---------------------------------------------------------
 template<bool Metric>
 class Quantized_Query {
  public:
-  using distanceType = float;
+  using distanceType = float;  // [Required by parlayann]
 
   alignas(64) std::vector<uint8_t> int_lut;  // [num_blocks * K]
-  float min_dist = 0.0f;
-  float scale = 1.0f;
-  uint32_t num_blocks = 0;
-  static constexpr uint32_t K = 16;
+
+  float min_dist = 0.0f;  // SQ param
+  float scale = 1.0f;     // SQ param
+
+  uint32_t num_blocks = 0;           // Num Blocks
+  static constexpr uint32_t K = 16;  // Num Centroids
 
   Quantized_Query() = default;
   explicit Quantized_Query(uint32_t m) : num_blocks(m) {
     int_lut.resize(static_cast<size_t>(m) * K);
   }
 
+  // Decode the quantized 16-bit int distance to a float distance.
   inline float decode(uint16_t int_dist) const {
     return (min_dist * static_cast<float>(num_blocks)) + (static_cast<float>(int_dist) * scale);
   }
 
+  // Decode the quantized 32-bit int distance to a float distance.
+  inline float decode(uint32_t int_dist) const {
+    return (min_dist * static_cast<float>(num_blocks)) + (static_cast<float>(int_dist) * scale);
+  }
+
+  // Fallback per-point distance computation.
+  // Note: This is slow as it requires strided access through the packed (striped) code layout.
   inline float distance(const Quantized_Point<Metric>& p) const {
     uint16_t acc = 0;
     for (uint32_t b = 0; b < num_blocks; ++b) {
@@ -63,8 +73,9 @@ class Quantized_Query {
     return decode(acc);
   }
 
-  template<typename EncRange>
-  void distances_all(const EncRange& db, float* out) const {
+  // Main One-to-Many Distance Computation.
+  template<typename QPointRange>
+  void distances_all(const QPointRange& db, float* out) const {
     const size_t N = db.size();
     if (N == 0) return;
 
@@ -140,24 +151,32 @@ class Quantized_Point_Range {
 #ifdef __AVX512F__
   void scan_64_chunk(const Quantized_Query<Metric>& q, const uint8_t* codes_ptr,
                      float* results) const {
+    // Initialize the accumulators for the even and odd lanes.
     __m512i acc_even = _mm512_setzero_si512();
     __m512i acc_odd = _mm512_setzero_si512();
+    // Mask to extract the lower 4 bits of the codes.
     const __m256i low_mask = _mm256_set1_epi8(0x0F);
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
+      // Load the packed codes for the current block, and increment the pointer to the next block.
       const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
       codes_ptr += 32;
 
+      // Extract the even and odd codes.
       const __m256i codes_even = _mm256_and_si256(packed, low_mask);
       const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
+      // Load the LUT for the current block into a 128-bit register.
       const __m128i lut128 =
           _mm_loadu_si128(reinterpret_cast<const __m128i*>(&q.int_lut[static_cast<size_t>(b) * K]));
+      // Duplicate it to the upper and lower halves of a 256-bit register.
       const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
 
+      // Shuffle the LUT to the even and odd codes.
       const __m256i scores_even_u8 = _mm256_shuffle_epi8(lut256, codes_even);
       const __m256i scores_odd_u8 = _mm256_shuffle_epi8(lut256, codes_odd);
 
+      // Add the scores to the accumulators.
       acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepu8_epi16(scores_even_u8));
       acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepu8_epi16(scores_odd_u8));
     }

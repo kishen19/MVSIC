@@ -17,6 +17,17 @@ cc_binary(
 )
 
 cc_test(
+    name = "correctness_fastscan",
+    srcs = ["correctness_fastscan.cpp"],
+    deps = [
+        "//mvsic/core/quantization:fastscan",
+        "@googletest//:gtest_main",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_test(
     name = "turboquant_4bit_test",
     srcs = ["turboquant_4bit_test.cpp"],
     deps = [
@@ -120,6 +131,16 @@ cc_test(
     srcs = ["fastscan_mv_microbench.cc"],
     deps = [
         "//mvsic/core/quantization:fastscan_mv",
+        "@google_benchmark//:benchmark",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_test(
+    name = "fastscan_kernel_bench",
+    srcs = ["fastscan_kernel_bench.cpp"],
+    deps = [
         "@google_benchmark//:benchmark",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
