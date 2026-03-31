@@ -55,12 +55,29 @@ cc_library(
     ],
 )
 
+# cc_library(
+#     name = "point_cloud_set",
+#     hdrs = ["point_cloud_set.h"],
+#     deps = [
+#         "//mvsic/core/distance_measures:many_to_many",
+#         "//mvsic/core/distance_measures:one_to_many",
+#         "//mvsic/core/utils:mmap",
+#         "//mvsic/core/utils:util",
+#         "@parlaylib//parlay:primitives",
+#     ],
+# )
+
 cc_library(
     name = "point_cloud_set",
-    hdrs = ["point_cloud_set.h"],
+    hdrs = [
+        "point_cloud_set.h",
+        "point_cloud_set-inl.h",
+    ],
     deps = [
+        "//mvsic/core/distance_measures:many_to_many",
         "//mvsic/core/distance_measures:one_to_many",
         "//mvsic/core/utils:mmap",
+        "//mvsic/core/utils:util",
         "@parlaylib//parlay:primitives",
     ],
 )

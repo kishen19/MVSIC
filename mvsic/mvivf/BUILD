@@ -13,6 +13,19 @@ cc_library(
 )
 
 cc_library(
+    name = "mvivf_base",
+    hdrs = [
+        "mvivf-inl.h",
+        "mvivf_base.h",
+    ],
+    deps = [
+        "//mvsic/core:index",
+        "//mvsic/core/mvclustering",
+        "//mvsic/core/utils:util",
+    ],
+)
+
+cc_library(
     name = "mvivf_spill",
     hdrs = ["mvivf_spill.h"],
     deps = [
@@ -42,6 +55,18 @@ cc_binary(
         "//mvsic/core:stats",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+    ],
+)
+
+cc_binary(
+    name = "bench_new",
+    srcs = ["bench_new.cpp"],
+    deps = [
+        ":mvivf_base",
+        "//mvsic/core:stats",
+        "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/utils:parse_command_line",
     ],
