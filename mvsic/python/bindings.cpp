@@ -109,31 +109,31 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("pq", &mvsic::IndexParams::pq)
       .def_readwrite("max_points_per_centroid", &mvsic::IndexParams::max_points_per_centroid)
       .def_static("mvivf", &mvsic::IndexParams::mvivf, py::arg("k_per_level") = 0,
-                  py::arg("max_leaf_size") = 200, py::arg("compress_input") = false,
+                  py::arg("max_leaf_size") = 500, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = false)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = false)
       .def_static("mvivf_spill", &mvsic::IndexParams::mvivf_spill, py::arg("k_per_level") = 0,
-                  py::arg("max_leaf_size") = 200, py::arg("num_spill") = 2,
+                  py::arg("max_leaf_size") = 500, py::arg("num_spill") = 2,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 0,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
                   py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = false)
       .def_static(
           "muvera_custom", &mvsic::IndexParams::muvera_custom, py::arg("num_repetitions") = 20,
           py::arg("num_simhash_projections") = 4, py::arg("seed") = 1,
@@ -141,40 +141,40 @@ PYBIND11_MODULE(mvsic, m) {
           py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
           py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1, py::arg("num_pass") = 1,
           py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("pq_method") = 0,
-          py::arg("block_size") = 8, py::arg("num_clusters_per_block") = 256,
-          py::arg("num_points_per_cluster") = 20, py::arg("rabitq_bits") = 8)
+          py::arg("block_size") = 8, py::arg("num_clusters_per_block") = 16,
+          py::arg("num_points_per_cluster") = 100, py::arg("rabitq_bits") = 4)
       .def_static("muvera", &mvsic::IndexParams::muvera, py::arg("d_fde") = 2560,
                   py::arg("seed") = 1, py::arg("fill_empty_partitions") = false,
                   py::arg("final_projection_dimension") = 0, py::arg("normalize") = false,
                   py::arg("R") = 200, py::arg("L") = 600, py::arg("alpha") = 1.1,
                   py::arg("num_pass") = 1, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4)
       .def_static("mpool", &mvsic::IndexParams::mpool, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("num_pass") = 1, py::arg("normalize") = true,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4)
       .def_static("vamana", &mvsic::IndexParams::vamana, py::arg("R") = 200, py::arg("L") = 600,
                   py::arg("alpha") = 1.2, py::arg("two_pass") = false,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4)
       .def_static("svh_ivf", &mvsic::IndexParams::svh_ivf, py::arg("k_per_level") = 0,
                   py::arg("max_leaf_size") = 500, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("max_points_per_centroid") = 100,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8, py::arg("quantize_centers") = false)
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = false)
       .def_static("svh_graph", &mvsic::IndexParams::svh_graph, py::arg("R") = 200,
                   py::arg("L") = 600, py::arg("alpha") = 1.2, py::arg("num_pass") = 1,
                   py::arg("compress_input") = false, py::arg("verbose") = 0,
                   py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 256, py::arg("num_points_per_cluster") = 20,
-                  py::arg("rabitq_bits") = 8);
+                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
+                  py::arg("rabitq_bits") = 4);
 
   py::class_<mvsic::SearchParams>(m, "SearchParams")
       .def(py::init([]() { return mvsic::SearchParams(); }))

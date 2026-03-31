@@ -337,8 +337,9 @@ class IndexMVIVF : public Index<metric> {
     } else {
       leaf_centers.distances(query, centers_dists.data());
     }
-    parlay::parallel_for(0, L,
-                         [&](size_t i) { scores[i] = {centers_dists[i].second, leaves_flat[i]}; });
+    parlay::parallel_for(0, L, [&](size_t i) {
+      scores[i] = {centers_dists[i].second, leaves_flat[i]};
+    });
     t_dists += t.stop();
     t.reset();
 
@@ -487,7 +488,7 @@ class IndexMVIVF : public Index<metric> {
     timings.push_back(t.stop());
     t.reset();
 
-    return std::make_tuple(final_results, dist_cmps, timings);
+    return std::make_tuple(std::move(final_results), dist_cmps, timings);
   }
 
   // Traversing the k-means tree: returns the height of the tree
