@@ -53,6 +53,7 @@ class IndexSVHGraph : public Index<metric> {
   parlayANN::Graph<uint32_t> G;
   parlayANN::BuildParams BP;
   parlayANN::knn_index<Range, Range, uint32_t> I;
+  uint32_t start_point = 0;
 
   // Quantizer Storage
   QuantModel quantizer = std::monostate{};
@@ -107,8 +108,11 @@ class IndexSVHGraph : public Index<metric> {
     G = parlayANN::Graph<uint32_t>(BP.R, flattened_points.size());
     parlayANN::stats<uint32_t> BuildStats(G.size());
     I.build_index(G, flattened_points, flattened_points, BuildStats);
+    // Keep start-point selection consistent between build/load paths.
+    I.set_start();
+    start_point = I.get_start();
 
-    // Step 4: Quantization for search acceleration
+    // Step 4: Quantization
     quantization_mode = params.pq.method;
     if (quantization_mode != QT::None) {
       if (params.verbose >= 1)
@@ -140,10 +144,12 @@ class IndexSVHGraph : public Index<metric> {
     auto all_candidates =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q_size * num_rerank);
     auto dist_cmps_seq = parlay::sequence<size_t>::uninitialized(q_size);
+    auto bytes_accessed_seq = parlay::sequence<size_t>::uninitialized(q_size);
 
-    uint32_t start_node = I.get_start();
-    auto QP = parlayANN::QueryParams(num_rerank, search_params.L, search_params.cut,
-                                     flattened_points.size(), params.ann.R);
+    // Use graph cardinality for max_visited. In quantized load paths we may not
+    // materialize flattened_points, but G is always present.
+    auto QP = parlayANN::QueryParams(num_rerank, search_params.L, search_params.cut, G.size(),
+                                     params.ann.R);
 
     parlay::parallel_for(0, q_size, [&](size_t i) {
       // Create parlayANN Point view of i-th query vector
@@ -156,10 +162,12 @@ class IndexSVHGraph : public Index<metric> {
       // Navigate Graph
       parlay::sequence<std::pair<uint32_t, float>> visited;
       size_t comps;
-      std::tie(visited, comps) = this->quant_beam_search(query_vec_p, q_query_var, flattened_points,
-                                                         quantized_data, G, start_node, QP);
+      size_t bytes;
+      std::tie(visited, comps, bytes) = this->quant_beam_search(
+          query_vec_p, q_query_var, flattened_points, quantized_data, G, start_point, QP);
 
       dist_cmps_seq[i] = comps;
+      bytes_accessed_seq[i] = bytes;
 
       // Fill candidates: Map global vector ID -> Cloud ID
       size_t count = std::min(num_rerank, visited.size());
@@ -174,6 +182,7 @@ class IndexSVHGraph : public Index<metric> {
     });
 
     size_t total_dist_cmps = parlay::reduce(dist_cmps_seq);
+    size_t total_bytes_accessed = parlay::reduce(bytes_accessed_seq);
     timings.push_back(t.stop());
     t.reset();
 
@@ -214,7 +223,8 @@ class IndexSVHGraph : public Index<metric> {
         std::min(k, unique_clouds.size()));
     if (!search_params.norerank && !unique_clouds.empty()) {
       size_t actual_rerank_count = std::min(num_rerank, unique_clouds.size());
-      this->rerank(query, points, unique_clouds, actual_rerank_count, final_results);
+      total_bytes_accessed +=
+          this->rerank(query, points, unique_clouds, actual_rerank_count, final_results);
       total_dist_cmps += actual_rerank_count;
     } else {
       parlay::parallel_for(0, final_results.size(),
@@ -222,7 +232,12 @@ class IndexSVHGraph : public Index<metric> {
     }
     timings.push_back(t.stop());
 
-    return std::make_tuple(final_results, total_dist_cmps, timings);
+    std::vector<double> stats;
+    stats.reserve(timings.size() + 1);
+    stats.push_back(static_cast<double>(total_dist_cmps));
+    stats.insert(stats.end(), timings.begin(), timings.end());
+
+    return std::make_tuple(final_results, total_bytes_accessed, stats);
   }
 
   // Persistence: Save index to disk
@@ -274,6 +289,7 @@ class IndexSVHGraph : public Index<metric> {
     // 1. Load Graph
     G = parlayANN::io::load_graph<uint32_t>(in);
     I.set_start();
+    start_point = I.get_start();
 
     // 2. Load flattening metadata
     in.read(reinterpret_cast<char*>(&d), sizeof(unsigned));
@@ -282,6 +298,9 @@ class IndexSVHGraph : public Index<metric> {
     vector_to_id.resize(map_sz);
     in.read(reinterpret_cast<char*>(vector_to_id.data()),
             map_sz * sizeof(std::pair<uint32_t, uint32_t>));
+    if (map_sz != G.size()) {
+      throw std::runtime_error("load: vector_to_id size does not match graph size");
+    }
 
     // 3. Load Quantizer
     int type_id;

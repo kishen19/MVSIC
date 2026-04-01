@@ -139,8 +139,9 @@ class IndexMVIVFFlat : public Index<metric> {
         nprobes, [&](size_t i) { return clusters[probe_list[i].first].get_size(); });
     auto scan_result = parlay::scan(sizes);
     auto& offsets = scan_result.first;
-    size_t& total_size = scan_result.second;
+    size_t total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+    auto bytes_accessed = parlay::sequence<size_t>::uninitialized(nprobes);
 
     auto process_probes_quant = [&]<typename SetType>(const auto& q_query) {
       parlay::parallel_for(0, nprobes, [&](size_t i) {
@@ -148,6 +149,7 @@ class IndexMVIVFFlat : public Index<metric> {
         auto* node_data = std::get_if<SetType>(&node.quantized_data);
         if (!node_data) UNREACHABLE();
         node_data->distances_all(q_query, &visited[offsets[i]]);
+        bytes_accessed[i] = node_data->num_bytes();
       });
     };
 
@@ -172,10 +174,11 @@ class IndexMVIVFFlat : public Index<metric> {
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t& node = clusters[probe_list[i].first];
           node.data.distances(query, &visited[offsets[i]]);
+          bytes_accessed[i] = node.data.num_bytes();
         });
         break;
     }
-    return visited;
+    return std::make_pair(visited, parlay::reduce(bytes_accessed));
   }
 
   // Returns the top-k point clouds for the query point cloud
@@ -184,15 +187,18 @@ class IndexMVIVFFlat : public Index<metric> {
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
                     const SearchParams& search_params) override {
     parlay::internal::timer t;
-    std::vector<double> timings;
 
     size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
-    size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
 
+    std::vector<double> stats;
+    size_t dist_cmps = 0;
+    double t_search = 0.0;
     double t_quantize = 0.0;
     double t_distances = 0.0;
     double t_rest = 0.0;
+    double t_rerank = 0.0;
 
     // -------------------------
     // Step 0: Quantize Query
@@ -216,14 +222,16 @@ class IndexMVIVFFlat : public Index<metric> {
 
     if (params.quantize_centers) {
       centers_quant.distances_all(q_center_query, probe_list.data());
+      bytes_accessed += centers_quant.num_bytes();
     } else {
       centers.distances(query, probe_list.data());
+      bytes_accessed += centers.num_bytes();
     }
 
     std::nth_element(probe_list.begin(), probe_list.begin() + nprobes, probe_list.end(),
                      [](const auto& a, const auto& b) { return a.second < b.second; });
     probe_list.resize(nprobes);
-    timings.push_back(t.stop());
+    t_search = t.stop();
     dist_cmps += L;
     t.reset();
 
@@ -231,7 +239,10 @@ class IndexMVIVFFlat : public Index<metric> {
     // Step 2: Probe top nprobe clusters
     // -------------------------
     t.start();
-    auto visited = process_probes(query, q_query_var, probe_list);
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    size_t bytes_accessed_pp;
+    std::tie(visited, bytes_accessed_pp) = process_probes(query, q_query_var, probe_list);
+    bytes_accessed += bytes_accessed_pp;
     t_distances = t.stop();
 
     t.start();
@@ -240,9 +251,6 @@ class IndexMVIVFFlat : public Index<metric> {
     t.reset();
 
     dist_cmps += visited.size();
-    timings.push_back(t_quantize);
-    timings.push_back(t_distances);
-    timings.push_back(t_rest);
 
     // -------------------------
     // Step 3: Re-ranking
@@ -252,16 +260,22 @@ class IndexMVIVFFlat : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      this->rerank(query, points, visited, num_rerank, final_results);
-      dist_cmps += num_rerank;
+      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    timings.push_back(t.stop());
+    t_rerank = t.stop();
     t.reset();
 
-    return std::make_tuple(final_results, dist_cmps, timings);
+    stats.push_back(static_cast<size_t>(L));
+    stats.push_back(static_cast<double>(dist_cmps));
+    stats.push_back(t_search);
+    stats.push_back(t_distances);
+    stats.push_back(t_rest);
+    stats.push_back(t_rerank);
+
+    return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
   // Write the index to a file in disk

@@ -51,7 +51,8 @@ struct ChamferIP_Point {
   }
   // Also computes the amount of data accessed by the distance function
   std::pair<float, size_t> distance_w_cmps(const ChamferIP_Point& x) const {
-    return std::make_pair(chamfer_ip_distance(values, n, x.values, x.n, dims), (n + x.n) * dims);
+    return std::make_pair(chamfer_ip_distance(values, n, x.values, x.n, dims),
+                          x.n * dims * sizeof(distanceType));
   }
 };
 

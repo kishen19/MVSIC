@@ -89,8 +89,13 @@ class IndexMPool : public Index<metric> {
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
                     const SearchParams& search_params) override {
     parlay::internal::timer t;
-    std::vector<double> timings;
+    size_t bytes_accessed = 0;
 
+    size_t dist_cmps = 0;
+    double t_mean_pooling = 0.0;
+    double t_quantize = 0.0;
+    double t_search = 0.0;
+    double t_rerank = 0.0;
     size_t k = search_params.k;
     // Step 1: Compute mean-pooling of the query point cloud
     t.start();
@@ -98,29 +103,25 @@ class IndexMPool : public Index<metric> {
     typename Point::parameters parlayann_pr_params(d);
     Point query_point(reinterpret_cast<typename Point::byte*>(query_mpv.data()), -1,
                       parlayann_pr_params);
-    timings.push_back(t.stop());
+    t_mean_pooling = t.stop();
     t.reset();
 
     // Step 2: Run beam search
-    t.start();
     uint32_t start_point = I.get_start();
     auto QP = parlayANN::QueryParams(search_params.num_rerank, search_params.L, search_params.cut,
                                      points.size(), params.ann.R);
     parlay::sequence<std::pair<uint32_t, float>> visited;
-    size_t dist_cmps;
-    timings.push_back(t.stop());
-    t.reset();
 
     // Quantize query
     t.start();
     QuantQuery q_query_var = this->quantize_query_point(query_point, quantizer);
-    timings.push_back(t.stop());
+    t_quantize = t.stop();
     t.reset();
     // Run beam search
     t.start();
-    std::tie(visited, dist_cmps) = this->quant_beam_search(query_point, q_query_var, points_mp,
-                                                           quantized_data, G, start_point, QP);
-    timings.push_back(t.stop());
+    std::tie(visited, dist_cmps, bytes_accessed) = this->quant_beam_search(
+        query_point, q_query_var, points_mp, quantized_data, G, start_point, QP);
+    t_search = t.stop();
     t.reset();
 
     // Step 3: Re-ranking
@@ -129,16 +130,21 @@ class IndexMPool : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (!search_params.norerank) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      this->rerank(query, points, visited, num_rerank, final_results);
-      dist_cmps += num_rerank;
+      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    timings.push_back(t.stop());
+    t_rerank = t.stop();
     t.reset();
 
-    return std::make_tuple(final_results, dist_cmps, timings);
+    std::vector<double> stats;
+    stats.push_back(t_mean_pooling);
+    stats.push_back(t_quantize);
+    stats.push_back(t_search);
+    stats.push_back(t_rerank);
+
+    return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
   // Write the index to a file in disk

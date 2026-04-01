@@ -172,6 +172,7 @@ class IndexSVHIVF : public Index<metric> {
   struct GreedySearchResult {
     parlay::sequence<std::pair<float, node_t*>> probe_list;
     size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
     std::vector<double> timings = {};
   };
 
@@ -187,6 +188,7 @@ class IndexSVHIVF : public Index<metric> {
 
     t.start();
     size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
     std::set<score_node> beam;
     parlay::sequence<score_node> top_probes;
     top_probes.reserve(nprobes + 1);
@@ -220,12 +222,14 @@ class IndexSVHIVF : public Index<metric> {
       dist_cmps += children.size();
       if (params.quantize_centers) {  // Center scoring always uses TQ when enabled.
         q_query.distances_all(std::get<TQ_Range>(current_node->quantized_data), child_dists.data());
+        bytes_accessed += std::get<TQ_Range>(current_node->quantized_data).num_bytes_per_point() * current_node->data.size();
       } else {
         auto& centers = current_node->data;
         const size_t nc = centers.size();
         for (size_t j = 0; j < nc; ++j) {
           child_dists[j] = query_point.distance(centers[j]);
         }
+        bytes_accessed += nc * (centers.get_dims() * sizeof(float));
       }
       t_dists += t.stop();
       t.reset();
@@ -268,6 +272,7 @@ class IndexSVHIVF : public Index<metric> {
 
     GreedySearchResult out;
     out.dist_cmps = dist_cmps;
+    out.bytes_accessed = bytes_accessed;
     out.timings = {t_dists, t_beam, t_rest};
     out.probe_list = std::move(top_probes);
     return out;
@@ -280,9 +285,10 @@ class IndexSVHIVF : public Index<metric> {
         nprobes, [&](size_t i) { return probe_list[i].second->get_size(); });
     auto scan_result = parlay::scan(sizes);
     auto& offsets = scan_result.first;
-    size_t& total_size = scan_result.second;
+    size_t total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
     auto tmp_dists = parlay::sequence<float>::uninitialized(total_size);
+    auto bytes_accessed = parlay::sequence<size_t>::uninitialized(nprobes);
 
     auto process_probes_quant = [&]<typename RangeType>(const auto& q_query) {
       parlay::parallel_for(0, nprobes, [&](size_t i) {
@@ -290,6 +296,7 @@ class IndexSVHIVF : public Index<metric> {
         auto* leaf_data = std::get_if<RangeType>(&leaf->quantized_data);
         if (!leaf_data) UNREACHABLE();
         q_query.distances_all(*leaf_data, tmp_dists.begin() + offsets[i]);
+        bytes_accessed[i] = leaf_data->num_bytes_per_point() * leaf->get_size();
       });
     };
 
@@ -318,6 +325,7 @@ class IndexSVHIVF : public Index<metric> {
           for (size_t j = 0; j < sz; ++j) {
             tmp_dists[off + j] = query_point.distance(leaf_node->data[j]);
           }
+          bytes_accessed[i] = sz * (leaf_node->data.get_dims() * sizeof(float));
         });
         break;
     }
@@ -330,7 +338,7 @@ class IndexSVHIVF : public Index<metric> {
         visited[off + j] = {static_cast<uint32_t>(leaf->get_id(j)), tmp_dists[off + j]};
       }
     });
-    return visited;
+    return std::make_pair(visited, parlay::reduce(bytes_accessed));
   }
 
   // Search for nearest neighbors of a single query point
@@ -339,6 +347,7 @@ class IndexSVHIVF : public Index<metric> {
     parlay::internal::timer t;
     std::vector<double> timings;
     size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
 
     double t_quantize = 0.0;
     double t_distances = 0.0;
@@ -359,15 +368,19 @@ class IndexSVHIVF : public Index<metric> {
     auto gs = greedy_search(query_point, q_center_query, nprobes);
     auto& probe_list = gs.probe_list;
     dist_cmps += gs.dist_cmps;
+    bytes_accessed += gs.bytes_accessed;
     nprobes = std::min(nprobes, probe_list.size());
-    timings.push_back(dist_cmps);
+    timings.push_back(static_cast<double>(dist_cmps));
     for (double time : gs.timings) {
       timings.push_back(time);
     }
 
     // Step 2: Probe clusters in probe_list
     t.start();
-    auto visited = process_probes(query_point, q_query_point_var, probe_list);
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    size_t bytes_pp;
+    std::tie(visited, bytes_pp) = process_probes(query_point, q_query_point_var, probe_list);
+    bytes_accessed += bytes_pp;
     t_distances = t.stop();
     t.reset();
 
@@ -408,7 +421,7 @@ class IndexSVHIVF : public Index<metric> {
     }
     t_dedup = t.stop();
     timings.push_back(t_dedup);
-    return std::make_tuple(dist_cmps, timings);
+    return std::make_tuple(dist_cmps, bytes_accessed, timings);
   }
 
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
@@ -421,17 +434,20 @@ class IndexSVHIVF : public Index<metric> {
     size_t nprobes = search_params.nprobes;
     size_t num_rerank = search_params.num_rerank;
     size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
     size_t q = query.size();
     // Step 1: Search each query independently to obtain candidates
     t.start();
     auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q * num_rerank);
     auto in_dist_cmps = parlay::sequence<size_t>::uninitialized(q);
+    auto in_bytes_accessed = parlay::sequence<size_t>::uninitialized(q);
     auto timings_each = parlay::sequence<std::vector<double>>(q);
     parlay::parallel_for(0, q, [&](size_t i) {
-      std::tie(in_dist_cmps[i], timings_each[i]) =
+      std::tie(in_dist_cmps[i], in_bytes_accessed[i], timings_each[i]) =
           search_each(query[i], nprobes, num_rerank, &results[i * num_rerank]);
     });
     dist_cmps += parlay::reduce(in_dist_cmps);
+    bytes_accessed += parlay::reduce(in_bytes_accessed);
     timings.push_back(t.stop());
     t.reset();
 
@@ -466,7 +482,7 @@ class IndexSVHIVF : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      this->rerank(query, points, visited, num_rerank, final_results);
+      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
       dist_cmps += num_rerank;
     } else {
       parlay::parallel_for(0, final_results.size(),
@@ -475,16 +491,21 @@ class IndexSVHIVF : public Index<metric> {
     timings.push_back(t.stop());
     t.reset();
 
-    size_t cur = timings.size();
+    std::vector<double> stats;
+    stats.reserve(timings.size() + 1);
+    stats.push_back(static_cast<double>(dist_cmps));
+    stats.insert(stats.end(), timings.begin(), timings.end());
+
+    size_t cur = stats.size();
     for (size_t i = 0; i < timings_each[0].size(); i++) {
-      timings.push_back(0.0);
+      stats.push_back(0.0);
     }
     for (auto& v : timings_each) {
       for (size_t i = 0; i < v.size(); i++) {
-        timings[cur + i] += v[i];
+        stats[cur + i] += v[i];
       }
     }
-    return std::make_tuple(final_results, dist_cmps, timings);
+    return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
   void save(const std::string& filename) override {

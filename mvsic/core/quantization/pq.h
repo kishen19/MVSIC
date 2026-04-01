@@ -161,6 +161,7 @@ class Quantized_Point_Range {
 
   inline uint32_t size() const noexcept { return static_cast<uint32_t>(n_points); }
   inline uint32_t get_dims() const noexcept { return static_cast<uint32_t>(dim); }
+  inline size_t num_bytes_per_point() const noexcept { return static_cast<size_t>(num_blocks); }
 
   // Save/load encoded data only (codebooks live in PQ model).
   void save(std::ostream& out) const {

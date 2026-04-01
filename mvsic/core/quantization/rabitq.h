@@ -177,6 +177,7 @@ class Quantized_Point_Range {
 
   inline uint32_t size() const noexcept { return static_cast<uint32_t>(n); }
   inline uint32_t get_dims() const noexcept { return static_cast<uint32_t>(dim); }
+  inline size_t num_bytes_per_point() const noexcept { return bin_stride + ex_stride; }
 
   void save(std::ostream& out) const {
     out.write(reinterpret_cast<const char*>(&n), sizeof(n));

@@ -209,15 +209,16 @@ class Index {
   }
 
   // SVTraits defaults to Index::SVQT (parlayANN PointRange). Pass QuantTypes<metric, YourRange>
-  // explicitly when your single-vector storage uses a different range type (e.g. mvsic::PointRange).
+  // explicitly when your single-vector storage uses a different range type (e.g.
+  // mvsic::PointRange).
   template<typename SVTraits = SVQT, typename PR>
   void train_quantizer(const PR& points, typename SVTraits::QuantModel& Model) {
     switch (quantization_mode) {
       case QT::PQ: {
         Model.template emplace<typename SVTraits::PQ_Model>();
         std::get<typename SVTraits::PQ_Model>(Model).train(points, params.pq.block_size,
-                                                            params.pq.num_clusters_per_block,
-                                                            params.pq.num_points_per_cluster);
+                                                           params.pq.num_clusters_per_block,
+                                                           params.pq.num_points_per_cluster);
         break;
       }
       case QT::RaBitQ: {
@@ -283,7 +284,8 @@ class Index {
       case QT::PQ: return std::get<typename SVTraits::PQ_Model>(Model).quantize_query(query);
       case QT::RaBitQ: return std::get<typename SVTraits::RQ_Model>(Model).quantize_query(query);
       case QT::FastScan: return std::get<typename SVTraits::FS_Model>(Model).quantize_query(query);
-      case QT::TurboQuant: return std::get<typename SVTraits::TQ_Model>(Model).quantize_query(query);
+      case QT::TurboQuant:
+        return std::get<typename SVTraits::TQ_Model>(Model).quantize_query(query);
       case QT::None:
       default: return std::monostate{};
     }
@@ -319,6 +321,7 @@ class Index {
                          const Graph& G, uint32_t start_point, const QueryParams& QP) {
     parlay::sequence<std::pair<uint32_t, float>> visited;
     size_t dist_cmps;
+    size_t bytes_accessed = 0;
     switch (quantization_mode) {
       case QT::PQ: {
         auto [result, cmps] =
@@ -327,6 +330,8 @@ class Index {
                 std::get<typename SVQT::PQ_Range>(quantized_points), start_point, QP);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed +=
+            cmps * std::get<typename SVQT::PQ_Range>(quantized_points).num_bytes_per_point();
         break;
       }
       case QT::RaBitQ: {
@@ -336,6 +341,8 @@ class Index {
                 std::get<typename SVQT::RQ_Range>(quantized_points), start_point, QP);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed +=
+            cmps * std::get<typename SVQT::RQ_Range>(quantized_points).num_bytes_per_point();
         break;
       }
       case QT::FastScan: {
@@ -345,6 +352,8 @@ class Index {
                 std::get<typename SVQT::FS_Range>(quantized_points), start_point, QP);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed +=
+            cmps * std::get<typename SVQT::FS_Range>(quantized_points).num_bytes_per_point();
         break;
       }
       case QT::TurboQuant: {
@@ -354,6 +363,8 @@ class Index {
                 std::get<typename SVQT::TQ_Range>(quantized_points), start_point, QP);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed +=
+            cmps * std::get<typename SVQT::TQ_Range>(quantized_points).num_bytes_per_point();
         break;
       }
       case QT::None: {
@@ -361,11 +372,12 @@ class Index {
             parlayANN::beam_search<Point, Range, uint32_t>(query, G, points, start_point, QP);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed += cmps * (points.get_dims() * sizeof(float));
         break;
       }
       default: std::cerr << "Error: Unsupported Quantization Method!" << std::endl; abort();
     }
-    return std::make_pair(visited, dist_cmps);
+    return std::make_tuple(visited, dist_cmps, bytes_accessed);
   }
 
   // Only valid for MVIVF

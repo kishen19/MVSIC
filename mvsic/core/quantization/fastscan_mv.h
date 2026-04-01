@@ -300,6 +300,104 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
 }
 #endif
 
+// ------------------------------------------------------------------
+// Fused FastScan Kernel
+// ------------------------------------------------------------------
+template<bool Metric>
+inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_scales,
+                                      const float* q_min_dists, size_t num_fused_embeddings,
+                                      uint32_t num_blocks, const uint8_t* strip_data,
+                                      size_t strip_stride, size_t start_vec, size_t cloud_size,
+                                      float* out_dists) {
+
+  if (cloud_size == 0) {
+    for (size_t qi = 0; qi < num_fused_embeddings; ++qi)
+      out_dists[qi] = std::numeric_limits<float>::max();
+    return;
+  }
+
+  const size_t strip0 = start_vec / 64;
+  const int lane0 = static_cast<int>(start_vec % 64);
+  const size_t true_end = start_vec + cloud_size;
+  const size_t strip1 = true_end / 64;
+  const int lane1 = static_cast<int>(true_end % 64);
+  const bool fully_aligned_full = (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
+
+  auto strip_ptr = [&](size_t s) -> const uint8_t* { return strip_data + s * strip_stride; };
+
+  // CACHE BLOCKING: Process queries in blocks of 64.
+  // Keeps RunningMinV state (~4KB) and LUTS (~8KB) locked in L1 Cache.
+  const size_t Q_CHUNK = 64;
+  for (size_t q_start = 0; q_start < num_fused_embeddings; q_start += Q_CHUNK) {
+    size_t q_end = std::min(q_start + Q_CHUNK, num_fused_embeddings);
+    size_t q_count = q_end - q_start;
+
+    std::vector<internal::RunningMinV> combined(q_count, internal::RunningMinV::max());
+    std::vector<uint16_t> min_dist_raw(q_count, 0xFFFF);
+
+    if (strip0 == strip1) {
+      const int hi = (lane1 == 0) ? 64 : lane1;
+      for (size_t qi = 0; qi < q_count; ++qi) {
+        const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
+        min_dist_raw[qi] =
+            scan_64_chunk_min_masked(q_lut, strip_ptr(strip0), num_blocks, lane0, hi);
+      }
+    } else {
+      if (fully_aligned_full) {
+        // --- THE LOOP SWAP ---
+        // DB Strip is Outer Loop (Pinned in L1). Queries are Inner Loop.
+        for (size_t s = strip0; s < strip1; ++s) {
+          const uint8_t* s_ptr = strip_ptr(s);
+          __builtin_prefetch(strip_ptr(s + 1), 0, 3);  // Hide RAM latency
+          for (size_t qi = 0; qi < q_count; ++qi) {
+            const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
+            scan_64_running_min(q_lut, s_ptr, num_blocks, combined[qi]);
+          }
+        }
+        for (size_t qi = 0; qi < q_count; ++qi) {
+          min_dist_raw[qi] = reduce_running_min(combined[qi]);
+        }
+      } else {
+        // Unaligned Head
+        for (size_t qi = 0; qi < q_count; ++qi) {
+          const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
+          min_dist_raw[qi] =
+              scan_64_chunk_min_masked(q_lut, strip_ptr(strip0), num_blocks, lane0, 64);
+        }
+        // Main Body
+        for (size_t s = strip0 + 1; s < strip1; ++s) {
+          const uint8_t* s_ptr = strip_ptr(s);
+          __builtin_prefetch(strip_ptr(s + 1), 0, 3);
+          for (size_t qi = 0; qi < q_count; ++qi) {
+            const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
+            scan_64_running_min(q_lut, s_ptr, num_blocks, combined[qi]);
+          }
+        }
+        for (size_t qi = 0; qi < q_count; ++qi) {
+          uint16_t d_full = reduce_running_min(combined[qi]);
+          if (d_full < min_dist_raw[qi]) min_dist_raw[qi] = d_full;
+        }
+        // Unaligned Tail
+        if (lane1 != 0) {
+          for (size_t qi = 0; qi < q_count; ++qi) {
+            const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
+            uint16_t tail =
+                scan_64_chunk_min_masked(q_lut, strip_ptr(strip1), num_blocks, 0, lane1);
+            if (tail < min_dist_raw[qi]) min_dist_raw[qi] = tail;
+          }
+        }
+      }
+    }
+
+    // Write back final float distances
+    for (size_t qi = 0; qi < q_count; ++qi) {
+      size_t global_qi = q_start + qi;
+      out_dists[global_qi] = (q_min_dists[global_qi] * static_cast<float>(num_blocks)) +
+                             (static_cast<float>(min_dist_raw[qi]) * q_scales[global_qi]);
+    }
+  }
+}
+
 }  // namespace internal
 
 // =========================================================================
@@ -374,7 +472,9 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
-    return {this->distance(cloud), num_queries};
+    const size_t cloud_size = cloud.end_idx - cloud.start_idx;
+    const size_t bytes_per_vec = (static_cast<size_t>(cloud.db->num_blocks) + 1) / 2;
+    return {this->distance(cloud), cloud_size * bytes_per_vec};
   }
 
   static constexpr bool is_metric() { return Metric; }
@@ -394,6 +494,7 @@ class Quantized_Point_Cloud_Set {
   parlay::sequence<uint32_t> ids;
 
   Quantized_Point_Cloud_Set() = default;
+  static constexpr bool is_metric() noexcept { return Metric; }
 
   Quantized_Point_Cloud<Metric> operator[](size_t i) const {
     const size_t n_clouds = (offsets.size() > 0) ? offsets.size() - 1 : 0;
@@ -409,6 +510,7 @@ class Quantized_Point_Cloud_Set {
   }
 
   inline uint32_t get_id(size_t i) const noexcept { return (ids.size() > 0) ? ids[i] : i; }
+  inline size_t num_bytes() const noexcept { return packed_codes.size() * sizeof(uint8_t); }
 
   void distances_all(const Quantized_Query_Point_Cloud<Metric>& q,
                      std::pair<uint32_t, float>* results) const {
@@ -785,6 +887,102 @@ class Model {
       in.read(reinterpret_cast<char*>(codebooks[b].data()), rs * cs * sizeof(float));
       codebook_norms[b] = codebooks[b].rowwise().squaredNorm();
     }
+  }
+};
+
+// ------------------------------------------------------------------
+// ManyToMany Batch Operator (FastScan)
+// ------------------------------------------------------------------
+template<typename PCS>
+class ManyToMany {
+ public:
+  static void TopKIntoUninitialized(
+      const std::vector<const Quantized_Query_Point_Cloud<PCS::is_metric()>*>& A, const PCS& B,
+      uint32_t k, std::pair<uint32_t, float>* results) {
+
+    const size_t num_q_clouds = A.size();
+    const size_t num_db_clouds = (B.offsets.size() > 0) ? B.offsets.size() - 1 : 0;
+    if (num_q_clouds == 0 || num_db_clouds == 0) return;
+
+    const size_t Q_BLOCK = 16;
+
+    parlay::parallel_for(0, (num_q_clouds + Q_BLOCK - 1) / Q_BLOCK, [&](size_t qb) {
+      size_t q_start = qb * Q_BLOCK;
+      size_t q_end = std::min(q_start + Q_BLOCK, num_q_clouds);
+      size_t q_count = q_end - q_start;
+
+      std::vector<std::priority_queue<std::pair<float, uint32_t>>> heaps(q_count);
+
+      // --- 1. FUSE LUTS ---
+      size_t total_embeddings = 0;
+      std::vector<size_t> emb_offsets(q_count + 1, 0);
+      for (size_t i = 0; i < q_count; ++i) {
+        total_embeddings += A[q_start + i]->num_queries;
+        emb_offsets[i + 1] = total_embeddings;
+      }
+
+      if (total_embeddings == 0) return;
+
+      uint32_t num_blocks = B.num_blocks;
+      size_t lut_bytes = num_blocks * 16;
+      std::vector<uint8_t> fused_luts(total_embeddings * lut_bytes);
+      std::vector<float> fused_scales(total_embeddings);
+      std::vector<float> fused_mins(total_embeddings);
+
+      for (size_t i = 0; i < q_count; ++i) {
+        const auto* qc = A[q_start + i];
+        size_t off = emb_offsets[i];
+        size_t count = qc->num_queries;
+        std::memcpy(fused_luts.data() + off * lut_bytes, qc->flat_int_luts.data(),
+                    count * lut_bytes);
+        std::memcpy(fused_scales.data() + off, qc->scales.data(), count * sizeof(float));
+        std::memcpy(fused_mins.data() + off, qc->min_dists.data(), count * sizeof(float));
+      }
+
+      std::vector<float> emb_min_dists(total_embeddings);
+
+      // --- 2. DATABASE PROBING ---
+      for (size_t c = 0; c < num_db_clouds; ++c) {
+        const size_t start_vec = B.offsets[c];
+        const size_t cloud_size = B.offsets[c + 1] - start_vec;
+        if (cloud_size == 0) continue;
+
+        // Stream all fused LUTs against the packed database strips
+        internal::fastscan_mv_chamfer_fused<PCS::is_metric()>(
+            fused_luts.data(), fused_scales.data(), fused_mins.data(), total_embeddings, num_blocks,
+            B.packed_codes.data(), B.num_blocks * 32, start_vec, cloud_size, emb_min_dists.data());
+
+        for (size_t i = 0; i < q_count; ++i) {
+          float dist_sum = 0.0f;
+          size_t e_start = emb_offsets[i];
+          size_t e_count = emb_offsets[i + 1] - e_start;
+          for (size_t e = 0; e < e_count; ++e)
+            dist_sum += emb_min_dists[e_start + e];
+          float chamfer_dist = dist_sum / static_cast<float>(e_count);
+
+          if (heaps[i].size() < k)
+            heaps[i].push({chamfer_dist, B.get_id(c)});
+          else if (chamfer_dist < heaps[i].top().first) {
+            heaps[i].pop();
+            heaps[i].push({chamfer_dist, B.get_id(c)});
+          }
+        }
+      }
+
+      // --- 3. DRAIN HEAPS ---
+      for (size_t i = 0; i < q_count; ++i) {
+        size_t count = heaps[i].size();
+        size_t global_idx = q_start + i;
+        for (size_t ki = 0; ki < count; ++ki) {
+          results[global_idx * k + (count - 1 - ki)] = {heaps[i].top().second,
+                                                        heaps[i].top().first};
+          heaps[i].pop();
+        }
+        for (size_t ki = count; ki < k; ++ki) {
+          results[global_idx * k + ki] = {0, std::numeric_limits<float>::max()};
+        }
+      }
+    });
   }
 };
 

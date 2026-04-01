@@ -3,7 +3,9 @@
 #include <fstream>
 #include "parlay/primitives.h"
 #include "mvsic/core/utils/mmap.h"
+#include "mvsic/core/utils/util.h"
 #include "mvsic/core/distance_measures/one_to_many.h"
+#include "mvsic/core/distance_measures/many_to_many.h"
 
 namespace mvsic {
 
@@ -45,6 +47,8 @@ struct PointCloudSet {
   inline size_t total_size() const noexcept { return offsets[n] / dims; }
   // Returns average number of embeddings per point cloud
   inline float average_size() const noexcept { return static_cast<float>(offsets[n]) / (n * dims); }
+  // Number of bytes
+  inline size_t num_bytes() const noexcept { return offsets[n] * sizeof(float); }
   // Returns embedding dimension
   inline uint32_t get_dims() const noexcept { return dims; }
   // Returns number of embeddings of pointcloud i
@@ -101,7 +105,7 @@ struct PointCloudSet {
     return std::make_pair(results, cmps);
   }
 
-  // Distances to only a subset (possible non-contiguous)
+  // Distances to only a subset (possibly non-contiguous)
   template<typename Seq>
   inline size_t distances_subset(const ChPoint& query, const Seq& indices,
                                  std::pair<uint32_t, float>* results) const {
@@ -119,6 +123,29 @@ struct PointCloudSet {
     auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(indices.size());
     auto cmps = distances_subset(query, indices, results.begin());
     return std::make_pair(results, cmps);
+  }
+
+  // Return top-k distances for a batch of query point clouds
+  inline parlay::sequence<std::pair<uint32_t, float>> distances(
+      const PointCloudSet<ChPoint>& Queries, size_t k) const {
+    k = std::min<size_t>(k, n);
+    size_t num_queries = Queries.size();
+    auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_queries * k);
+    if (num_queries >= 64) {  // High-throughput path: Use the blocked ManyToMany kernel
+      mvsic::ManyToMany<PointCloudSet<ChPoint>>::TopKIntoUninitialized(Queries, *this, k,
+                                                                       results.data());
+    } else {  // Low-latency path: Parallel loop over queries
+      parlay::parallel_for(0, num_queries, [&](size_t i) {
+        ChPoint q_i = Queries[i];
+        auto all_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(n);
+        this->distances(q_i, all_dists.data());
+        if (k < n) {
+          mvsic::sort_inplace_kv(all_dists);
+        }
+        parlay::parallel_for(0, k, [&](size_t j) { results[i * k + j] = all_dists[j]; });
+      });
+    }
+    return results;
   }
 
   // Returns non-owning sequence of ChPoint type objects of the point

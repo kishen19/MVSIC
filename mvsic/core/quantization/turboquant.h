@@ -235,6 +235,10 @@ class Quantized_Point_Range {
 
   Quantized_Point_Range() = default;
 
+  inline size_t num_bytes_per_point() const noexcept {
+    return num_bytes_per_datapoint + sizeof(float) + (Metric ? sizeof(float) : 0);
+  }
+
   Quantized_Point<Metric> operator[](size_t i) const {
     const uint8_t* ptr = packed_codes.data() + i * num_bytes_per_datapoint;
     float sqn = Metric ? unquantized_squared_norms[i] : 0.0f;

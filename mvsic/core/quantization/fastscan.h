@@ -140,6 +140,8 @@ class Quantized_Point_Range {
 
   Quantized_Point_Range() = default;
 
+  inline size_t num_bytes_per_point() const noexcept { return (num_blocks + 1) / 2; }
+
   Quantized_Point<Metric> operator[](size_t i) const {
     const size_t strip_idx = i / 64;
     const size_t lane_idx = i % 64;

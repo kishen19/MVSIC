@@ -2,6 +2,7 @@
 
 #include <variant>
 #include <fstream>
+#include <cstdint>
 
 #include "mvsic/core/index.h"
 
@@ -189,8 +190,9 @@ class IndexVamana : public Index<metric> {
         size_t index = shuffled_inserts[i];
         SearchParams search_params = SearchParams::vamana((long)0, params.L, (double)0.0);
         parlay::sequence<pid> visited =
-            (vamana::beam_search<uint32_t>(points[index], G, points, start_point, search_params))
-                .first.second;
+            std::get<0>(
+                mvsic::vamana::beam_search(points[index], G, points, start_point, search_params))
+                .second;
         new_out_[i - floor] = robustPrune(index, visited, points, alpha).first;
       });
       t_beam.stop();
@@ -269,14 +271,18 @@ class IndexVamana : public Index<metric> {
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
                     const SearchParams& search_params) override {
     parlay::internal::timer t;
-    std::vector<double> timings;
     size_t k = search_params.k;
+    size_t bytes_accessed = 0;
+
     size_t dist_cmps = 0;
+    double t_quantize = 0.0;
+    double t_search = 0.0;
+    double t_rerank = 0.0;
 
     // Step 1: Quantize Query
     t.start();
     QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
-    timings.push_back(t.stop());
+    t_quantize = t.stop();
     t.reset();
 
     // Step 2: Run beam search
@@ -287,43 +293,54 @@ class IndexVamana : public Index<metric> {
       case QT::PQ: {
         auto& q = std::get<typename MVQT::PQ_Query>(q_query_var);
         auto& d = std::get<typename MVQT::PQ_Set>(quantized_points);
-        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        auto [result, cmps, bytes_acc] =
+            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed = bytes_acc;
         break;
       }
       case QT::RaBitQ: {
         auto& q = std::get<typename MVQT::RQ_Query>(q_query_var);
         auto& d = std::get<typename MVQT::RQ_Set>(quantized_points);
-        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        auto [result, cmps, bytes_acc] =
+            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed = bytes_acc;
         break;
       }
       case QT::FastScan: {
         auto& q = std::get<typename MVQT::FS_Query>(q_query_var);
         auto& d = std::get<typename MVQT::FS_Set>(quantized_points);
-        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        auto [result, cmps, bytes_acc] =
+            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed = bytes_acc;
         break;
       }
       case QT::TurboQuant: {
         auto& q = std::get<typename MVQT::TQ_Query>(q_query_var);
         auto& d = std::get<typename MVQT::TQ_Set>(quantized_points);
-        auto [result, cmps] = vamana::beam_search<uint32_t>(q, G, d, start_point, search_params);
+        auto [result, cmps, bytes_acc] =
+            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed = bytes_acc;
         break;
       }
       case QT::None: {
-        auto [result, cmps] = vamana::beam_search(query, G, points, start_point, search_params);
+        auto [result, cmps, bytes_acc] =
+            mvsic::vamana::beam_search(query, G, points, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
+        bytes_accessed = bytes_acc;
+        break;
       }
       default: break;
     }
-    timings.push_back(t.stop());
+    t_search = t.stop();
     t.reset();
 
     // Step 3: Re-ranking
@@ -332,16 +349,21 @@ class IndexVamana : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      this->rerank(query, points, visited, num_rerank, final_results);
-      dist_cmps += num_rerank;
+      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    timings.push_back(t.stop());
+    t_rerank = t.stop();
     t.reset();
 
-    return std::make_tuple(final_results, dist_cmps, timings);
+    std::vector<double> stats;
+    stats.push_back(static_cast<double>(dist_cmps));
+    stats.push_back(t_quantize);
+    stats.push_back(t_search);
+    stats.push_back(t_rerank);
+
+    return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
   // Write the index to a file in disk

@@ -109,7 +109,9 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
-    return {this->distance(cloud), num_queries};
+    const size_t cloud_size = cloud.end_idx - cloud.start_idx;
+    const size_t bytes = cloud_size * static_cast<size_t>(cloud.db->num_blocks) * sizeof(uint8_t);
+    return {this->distance(cloud), bytes};
   }
 
   static constexpr bool is_metric() { return Metric; }
@@ -137,6 +139,7 @@ class Quantized_Point_Cloud_Set {
   }
 
   inline uint32_t get_id(size_t i) const noexcept { return (ids.size() > 0) ? ids[i] : i; }
+  inline size_t num_bytes() const noexcept { return packed_codes.size() * sizeof(uint8_t); }
 
   void distances_all(const Quantized_Query_Point_Cloud<Metric>& q,
                      std::pair<uint32_t, float>* results) const {

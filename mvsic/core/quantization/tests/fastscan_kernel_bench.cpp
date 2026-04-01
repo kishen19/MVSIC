@@ -12,6 +12,7 @@ constexpr uint32_t K = 16;
 // ============================================================================
 // Kernel 1: Original AVX-512 Striped Kernel (1-Block per Iteration)
 // ============================================================================
+#ifdef __AVX512F__
 void scan_original_avx512(const uint8_t* codes, const uint8_t* lut, uint16_t* results) {
   const size_t strip_stride = NUM_BLOCKS * 32;
   const size_t n_full_strips = NUM_POINTS / 64;
@@ -44,10 +45,12 @@ void scan_original_avx512(const uint8_t* codes, const uint8_t* lut, uint16_t* re
     _mm512_storeu_si512(reinterpret_cast<__m512i*>(&results[s * 64 + 32]), acc_odd);
   }
 }
+#endif
 
 // ============================================================================
 // Kernel 2: VBMI 2-Block (Unrolled 256-bit registers)
 // ============================================================================
+#ifdef __AVX512VBMI__
 void scan_vbmi_2block(const uint8_t* codes, const uint8_t* lut, uint16_t* results) {
   const size_t strip_stride = (NUM_BLOCKS / 2) * 64;
   const size_t n_full_strips = NUM_POINTS / 64;
@@ -96,10 +99,11 @@ void scan_vbmi_2block(const uint8_t* codes, const uint8_t* lut, uint16_t* result
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(&results[s * 64 + 48]), acc_odd2);
   }
 }
-
+#endif
 // ============================================================================
 // Kernel 3: VBMI 512-bit (Native 512-bit, 2-Block)
 // ============================================================================
+#ifdef __AVX512VBMI__
 void scan_vbmi_512(const uint8_t* codes, const uint8_t* lut, uint16_t* results) {
   const size_t strip_stride = (NUM_BLOCKS / 2) * 64;
   const size_t n_full_strips = NUM_POINTS / 64;
@@ -136,10 +140,11 @@ void scan_vbmi_512(const uint8_t* codes, const uint8_t* lut, uint16_t* results) 
     _mm512_storeu_si512(reinterpret_cast<__m512i*>(&results[s * 64 + 32]), acc_odd);
   }
 }
-
+#endif
 // ============================================================================
 // Kernel 4: Zero LUT Load (Fully Unrolled 512-bit VBMI)
 // ============================================================================
+#ifdef __AVX512VBMI__
 void scan_vbmi_512_unrolled(const uint8_t* codes, const uint8_t* lut, uint16_t* results) {
   const size_t strip_stride = (NUM_BLOCKS / 2) * 64;
   const size_t n_full_strips = NUM_POINTS / 64;
@@ -179,10 +184,12 @@ void scan_vbmi_512_unrolled(const uint8_t* codes, const uint8_t* lut, uint16_t* 
     _mm512_storeu_si512(reinterpret_cast<__m512i*>(&results[s * 64 + 32]), acc_odd);
   }
 }
+#endif
 
 // ============================================================================
 // Kernel 5: AVX512-VNNI (4-Block, 32-bit Native Accumulation)
 // ============================================================================
+#ifdef __AVX512VNNI__
 void scan_vnni_32bit(const uint8_t* codes, const uint8_t* lut, uint32_t* results_32) {
   const size_t strip_stride = (NUM_BLOCKS / 4) * 64;
   const size_t n_full_strips = NUM_POINTS / 32;
@@ -219,10 +226,12 @@ void scan_vnni_32bit(const uint8_t* codes, const uint8_t* lut, uint32_t* results
     _mm512_storeu_si512(reinterpret_cast<__m512i*>(&results_32[s * 32 + 16]), acc_odd);
   }
 }
+#endif
 
 // ============================================================================
 // Kernel 6: Zero LUT Load (Fully Unrolled VNNI 32-bit)
 // ============================================================================
+#ifdef __AVX512VNNI__
 void scan_vnni_32bit_unrolled(const uint8_t* codes, const uint8_t* lut, uint32_t* results_32) {
   const size_t strip_stride = (NUM_BLOCKS / 4) * 64;
   const size_t n_full_strips = NUM_POINTS / 32;
@@ -265,10 +274,11 @@ void scan_vnni_32bit_unrolled(const uint8_t* codes, const uint8_t* lut, uint32_t
     _mm512_storeu_si512(reinterpret_cast<__m512i*>(&results_32[s * 32 + 16]), acc_odd);
   }
 }
-
+#endif
 // ============================================================================
 // Kernel 7: The Final Boss (4x Accumulator ILP Unrolled VNNI)
 // ============================================================================
+#ifdef __AVX512VNNI__
 void scan_vnni_32bit_unrolled_4x(const uint8_t* codes, const uint8_t* lut, uint32_t* results_32) {
   // We process 64 points per loop -> 128 bytes of codes per block-chunk
   const size_t strip_stride = (NUM_BLOCKS / 4) * 128;
@@ -325,7 +335,7 @@ void scan_vnni_32bit_unrolled_4x(const uint8_t* codes, const uint8_t* lut, uint3
     _mm512_storeu_si512(reinterpret_cast<__m512i*>(&results_32[s * 64 + 48]), acc_odd2);
   }
 }
-
+#endif
 // ============================================================================
 // Google Benchmark Harness
 // ============================================================================
@@ -354,6 +364,7 @@ class FastScanFixture : public benchmark::Fixture {
   }
 };
 
+#ifdef __AVX512F__
 BENCHMARK_F(FastScanFixture, BM_Original_AVX512)(benchmark::State& state) {
   for (auto _ : state) {
     scan_original_avx512(codes.data(), lut.data(), results_16.data());
@@ -363,7 +374,8 @@ BENCHMARK_F(FastScanFixture, BM_Original_AVX512)(benchmark::State& state) {
   state.SetBytesProcessed(state.iterations() * codes.size());
   state.SetItemsProcessed(state.iterations() * NUM_POINTS);
 }
-
+#endif
+#ifdef __AVX512VBMI__
 BENCHMARK_F(FastScanFixture, BM_VBMI_2Block)(benchmark::State& state) {
   for (auto _ : state) {
     scan_vbmi_2block(codes.data(), lut.data(), results_16.data());
@@ -393,7 +405,8 @@ BENCHMARK_F(FastScanFixture, BM_VBMI_512_Unrolled)(benchmark::State& state) {
   state.SetBytesProcessed(state.iterations() * codes.size());
   state.SetItemsProcessed(state.iterations() * NUM_POINTS);
 }
-
+#endif
+#ifdef __AVX512VNNI__
 BENCHMARK_F(FastScanFixture, BM_VNNI_32Bit)(benchmark::State& state) {
   for (auto _ : state) {
     scan_vnni_32bit(codes.data(), lut.data(), results_32.data());
@@ -423,5 +436,5 @@ BENCHMARK_F(FastScanFixture, BM_VNNI_32Bit_Unrolled_4x)(benchmark::State& state)
   state.SetBytesProcessed(state.iterations() * codes.size());
   state.SetItemsProcessed(state.iterations() * NUM_POINTS);
 }
-
+#endif
 BENCHMARK_MAIN();
