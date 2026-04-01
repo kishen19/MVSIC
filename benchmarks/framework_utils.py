@@ -48,6 +48,9 @@ class FastPlaidWrapper:
         k = params['k']
         search_args = params.copy()
         search_args['top_k'] = search_args.pop('k')
+        # Benchmark configs use num_rerank; FastPlaid expects n_full_scores.
+        if 'num_rerank' in search_args and 'n_full_scores' not in search_args:
+            search_args['n_full_scores'] = search_args.pop('num_rerank')
 
         # 1. QPS_seq
         # start_time = time.time()
@@ -61,6 +64,7 @@ class FastPlaidWrapper:
         start_time = time.time()
         neighbors = self.index.search(queries_embeddings=queries, **search_args)
         end_time = time.time()
+        batch_search_time = end_time - start_time
         qps_par = len(queries) / (end_time - start_time) if (end_time - start_time) > 0 else 0
 
         # 3. Compute scores
@@ -70,10 +74,10 @@ class FastPlaidWrapper:
             k=k,
             recall_1_k=min(1.0, recall_1_k),
             recall_k_k=min(1.0, recall_k_k),
-            QPS_seq=0.0,
+            QPS_seq=None,
             QPS_par=qps_par,
             avg_cmps=0.0,
-            avg_timings=[0.0],
+            avg_timings=[batch_search_time],
         )
 
     def save(self, path: str):

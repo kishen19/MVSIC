@@ -3,33 +3,81 @@
 mvivf:
   variable_param: nprobes
   class: "MVIVF" 
-  labels: ["search_cmps", "t_search_dists", "t_search_beam", "t_search_rest", "t_quant", "t_leaf_dists", "t_leaf_rest", "t_rerank"]
+  labels:
+    [
+      "search_cmps",
+      "probe_cmps",
+      "t_search_dists",
+      "t_search_beam",
+      "t_search_rest",
+      "t_quant",
+      "t_leaf_dists",
+      "t_leaf_rest",
+      "t_rerank",
+    ]
 
 mvivf_flat:
   variable_param: nprobes
   class: "MVIVFFlat" 
+  labels: ["search_L", "search_cmps", "t_search", "t_leaf_dists", "t_leaf_rest", "t_rerank"]
 
 mvivf_spill:
   variable_param: nprobes
   class: "MVIVFSpill" 
-  labels: ["search_cmps", "t_search_dists", "t_search_beam", "t_search_rest", "t_quant", "t_leaf_dists", "t_leaf_dedup", "t_leaf_rest", "t_rerank"]
+  labels:
+    [
+      "search_cmps",
+      "probe_cmps",
+      "t_search_dists",
+      "t_search_beam",
+      "t_search_rest",
+      "t_quant",
+      "t_leaf_dists",
+      "t_leaf_dedup",
+      "t_leaf_rest",
+      "t_rerank",
+    ]
 
 muvera:
   variable_param: L
   class: "MUVERA"
+  labels: ["search_cmps", "t_fde", "t_quant", "t_search", "t_rerank"]
 
 mpool:
   variable_param: L
   class: "MPool"
+  labels: ["t_mean_pool", "t_quant", "t_search", "t_rerank"]
 
 vamana:
   variable_param: L
   class: "Vamana"
+  labels: ["search_cmps", "t_quant", "t_search", "t_rerank"]
 
 svh_ivf:
   variable_param: nprobes
   class: "SVHIVF"
+  labels:
+    [
+      "search_cmps",
+      "t_search_each_total",
+      "t_merge_dedup",
+      "t_rerank",
+      "search_each_cmps",
+      "t_each_search_dists",
+      "t_each_search_beam",
+      "t_each_search_rest",
+      "t_each_quant",
+      "t_each_leaf_dists",
+      "t_each_leaf_rest",
+      "t_each_dedup",
+    ]
+
+svh_graph:
+  variable_param: L
+  class: "SVHGraph"
+  labels: ["search_cmps", "t_graph_search", "t_aggregate", "t_rerank"]
 
 fastplaid:
   variable_param: n_ivf_probe
   class: "FastPlaid"
+  labels: ["t_batch_search"]

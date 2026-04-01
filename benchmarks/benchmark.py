@@ -485,9 +485,11 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                                 params_list.sort(key=lambda p: p.get(variable_param_name, 0))
 
                             all_results_for_variant = []
-                            all_params_for_variant = []
 
                             for params in params_list:
+                                skip_computation = False
+                                existing_recall_k_k = None
+
                                 # Check if this parameter combination already exists
                                 if existing_results_df is not None:
                                     # Build a boolean mask for matching parameters
@@ -501,87 +503,104 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                                                 mask &= existing_results_df[key] == val
                                     if mask.any():
                                         print(f"      Skipping existing params: {params}", flush=True)
-                                        continue
+                                        skip_computation = True
+                                        existing_recall_k_k = existing_results_df[mask].iloc[0]['recall_k_k']
 
-                                if index_name == 'fastplaid':
-                                    with suppress_stdout_stderr():
-                                        result = index.compute_stats_extended(queries, gt, params)
-                                    all_results_for_variant.append(result)
-                                    all_params_for_variant.append(params)
+                                if skip_computation:
+                                    class MockResult:
+                                        def __init__(self, recall_k_k):
+                                            self.recall_k_k = recall_k_k
+                                    current_result = MockResult(existing_recall_k_k)
                                 else:
-                                    search_params_func = getattr(mvsic.SearchParams, index_name)
-                                    search_params_obj = search_params_func(**params)
-                                    with suppress_stdout_stderr():
-                                        if num_threads:
-                                            result = mvsic.compute_stats_extended_p_threaded(
-                                                index, points, queries, gt, [search_params_obj], num_threads
+                                    if index_name == 'fastplaid':
+                                        with suppress_stdout_stderr():
+                                            result = index.compute_stats_extended(queries, gt, params)
+                                        current_result = result
+                                    else:
+                                        search_params_func = getattr(mvsic.SearchParams, index_name)
+                                        search_params_obj = search_params_func(**params)
+                                        with suppress_stdout_stderr():
+                                            if num_threads:
+                                                result = mvsic.compute_stats_extended_p_threaded(
+                                                    index, points, queries, gt, [search_params_obj], num_threads
+                                                )
+                                            else:
+                                                result = mvsic.compute_stats_extended(index, points, queries, gt, [search_params_obj])
+                                            result_ = StatsExtended(
+                                                k=params['k'],
+                                                recall_1_k=min(1.0, result[0].recall_1_k),
+                                                recall_k_k=min(1.0, result[0].recall_k_k),
+                                                QPS_seq=result[0].QPS_seq,
+                                                QPS_par=result[0].QPS_par,
+                                                avg_cmps=result[0].avg_cmps,
+                                                avg_timings=result[0].avg_timings,
                                             )
-                                        else:
-                                            result = mvsic.compute_stats_extended(index, points, queries, gt, [search_params_obj])
-                                        result_ = StatsExtended(
-                                            k=params['k'],
-                                            recall_1_k=min(1.0, result[0].recall_1_k),
-                                            recall_k_k=min(1.0, result[0].recall_k_k),
-                                            QPS_seq=result[0].QPS_seq,
-                                            QPS_par=result[0].QPS_par,
-                                            avg_cmps=result[0].avg_cmps,
-                                            avg_timings=result[0].avg_timings,
-                                        )
-                                    all_results_for_variant.append(result_)
-                                    all_params_for_variant.append(params)
+                                        current_result = result_
+
+                                    print(
+                                        "QPS:",
+                                        current_result.QPS_seq,
+                                        "QPS_par:",
+                                        current_result.QPS_par,
+                                        f"Recall 1@{params['k']}:",
+                                        current_result.recall_1_k,
+                                        f"Recall {params['k']}@{params['k']}",
+                                        current_result.recall_k_k,
+                                        flush=True,
+                                    )
+
+                                    # Update CSV row by row and keep sorted
+                                    df = pd.DataFrame([current_result])
+                                    params_df = pd.DataFrame([params])
+                                    single_df = pd.concat([df, params_df], axis=1)
+                                    single_df = single_df.loc[:, ~single_df.columns.duplicated()]
+                                    single_df = _expand_method_timings(single_df, method_info)
+                                    single_df = _reorder_result_columns(single_df, method_info)
+                                    single_df = single_df.applymap(_format_scalar_for_csv)
+
+                                    if os.path.exists(results_path):
+                                        try:
+                                            existing_df = pd.read_csv(results_path)
+                                            updated_df = pd.concat([existing_df, single_df], ignore_index=True)
+                                        except pd.errors.EmptyDataError:
+                                            updated_df = single_df
+                                    else:
+                                        updated_df = single_df
+
+                                    if variable_param_name and variable_param_name in updated_df.columns:
+                                        updated_df = updated_df.sort_values(by=variable_param_name)
+
+                                    print(f"      Saving updated results to {results_path}", flush=True)
+                                    updated_df.to_csv(results_path, index=False)
+
+                                all_results_for_variant.append(current_result)
 
                                 # Check for early exit
-                                if all_results_for_variant and all_results_for_variant[-1].recall_k_k >= 1.0:
+                                if current_result.recall_k_k >= 1.0:
                                     print(
                                         f"      Recall@k reached 1.0. Stopping sweep for this variant.",
                                         flush=True,
                                     )
                                     break
                                 elif (
-                                    all_results_for_variant
-                                    and len(all_results_for_variant) > 3
-                                    and all_results_for_variant[-1].recall_k_k == all_results_for_variant[-2].recall_k_k
-                                    and all_results_for_variant[-1].recall_k_k == all_results_for_variant[-3].recall_k_k
+                                    len(all_results_for_variant) > 3
+                                    and current_result.recall_k_k == all_results_for_variant[-2].recall_k_k
+                                    and current_result.recall_k_k == all_results_for_variant[-3].recall_k_k
                                 ):
                                     print(
                                         f"      Recall@k did not improve. Stopping sweep for this variant.",
                                         flush=True,
                                     )
                                     break
-                                print(
-                                    "QPS:",
-                                    all_results_for_variant[-1].QPS_seq,
-                                    "QPS_par:",
-                                    all_results_for_variant[-1].QPS_par,
-                                    f"Recall 1@{params['k']}:",
-                                    all_results_for_variant[-1].recall_1_k,
-                                    f"Recall {params['k']}@{params['k']}",
-                                    all_results_for_variant[-1].recall_k_k,
-                                    flush=True,
-                                )
-
-                            if not all_results_for_variant:
-                                continue
-
-                            df = pd.DataFrame(all_results_for_variant)
-                            params_df = pd.DataFrame(all_params_for_variant)
-                            # Reset index to ensure correct alignment
-                            params_df.reset_index(drop=True, inplace=True)
-                            df.reset_index(drop=True, inplace=True)
-                            full_df = pd.concat([df, params_df], axis=1)
-
-                            # Method-specific expansion and column ordering.
-                            full_df = _expand_method_timings(full_df, method_info)
-                            full_df = _reorder_result_columns(full_df, method_info)
-
-                            # Pretty formatting: <=3 decimals; whole numbers as ints.
-                            full_df = full_df.applymap(_format_scalar_for_csv)
-
-                            mode = 'a' if os.path.exists(results_path) else 'w'
-                            header = not (os.path.exists(results_path) and os.path.getsize(results_path) > 0)
-
-                            print(f"      Saving results to {results_path}", flush=True)
-                            full_df.to_csv(results_path, mode=mode, header=header, index=False)
+                                elif (
+                                    len(all_results_for_variant) > 1
+                                    and current_result.recall_k_k < all_results_for_variant[-2].recall_k_k
+                                ):
+                                    print(
+                                        f"      Recall@k dropped. Stopping sweep for this variant.",
+                                        flush=True,
+                                    )
+                                    break
 
 
 def main():
