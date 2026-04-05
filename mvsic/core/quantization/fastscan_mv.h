@@ -23,7 +23,126 @@ namespace fastscan_mv {
 // =========================================================================
 namespace internal {
 
-#ifdef __AVX512F__
+#if defined(__AVX512VBMI__)
+// =========================================================================
+// 1. AVX512-VBMI (2-Block Layout, 512-bit Registers)
+// =========================================================================
+struct RunningMinV {
+  __m512i v;
+  void set_max() { v = _mm512_set1_epi16(0xFFFF); }
+  static RunningMinV max() {
+    RunningMinV r;
+    r.v = _mm512_set1_epi16(0xFFFF);
+    return r;
+  }
+};
+
+inline uint16_t hmin_512_epu16(__m512i v) {
+  v = _mm512_min_epu16(v, _mm512_shuffle_i32x4(v, v, _MM_SHUFFLE(1, 0, 3, 2)));
+  v = _mm512_min_epu16(v, _mm512_shuffle_i32x4(v, v, _MM_SHUFFLE(0, 0, 1, 1)));
+  __m128i v128 = _mm512_castsi512_si128(v);
+  v128 = _mm_min_epu16(v128, _mm_srli_si128(v128, 8));
+  v128 = _mm_min_epu16(v128, _mm_srli_si128(v128, 4));
+  v128 = _mm_min_epu16(v128, _mm_srli_si128(v128, 2));
+  return static_cast<uint16_t>(_mm_extract_epi16(v128, 0));
+}
+
+inline void scan_64_running_min(const uint8_t* lut, const uint8_t* codes_ptr, uint32_t num_blocks,
+                                RunningMinV& current_min_v) {
+  __m512i acc_even = _mm512_setzero_si512();
+  __m512i acc_odd = _mm512_setzero_si512();
+  const __m512i low_mask = _mm512_set1_epi8(0x0F);
+  const __m512i offset_mask = _mm512_set1_epi16(0x1000);
+  const __m512i ones = _mm512_set1_epi8(1);
+
+  // Step by 2 blocks!
+  for (uint32_t b = 0; b < num_blocks; b += 2) {
+    const __m512i packed = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+    codes_ptr += 64;
+
+    __m512i codes_even = _mm512_or_si512(_mm512_and_si512(packed, low_mask), offset_mask);
+    __m512i codes_odd =
+        _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi16(packed, 4), low_mask), offset_mask);
+
+    // Load 32 bytes of LUT (Covers Block B and Block B+1 perfectly)
+    const __m256i lut256 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&lut[b * 16]));
+    const __m512i lut512 = _mm512_castsi256_si512(lut256);
+
+    __m512i scores_even_u8 = _mm512_permutexvar_epi8(codes_even, lut512);
+    __m512i scores_odd_u8 = _mm512_permutexvar_epi8(codes_odd, lut512);
+
+    // Multiply by 1, add pairs, and accumulate as 16-bit
+    acc_even = _mm512_add_epi16(acc_even, _mm512_maddubs_epi16(scores_even_u8, ones));
+    acc_odd = _mm512_add_epi16(acc_odd, _mm512_maddubs_epi16(scores_odd_u8, ones));
+  }
+
+  current_min_v.v = _mm512_min_epu16(current_min_v.v, acc_even);
+  current_min_v.v = _mm512_min_epu16(current_min_v.v, acc_odd);
+}
+
+inline uint16_t reduce_running_min(const RunningMinV& running_min_v) {
+  return hmin_512_epu16(running_min_v.v);
+}
+
+inline __mmask32 mask_even_lanes(int lo, int hi) {
+  __mmask32 m = 0;
+  for (int i = 0; i < 32; ++i) {
+    if (lo <= 2 * i && 2 * i < hi) m |= (__mmask32(1) << i);
+  }
+  return m;
+}
+
+inline __mmask32 mask_odd_lanes(int lo, int hi) {
+  __mmask32 m = 0;
+  for (int i = 0; i < 32; ++i) {
+    if (lo <= 2 * i + 1 && 2 * i + 1 < hi) m |= (__mmask32(1) << i);
+  }
+  return m;
+}
+
+inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* codes_ptr,
+                                         uint32_t num_blocks, int lo, int hi) {
+  lo = std::max(lo, 0);
+  hi = std::min(hi, 64);
+  if (hi <= lo) return 0xFFFF;
+
+  __m512i acc_even = _mm512_setzero_si512();
+  __m512i acc_odd = _mm512_setzero_si512();
+  const __m512i low_mask = _mm512_set1_epi8(0x0F);
+  const __m512i offset_mask = _mm512_set1_epi16(0x1000);
+  const __m512i ones = _mm512_set1_epi8(1);
+
+  for (uint32_t b = 0; b < num_blocks; b += 2) {
+    const __m512i packed = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+    codes_ptr += 64;
+
+    __m512i codes_even = _mm512_or_si512(_mm512_and_si512(packed, low_mask), offset_mask);
+    __m512i codes_odd =
+        _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi16(packed, 4), low_mask), offset_mask);
+
+    const __m256i lut256 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&lut[b * 16]));
+    const __m512i lut512 = _mm512_castsi256_si512(lut256);
+
+    __m512i scores_even_u8 = _mm512_permutexvar_epi8(codes_even, lut512);
+    __m512i scores_odd_u8 = _mm512_permutexvar_epi8(codes_odd, lut512);
+
+    acc_even = _mm512_add_epi16(acc_even, _mm512_maddubs_epi16(scores_even_u8, ones));
+    acc_odd = _mm512_add_epi16(acc_odd, _mm512_maddubs_epi16(scores_odd_u8, ones));
+  }
+
+  const __m512i INF = _mm512_set1_epi16(0xFFFF);
+  const __mmask32 me = mask_even_lanes(lo, hi);
+  const __mmask32 mo = mask_odd_lanes(lo, hi);
+  acc_even = _mm512_mask_mov_epi16(INF, me, acc_even);
+  acc_odd = _mm512_mask_mov_epi16(INF, mo, acc_odd);
+  const __m512i vmin = _mm512_min_epu16(acc_even, acc_odd);
+  return hmin_512_epu16(vmin);
+}
+
+#elif defined(__AVX512F__)
+// =========================================================================
+// 2. AVX512-F (1-Block Striped Layout)
+// =========================================================================
 struct RunningMinV {
   __m512i v;
   void set_max() { v = _mm512_set1_epi16(0xFFFF); }
@@ -119,6 +238,9 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
 }
 
 #elif defined(__AVX2__)
+// =========================================================================
+// 3. AVX2 FALLBACK (1-Block Striped Layout)
+// =========================================================================
 struct RunningMinV {
   __m256i lo, hi;
   void set_max() {
@@ -189,7 +311,6 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
   __m256i acc_odd_hi = _mm256_setzero_si256();
   const __m256i low_mask = _mm256_set1_epi8(0x0F);
 
-  // 1. Standard FastScan Accumulation Loop
   for (uint32_t b = 0; b < num_blocks; ++b) {
     const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
     codes_ptr += 32;
@@ -208,21 +329,13 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
         _mm256_add_epi16(acc_odd_hi, _mm256_cvtepu8_epi16(_mm256_extracti128_si256(so, 1)));
   }
 
-  // 2. Construct Lane-ID Registers
-  // We need to check: lo <= (base_idx + 2*i + parity) < hi
   const __m256i v_lo = _mm256_set1_epi16(static_cast<short>(lo));
   const __m256i v_hi = _mm256_set1_epi16(static_cast<short>(hi));
-  const __m256i v_step = _mm256_set1_epi16(2);
-
-  // Indices for even lanes: 0, 2, 4 ... 30 and 32, 34 ... 62
   __m256i idx_even_lo = _mm256_set_epi16(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
   __m256i idx_even_hi = _mm256_add_epi16(idx_even_lo, _mm256_set1_epi16(32));
-
-  // Indices for odd lanes: 1, 3, 5 ... 31 and 33, 35 ... 63
   __m256i idx_odd_lo = _mm256_add_epi16(idx_even_lo, _mm256_set1_epi16(1));
   __m256i idx_odd_hi = _mm256_add_epi16(idx_even_hi, _mm256_set1_epi16(1));
 
-  // 3. Create logical masks: (idx >= lo) AND (idx < hi)
   auto get_mask = [&](__m256i idx) {
     __m256i m_ge = _mm256_cmpgt_epi16(idx, v_lo);
     __m256i m_eq = _mm256_cmpeq_epi16(idx, v_lo);
@@ -233,21 +346,20 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
 
   const __m256i INF = _mm256_set1_epi16(static_cast<short>(0xFFFF));
 
-  // 4. Apply Masks using Blend
-  // _mm256_blendv_epi8(a, b, mask) picks b if MSB of mask is 1, else a.
   acc_even_lo = _mm256_blendv_epi8(INF, acc_even_lo, get_mask(idx_even_lo));
   acc_even_hi = _mm256_blendv_epi8(INF, acc_even_hi, get_mask(idx_even_hi));
   acc_odd_lo = _mm256_blendv_epi8(INF, acc_odd_lo, get_mask(idx_odd_lo));
   acc_odd_hi = _mm256_blendv_epi8(INF, acc_odd_hi, get_mask(idx_odd_hi));
 
-  // 5. Final Horizontal Min Reduction
   __m256i m1 = _mm256_min_epu16(acc_even_lo, acc_even_hi);
   __m256i m2 = _mm256_min_epu16(acc_odd_lo, acc_odd_hi);
   return hmin_256_epu16(_mm256_min_epu16(m1, m2));
 }
 
 #else
-// Scalar Fallback
+// =========================================================================
+// 4. SCALAR FALLBACK (No SIMD)
+// =========================================================================
 struct RunningMinV {
   alignas(64) uint16_t data[64];
   void set_max() {
@@ -301,14 +413,19 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
 #endif
 
 // ------------------------------------------------------------------
-// Fused FastScan Kernel
+// Fused FastScan Kernel (Cache-Locality Optimized)
 // ------------------------------------------------------------------
 template<bool Metric>
 inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_scales,
                                       const float* q_min_dists, size_t num_fused_embeddings,
                                       uint32_t num_blocks, const uint8_t* strip_data,
                                       size_t strip_stride, size_t start_vec, size_t cloud_size,
-                                      float* out_dists) {
+                                      float* out_dists,
+                                      std::vector<internal::RunningMinV>& scratch_combined,
+                                      std::vector<uint16_t>& scratch_min_raw) {
+  // Fixed fused-kernel blocking (L1-friendly)
+  constexpr size_t Q_CHUNK = 64;
+  constexpr size_t PREFETCH_STRIPS = 2;
 
   if (cloud_size == 0) {
     for (size_t qi = 0; qi < num_fused_embeddings; ++qi)
@@ -325,15 +442,19 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
 
   auto strip_ptr = [&](size_t s) -> const uint8_t* { return strip_data + s * strip_stride; };
 
-  // CACHE BLOCKING: Process queries in blocks of 64.
-  // Keeps RunningMinV state (~4KB) and LUTS (~8KB) locked in L1 Cache.
-  const size_t Q_CHUNK = 64;
+  // Chunk through the fused queries to keep the active LUTs within the L1 cache
   for (size_t q_start = 0; q_start < num_fused_embeddings; q_start += Q_CHUNK) {
     size_t q_end = std::min(q_start + Q_CHUNK, num_fused_embeddings);
     size_t q_count = q_end - q_start;
 
-    std::vector<internal::RunningMinV> combined(q_count, internal::RunningMinV::max());
-    std::vector<uint16_t> min_dist_raw(q_count, 0xFFFF);
+    // Zero-allocation scratch usage (buffers persist across leaf calls)
+    scratch_combined.resize(q_count);
+    for (size_t qi = 0; qi < q_count; ++qi)
+      scratch_combined[qi] = internal::RunningMinV::max();
+    scratch_min_raw.assign(q_count, static_cast<uint16_t>(0xFFFF));
+
+    auto* combined = scratch_combined.data();
+    auto* min_dist_raw = scratch_min_raw.data();
 
     if (strip0 == strip1) {
       const int hi = (lane1 == 0) ? 64 : lane1;
@@ -344,11 +465,13 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
       }
     } else {
       if (fully_aligned_full) {
-        // --- THE LOOP SWAP ---
-        // DB Strip is Outer Loop (Pinned in L1). Queries are Inner Loop.
+        // --- THE LOOP SWAP (Maximum Cache Locality) ---
+        // DB Strip is the Outer Loop (Pinned in L1 Cache). Queries are the Inner Loop.
         for (size_t s = strip0; s < strip1; ++s) {
           const uint8_t* s_ptr = strip_ptr(s);
-          __builtin_prefetch(strip_ptr(s + 1), 0, 3);  // Hide RAM latency
+          if (s + PREFETCH_STRIPS < strip1) {
+            __builtin_prefetch(strip_ptr(s + PREFETCH_STRIPS), 0, 3);
+          }
           for (size_t qi = 0; qi < q_count; ++qi) {
             const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
             scan_64_running_min(q_lut, s_ptr, num_blocks, combined[qi]);
@@ -364,10 +487,12 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
           min_dist_raw[qi] =
               scan_64_chunk_min_masked(q_lut, strip_ptr(strip0), num_blocks, lane0, 64);
         }
-        // Main Body
+        // Main Body (Loop Swapped for Cache Locality)
         for (size_t s = strip0 + 1; s < strip1; ++s) {
           const uint8_t* s_ptr = strip_ptr(s);
-          __builtin_prefetch(strip_ptr(s + 1), 0, 3);
+          if (s + PREFETCH_STRIPS < strip1) {
+            __builtin_prefetch(strip_ptr(s + PREFETCH_STRIPS), 0, 3);
+          }
           for (size_t qi = 0; qi < q_count; ++qi) {
             const uint8_t* q_lut = fused_luts + (q_start + qi) * num_blocks * 16;
             scan_64_running_min(q_lut, s_ptr, num_blocks, combined[qi]);
@@ -432,7 +557,7 @@ class Quantized_Point_Cloud {
   }
 };
 
-// Chamfer distance for one cloud; same SIMD path as distances_all (AVX-512 / AVX2 / scalar).
+// Chamfer distance for one cloud; same SIMD path as distances_all
 template<bool Metric>
 float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
                                    const Quantized_Point_Cloud_Set<Metric>& db, size_t start,
@@ -587,7 +712,12 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
   if (num_q == 0) return 0.0f;
   if (true_end <= start) return std::numeric_limits<float>::max();
 
+#if defined(__AVX512VBMI__)
+  const size_t strip_stride = static_cast<size_t>((db.num_blocks + 1) / 2) * 64;
+#else
   const size_t strip_stride = static_cast<size_t>(db.num_blocks) * 32;
+#endif
+
   const size_t strip0 = start / 64;
   const int lane0 = static_cast<int>(start % 64);
   const size_t strip1 = true_end / 64;
@@ -623,7 +753,7 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
           internal::scan_64_running_min(q_lut, p0 + 3 * strip_stride, db.num_blocks, min3);
         }
         internal::RunningMinV combined;
-#ifdef __AVX512F__
+#if defined(__AVX512VBMI__) || defined(__AVX512F__)
         combined.v =
             _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v), _mm512_min_epu16(min2.v, min3.v));
 #else
@@ -656,7 +786,7 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
             internal::scan_64_running_min(q_lut, p0 + 3 * strip_stride, db.num_blocks, min3);
           }
           internal::RunningMinV combined;
-#ifdef __AVX512F__
+#if defined(__AVX512VBMI__) || defined(__AVX512F__)
           combined.v =
               _mm512_min_epu16(_mm512_min_epu16(min0.v, min1.v), _mm512_min_epu16(min2.v, min3.v));
 #else
@@ -725,7 +855,6 @@ class Model {
         const float* raw = reinterpret_cast<const float*>(pcs.data() + distu(rng) * dim);
         sub[i] = parlay::sequence<float>(raw + offset, raw + offset + dim_per_block);
       }
-      // Always apply L2-based kmeans, as sub-vectors are not L2-normalized
       auto [centers, _] = mvsic::kmeans_subsample_assign_only<true>(sub, K, sample_size, false);
       codebooks[b] =
           Eigen::MatrixXf(static_cast<Eigen::Index>(K), static_cast<Eigen::Index>(dim_per_block));
@@ -755,6 +884,9 @@ class Model {
     return best;
   }
 
+  // ---------------------------------------------------------
+  // Database Encoder (Compile-Time Dispatch)
+  // ---------------------------------------------------------
   template<typename PCSet>
   Quantized_Point_Cloud_Set<Metric> encode(const PCSet& pcs) const {
     Quantized_Point_Cloud_Set<Metric> res;
@@ -777,7 +909,13 @@ class Model {
     res.offsets[n_clouds] = cur_padded;
 
     size_t n_strips = cur_padded / 64;
-    const size_t strip_stride = num_blocks * 32;
+
+#if defined(__AVX512VBMI__)
+    const size_t strip_stride = static_cast<size_t>((num_blocks + 1) / 2) * 64;
+#else
+    const size_t strip_stride = static_cast<size_t>(num_blocks) * 32;
+#endif
+
     res.packed_codes.resize(n_strips * strip_stride, 0);
 
     auto pcs_ids = pcs.get_ids();
@@ -791,6 +929,34 @@ class Model {
       size_t n_strips_c = padded_sz / 64;
       size_t strip0_dst = dst_start / 64;
 
+#if defined(__AVX512VBMI__)
+      // --- VBMI 2-BLOCK LAYOUT ---
+      for (size_t s = 0; s < n_strips_c; ++s) {
+        uint8_t* strip_base = res.packed_codes.data() + (strip0_dst + s) * strip_stride;
+        for (uint32_t b = 0; b < num_blocks; b += 2) {
+          uint8_t* block_pair_base = strip_base + (b / 2) * 64;
+          for (size_t lane_pair = 0; lane_pair < 32; ++lane_pair) {
+            const size_t v_even_in_cloud = s * 64 + lane_pair * 2;
+            const size_t v_odd_in_cloud = v_even_in_cloud + 1;
+            const bool has_even = (v_even_in_cloud < n_vecs);
+            const bool has_odd = (v_odd_in_cloud < n_vecs);
+            const size_t v_even_src = src_start + v_even_in_cloud;
+            const size_t v_odd_src = src_start + v_odd_in_cloud;
+
+            const uint8_t c_e_b0 = has_even ? find_best(pcs.data() + v_even_src * dim, b) : 0;
+            const uint8_t c_o_b0 = has_odd ? find_best(pcs.data() + v_odd_src * dim, b) : 0;
+            block_pair_base[lane_pair * 2] = (c_e_b0 & 0x0F) | ((c_o_b0 & 0x0F) << 4);
+
+            if (b + 1 < num_blocks) {
+              const uint8_t c_e_b1 = has_even ? find_best(pcs.data() + v_even_src * dim, b + 1) : 0;
+              const uint8_t c_o_b1 = has_odd ? find_best(pcs.data() + v_odd_src * dim, b + 1) : 0;
+              block_pair_base[lane_pair * 2 + 1] = (c_e_b1 & 0x0F) | ((c_o_b1 & 0x0F) << 4);
+            }
+          }
+        }
+      }
+#else
+      // --- ORIGINAL STRIPED LAYOUT (AVX512F / AVX2 / SCALAR) ---
       for (size_t s = 0; s < n_strips_c; ++s) {
         uint8_t* strip_base = res.packed_codes.data() + (strip0_dst + s) * strip_stride;
         for (size_t lane_pair = 0; lane_pair < 32; ++lane_pair) {
@@ -808,6 +974,7 @@ class Model {
           }
         }
       }
+#endif
     });
 
     return res;
@@ -891,98 +1058,110 @@ class Model {
 };
 
 // ------------------------------------------------------------------
-// ManyToMany Batch Operator (FastScan)
+// ManyToMany Batch Operator
 // ------------------------------------------------------------------
 template<typename PCS>
 class ManyToMany {
  public:
+  // Streamlined scratch space. Eliminates all fused array allocations.
+  struct M2MScratch {
+    std::vector<std::pair<uint32_t, float>> scores;
+    std::vector<float> emb_min_dists;
+    std::vector<internal::RunningMinV> running_mins;
+    std::vector<uint16_t> min_dist_raw;
+  };
+
   static void TopKIntoUninitialized(
       const std::vector<const Quantized_Query_Point_Cloud<PCS::is_metric()>*>& A, const PCS& B,
-      uint32_t k, std::pair<uint32_t, float>* results) {
+      uint32_t k, std::pair<uint32_t, float>* results, size_t q_block = 4,
+      bool parallel_query_blocks = false) {
 
     const size_t num_q_clouds = A.size();
     const size_t num_db_clouds = (B.offsets.size() > 0) ? B.offsets.size() - 1 : 0;
-    if (num_q_clouds == 0 || num_db_clouds == 0) return;
+    if (num_q_clouds == 0 || num_db_clouds == 0 || k == 0) return;
 
-    const size_t Q_BLOCK = 16;
+    const uint32_t num_blocks = B.num_blocks;
 
-    parlay::parallel_for(0, (num_q_clouds + Q_BLOCK - 1) / Q_BLOCK, [&](size_t qb) {
-      size_t q_start = qb * Q_BLOCK;
-      size_t q_end = std::min(q_start + Q_BLOCK, num_q_clouds);
-      size_t q_count = q_end - q_start;
+#if defined(__AVX512VBMI__)
+    const size_t db_strip_stride = static_cast<size_t>((num_blocks + 1) / 2) * 64;
+#else
+    const size_t db_strip_stride = static_cast<size_t>(num_blocks) * 32;
+#endif
 
-      std::vector<std::priority_queue<std::pair<float, uint32_t>>> heaps(q_count);
+    // Centralized chunk processor to handle both parallel and sequential routing
+    auto process_chunk = [&](size_t q_start, size_t q_end) {
+      // THREAD LOCAL: Allocates once per OS thread.
+      // Eliminates allocator locks when running in parlay::blocked_for.
+      thread_local M2MScratch scratch;
 
-      // --- 1. FUSE LUTS ---
-      size_t total_embeddings = 0;
-      std::vector<size_t> emb_offsets(q_count + 1, 0);
-      for (size_t i = 0; i < q_count; ++i) {
-        total_embeddings += A[q_start + i]->num_queries;
-        emb_offsets[i + 1] = total_embeddings;
+      if (scratch.scores.size() < num_db_clouds) {
+        scratch.scores.resize(num_db_clouds);
       }
 
-      if (total_embeddings == 0) return;
-
-      uint32_t num_blocks = B.num_blocks;
-      size_t lut_bytes = num_blocks * 16;
-      std::vector<uint8_t> fused_luts(total_embeddings * lut_bytes);
-      std::vector<float> fused_scales(total_embeddings);
-      std::vector<float> fused_mins(total_embeddings);
-
-      for (size_t i = 0; i < q_count; ++i) {
-        const auto* qc = A[q_start + i];
-        size_t off = emb_offsets[i];
-        size_t count = qc->num_queries;
-        std::memcpy(fused_luts.data() + off * lut_bytes, qc->flat_int_luts.data(),
-                    count * lut_bytes);
-        std::memcpy(fused_scales.data() + off, qc->scales.data(), count * sizeof(float));
-        std::memcpy(fused_mins.data() + off, qc->min_dists.data(), count * sizeof(float));
-      }
-
-      std::vector<float> emb_min_dists(total_embeddings);
-
-      // --- 2. DATABASE PROBING ---
-      for (size_t c = 0; c < num_db_clouds; ++c) {
-        const size_t start_vec = B.offsets[c];
-        const size_t cloud_size = B.offsets[c + 1] - start_vec;
-        if (cloud_size == 0) continue;
-
-        // Stream all fused LUTs against the packed database strips
-        internal::fastscan_mv_chamfer_fused<PCS::is_metric()>(
-            fused_luts.data(), fused_scales.data(), fused_mins.data(), total_embeddings, num_blocks,
-            B.packed_codes.data(), B.num_blocks * 32, start_vec, cloud_size, emb_min_dists.data());
-
-        for (size_t i = 0; i < q_count; ++i) {
-          float dist_sum = 0.0f;
-          size_t e_start = emb_offsets[i];
-          size_t e_count = emb_offsets[i + 1] - e_start;
-          for (size_t e = 0; e < e_count; ++e)
-            dist_sum += emb_min_dists[e_start + e];
-          float chamfer_dist = dist_sum / static_cast<float>(e_count);
-
-          if (heaps[i].size() < k)
-            heaps[i].push({chamfer_dist, B.get_id(c)});
-          else if (chamfer_dist < heaps[i].top().first) {
-            heaps[i].pop();
-            heaps[i].push({chamfer_dist, B.get_id(c)});
+      // SEQUENTIAL INNER LOOP over the chunk's queries.
+      // Query 1 pulls DB into L2 cache. Queries 2, 3, 4 reuse DB from L2.
+      for (size_t i = q_start; i < q_end; ++i) {
+        const auto* qc = A[i];
+        const size_t num_embeddings = qc->num_queries;
+        if (num_embeddings == 0) {
+          for (size_t ki = 0; ki < k; ++ki) {
+            results[i * k + ki] = {0, std::numeric_limits<float>::max()};
           }
+          continue;
+        }
+        // Resize intermediate buffers for the active query
+        if (scratch.emb_min_dists.size() < num_embeddings) {
+          scratch.emb_min_dists.resize(num_embeddings);
+        }
+        // INNER LOOP: Stream the DB clouds against the L1-resident Query LUT
+        for (size_t c = 0; c < num_db_clouds; ++c) {
+          const size_t start_vec = B.offsets[c];
+          const size_t cloud_size = B.offsets[c + 1] - start_vec;
+          if (cloud_size == 0) {
+            scratch.scores[c] = {B.get_id(c), std::numeric_limits<float>::max()};
+            continue;
+          }
+          // ====================================================================
+          // ZERO-COPY execution straight from the point cloud's memory
+          // ====================================================================
+          internal::fastscan_mv_chamfer_fused<PCS::is_metric()>(
+              qc->flat_int_luts.data(), qc->scales.data(), qc->min_dists.data(), num_embeddings,
+              num_blocks, B.packed_codes.data(), db_strip_stride, start_vec, cloud_size,
+              scratch.emb_min_dists.data(), scratch.running_mins, scratch.min_dist_raw);
+          // Average the distances to compute Chamfer
+          float dist_sum = 0.0f;
+          for (size_t e = 0; e < num_embeddings; ++e) {
+            dist_sum += scratch.emb_min_dists[e];
+          }
+          const float chamfer_dist = dist_sum / static_cast<float>(num_embeddings);
+          scratch.scores[c] = {B.get_id(c), chamfer_dist};
+        }
+        // TOP-K SELECTION (Inline for cache locality)
+        const size_t k_take = std::min(static_cast<size_t>(k), num_db_clouds);
+        if (k_take > 0 && k_take < num_db_clouds) {
+          std::nth_element(scratch.scores.begin(), scratch.scores.begin() + k_take,
+                           scratch.scores.end(),
+                           [](const auto& a, const auto& b) { return a.second < b.second; });
+        }
+        // Scatter directly to results pointer
+        for (size_t ki = 0; ki < k_take; ++ki) {
+          results[i * k + ki] = scratch.scores[ki];
+        }
+        for (size_t ki = k_take; ki < k; ++ki) {
+          results[i * k + ki] = {0, std::numeric_limits<float>::max()};
         }
       }
+    };
 
-      // --- 3. DRAIN HEAPS ---
-      for (size_t i = 0; i < q_count; ++i) {
-        size_t count = heaps[i].size();
-        size_t global_idx = q_start + i;
-        for (size_t ki = 0; ki < count; ++ki) {
-          results[global_idx * k + (count - 1 - ki)] = {heaps[i].top().second,
-                                                        heaps[i].top().first};
-          heaps[i].pop();
-        }
-        for (size_t ki = count; ki < k; ++ki) {
-          results[global_idx * k + ki] = {0, std::numeric_limits<float>::max()};
-        }
-      }
-    });
+    // Execution Dispatcher
+    if (parallel_query_blocks) {
+      if (q_block == 0) q_block = 4;  // Safeguard fallback
+      parlay::blocked_for(
+          0, num_q_clouds, q_block,
+          [&](size_t /*block_idx*/, size_t start, size_t end) { process_chunk(start, end); });
+    } else {
+      process_chunk(0, num_q_clouds);
+    }
   }
 };
 

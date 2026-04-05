@@ -1,11 +1,39 @@
 #pragma once
 
-// fastscan.h
+// ============================================================================
+// FASTSCAN VECTOR SEARCH KERNELS
+// ============================================================================
+// This header implements the core FastScan distance approximation algorithms using
+// highly optimized SIMD (Single Instruction, Multiple Data) instructions.
 //
-// FastScan with AVX512 and AVX2 fallback.
-// Pure Single-Vector Implementation.
-// - When __AVX512F__ is defined: all kernels use AVX-512 (shuffle + int16 accumulate).
-// - When only __AVX2__ is defined: all kernels use AVX2 (256-bit shuffle + int16 accumulate).
+// COMPILE-TIME DISPATCH & MEMORY LAYOUTS:
+// The database is encoded into specific memory layouts at index-build time based
+// on the target CPU architecture. You must compile with the appropriate flags
+// (-mavx512vbmi, -mavx512f, or -mavx2).
+//
+// 1. __AVX512VBMI__ (The 44+ GiB/s Limit)
+//    - Layout: 2-Block Adjacent Interleaved
+//    - Structure: Packs 64 points across 2 blocks into a 64-byte contiguous chunk.
+//      [ Byte 0: P0_B0 (low 4b) | P1_B0 (high 4b) ]
+//      [ Byte 1: P0_B1 (low 4b) | P1_B1 (high 4b) ] <-- B1 is perfectly adjacent to B0
+//      [ Byte 2: P2_B0 (low 4b) | P3_B0 (high 4b) ]
+//      [ Byte 3: P2_B1 (low 4b) | P3_B1 (high 4b) ]
+//    - Why?: Allows `vpermb` to look up distances for two blocks simultaneously,
+//      and `vpmaddubsw` to perfectly add the B0 and B1 distances into a 16-bit
+//      accumulator in a single hardware cycle, eliminating zero-extension overhead.
+//      It completely unrolls and pins the LUTs to ZMM registers (Zero-LUT Load).
+//
+// 2. __AVX512F__ and __AVX2__ (Standard Fallback)
+//    - Layout: Standard 1-Block Striped
+//    - Structure: Packs 64 points for a SINGLE block into a 32-byte chunk.
+//      [ Byte 0: P0_B0 (low 4b) | P1_B0 (high 4b) ]
+//      [ Byte 1: P2_B0 (low 4b) | P3_B0 (high 4b) ]
+//      ... 32 bytes later ...
+//      [ Byte 32: P0_B1 (low 4b) | P1_B1 (high 4b) ]
+//    - Why?: Standard PQ FastScan approach. Requires shuffling one block at a time,
+//      then using `_mm..._cvtepu8_epi16` to widen 8-bit distances to 16-bit before
+//      adding them to the accumulator.
+// ============================================================================
 
 #include <immintrin.h>
 #include <Eigen/Core>
@@ -36,15 +64,15 @@ class Quantized_Point;
 template<bool Metric>
 class Quantized_Query {
  public:
-  using distanceType = float;  // [Required by parlayann]
+  using distanceType = float;  // [Required by parlayann interface]
 
   alignas(64) std::vector<uint8_t> int_lut;  // [num_blocks * K]
 
-  float min_dist = 0.0f;  // SQ param
-  float scale = 1.0f;     // SQ param
+  float min_dist = 0.0f;  // Scalar Quantization param
+  float scale = 1.0f;     // Scalar Quantization param
 
-  uint32_t num_blocks = 0;           // Num Blocks
-  static constexpr uint32_t K = 16;  // Num Centroids
+  uint32_t num_blocks = 0;           // Number of PQ blocks
+  static constexpr uint32_t K = 16;  // Number of Centroids per block (4-bit encoding)
 
   Quantized_Query() = default;
   explicit Quantized_Query(uint32_t m) : num_blocks(m) {
@@ -62,35 +90,62 @@ class Quantized_Query {
   }
 
   // Fallback per-point distance computation.
-  // Note: This is slow as it requires strided access through the packed (striped) code layout.
+  // Slow path used for verification and non-batched queries.
   inline float distance(const Quantized_Point<Metric>& p) const {
     uint16_t acc = 0;
+#if defined(__AVX512VBMI__)
+    // 2-Block Adjacent Layout Access Pattern
+    for (uint32_t b = 0; b < num_blocks; b += 2) {
+      uint8_t packed0 = p.code_ptr[(b / 2) * 64];
+      uint8_t code0 = (p.lane_idx % 2 == 0) ? (packed0 & 0x0F) : (packed0 >> 4);
+      acc += static_cast<uint16_t>(int_lut[b * K + code0]);
+
+      // Handle odd number of blocks
+      if (b + 1 < num_blocks) {
+        uint8_t packed1 = p.code_ptr[(b / 2) * 64 + 1];
+        uint8_t code1 = (p.lane_idx % 2 == 0) ? (packed1 & 0x0F) : (packed1 >> 4);
+        acc += static_cast<uint16_t>(int_lut[(b + 1) * K + code1]);
+      }
+    }
+#else
+    // Standard Striped Layout Access Pattern
     for (uint32_t b = 0; b < num_blocks; ++b) {
       uint8_t packed = p.code_ptr[b * 32];
       uint8_t code = (p.lane_idx % 2 == 0) ? (packed & 0x0F) : (packed >> 4);
       acc += static_cast<uint16_t>(int_lut[static_cast<size_t>(b) * K + code]);
     }
+#endif
     return decode(acc);
   }
 
   // Main One-to-Many Distance Computation.
+  // Computes distances from this query to all points in the database.
   template<typename QPointRange>
   void distances_all(const QPointRange& db, float* out) const {
     const size_t N = db.size();
     if (N == 0) return;
 
+#if defined(__AVX512VBMI__)
+    // Stride is 64 bytes per 2 blocks
+    const size_t strip_stride = static_cast<size_t>((db.num_blocks + 1) / 2) * 64;
+#else
+    // Stride is 32 bytes per 1 block
     const size_t strip_stride = static_cast<size_t>(db.num_blocks) * 32;
+#endif
+
     const size_t n_full_strips = N / 64;
     const size_t full = n_full_strips * 64;
 
+    // Process blocks of 64 points in parallel
     parlay::parallel_for(
         0, n_full_strips,
         [&](size_t s) {
           const uint8_t* codes_ptr = db.packed_codes.data() + s * strip_stride;
           db.scan_64_chunk(*this, codes_ptr, out + s * 64);
         },
-        /*granularity=*/64);  // Tuned via microbenchmark
+        64);  // Granularity tuned via microbenchmark
 
+    // Process the remaining tail points
     if (full < N) {
       alignas(64) float tmp[64];
       const size_t tail_strip = n_full_strips;
@@ -105,6 +160,7 @@ class Quantized_Query {
 // ---------------------------------------------------------
 // FastScan Point Handle
 // ---------------------------------------------------------
+// A lightweight handle pointing to a specific quantized vector.
 template<bool Metric>
 class Quantized_Point {
  public:
@@ -145,40 +201,98 @@ class Quantized_Point_Range {
   Quantized_Point<Metric> operator[](size_t i) const {
     const size_t strip_idx = i / 64;
     const size_t lane_idx = i % 64;
+#if defined(__AVX512VBMI__)
+    const size_t strip_stride = static_cast<size_t>((num_blocks + 1) / 2) * 64;
+    // Step by 2 bytes because blocks are interleaved pairwise
+    const uint8_t* ptr = &packed_codes[strip_idx * strip_stride + (lane_idx / 2) * 2];
+#else
     const size_t strip_stride = static_cast<size_t>(num_blocks) * 32;
     const uint8_t* ptr = &packed_codes[strip_idx * strip_stride + (lane_idx / 2)];
+#endif
     return Quantized_Point<Metric>(ptr, static_cast<uint32_t>(lane_idx));
   }
 
-#ifdef __AVX512F__
+#if defined(__AVX512VBMI__)
+  // ---------------------------------------------------------
+  // 1. VBMI KING: 512-bit registers, 2-Block Horizontal Add
+  // ---------------------------------------------------------
   void scan_64_chunk(const Quantized_Query<Metric>& q, const uint8_t* codes_ptr,
                      float* results) const {
-    // Initialize the accumulators for the even and odd lanes.
+    // low_mask isolates the 4-bit codes
+    const __m512i low_mask = _mm512_set1_epi8(0x0F);
+
+    // 0x1000 places 16 in the high byte and 0 in the low byte.
+    // This perfectly offsets the B1 codes so they look in the upper half of the 32-byte LUT.
+    const __m512i offset_mask = _mm512_set1_epi16(0x1000);
+    const __m512i ones = _mm512_set1_epi8(1);
+
+    // Dynamic LUT preloading: Pins the Look-Up Tables into the CPU's ZMM registers
+    // to completely bypass the L1 Cache bottleneck inside the loop.
+    __m512i preloaded_luts[256];
+    uint32_t limit = std::min(num_blocks / 2, 256u);
+    for (uint32_t i = 0; i < limit; ++i) {
+      preloaded_luts[i] = _mm512_castsi256_si512(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&q.int_lut[i * 2 * K])));
+    }
+
     __m512i acc_even = _mm512_setzero_si512();
     __m512i acc_odd = _mm512_setzero_si512();
-    // Mask to extract the lower 4 bits of the codes.
+
+#pragma GCC unroll 8
+    for (uint32_t b = 0; b < num_blocks; b += 2) {
+      // Natively load 64 bytes (64 points * 2 blocks)
+      const __m512i packed = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+      codes_ptr += 64;
+
+      // Extract and offset the codes
+      __m512i codes_even = _mm512_or_si512(_mm512_and_si512(packed, low_mask), offset_mask);
+      __m512i codes_odd =
+          _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi16(packed, 4), low_mask), offset_mask);
+
+      // Full 512-bit cross-lane shuffle (Zero L1 cache fetches)
+      __m512i scores_even_u8 = _mm512_permutexvar_epi8(codes_even, preloaded_luts[b / 2]);
+      __m512i scores_odd_u8 = _mm512_permutexvar_epi8(codes_odd, preloaded_luts[b / 2]);
+
+      // Multiply 8-bit distances by 1, add adjacent pairs (B0+B1), and accumulate as 16-bit
+      acc_even = _mm512_add_epi16(acc_even, _mm512_maddubs_epi16(scores_even_u8, ones));
+      acc_odd = _mm512_add_epi16(acc_odd, _mm512_maddubs_epi16(scores_odd_u8, ones));
+    }
+
+    alignas(64) uint16_t raw_even[32];
+    alignas(64) uint16_t raw_odd[32];
+    _mm512_store_si512(reinterpret_cast<__m512i*>(raw_even), acc_even);
+    _mm512_store_si512(reinterpret_cast<__m512i*>(raw_odd), acc_odd);
+
+    for (int i = 0; i < 32; ++i) {
+      results[i * 2] = q.decode(raw_even[i]);
+      results[i * 2 + 1] = q.decode(raw_odd[i]);
+    }
+  }
+
+#elif defined(__AVX512F__)
+  // ---------------------------------------------------------
+  // 2. AVX-512 FOUNDATION: Original Striped Kernel
+  // ---------------------------------------------------------
+  void scan_64_chunk(const Quantized_Query<Metric>& q, const uint8_t* codes_ptr,
+                     float* results) const {
+    __m512i acc_even = _mm512_setzero_si512();
+    __m512i acc_odd = _mm512_setzero_si512();
     const __m256i low_mask = _mm256_set1_epi8(0x0F);
 
     for (uint32_t b = 0; b < num_blocks; ++b) {
-      // Load the packed codes for the current block, and increment the pointer to the next block.
       const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
       codes_ptr += 32;
 
-      // Extract the even and odd codes.
       const __m256i codes_even = _mm256_and_si256(packed, low_mask);
       const __m256i codes_odd = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
-      // Load the LUT for the current block into a 128-bit register.
       const __m128i lut128 =
           _mm_loadu_si128(reinterpret_cast<const __m128i*>(&q.int_lut[static_cast<size_t>(b) * K]));
-      // Duplicate it to the upper and lower halves of a 256-bit register.
       const __m256i lut256 = _mm256_broadcastsi128_si256(lut128);
 
-      // Shuffle the LUT to the even and odd codes.
       const __m256i scores_even_u8 = _mm256_shuffle_epi8(lut256, codes_even);
       const __m256i scores_odd_u8 = _mm256_shuffle_epi8(lut256, codes_odd);
 
-      // Add the scores to the accumulators.
       acc_even = _mm512_add_epi16(acc_even, _mm512_cvtepu8_epi16(scores_even_u8));
       acc_odd = _mm512_add_epi16(acc_odd, _mm512_cvtepu8_epi16(scores_odd_u8));
     }
@@ -193,7 +307,11 @@ class Quantized_Point_Range {
       results[i * 2 + 1] = q.decode(raw_odd[i]);
     }
   }
+
 #elif defined(__AVX2__)
+  // ---------------------------------------------------------
+  // 3. AVX2 FALLBACK: 256-bit registers
+  // ---------------------------------------------------------
   void scan_64_chunk(const Quantized_Query<Metric>& q, const uint8_t* codes_ptr,
                      float* results) const {
     __m256i acc_even_lo = _mm256_setzero_si256();
@@ -235,7 +353,11 @@ class Quantized_Point_Range {
       results[i * 2 + 1] = q.decode(raw_odd[i]);
     }
   }
+
 #else
+  // ---------------------------------------------------------
+  // 4. SCALAR FALLBACK (No SIMD)
+  // ---------------------------------------------------------
   void scan_64_chunk(const Quantized_Query<Metric>& q, const uint8_t* codes_ptr,
                      float* results) const {
     for (int lane = 0; lane < 64; ++lane) {
@@ -354,6 +476,9 @@ class Model {
     return best;
   }
 
+  // ---------------------------------------------------------
+  // Database Encoder (Compile-Time Dispatch)
+  // ---------------------------------------------------------
   template<typename PointRange>
   Quantized_Point_Range<PointRange, Metric> encode(const PointRange& data) const {
     Quantized_Point_Range<PointRange, Metric> enc;
@@ -364,8 +489,39 @@ class Model {
 
     const size_t n_padded = ((enc.n_points + 63) / 64) * 64;
     const size_t num_strips = n_padded / 64;
-    const size_t strip_stride = static_cast<size_t>(enc.num_blocks) * 32;
 
+#if defined(__AVX512VBMI__)
+    // --- VBMI 2-BLOCK LAYOUT ---
+    const size_t strip_stride = static_cast<size_t>((enc.num_blocks + 1) / 2) * 64;
+    enc.packed_codes.resize(num_strips * strip_stride);
+    std::fill(enc.packed_codes.begin(), enc.packed_codes.end(), uint8_t{0});
+
+    parlay::parallel_for(0, num_strips, [&](size_t s) {
+      uint8_t* strip_base = enc.packed_codes.data() + s * strip_stride;
+      for (uint32_t b = 0; b < enc.num_blocks; b += 2) {
+        uint8_t* block_pair_base = strip_base + (b / 2) * 64;
+        for (size_t lane_pair = 0; lane_pair < 32; ++lane_pair) {
+          const size_t v_even = s * 64 + lane_pair * 2;
+          const size_t v_odd = v_even + 1;
+          const bool has_even = (v_even < enc.n_points);
+          const bool has_odd = (v_odd < enc.n_points);
+
+          const uint8_t c_e_b0 = has_even ? find_best(data.location(v_even), b) : 0;
+          const uint8_t c_o_b0 = has_odd ? find_best(data.location(v_odd), b) : 0;
+          block_pair_base[lane_pair * 2] = (c_e_b0 & 0x0F) | ((c_o_b0 & 0x0F) << 4);
+
+          // If there is an odd number of blocks, pad the adjacent byte with 0s
+          if (b + 1 < enc.num_blocks) {
+            const uint8_t c_e_b1 = has_even ? find_best(data.location(v_even), b + 1) : 0;
+            const uint8_t c_o_b1 = has_odd ? find_best(data.location(v_odd), b + 1) : 0;
+            block_pair_base[lane_pair * 2 + 1] = (c_e_b1 & 0x0F) | ((c_o_b1 & 0x0F) << 4);
+          }
+        }
+      }
+    });
+#else
+    // --- ORIGINAL STRIPED LAYOUT (AVX512F / AVX2 / SCALAR) ---
+    const size_t strip_stride = static_cast<size_t>(enc.num_blocks) * 32;
     enc.packed_codes.resize(num_strips * strip_stride);
     std::fill(enc.packed_codes.begin(), enc.packed_codes.end(), uint8_t{0});
 
@@ -383,6 +539,7 @@ class Model {
         }
       }
     });
+#endif
 
     return enc;
   }

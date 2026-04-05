@@ -36,3 +36,27 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "bench_search_all",
+    srcs = ["bench_search_all.cpp"],
+    deps = [
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/mvivf",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
+    name = "bench_fastscan_m2m",
+    srcs = ["bench_fastscan_m2m.cpp"],
+    deps = [
+        "//mvsic/core/quantization:fastscan_mv",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+        "@parlaylib//parlay:primitives",
+    ],
+)

@@ -1263,19 +1263,17 @@ class ManyToMany {
  public:
   static void TopKIntoUninitialized(
       const std::vector<const Quantized_Query_Point_Cloud<PCS::is_metric()>*>& A, const PCS& B,
-      uint32_t k, std::pair<uint32_t, float>* results) {
+      uint32_t k, std::pair<uint32_t, float>* results, size_t q_block = 16,
+      bool parallel_query_blocks = true) {
 
     const size_t num_q_clouds = A.size();
     const size_t num_db_clouds = (B.offsets.size() > 0) ? B.offsets.size() - 1 : 0;
-    if (num_q_clouds == 0 || num_db_clouds == 0) return;
+    if (num_q_clouds == 0 || num_db_clouds == 0 || k == 0) return;
+    if (q_block == 0) q_block = 1;
 
-    // 16 clouds per thread. If each cloud has 32 vectors, this is a 512-vector SIMD block.
-    const size_t Q_BLOCK = 16;
-
-    parlay::parallel_for(0, (num_q_clouds + Q_BLOCK - 1) / Q_BLOCK, [&](size_t qb) {
-      size_t q_start = qb * Q_BLOCK;
-      size_t q_end = std::min(q_start + Q_BLOCK, num_q_clouds);
+    auto process_query_range = [&](size_t q_start, size_t q_end) {
       size_t q_count = q_end - q_start;
+      if (q_count == 0) return;
 
       std::vector<std::priority_queue<std::pair<float, uint32_t>>> heaps(q_count);
 
@@ -1360,7 +1358,19 @@ class ManyToMany {
           results[global_idx * k + ki] = {0, std::numeric_limits<float>::max()};
         }
       }
-    });
+    };
+
+    if (parallel_query_blocks) {
+      parlay::blocked_for(0, num_q_clouds, q_block,
+                          [&](size_t /*block_idx*/, size_t q_start, size_t q_end) {
+                            process_query_range(q_start, q_end);
+                          });
+    } else {
+      for (size_t q_start = 0; q_start < num_q_clouds; q_start += q_block) {
+        const size_t q_end = std::min(q_start + q_block, num_q_clouds);
+        process_query_range(q_start, q_end);
+      }
+    }
   }
 };
 

@@ -95,7 +95,7 @@ class IndexMVIVF : public Index<metric> {
     size_t n = points.size();
     // Number of centers: Dynamic
     // main_val: either k_per_level or sqrt(n)
-    // small_nc: If n is small, choosing ~ n/max_leaf_size is better
+    // small_nc: If n is small, choosing ~n/max_leaf_size is better
     size_t auto_nc = (params.k_per_level > 0) ? params.k_per_level
                                               : static_cast<size_t>(std::ceil(std::sqrt(n)));
     size_t small_nc = 4 * (n + params.max_leaf_size - 1) / params.max_leaf_size;
@@ -207,8 +207,8 @@ class IndexMVIVF : public Index<metric> {
   // Output type of Greedy Search
   struct GreedySearchResult {
     parlay::sequence<std::pair<float, node_t*>> probe_list;
-    size_t dist_cmps = 0;
-    std::vector<double> timings = {};
+    size_t bytes_accessed = 0;
+    std::vector<double> stats = {};
   };
 
   // Simple Beam Search with early exit
@@ -228,6 +228,7 @@ class IndexMVIVF : public Index<metric> {
 
     t.start();
     size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
     std::set<score_node> beam;
     parlay::sequence<score_node> top_probes;
     top_probes.reserve(nprobes + 1);
@@ -258,13 +259,15 @@ class IndexMVIVF : public Index<metric> {
       auto& children = current_node->children;
       // Compute distances to children
       child_dists.resize(children.size());
-      dist_cmps += children.size();
       if (params.quantize_centers) {  // Center scoring always uses TQ when enabled.
         std::get<TQ_Set>(current_node->quantized_data).distances_all(q_query, child_dists.data());
+        bytes_accessed += std::get<TQ_Set>(current_node->quantized_data).num_bytes();
       } else {
         auto& centers = current_node->data;
         centers.distances(query, child_dists.data());
+        bytes_accessed += centers.num_bytes();
       }
+      dist_cmps += children.size();
       t_dists += t.stop();
       t.reset();
 
@@ -305,8 +308,8 @@ class IndexMVIVF : public Index<metric> {
     }
 
     GreedySearchResult out;
-    out.dist_cmps = dist_cmps;
-    out.timings = {t_dists, t_beam, t_rest};
+    out.bytes_accessed = bytes_accessed;
+    out.stats = {static_cast<double>(dist_cmps), t_dists, t_beam, t_rest};
     out.probe_list = std::move(top_probes);
     return out;
   }
@@ -329,17 +332,19 @@ class IndexMVIVF : public Index<metric> {
 
     t.start();
     size_t dist_cmps = L;
+    size_t bytes_accessed = 0;
     auto centers_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
     auto scores = parlay::sequence<score_node>::uninitialized(L);
 
     if (params.quantize_centers) {
       std::get<TQ_Set>(leaf_centers_quant).distances_all(q_query, centers_dists.data());
+      bytes_accessed += std::get<TQ_Set>(leaf_centers_quant).num_bytes();
     } else {
       leaf_centers.distances(query, centers_dists.data());
+      bytes_accessed += leaf_centers.num_bytes();
     }
-    parlay::parallel_for(0, L, [&](size_t i) {
-      scores[i] = {centers_dists[i].second, leaves_flat[i]};
-    });
+    parlay::parallel_for(0, L,
+                         [&](size_t i) { scores[i] = {centers_dists[i].second, leaves_flat[i]}; });
     t_dists += t.stop();
     t.reset();
 
@@ -354,8 +359,8 @@ class IndexMVIVF : public Index<metric> {
     t.reset();
 
     out.probe_list = std::move(scores);
-    out.dist_cmps = dist_cmps;
-    out.timings = {t_dists, /*t_beam=*/0.0, t_rest};
+    out.bytes_accessed = bytes_accessed;
+    out.stats = {static_cast<double>(dist_cmps), t_dists, /*t_beam=*/0.0, t_rest};
     return out;
   }
 
@@ -368,6 +373,7 @@ class IndexMVIVF : public Index<metric> {
     auto& offsets = scan_result.first;
     size_t& total_size = scan_result.second;
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
+    auto bytes_accessed = parlay::sequence<size_t>::uninitialized(nprobes);
 
     auto process_probes_quant = [&]<typename SetType>(const auto& q_query) {
       parlay::parallel_for(0, nprobes, [&](size_t i) {
@@ -375,6 +381,7 @@ class IndexMVIVF : public Index<metric> {
         auto* leaf_data = std::get_if<SetType>(&leaf->quantized_data);
         if (!leaf_data) UNREACHABLE();
         leaf_data->distances_all(q_query, &visited[offsets[i]]);
+        bytes_accessed[i] = leaf_data->num_bytes();
       });
     };
 
@@ -399,25 +406,28 @@ class IndexMVIVF : public Index<metric> {
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t* leaf_node = probe_list[i].second;
           leaf_node->data.distances(query, &visited[offsets[i]]);
+          bytes_accessed[i] = leaf_node->data.num_bytes();
         });
         break;
     }
-    return visited;
+    return std::make_pair(visited, parlay::reduce(bytes_accessed));
   }
 
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
                     const SearchParams& search_params) override {
     parlay::internal::timer t;
-    std::vector<double> timings;
 
     size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
-    size_t dist_cmps = 0;
+    size_t bytes_accessed = 0;
 
+    std::vector<double> stats;
+    size_t dist_cmps = 0;
     double t_quantize = 0.0;
     double t_distances = 0.0;
     double t_rest = 0.0;
+    double t_rerank = 0.0;
 
     // -------------------------
     // Step 0: Quantize Query
@@ -444,33 +454,27 @@ class IndexMVIVF : public Index<metric> {
       gs = greedy_search(query, q_center_query, nprobes);
     }
     auto& probe_list = gs.probe_list;
-    dist_cmps += gs.dist_cmps;
+    bytes_accessed += gs.bytes_accessed;
     nprobes = std::min(nprobes, probe_list.size());
-    timings.push_back(dist_cmps);
-    for (double time : gs.timings) {
-      timings.push_back(time);
-    }
+    stats = {gs.stats[0]};
 
     // -------------------------
     // Step 2: Probe clusters in probe_list
     // -------------------------
 
     t.start();
-    auto visited = process_probes(query, q_query_var, probe_list);
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    size_t bytes_accessed_pp;
+    std::tie(visited, bytes_accessed_pp) = process_probes(query, q_query_var, probe_list);
+    bytes_accessed += bytes_accessed_pp;
+    dist_cmps += visited.size();
     t_distances = t.stop();
     t.reset();
-
-    dist_cmps += visited.size();
 
     t.start();
     mvsic::sort_inplace_kv(visited);
     t_rest += t.stop();
     t.reset();
-
-    timings.push_back(t_quantize);
-    timings.push_back(t_distances);
-    timings.push_back(t_rest);
-
     // -------------------------
     // Step 3: Re-ranking
     // -------------------------
@@ -479,16 +483,27 @@ class IndexMVIVF : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      this->rerank(query, points, visited, num_rerank, final_results);
-      dist_cmps += num_rerank;
+      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    timings.push_back(t.stop());
+    t_rerank = t.stop();
     t.reset();
 
-    return std::make_tuple(std::move(final_results), dist_cmps, timings);
+    stats = {gs.stats[0]};                            // #cmps in greedy/flat search
+    stats.push_back(static_cast<size_t>(dist_cmps));  // #cmps during probing
+    // Stats from greedy/flat search
+    for (int i = 1; i < gs.stats.size(); i++) {
+      stats.push_back(gs.stats[i]);
+    }
+    // Stats from probing and reranking
+    stats.push_back(t_quantize);
+    stats.push_back(t_distances);
+    stats.push_back(t_rest);
+    stats.push_back(t_rerank);
+
+    return std::make_tuple(std::move(final_results), bytes_accessed, stats);
   }
 
   // Traversing the k-means tree: returns the height of the tree
@@ -655,6 +670,7 @@ class IndexMVIVF : public Index<metric> {
     int type_id = 0;
     infile.read(reinterpret_cast<char*>(&type_id), sizeof(int));
     quantization_mode = static_cast<QT>(type_id);
+    std::cout << "Quantization mode: " << type_id << std::endl;
 
     switch (quantization_mode) {
       case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(infile); break;
@@ -1043,6 +1059,253 @@ class IndexMVIVF : public Index<metric> {
   }
 
   size_t get_height() const noexcept override { return kmeanstree_height; }
+
+  // [Working]: Specialized search_all function that is more cache-efficient.
+  // Idea:
+  // 1. Run the greedy/flat search part independently in parallel, collecting the output in a single
+  // pass. This emits per query nprobes many leaves that it would like to probe.
+  // 2. Group queries by the leaves they would like to probe.
+  // 3. For each leaf, we score all queries agains all points in the leaf to return top num_rerank/k
+  // results. This is done via a cache-efficient many-to-many kernel. Currently implemented for
+  // Exact and FastScan. It is hard to obtain speedups on exact, as leaves and queries can be huge,
+  // and independent processing is already good. Finally, scatter the results into a global buffer.
+  // 4. Re-rank if necessary.
+
+  std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t> search_all_new(
+      const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
+      const SearchParams& search_params) {
+    if (search_params.nprobes <= 16) {
+      return Index<metric>::search_all(query_points, points, search_params);
+    }
+    parlay::internal::timer t;
+
+    const size_t num_q = query_points.size();
+    const size_t num_leaves = leaves_flat.size();
+    const size_t k = search_params.k;
+    size_t nprobes = std::min(num_leaves, search_params.nprobes);
+    size_t bytes_accessed = 0;
+    size_t dist_cmps = 0;
+
+    // ---------------------------------------------------------------------
+    // Step 0: Pre-Quantize Queries
+    // ---------------------------------------------------------------------
+    t.start();
+    auto q_queries = parlay::sequence<QuantQuery>::uninitialized(num_q);
+    if (quantization_mode != QT::None) {
+      parlay::parallel_for(0, num_q, [&](size_t i) {
+        q_queries[i] = this->quantize_query_point_cloud(query_points[i], quantizer);
+      });
+    }
+    t.stop();
+    std::cout << "[MVIVF] Query Quantization: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+
+    // ---------------------------------------------------------------------
+    // Step 1: Greedy Search
+    // ---------------------------------------------------------------------
+    t.start();
+    auto leaf_query_pairs =
+        parlay::sequence<std::pair<node_t*, std::pair<uint32_t, uint32_t>>>::uninitialized(nprobes *
+                                                                                           num_q);
+    auto dist_cmps_gs = parlay::sequence<size_t>::uninitialized(num_q);
+    auto bytes_accessed_gs = parlay::sequence<size_t>::uninitialized(num_q);
+
+    parlay::parallel_for(0, num_q, [&](uint32_t i) {
+      TQ_Query q_center_query;
+      if (params.quantize_centers) {
+        q_center_query = center_quantizer.quantize_query(query_points[i]);
+      }
+      const double alpha = 1.0;  // heuristic threshold: TODO: set this
+      bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+      GreedySearchResult gs;
+      if (use_flat) {
+        gs = flat_leaf_search(query_points[i], q_center_query, nprobes);
+      } else {
+        gs = greedy_search(query_points[i], q_center_query, nprobes);
+      }
+      auto& probe_list = gs.probe_list;
+      dist_cmps_gs[i] = static_cast<size_t>(gs.stats[0]);
+      bytes_accessed_gs[i] = gs.bytes_accessed;
+      parlay::parallel_for(0, probe_list.size(), [&](uint32_t j) {
+        leaf_query_pairs[i * nprobes + j] = {probe_list[j].second, std::make_pair(i, j)};
+      });
+    });
+    t.stop();
+    std::cout << "[MVIVF] Greedy Search: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+    bytes_accessed += parlay::reduce(bytes_accessed_gs);
+    dist_cmps += parlay::reduce(dist_cmps_gs);
+
+    // ---------------------------------------------------------------------
+    // Step 2: Group
+    // ---------------------------------------------------------------------
+    t.start();
+    auto grouped = mvsic::group_by_key_inplace(leaf_query_pairs);
+    t.stop();
+    std::cout << "[MVIVF] Grouping: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+
+    // ---------------------------------------------------------------------
+    // Step 3: Leaf Probing
+    // ---------------------------------------------------------------------
+    t.start();
+    size_t num_rerank = std::max(search_params.num_rerank, k);
+    size_t max_cands_per_query = nprobes * num_rerank;
+
+    auto all_candidates = parlay::sequence<std::pair<uint32_t, float>>(
+        num_q * max_cands_per_query, {UINT32_MAX, std::numeric_limits<float>::max()});
+
+    // HELPER 1: Default Parallel 1-to-N Loop (for PQ, RaBitQ, TQ)
+    auto process_leaf_quant = [&]<typename SetType, typename QueryType>(
+                                  node_t* leaf, const auto& group, size_t C) {
+      auto* leaf_data = std::get_if<SetType>(&leaf->quantized_data);
+      if (!leaf_data) UNREACHABLE();
+      parlay::parallel_for(0, group.size(), [&](size_t j) {
+        uint32_t q_id = group[j].second.first;
+        uint32_t probe_idx = group[j].second.second;
+        auto* q_query_ptr = std::get_if<QueryType>(&q_queries[q_id]);
+        if (!q_query_ptr) UNREACHABLE();
+        // Compute scores to all points in the leaf
+        auto all_dists =
+            parlay::sequence<std::pair<uint32_t, float>>::uninitialized(leaf->get_size());
+        leaf_data->distances_all(*q_query_ptr, all_dists.data());
+        // Collect top C
+        if (C < all_dists.size()) {
+          std::nth_element(all_dists.begin(), all_dists.begin() + C, all_dists.end(),
+                           [](const auto& a, const auto& b) { return a.second < b.second; });
+        }
+        // Scatter to global buffer
+        size_t base_idx = (q_id * max_cands_per_query) + (probe_idx * num_rerank);
+        for (size_t c = 0; c < C; ++c) {
+          all_candidates[base_idx + c] = all_dists[c];
+        }
+      });
+    };
+
+    // HELPER 2: Batched Many-to-Many M2M Kernel (for FastScan)
+    auto process_leaf_quant_m2m = [&]<typename SetType, typename QueryType, typename M2MType>(
+                                      node_t* leaf, const auto& group, size_t C) {
+      auto* leaf_data = std::get_if<SetType>(&leaf->quantized_data);
+      if (!leaf_data) UNREACHABLE();
+      size_t num_queries_in_group = group.size();
+      // Gather raw pointers to the strongly-typed queries
+      std::vector<const QueryType*> typed_queries(num_queries_in_group);
+      parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
+        uint32_t q_id = group[j].second.first;
+        auto* q_query_ptr = std::get_if<QueryType>(&q_queries[q_id]);
+        if (!q_query_ptr) UNREACHABLE();
+        typed_queries[j] = q_query_ptr;
+      });
+
+      std::vector<std::pair<uint32_t, float>> batch_results(num_queries_in_group * num_rerank);
+      M2MType::TopKIntoUninitialized(typed_queries, *leaf_data, num_rerank, batch_results.data(),
+                                     num_queries_in_group, /*parallel_query_blocks=*/true);
+      // Scatter to global buffer
+      parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
+        uint32_t q_id = group[j].second.first;
+        uint32_t probe_idx = group[j].second.second;
+        size_t base_idx = (q_id * max_cands_per_query) + (probe_idx * num_rerank);
+        for (size_t c = 0; c < C; ++c) {
+          all_candidates[base_idx + c] = batch_results[j * num_rerank + c];
+        }
+      });
+    };
+
+    // For each leaf group in parallel:
+    parlay::parallel_for(0, grouped.size(), [&](size_t i) {
+      auto& group = grouped[i];
+      node_t* leaf = group[0].first;
+      size_t C = std::min<size_t>(num_rerank, leaf->get_size());
+      size_t num_queries_in_group = group.size();
+      switch (quantization_mode) {
+        case QT::PQ:
+          process_leaf_quant.template operator()<typename MVQT::PQ_Set, typename MVQT::PQ_Query>(
+              leaf, group, C);
+          break;
+        case QT::RaBitQ:
+          process_leaf_quant.template operator()<typename MVQT::RQ_Set, typename MVQT::RQ_Query>(
+              leaf, group, C);
+          break;
+        case QT::FastScan:
+          // Route to FastScan's M2M Kernel
+          process_leaf_quant_m2m
+              .template operator()<typename MVQT::FS_Set, typename MVQT::FS_Query,
+                                   fastscan_mv::ManyToMany<typename MVQT::FS_Set>>(leaf, group, C);
+          break;
+        case QT::TurboQuant:
+          process_leaf_quant.template operator()<typename MVQT::TQ_Set, typename MVQT::TQ_Query>(
+              leaf, group, C);
+          break;
+        case QT::None: {
+          auto query_ids = parlay::delayed_tabulate(
+              num_queries_in_group, [&](size_t j) { return group[j].second.first; });
+          PointCloudSet<ChPoint> batched_queries(query_points.filter(query_ids), d);
+          auto leaf_results = leaf->data.distances(batched_queries, num_rerank);
+          parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
+            uint32_t q_id = group[j].second.first;
+            uint32_t probe_idx = group[j].second.second;
+            size_t base_idx = (q_id * max_cands_per_query) + (probe_idx * num_rerank);
+            for (size_t c = 0; c < C; ++c) {
+              all_candidates[base_idx + c] = leaf_results[j * num_rerank + c];
+            }
+          });
+          break;
+        }
+        default: UNREACHABLE();
+      }
+    });
+    t.stop();
+    std::cout << "[MVIVF] Probing & Scattering: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+    // TODO: update bytes_accessed and dist_cmps
+
+    // ---------------------------------------------------------------------
+    // Step 4: Aggregation and Re-ranking
+    // ---------------------------------------------------------------------
+    t.start();
+    auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
+    auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
+
+    parlay::parallel_for(0, num_q, [&](size_t q_id) {
+      size_t base_idx = q_id * max_cands_per_query;
+      auto q_cands = parlay::sequence<std::pair<uint32_t, float>>(
+          all_candidates.begin() + base_idx,
+          all_candidates.begin() + base_idx + max_cands_per_query);
+      parlay::sort_inplace(q_cands,
+                           [](const auto& a, const auto& b) { return a.second < b.second; });
+      parlay::sequence<std::pair<uint32_t, float>> top_cands;
+      top_cands.reserve(num_rerank);
+
+      for (size_t c = 0; c < q_cands.size() && top_cands.size() < num_rerank; ++c) {
+        if (q_cands[c].first == UINT32_MAX) break;
+        top_cands.push_back(q_cands[c]);
+      }
+      auto q_final = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+          std::min(k, top_cands.size()));
+      bytes_accessed_rerank[q_id] = 0;
+
+      if (search_params.num_rerank > 0) {
+        size_t actual_rerank = std::min(num_rerank, top_cands.size());
+        bytes_accessed_rerank[q_id] =
+            this->rerank(query_points[q_id], points, top_cands, actual_rerank, q_final);
+      } else {
+        for (size_t c = 0; c < q_final.size(); ++c) {
+          q_final[c] = top_cands[c];
+        }
+      }
+
+      final_results[q_id] = std::move(q_final);
+    });
+    t.stop();
+    std::cout << "[MVIVF] Aggregation and Re-ranking: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+    bytes_accessed += parlay::reduce(bytes_accessed_rerank);
+
+    std::cout << "[MVIVF] Bytes Accessed: " << bytes_accessed << std::endl;
+    std::cout << "[MVIVF] Dist Cmps: " << dist_cmps << std::endl;
+
+    return std::make_pair(std::move(final_results), bytes_accessed);
+  }
 };
 
 using IndexMVIVFL2 = IndexMVIVF<true>;   // Instantiates for L2 metric (metric = true)
