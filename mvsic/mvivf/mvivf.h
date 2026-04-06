@@ -1199,7 +1199,7 @@ class IndexMVIVF : public Index<metric> {
 
       std::vector<std::pair<uint32_t, float>> batch_results(num_queries_in_group * num_rerank);
       M2MType::TopKIntoUninitialized(typed_queries, *leaf_data, num_rerank, batch_results.data(),
-                                     num_queries_in_group, /*parallel_query_blocks=*/true);
+                                     /*q_block=*/4, /*parallel_query_blocks=*/true);
       // Scatter to global buffer
       parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
         uint32_t q_id = group[j].second.first;
@@ -1271,13 +1271,21 @@ class IndexMVIVF : public Index<metric> {
       auto q_cands = parlay::sequence<std::pair<uint32_t, float>>(
           all_candidates.begin() + base_idx,
           all_candidates.begin() + base_idx + max_cands_per_query);
-      parlay::sort_inplace(q_cands,
-                           [](const auto& a, const auto& b) { return a.second < b.second; });
-      parlay::sequence<std::pair<uint32_t, float>> top_cands;
-      top_cands.reserve(num_rerank);
 
-      for (size_t c = 0; c < q_cands.size() && top_cands.size() < num_rerank; ++c) {
-        if (q_cands[c].first == UINT32_MAX) break;
+      // Find how many valid candidates there are (not UINT32_MAX sentinels)
+      size_t num_valid = 0;
+      for (size_t c = 0; c < q_cands.size(); ++c)
+        if (q_cands[c].first != UINT32_MAX) ++num_valid;
+
+      size_t take = std::min(num_rerank, num_valid);
+      if (take > 0 && take < num_valid) {
+        std::nth_element(q_cands.begin(), q_cands.begin() + take, q_cands.begin() + num_valid,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+      }
+
+      parlay::sequence<std::pair<uint32_t, float>> top_cands;
+      top_cands.reserve(take);
+      for (size_t c = 0; c < take; ++c) {
         top_cands.push_back(q_cands[c]);
       }
       auto q_final = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(

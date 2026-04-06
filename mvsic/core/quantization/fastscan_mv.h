@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <queue>
 #include <cstdint>
 #include <immintrin.h>
 #include <limits>
@@ -165,53 +166,85 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
   return static_cast<uint16_t>(hmin_512_epu32(m));
 }
 
-inline void scan_64_nq_running_min(const uint8_t* const* luts, size_t nq,
-                                   const uint8_t* codes_ptr, uint32_t num_blocks,
-                                   RunningMinV* running_mins) {
-  __m512i ae_lo[NQ_BATCH], ae_hi[NQ_BATCH], ao_lo[NQ_BATCH], ao_hi[NQ_BATCH];
-  for (size_t qi = 0; qi < nq; ++qi) {
-    ae_lo[qi] = _mm512_setzero_si512();
-    ae_hi[qi] = _mm512_setzero_si512();
-    ao_lo[qi] = _mm512_setzero_si512();
-    ao_hi[qi] = _mm512_setzero_si512();
-  }
+static constexpr size_t SCAN_Q_BATCH = 6;
+
+inline void scan_64_6q_running_min(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* lut3, const uint8_t* lut4, const uint8_t* lut5,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2,
+    RunningMinV& rm3, RunningMinV& rm4, RunningMinV& rm5) {
+
+  __m512i a0el = _mm512_setzero_si512(), a0ol = _mm512_setzero_si512();
+  __m512i a0eh = _mm512_setzero_si512(), a0oh = _mm512_setzero_si512();
+  __m512i a1el = _mm512_setzero_si512(), a1ol = _mm512_setzero_si512();
+  __m512i a1eh = _mm512_setzero_si512(), a1oh = _mm512_setzero_si512();
+  __m512i a2el = _mm512_setzero_si512(), a2ol = _mm512_setzero_si512();
+  __m512i a2eh = _mm512_setzero_si512(), a2oh = _mm512_setzero_si512();
+  __m512i a3el = _mm512_setzero_si512(), a3ol = _mm512_setzero_si512();
+  __m512i a3eh = _mm512_setzero_si512(), a3oh = _mm512_setzero_si512();
+  __m512i a4el = _mm512_setzero_si512(), a4ol = _mm512_setzero_si512();
+  __m512i a4eh = _mm512_setzero_si512(), a4oh = _mm512_setzero_si512();
+  __m512i a5el = _mm512_setzero_si512(), a5ol = _mm512_setzero_si512();
+  __m512i a5eh = _mm512_setzero_si512(), a5oh = _mm512_setzero_si512();
+
   const __m512i low_mask = _mm512_set1_epi8(0x0F);
   const __m512i ones_i8 = _mm512_set1_epi8(1);
   const __m512i blk_off = _mm512_set1_epi32(0x30201000);
   const uint32_t nb4 = ((num_blocks + 3) / 4) * 4;
-  const uint8_t* cp = codes_ptr;
 
   for (uint32_t g = 0; g < nb4 / 4; ++g) {
-    const __m512i p_lo = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(cp));
-    const __m512i p_hi = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(cp + 64));
-    cp += 128;
+    const __m512i p_lo = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+    const __m512i p_hi = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr + 64));
+    codes_ptr += 128;
 
-    __m512i ce_lo = _mm512_or_si512(_mm512_and_si512(p_lo, low_mask), blk_off);
-    __m512i ce_hi = _mm512_or_si512(_mm512_and_si512(p_hi, low_mask), blk_off);
-    __m512i co_lo = _mm512_or_si512(
+    const __m512i ce_lo = _mm512_or_si512(_mm512_and_si512(p_lo, low_mask), blk_off);
+    const __m512i ce_hi = _mm512_or_si512(_mm512_and_si512(p_hi, low_mask), blk_off);
+    const __m512i co_lo = _mm512_or_si512(
         _mm512_and_si512(_mm512_srli_epi16(p_lo, 4), low_mask), blk_off);
-    __m512i co_hi = _mm512_or_si512(
+    const __m512i co_hi = _mm512_or_si512(
         _mm512_and_si512(_mm512_srli_epi16(p_hi, 4), low_mask), blk_off);
 
-    for (size_t qi = 0; qi < nq; ++qi) {
-      const __m512i lut512 =
-          _mm512_loadu_si512(reinterpret_cast<const __m512i*>(&luts[qi][g * 64]));
-      __m512i se_lo = _mm512_permutexvar_epi8(ce_lo, lut512);
-      __m512i se_hi = _mm512_permutexvar_epi8(ce_hi, lut512);
-      __m512i so_lo = _mm512_permutexvar_epi8(co_lo, lut512);
-      __m512i so_hi = _mm512_permutexvar_epi8(co_hi, lut512);
-      ae_lo[qi] = _mm512_dpbusd_epi32(ae_lo[qi], se_lo, ones_i8);
-      ae_hi[qi] = _mm512_dpbusd_epi32(ae_hi[qi], se_hi, ones_i8);
-      ao_lo[qi] = _mm512_dpbusd_epi32(ao_lo[qi], so_lo, ones_i8);
-      ao_hi[qi] = _mm512_dpbusd_epi32(ao_hi[qi], so_hi, ones_i8);
+#define FSMV_VNNI_Q(Q, lp)                                                                        \
+    {                                                                                              \
+      const __m512i lut512 =                                                                       \
+          _mm512_loadu_si512(reinterpret_cast<const __m512i*>(&lp[g * 64]));                       \
+      a##Q##el = _mm512_dpbusd_epi32(a##Q##el, _mm512_permutexvar_epi8(ce_lo, lut512), ones_i8);  \
+      a##Q##eh = _mm512_dpbusd_epi32(a##Q##eh, _mm512_permutexvar_epi8(ce_hi, lut512), ones_i8);  \
+      a##Q##ol = _mm512_dpbusd_epi32(a##Q##ol, _mm512_permutexvar_epi8(co_lo, lut512), ones_i8);  \
+      a##Q##oh = _mm512_dpbusd_epi32(a##Q##oh, _mm512_permutexvar_epi8(co_hi, lut512), ones_i8);  \
     }
+    FSMV_VNNI_Q(0, lut0)
+    FSMV_VNNI_Q(1, lut1)
+    FSMV_VNNI_Q(2, lut2)
+    FSMV_VNNI_Q(3, lut3)
+    FSMV_VNNI_Q(4, lut4)
+    FSMV_VNNI_Q(5, lut5)
+#undef FSMV_VNNI_Q
   }
-  for (size_t qi = 0; qi < nq; ++qi) {
-    running_mins[qi].lo =
-        _mm512_min_epu32(running_mins[qi].lo, _mm512_min_epu32(ae_lo[qi], ao_lo[qi]));
-    running_mins[qi].hi =
-        _mm512_min_epu32(running_mins[qi].hi, _mm512_min_epu32(ae_hi[qi], ao_hi[qi]));
-  }
+
+#define FSMV_VNNI_REDUCE(Q, rm)                                                        \
+  rm.lo = _mm512_min_epu32(rm.lo, _mm512_min_epu32(a##Q##el, a##Q##ol));               \
+  rm.hi = _mm512_min_epu32(rm.hi, _mm512_min_epu32(a##Q##eh, a##Q##oh));
+  FSMV_VNNI_REDUCE(0, rm0)
+  FSMV_VNNI_REDUCE(1, rm1)
+  FSMV_VNNI_REDUCE(2, rm2)
+  FSMV_VNNI_REDUCE(3, rm3)
+  FSMV_VNNI_REDUCE(4, rm4)
+  FSMV_VNNI_REDUCE(5, rm5)
+#undef FSMV_VNNI_REDUCE
+}
+
+inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
+                            const uint8_t* codes_ptr, uint32_t num_blocks,
+                            RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 5 < nq; qi += 6)
+    scan_64_6q_running_min(luts[qi], luts[qi + 1], luts[qi + 2], luts[qi + 3], luts[qi + 4],
+                           luts[qi + 5], codes_ptr, num_blocks, rmins[qi], rmins[qi + 1],
+                           rmins[qi + 2], rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
+  for (; qi < nq; ++qi)
+    scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
 #elif defined(__AVX512VBMI__)
@@ -327,39 +360,69 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
   return hmin_512_epu16(vmin);
 }
 
-inline void scan_64_nq_running_min(const uint8_t* const* luts, size_t nq,
-                                   const uint8_t* codes_ptr, uint32_t num_blocks,
-                                   RunningMinV* running_mins) {
-  __m512i acc_even[NQ_BATCH], acc_odd[NQ_BATCH];
-  for (size_t qi = 0; qi < nq; ++qi) {
-    acc_even[qi] = _mm512_setzero_si512();
-    acc_odd[qi] = _mm512_setzero_si512();
-  }
+static constexpr size_t SCAN_Q_BATCH = 6;
+
+inline void scan_64_6q_running_min(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* lut3, const uint8_t* lut4, const uint8_t* lut5,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2,
+    RunningMinV& rm3, RunningMinV& rm4, RunningMinV& rm5) {
+
+  __m512i a0e = _mm512_setzero_si512(), a0o = _mm512_setzero_si512();
+  __m512i a1e = _mm512_setzero_si512(), a1o = _mm512_setzero_si512();
+  __m512i a2e = _mm512_setzero_si512(), a2o = _mm512_setzero_si512();
+  __m512i a3e = _mm512_setzero_si512(), a3o = _mm512_setzero_si512();
+  __m512i a4e = _mm512_setzero_si512(), a4o = _mm512_setzero_si512();
+  __m512i a5e = _mm512_setzero_si512(), a5o = _mm512_setzero_si512();
+
   const __m512i low_mask = _mm512_set1_epi8(0x0F);
   const __m512i offset_mask = _mm512_set1_epi16(0x1000);
   const __m512i ones = _mm512_set1_epi8(1);
-  const uint8_t* cp = codes_ptr;
 
   for (uint32_t b = 0; b < num_blocks; b += 2) {
-    const __m512i packed = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(cp));
-    cp += 64;
-    __m512i ce = _mm512_or_si512(_mm512_and_si512(packed, low_mask), offset_mask);
-    __m512i co =
+    const __m512i packed = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+    codes_ptr += 64;
+    const __m512i ce = _mm512_or_si512(_mm512_and_si512(packed, low_mask), offset_mask);
+    const __m512i co =
         _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi16(packed, 4), low_mask), offset_mask);
 
-    for (size_t qi = 0; qi < nq; ++qi) {
-      const __m256i l256 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&luts[qi][b * 16]));
-      const __m512i l512 = _mm512_castsi256_si512(l256);
-      acc_even[qi] = _mm512_add_epi16(
-          acc_even[qi], _mm512_maddubs_epi16(_mm512_permutexvar_epi8(ce, l512), ones));
-      acc_odd[qi] = _mm512_add_epi16(
-          acc_odd[qi], _mm512_maddubs_epi16(_mm512_permutexvar_epi8(co, l512), ones));
+#define FSMV_VBMI_Q(Q, lp)                                                                        \
+    {                                                                                              \
+      const __m256i l256 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&lp[b * 16]));      \
+      const __m512i l512 = _mm512_castsi256_si512(l256);                                           \
+      a##Q##e = _mm512_add_epi16(                                                                  \
+          a##Q##e, _mm512_maddubs_epi16(_mm512_permutexvar_epi8(ce, l512), ones));                 \
+      a##Q##o = _mm512_add_epi16(                                                                  \
+          a##Q##o, _mm512_maddubs_epi16(_mm512_permutexvar_epi8(co, l512), ones));                 \
     }
+    FSMV_VBMI_Q(0, lut0)
+    FSMV_VBMI_Q(1, lut1)
+    FSMV_VBMI_Q(2, lut2)
+    FSMV_VBMI_Q(3, lut3)
+    FSMV_VBMI_Q(4, lut4)
+    FSMV_VBMI_Q(5, lut5)
+#undef FSMV_VBMI_Q
   }
-  for (size_t qi = 0; qi < nq; ++qi) {
-    running_mins[qi].v = _mm512_min_epu16(running_mins[qi].v, acc_even[qi]);
-    running_mins[qi].v = _mm512_min_epu16(running_mins[qi].v, acc_odd[qi]);
-  }
+
+  rm0.v = _mm512_min_epu16(rm0.v, _mm512_min_epu16(a0e, a0o));
+  rm1.v = _mm512_min_epu16(rm1.v, _mm512_min_epu16(a1e, a1o));
+  rm2.v = _mm512_min_epu16(rm2.v, _mm512_min_epu16(a2e, a2o));
+  rm3.v = _mm512_min_epu16(rm3.v, _mm512_min_epu16(a3e, a3o));
+  rm4.v = _mm512_min_epu16(rm4.v, _mm512_min_epu16(a4e, a4o));
+  rm5.v = _mm512_min_epu16(rm5.v, _mm512_min_epu16(a5e, a5o));
+}
+
+inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
+                            const uint8_t* codes_ptr, uint32_t num_blocks,
+                            RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 5 < nq; qi += 6)
+    scan_64_6q_running_min(luts[qi], luts[qi + 1], luts[qi + 2], luts[qi + 3], luts[qi + 4],
+                           luts[qi + 5], codes_ptr, num_blocks, rmins[qi], rmins[qi + 1],
+                           rmins[qi + 2], rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
+  for (; qi < nq; ++qi)
+    scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
 #elif defined(__AVX512F__)
@@ -460,36 +523,64 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
   return hmin_512_epu16(vmin);
 }
 
-inline void scan_64_nq_running_min(const uint8_t* const* luts, size_t nq,
-                                   const uint8_t* codes_ptr, uint32_t num_blocks,
-                                   RunningMinV* running_mins) {
-  __m512i acc_even[NQ_BATCH], acc_odd[NQ_BATCH];
-  for (size_t qi = 0; qi < nq; ++qi) {
-    acc_even[qi] = _mm512_setzero_si512();
-    acc_odd[qi] = _mm512_setzero_si512();
-  }
+static constexpr size_t SCAN_Q_BATCH = 6;
+
+inline void scan_64_6q_running_min(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* lut3, const uint8_t* lut4, const uint8_t* lut5,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2,
+    RunningMinV& rm3, RunningMinV& rm4, RunningMinV& rm5) {
+
+  __m512i a0e = _mm512_setzero_si512(), a0o = _mm512_setzero_si512();
+  __m512i a1e = _mm512_setzero_si512(), a1o = _mm512_setzero_si512();
+  __m512i a2e = _mm512_setzero_si512(), a2o = _mm512_setzero_si512();
+  __m512i a3e = _mm512_setzero_si512(), a3o = _mm512_setzero_si512();
+  __m512i a4e = _mm512_setzero_si512(), a4o = _mm512_setzero_si512();
+  __m512i a5e = _mm512_setzero_si512(), a5o = _mm512_setzero_si512();
+
   const __m256i low_mask = _mm256_set1_epi8(0x0F);
-  const uint8_t* cp = codes_ptr;
 
   for (uint32_t b = 0; b < num_blocks; ++b) {
-    const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(cp));
-    cp += 32;
+    const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+    codes_ptr += 32;
     const __m256i ce = _mm256_and_si256(packed, low_mask);
     const __m256i co = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
-    for (size_t qi = 0; qi < nq; ++qi) {
-      const __m128i l128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&luts[qi][b * 16]));
-      const __m256i l256 = _mm256_broadcastsi128_si256(l128);
-      acc_even[qi] =
-          _mm512_add_epi16(acc_even[qi], _mm512_cvtepu8_epi16(_mm256_shuffle_epi8(l256, ce)));
-      acc_odd[qi] =
-          _mm512_add_epi16(acc_odd[qi], _mm512_cvtepu8_epi16(_mm256_shuffle_epi8(l256, co)));
+#define FSMV_AVX512F_Q(Q, lp)                                                                     \
+    {                                                                                              \
+      const __m128i l128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&lp[b * 16]));         \
+      const __m256i l256 = _mm256_broadcastsi128_si256(l128);                                      \
+      a##Q##e = _mm512_add_epi16(a##Q##e, _mm512_cvtepu8_epi16(_mm256_shuffle_epi8(l256, ce)));    \
+      a##Q##o = _mm512_add_epi16(a##Q##o, _mm512_cvtepu8_epi16(_mm256_shuffle_epi8(l256, co)));    \
     }
+    FSMV_AVX512F_Q(0, lut0)
+    FSMV_AVX512F_Q(1, lut1)
+    FSMV_AVX512F_Q(2, lut2)
+    FSMV_AVX512F_Q(3, lut3)
+    FSMV_AVX512F_Q(4, lut4)
+    FSMV_AVX512F_Q(5, lut5)
+#undef FSMV_AVX512F_Q
   }
-  for (size_t qi = 0; qi < nq; ++qi) {
-    running_mins[qi].v = _mm512_min_epu16(running_mins[qi].v, acc_even[qi]);
-    running_mins[qi].v = _mm512_min_epu16(running_mins[qi].v, acc_odd[qi]);
-  }
+
+  rm0.v = _mm512_min_epu16(rm0.v, _mm512_min_epu16(a0e, a0o));
+  rm1.v = _mm512_min_epu16(rm1.v, _mm512_min_epu16(a1e, a1o));
+  rm2.v = _mm512_min_epu16(rm2.v, _mm512_min_epu16(a2e, a2o));
+  rm3.v = _mm512_min_epu16(rm3.v, _mm512_min_epu16(a3e, a3o));
+  rm4.v = _mm512_min_epu16(rm4.v, _mm512_min_epu16(a4e, a4o));
+  rm5.v = _mm512_min_epu16(rm5.v, _mm512_min_epu16(a5e, a5o));
+}
+
+inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
+                            const uint8_t* codes_ptr, uint32_t num_blocks,
+                            RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 5 < nq; qi += 6)
+    scan_64_6q_running_min(luts[qi], luts[qi + 1], luts[qi + 2], luts[qi + 3], luts[qi + 4],
+                           luts[qi + 5], codes_ptr, num_blocks, rmins[qi], rmins[qi + 1],
+                           rmins[qi + 2], rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
+  for (; qi < nq; ++qi)
+    scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
 #elif defined(__AVX2__)
@@ -612,44 +703,64 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
   return hmin_256_epu16(_mm256_min_epu16(m1, m2));
 }
 
-inline void scan_64_nq_running_min(const uint8_t* const* luts, size_t nq,
-                                   const uint8_t* codes_ptr, uint32_t num_blocks,
-                                   RunningMinV* running_mins) {
-  __m256i ae_lo[NQ_BATCH], ae_hi[NQ_BATCH], ao_lo[NQ_BATCH], ao_hi[NQ_BATCH];
-  for (size_t qi = 0; qi < nq; ++qi) {
-    ae_lo[qi] = _mm256_setzero_si256();
-    ae_hi[qi] = _mm256_setzero_si256();
-    ao_lo[qi] = _mm256_setzero_si256();
-    ao_hi[qi] = _mm256_setzero_si256();
-  }
+static constexpr size_t SCAN_Q_BATCH = 3;
+
+inline void scan_64_3q_running_min(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2) {
+
+  __m256i a0el = _mm256_setzero_si256(), a0eh = _mm256_setzero_si256();
+  __m256i a0ol = _mm256_setzero_si256(), a0oh = _mm256_setzero_si256();
+  __m256i a1el = _mm256_setzero_si256(), a1eh = _mm256_setzero_si256();
+  __m256i a1ol = _mm256_setzero_si256(), a1oh = _mm256_setzero_si256();
+  __m256i a2el = _mm256_setzero_si256(), a2eh = _mm256_setzero_si256();
+  __m256i a2ol = _mm256_setzero_si256(), a2oh = _mm256_setzero_si256();
   const __m256i low_mask = _mm256_set1_epi8(0x0F);
-  const uint8_t* cp = codes_ptr;
 
   for (uint32_t b = 0; b < num_blocks; ++b) {
-    const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(cp));
-    cp += 32;
+    const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+    codes_ptr += 32;
     const __m256i ce = _mm256_and_si256(packed, low_mask);
     const __m256i co = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
 
-    for (size_t qi = 0; qi < nq; ++qi) {
-      const __m128i l128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&luts[qi][b * 16]));
-      const __m256i l256 = _mm256_broadcastsi128_si256(l128);
-      const __m256i se = _mm256_shuffle_epi8(l256, ce);
-      const __m256i so = _mm256_shuffle_epi8(l256, co);
-      ae_lo[qi] = _mm256_add_epi16(ae_lo[qi], _mm256_cvtepu8_epi16(_mm256_castsi256_si128(se)));
-      ae_hi[qi] =
-          _mm256_add_epi16(ae_hi[qi], _mm256_cvtepu8_epi16(_mm256_extracti128_si256(se, 1)));
-      ao_lo[qi] = _mm256_add_epi16(ao_lo[qi], _mm256_cvtepu8_epi16(_mm256_castsi256_si128(so)));
-      ao_hi[qi] =
-          _mm256_add_epi16(ao_hi[qi], _mm256_cvtepu8_epi16(_mm256_extracti128_si256(so, 1)));
+#define FSMV_AVX2_Q(Q, lp)                                                                        \
+    {                                                                                              \
+      const __m128i l128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&lp[b * 16]));         \
+      const __m256i l256 = _mm256_broadcastsi128_si256(l128);                                      \
+      const __m256i se = _mm256_shuffle_epi8(l256, ce);                                            \
+      const __m256i so = _mm256_shuffle_epi8(l256, co);                                            \
+      a##Q##el = _mm256_add_epi16(a##Q##el, _mm256_cvtepu8_epi16(_mm256_castsi256_si128(se)));     \
+      a##Q##eh =                                                                                   \
+          _mm256_add_epi16(a##Q##eh, _mm256_cvtepu8_epi16(_mm256_extracti128_si256(se, 1)));       \
+      a##Q##ol = _mm256_add_epi16(a##Q##ol, _mm256_cvtepu8_epi16(_mm256_castsi256_si128(so)));     \
+      a##Q##oh =                                                                                   \
+          _mm256_add_epi16(a##Q##oh, _mm256_cvtepu8_epi16(_mm256_extracti128_si256(so, 1)));       \
     }
+    FSMV_AVX2_Q(0, lut0)
+    FSMV_AVX2_Q(1, lut1)
+    FSMV_AVX2_Q(2, lut2)
+#undef FSMV_AVX2_Q
   }
-  for (size_t qi = 0; qi < nq; ++qi) {
-    running_mins[qi].lo = _mm256_min_epu16(running_mins[qi].lo, ae_lo[qi]);
-    running_mins[qi].lo = _mm256_min_epu16(running_mins[qi].lo, ao_lo[qi]);
-    running_mins[qi].hi = _mm256_min_epu16(running_mins[qi].hi, ae_hi[qi]);
-    running_mins[qi].hi = _mm256_min_epu16(running_mins[qi].hi, ao_hi[qi]);
-  }
+
+#define FSMV_AVX2_REDUCE(Q, rm)                                              \
+  rm.lo = _mm256_min_epu16(rm.lo, _mm256_min_epu16(a##Q##el, a##Q##ol));     \
+  rm.hi = _mm256_min_epu16(rm.hi, _mm256_min_epu16(a##Q##eh, a##Q##oh));
+  FSMV_AVX2_REDUCE(0, rm0)
+  FSMV_AVX2_REDUCE(1, rm1)
+  FSMV_AVX2_REDUCE(2, rm2)
+#undef FSMV_AVX2_REDUCE
+}
+
+inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
+                            const uint8_t* codes_ptr, uint32_t num_blocks,
+                            RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 2 < nq; qi += 3)
+    scan_64_3q_running_min(luts[qi], luts[qi + 1], luts[qi + 2], codes_ptr, num_blocks,
+                           rmins[qi], rmins[qi + 1], rmins[qi + 2]);
+  for (; qi < nq; ++qi)
+    scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
 #else
@@ -707,11 +818,13 @@ inline uint16_t scan_64_chunk_min_masked(const uint8_t* lut, const uint8_t* code
   return best;
 }
 
-inline void scan_64_nq_running_min(const uint8_t* const* luts, size_t nq,
-                                   const uint8_t* codes_ptr, uint32_t num_blocks,
-                                   RunningMinV* running_mins) {
+static constexpr size_t SCAN_Q_BATCH = 1;
+
+inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
+                            const uint8_t* codes_ptr, uint32_t num_blocks,
+                            RunningMinV* rmins) {
   for (size_t qi = 0; qi < nq; ++qi)
-    scan_64_running_min(luts[qi], codes_ptr, num_blocks, running_mins[qi]);
+    scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 #endif
 
@@ -770,8 +883,7 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
       for (size_t s = strip0; s < strip1; ++s) {
         const uint8_t* sp = strip_ptr(s);
         if (s + PREFETCH_STRIPS < strip1) __builtin_prefetch(strip_ptr(s + PREFETCH_STRIPS), 0, 3);
-        for (size_t qi = 0; qi < q_count; ++qi)
-          scan_64_running_min(lut_ptrs[qi], sp, num_blocks, scratch_combined[qi]);
+        scan_64_batched(lut_ptrs, q_count, sp, num_blocks, scratch_combined.data());
       }
       for (size_t qi = 0; qi < q_count; ++qi)
         scratch_min_raw[qi] = reduce_running_min(scratch_combined[qi]);
@@ -788,8 +900,7 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
           const uint8_t* sp = strip_ptr(s);
           if (s + PREFETCH_STRIPS < strip1)
             __builtin_prefetch(strip_ptr(s + PREFETCH_STRIPS), 0, 3);
-          for (size_t qi = 0; qi < q_count; ++qi)
-            scan_64_running_min(lut_ptrs[qi], sp, num_blocks, scratch_combined[qi]);
+          scan_64_batched(lut_ptrs, q_count, sp, num_blocks, scratch_combined.data());
         }
         for (size_t qi = 0; qi < q_count; ++qi) {
           uint16_t d = reduce_running_min(scratch_combined[qi]);
@@ -1037,8 +1148,7 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
       for (size_t s = strip0; s < strip1; ++s) {
         const uint8_t* sp = strip_ptr(s);
         if (s + 2 < strip1) __builtin_prefetch(strip_ptr(s + 2), 0, 3);
-        for (size_t qi = 0; qi < q_count; ++qi)
-          internal::scan_64_running_min(lut_ptrs[qi], sp, db.num_blocks, rmins[qi]);
+        internal::scan_64_batched(lut_ptrs, q_count, sp, db.num_blocks, rmins);
       }
       for (size_t qi = 0; qi < q_count; ++qi)
         min_dist_raw[qi] = internal::reduce_running_min(rmins[qi]);
@@ -1056,8 +1166,7 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
         for (size_t s = strip0 + 1; s < strip1; ++s) {
           const uint8_t* sp = strip_ptr(s);
           if (s + 2 < strip1) __builtin_prefetch(strip_ptr(s + 2), 0, 3);
-          for (size_t qi = 0; qi < q_count; ++qi)
-            internal::scan_64_running_min(lut_ptrs[qi], sp, db.num_blocks, rmins[qi]);
+          internal::scan_64_batched(lut_ptrs, q_count, sp, db.num_blocks, rmins);
         }
         for (size_t qi = 0; qi < q_count; ++qi) {
           uint16_t d = internal::reduce_running_min(rmins[qi]);
@@ -1350,7 +1459,6 @@ template<typename PCS>
 class ManyToMany {
  public:
   struct M2MScratch {
-    std::vector<std::pair<uint32_t, float>> scores;
     std::vector<float> emb_min_dists;
     std::vector<internal::RunningMinV> running_mins;
     std::vector<uint16_t> min_dist_raw;
@@ -1370,92 +1478,95 @@ class ManyToMany {
     const uint32_t lpb = internal::lut_padded_blocks(num_blocks);
     const size_t lut_stride = static_cast<size_t>(lpb) * 16;
 
+    static constexpr size_t ET_BATCH = internal::SCAN_Q_BATCH;
+
     auto process_chunk = [&](size_t q_start, size_t q_end) {
       thread_local M2MScratch scratch;
+      const size_t nq_local = q_end - q_start;
+      if (nq_local == 0) return;
 
-      if (scratch.scores.size() < num_db_clouds) {
-        scratch.scores.resize(num_db_clouds);
+      // Per-query-cloud state for the DB-cloud-outer loop
+      using HeapEntry = std::pair<float, uint32_t>;
+      struct QCloudState {
+        size_t num_embeddings;
+        std::priority_queue<HeapEntry> heap;
+        float kth_best_dist;
+      };
+      std::vector<QCloudState> qs(nq_local);
+
+      size_t max_embs = 0;
+      for (size_t qi = 0; qi < nq_local; ++qi) {
+        qs[qi].num_embeddings = A[q_start + qi]->num_queries;
+        qs[qi].kth_best_dist = std::numeric_limits<float>::max();
+        max_embs = std::max(max_embs, qs[qi].num_embeddings);
       }
+      if (scratch.emb_min_dists.size() < max_embs)
+        scratch.emb_min_dists.resize(max_embs);
 
-      for (size_t i = q_start; i < q_end; ++i) {
-        const auto* qc = A[i];
-        const size_t num_embeddings = qc->num_queries;
-        if (num_embeddings == 0) {
-          for (size_t ki = 0; ki < k; ++ki) {
-            results[i * k + ki] = {0, std::numeric_limits<float>::max()};
-          }
-          continue;
-        }
-        if (scratch.emb_min_dists.size() < num_embeddings) {
-          scratch.emb_min_dists.resize(num_embeddings);
-        }
+      // DB-cloud-outer: strip data stays hot in L1 across query clouds
+      for (size_t c = 0; c < num_db_clouds; ++c) {
+        const size_t start_vec = B.offsets[c];
+        const size_t cloud_size =
+            (B.sizes_unpadded.size() == num_db_clouds)
+                ? static_cast<size_t>(B.sizes_unpadded[c])
+                : (B.offsets[c + 1] - start_vec);
+        if (cloud_size == 0) continue;
 
-        float kth_best_dist = std::numeric_limits<float>::max();
-        size_t candidates_found = 0;
+        // Query-cloud-inner: each cloud keeps its own ET threshold
+        for (size_t qi = 0; qi < nq_local; ++qi) {
+          const size_t ne = qs[qi].num_embeddings;
+          if (ne == 0) continue;
+          const auto* qc = A[q_start + qi];
 
-        for (size_t c = 0; c < num_db_clouds; ++c) {
-          const size_t start_vec = B.offsets[c];
-          const size_t cloud_size =
-              (B.sizes_unpadded.size() == num_db_clouds)
-                  ? static_cast<size_t>(B.sizes_unpadded[c])
-                  : (B.offsets[c + 1] - start_vec);
-          if (cloud_size == 0) {
-            scratch.scores[c] = {B.get_id(c), std::numeric_limits<float>::max()};
-            continue;
-          }
-
-          // Process query embeddings in batches with partial-Chamfer early termination
           float partial_sum = 0.0f;
           bool pruned = false;
 
-          for (size_t q_off = 0; q_off < num_embeddings; q_off += internal::NQ_BATCH) {
-            const size_t batch_end = std::min(q_off + internal::NQ_BATCH, num_embeddings);
+          for (size_t q_off = 0; q_off < ne; q_off += ET_BATCH) {
+            const size_t batch_end = std::min(q_off + ET_BATCH, ne);
             const size_t batch_sz = batch_end - q_off;
 
             internal::fastscan_mv_chamfer_fused<PCS::is_metric()>(
                 qc->flat_int_luts.data() + q_off * lut_stride, qc->scales.data() + q_off,
-                qc->min_dists.data() + q_off, batch_sz, num_blocks, B.packed_codes.data(),
-                db_strip_stride, start_vec, cloud_size, scratch.emb_min_dists.data() + q_off,
+                qc->min_dists.data() + q_off, batch_sz, num_blocks,
+                B.packed_codes.data(), db_strip_stride, start_vec, cloud_size,
+                scratch.emb_min_dists.data() + q_off,
                 scratch.running_mins, scratch.min_dist_raw);
 
             for (size_t e = q_off; e < batch_end; ++e)
               partial_sum += scratch.emb_min_dists[e];
 
-            if (partial_sum / static_cast<float>(num_embeddings) >= kth_best_dist) {
+            if (partial_sum / static_cast<float>(ne) >= qs[qi].kth_best_dist) {
               pruned = true;
               break;
             }
           }
 
-          if (pruned) {
-            scratch.scores[c] = {B.get_id(c), std::numeric_limits<float>::max()};
-          } else {
-            const float chamfer_dist = partial_sum / static_cast<float>(num_embeddings);
-            scratch.scores[c] = {B.get_id(c), chamfer_dist};
-
-            if (chamfer_dist < kth_best_dist) {
-              ++candidates_found;
-              if (candidates_found >= k) {
-                std::nth_element(scratch.scores.begin(), scratch.scores.begin() + k,
-                                 scratch.scores.begin() + c + 1,
-                                 [](const auto& a, const auto& b) { return a.second < b.second; });
-                kth_best_dist = scratch.scores[k - 1].second;
-              }
+          if (!pruned) {
+            const float chamfer_dist = partial_sum / static_cast<float>(ne);
+            if (qs[qi].heap.size() < k) {
+              qs[qi].heap.push({chamfer_dist, B.get_id(c)});
+              if (qs[qi].heap.size() == k) qs[qi].kth_best_dist = qs[qi].heap.top().first;
+            } else if (chamfer_dist < qs[qi].kth_best_dist) {
+              qs[qi].heap.pop();
+              qs[qi].heap.push({chamfer_dist, B.get_id(c)});
+              qs[qi].kth_best_dist = qs[qi].heap.top().first;
             }
           }
         }
+      }
 
-        const size_t k_take = std::min(static_cast<size_t>(k), num_db_clouds);
-        if (k_take > 0 && k_take < num_db_clouds) {
-          std::nth_element(scratch.scores.begin(), scratch.scores.begin() + k_take,
-                           scratch.scores.begin() + num_db_clouds,
-                           [](const auto& a, const auto& b) { return a.second < b.second; });
-        }
+      // Extract results from heaps
+      for (size_t qi = 0; qi < nq_local; ++qi) {
+        const size_t idx = q_start + qi;
+        auto& heap = qs[qi].heap;
+        const size_t k_take = std::min(static_cast<size_t>(k), heap.size());
         for (size_t ki = 0; ki < k_take; ++ki) {
-          results[i * k + ki] = scratch.scores[ki];
+          auto [dist, id] = heap.top();
+          heap.pop();
+          results[idx * k + (k_take - 1 - ki)] = {id, dist};
         }
         for (size_t ki = k_take; ki < k; ++ki) {
-          results[i * k + ki] = {0, std::numeric_limits<float>::max()};
+          results[idx * k + ki] = {0, std::numeric_limits<float>::max()};
         }
       }
     };
