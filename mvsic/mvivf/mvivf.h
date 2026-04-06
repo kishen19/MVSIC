@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <set>
 #include <type_traits>
 #include <unordered_set>
@@ -1090,7 +1092,7 @@ class IndexMVIVF : public Index<metric> {
     // Step 0: Pre-Quantize Queries
     // ---------------------------------------------------------------------
     t.start();
-    auto q_queries = parlay::sequence<QuantQuery>::uninitialized(num_q);
+    auto q_queries = parlay::sequence<QuantQuery>(num_q);
     if (quantization_mode != QT::None) {
       parlay::parallel_for(0, num_q, [&](size_t i) {
         q_queries[i] = this->quantize_query_point_cloud(query_points[i], quantizer);
@@ -1152,8 +1154,20 @@ class IndexMVIVF : public Index<metric> {
     size_t num_rerank = std::max(search_params.num_rerank, k);
     size_t max_cands_per_query = nprobes * num_rerank;
 
-    auto all_candidates = parlay::sequence<std::pair<uint32_t, float>>(
-        num_q * max_cands_per_query, {UINT32_MAX, std::numeric_limits<float>::max()});
+    auto all_candidates =
+        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_q * max_cands_per_query);
+    auto cand_counts = std::unique_ptr<std::atomic<size_t>[]>(new std::atomic<size_t>[num_q]{});
+
+    auto leaf_bytes = parlay::sequence<size_t>::uninitialized(grouped.size());
+    auto leaf_dist_cmps = parlay::sequence<size_t>::uninitialized(grouped.size());
+
+    auto safe_scatter = [&](uint32_t q_id, const std::pair<uint32_t, float>* src, size_t count) {
+      size_t slot = cand_counts[q_id].fetch_add(count, std::memory_order_relaxed);
+      if (slot + count > max_cands_per_query) return;
+      size_t base_idx = q_id * max_cands_per_query + slot;
+      for (size_t c = 0; c < count; ++c)
+        all_candidates[base_idx + c] = src[c];
+    };
 
     // HELPER 1: Default Parallel 1-to-N Loop (for PQ, RaBitQ, TQ)
     auto process_leaf_quant = [&]<typename SetType, typename QueryType>(
@@ -1162,23 +1176,16 @@ class IndexMVIVF : public Index<metric> {
       if (!leaf_data) UNREACHABLE();
       parlay::parallel_for(0, group.size(), [&](size_t j) {
         uint32_t q_id = group[j].second.first;
-        uint32_t probe_idx = group[j].second.second;
         auto* q_query_ptr = std::get_if<QueryType>(&q_queries[q_id]);
         if (!q_query_ptr) UNREACHABLE();
-        // Compute scores to all points in the leaf
         auto all_dists =
             parlay::sequence<std::pair<uint32_t, float>>::uninitialized(leaf->get_size());
         leaf_data->distances_all(*q_query_ptr, all_dists.data());
-        // Collect top C
         if (C < all_dists.size()) {
           std::nth_element(all_dists.begin(), all_dists.begin() + C, all_dists.end(),
                            [](const auto& a, const auto& b) { return a.second < b.second; });
         }
-        // Scatter to global buffer
-        size_t base_idx = (q_id * max_cands_per_query) + (probe_idx * num_rerank);
-        for (size_t c = 0; c < C; ++c) {
-          all_candidates[base_idx + c] = all_dists[c];
-        }
+        safe_scatter(q_id, all_dists.data(), C);
       });
     };
 
@@ -1188,7 +1195,6 @@ class IndexMVIVF : public Index<metric> {
       auto* leaf_data = std::get_if<SetType>(&leaf->quantized_data);
       if (!leaf_data) UNREACHABLE();
       size_t num_queries_in_group = group.size();
-      // Gather raw pointers to the strongly-typed queries
       std::vector<const QueryType*> typed_queries(num_queries_in_group);
       parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
         uint32_t q_id = group[j].second.first;
@@ -1200,14 +1206,9 @@ class IndexMVIVF : public Index<metric> {
       std::vector<std::pair<uint32_t, float>> batch_results(num_queries_in_group * num_rerank);
       M2MType::TopKIntoUninitialized(typed_queries, *leaf_data, num_rerank, batch_results.data(),
                                      /*q_block=*/4, /*parallel_query_blocks=*/true);
-      // Scatter to global buffer
       parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
         uint32_t q_id = group[j].second.first;
-        uint32_t probe_idx = group[j].second.second;
-        size_t base_idx = (q_id * max_cands_per_query) + (probe_idx * num_rerank);
-        for (size_t c = 0; c < C; ++c) {
-          all_candidates[base_idx + c] = batch_results[j * num_rerank + c];
-        }
+        safe_scatter(q_id, batch_results.data() + j * num_rerank, C);
       });
     };
 
@@ -1217,6 +1218,10 @@ class IndexMVIVF : public Index<metric> {
       node_t* leaf = group[0].first;
       size_t C = std::min<size_t>(num_rerank, leaf->get_size());
       size_t num_queries_in_group = group.size();
+
+      leaf_bytes[i] = 0;
+      leaf_dist_cmps[i] = static_cast<size_t>(leaf->get_size()) * num_queries_in_group;
+
       switch (quantization_mode) {
         case QT::PQ:
           process_leaf_quant.template operator()<typename MVQT::PQ_Set, typename MVQT::PQ_Query>(
@@ -1227,7 +1232,6 @@ class IndexMVIVF : public Index<metric> {
               leaf, group, C);
           break;
         case QT::FastScan:
-          // Route to FastScan's M2M Kernel
           process_leaf_quant_m2m
               .template operator()<typename MVQT::FS_Set, typename MVQT::FS_Query,
                                    fastscan_mv::ManyToMany<typename MVQT::FS_Set>>(leaf, group, C);
@@ -1243,11 +1247,7 @@ class IndexMVIVF : public Index<metric> {
           auto leaf_results = leaf->data.distances(batched_queries, num_rerank);
           parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
             uint32_t q_id = group[j].second.first;
-            uint32_t probe_idx = group[j].second.second;
-            size_t base_idx = (q_id * max_cands_per_query) + (probe_idx * num_rerank);
-            for (size_t c = 0; c < C; ++c) {
-              all_candidates[base_idx + c] = leaf_results[j * num_rerank + c];
-            }
+            safe_scatter(q_id, leaf_results.begin() + j * num_rerank, C);
           });
           break;
         }
@@ -1257,7 +1257,8 @@ class IndexMVIVF : public Index<metric> {
     t.stop();
     std::cout << "[MVIVF] Probing & Scattering: " << t.total_time() << " sec" << std::endl;
     t.reset();
-    // TODO: update bytes_accessed and dist_cmps
+    bytes_accessed += parlay::reduce(leaf_bytes);
+    dist_cmps += parlay::reduce(leaf_dist_cmps);
 
     // ---------------------------------------------------------------------
     // Step 4: Aggregation and Re-ranking
@@ -1268,25 +1269,29 @@ class IndexMVIVF : public Index<metric> {
 
     parlay::parallel_for(0, num_q, [&](size_t q_id) {
       size_t base_idx = q_id * max_cands_per_query;
-      auto q_cands = parlay::sequence<std::pair<uint32_t, float>>(
-          all_candidates.begin() + base_idx,
-          all_candidates.begin() + base_idx + max_cands_per_query);
+      size_t num_scattered = std::min(cand_counts[q_id].load(std::memory_order_relaxed),
+                                      max_cands_per_query);
+      auto* cands = all_candidates.begin() + base_idx;
 
-      // Find how many valid candidates there are (not UINT32_MAX sentinels)
+      // Compact: remove sentinel entries (UINT32_MAX) from TopKIntoUninitialized padding
       size_t num_valid = 0;
-      for (size_t c = 0; c < q_cands.size(); ++c)
-        if (q_cands[c].first != UINT32_MAX) ++num_valid;
+      for (size_t c = 0; c < num_scattered; ++c) {
+        if (cands[c].first != UINT32_MAX) {
+          if (num_valid != c) cands[num_valid] = cands[c];
+          ++num_valid;
+        }
+      }
 
       size_t take = std::min(num_rerank, num_valid);
       if (take > 0 && take < num_valid) {
-        std::nth_element(q_cands.begin(), q_cands.begin() + take, q_cands.begin() + num_valid,
+        std::nth_element(cands, cands + take, cands + num_valid,
                          [](const auto& a, const auto& b) { return a.second < b.second; });
       }
 
       parlay::sequence<std::pair<uint32_t, float>> top_cands;
       top_cands.reserve(take);
       for (size_t c = 0; c < take; ++c) {
-        top_cands.push_back(q_cands[c]);
+        top_cands.push_back(cands[c]);
       }
       auto q_final = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
           std::min(k, top_cands.size()));

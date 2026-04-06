@@ -1,7 +1,6 @@
 #pragma once
 
 #include <vector>
-#include <queue>
 #include <cstdint>
 #include <immintrin.h>
 #include <limits>
@@ -247,6 +246,108 @@ inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
     scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
+inline void scan_64_6q_running_min_masked(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* lut3, const uint8_t* lut4, const uint8_t* lut5,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    int lo, int hi,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2,
+    RunningMinV& rm3, RunningMinV& rm4, RunningMinV& rm5) {
+
+  lo = std::max(lo, 0);
+  hi = std::min(hi, 64);
+  if (hi <= lo) return;
+
+  __m512i a0el = _mm512_setzero_si512(), a0ol = _mm512_setzero_si512();
+  __m512i a0eh = _mm512_setzero_si512(), a0oh = _mm512_setzero_si512();
+  __m512i a1el = _mm512_setzero_si512(), a1ol = _mm512_setzero_si512();
+  __m512i a1eh = _mm512_setzero_si512(), a1oh = _mm512_setzero_si512();
+  __m512i a2el = _mm512_setzero_si512(), a2ol = _mm512_setzero_si512();
+  __m512i a2eh = _mm512_setzero_si512(), a2oh = _mm512_setzero_si512();
+  __m512i a3el = _mm512_setzero_si512(), a3ol = _mm512_setzero_si512();
+  __m512i a3eh = _mm512_setzero_si512(), a3oh = _mm512_setzero_si512();
+  __m512i a4el = _mm512_setzero_si512(), a4ol = _mm512_setzero_si512();
+  __m512i a4eh = _mm512_setzero_si512(), a4oh = _mm512_setzero_si512();
+  __m512i a5el = _mm512_setzero_si512(), a5ol = _mm512_setzero_si512();
+  __m512i a5eh = _mm512_setzero_si512(), a5oh = _mm512_setzero_si512();
+
+  const __m512i low_mask = _mm512_set1_epi8(0x0F);
+  const __m512i ones_i8 = _mm512_set1_epi8(1);
+  const __m512i blk_off = _mm512_set1_epi32(0x30201000);
+  const uint32_t nb4 = ((num_blocks + 3) / 4) * 4;
+
+  for (uint32_t g = 0; g < nb4 / 4; ++g) {
+    const __m512i p_lo = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+    const __m512i p_hi = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr + 64));
+    codes_ptr += 128;
+
+    const __m512i ce_lo = _mm512_or_si512(_mm512_and_si512(p_lo, low_mask), blk_off);
+    const __m512i ce_hi = _mm512_or_si512(_mm512_and_si512(p_hi, low_mask), blk_off);
+    const __m512i co_lo = _mm512_or_si512(
+        _mm512_and_si512(_mm512_srli_epi16(p_lo, 4), low_mask), blk_off);
+    const __m512i co_hi = _mm512_or_si512(
+        _mm512_and_si512(_mm512_srli_epi16(p_hi, 4), low_mask), blk_off);
+
+#define FSMV_VNNI_QM(Q, lp)                                                                       \
+    {                                                                                              \
+      const __m512i lut512 =                                                                       \
+          _mm512_loadu_si512(reinterpret_cast<const __m512i*>(&lp[g * 64]));                       \
+      a##Q##el = _mm512_dpbusd_epi32(a##Q##el, _mm512_permutexvar_epi8(ce_lo, lut512), ones_i8);  \
+      a##Q##eh = _mm512_dpbusd_epi32(a##Q##eh, _mm512_permutexvar_epi8(ce_hi, lut512), ones_i8);  \
+      a##Q##ol = _mm512_dpbusd_epi32(a##Q##ol, _mm512_permutexvar_epi8(co_lo, lut512), ones_i8);  \
+      a##Q##oh = _mm512_dpbusd_epi32(a##Q##oh, _mm512_permutexvar_epi8(co_hi, lut512), ones_i8);  \
+    }
+    FSMV_VNNI_QM(0, lut0)
+    FSMV_VNNI_QM(1, lut1)
+    FSMV_VNNI_QM(2, lut2)
+    FSMV_VNNI_QM(3, lut3)
+    FSMV_VNNI_QM(4, lut4)
+    FSMV_VNNI_QM(5, lut5)
+#undef FSMV_VNNI_QM
+  }
+
+  const __m512i INF = _mm512_set1_epi32(-1);
+  __mmask16 me_lo = 0, me_hi = 0, mo_lo = 0, mo_hi = 0;
+  for (int lp = 0; lp < 16; ++lp) {
+    if (lo <= lp * 2 && lp * 2 < hi) me_lo |= (__mmask16(1) << lp);
+    if (lo <= (lp + 16) * 2 && (lp + 16) * 2 < hi) me_hi |= (__mmask16(1) << lp);
+    if (lo <= lp * 2 + 1 && lp * 2 + 1 < hi) mo_lo |= (__mmask16(1) << lp);
+    if (lo <= (lp + 16) * 2 + 1 && (lp + 16) * 2 + 1 < hi) mo_hi |= (__mmask16(1) << lp);
+  }
+
+#define FSMV_VNNI_MREDUCE(Q, rm)                                                                   \
+  rm.lo = _mm512_min_epu32(rm.lo, _mm512_min_epu32(                                               \
+      _mm512_mask_mov_epi32(INF, me_lo, a##Q##el),                                                \
+      _mm512_mask_mov_epi32(INF, mo_lo, a##Q##ol)));                                              \
+  rm.hi = _mm512_min_epu32(rm.hi, _mm512_min_epu32(                                               \
+      _mm512_mask_mov_epi32(INF, me_hi, a##Q##eh),                                                \
+      _mm512_mask_mov_epi32(INF, mo_hi, a##Q##oh)));
+  FSMV_VNNI_MREDUCE(0, rm0)
+  FSMV_VNNI_MREDUCE(1, rm1)
+  FSMV_VNNI_MREDUCE(2, rm2)
+  FSMV_VNNI_MREDUCE(3, rm3)
+  FSMV_VNNI_MREDUCE(4, rm4)
+  FSMV_VNNI_MREDUCE(5, rm5)
+#undef FSMV_VNNI_MREDUCE
+}
+
+inline void scan_64_batched_masked(const uint8_t* const* luts, size_t nq,
+                                   const uint8_t* codes_ptr, uint32_t num_blocks,
+                                   int lo, int hi, RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 5 < nq; qi += 6)
+    scan_64_6q_running_min_masked(luts[qi], luts[qi + 1], luts[qi + 2], luts[qi + 3], luts[qi + 4],
+                                  luts[qi + 5], codes_ptr, num_blocks, lo, hi,
+                                  rmins[qi], rmins[qi + 1], rmins[qi + 2],
+                                  rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
+  for (; qi < nq; ++qi) {
+    uint16_t t = scan_64_chunk_min_masked(luts[qi], codes_ptr, num_blocks, lo, hi);
+    __m512i tv = _mm512_set1_epi32(static_cast<int>(static_cast<uint32_t>(t)));
+    rmins[qi].lo = _mm512_min_epu32(rmins[qi].lo, tv);
+    rmins[qi].hi = _mm512_min_epu32(rmins[qi].hi, tv);
+  }
+}
+
 #elif defined(__AVX512VBMI__)
 // =========================================================================
 // 1. AVX512-VBMI (2-Block Layout, 512-bit Registers)
@@ -425,6 +526,86 @@ inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
     scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
+inline void scan_64_6q_running_min_masked(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* lut3, const uint8_t* lut4, const uint8_t* lut5,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    int lo, int hi,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2,
+    RunningMinV& rm3, RunningMinV& rm4, RunningMinV& rm5) {
+
+  lo = std::max(lo, 0);
+  hi = std::min(hi, 64);
+  if (hi <= lo) return;
+
+  __m512i a0e = _mm512_setzero_si512(), a0o = _mm512_setzero_si512();
+  __m512i a1e = _mm512_setzero_si512(), a1o = _mm512_setzero_si512();
+  __m512i a2e = _mm512_setzero_si512(), a2o = _mm512_setzero_si512();
+  __m512i a3e = _mm512_setzero_si512(), a3o = _mm512_setzero_si512();
+  __m512i a4e = _mm512_setzero_si512(), a4o = _mm512_setzero_si512();
+  __m512i a5e = _mm512_setzero_si512(), a5o = _mm512_setzero_si512();
+
+  const __m512i low_mask = _mm512_set1_epi8(0x0F);
+  const __m512i offset_mask = _mm512_set1_epi16(0x1000);
+  const __m512i ones = _mm512_set1_epi8(1);
+
+  for (uint32_t b = 0; b < num_blocks; b += 2) {
+    const __m512i packed = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(codes_ptr));
+    codes_ptr += 64;
+    const __m512i ce = _mm512_or_si512(_mm512_and_si512(packed, low_mask), offset_mask);
+    const __m512i co =
+        _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi16(packed, 4), low_mask), offset_mask);
+
+#define FSMV_VBMI_QM(Q, lp)                                                                       \
+    {                                                                                              \
+      const __m256i l256 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&lp[b * 16]));      \
+      const __m512i l512 = _mm512_castsi256_si512(l256);                                           \
+      a##Q##e = _mm512_add_epi16(                                                                  \
+          a##Q##e, _mm512_maddubs_epi16(_mm512_permutexvar_epi8(ce, l512), ones));                 \
+      a##Q##o = _mm512_add_epi16(                                                                  \
+          a##Q##o, _mm512_maddubs_epi16(_mm512_permutexvar_epi8(co, l512), ones));                 \
+    }
+    FSMV_VBMI_QM(0, lut0)
+    FSMV_VBMI_QM(1, lut1)
+    FSMV_VBMI_QM(2, lut2)
+    FSMV_VBMI_QM(3, lut3)
+    FSMV_VBMI_QM(4, lut4)
+    FSMV_VBMI_QM(5, lut5)
+#undef FSMV_VBMI_QM
+  }
+
+  const __m512i INF = _mm512_set1_epi16(0xFFFF);
+  const __mmask32 me = mask_even_lanes(lo, hi);
+  const __mmask32 mo = mask_odd_lanes(lo, hi);
+
+#define FSMV_VBMI_MREDUCE(Q, rm)                                                                   \
+  rm.v = _mm512_min_epu16(rm.v, _mm512_min_epu16(                                                 \
+      _mm512_mask_mov_epi16(INF, me, a##Q##e),                                                    \
+      _mm512_mask_mov_epi16(INF, mo, a##Q##o)));
+  FSMV_VBMI_MREDUCE(0, rm0)
+  FSMV_VBMI_MREDUCE(1, rm1)
+  FSMV_VBMI_MREDUCE(2, rm2)
+  FSMV_VBMI_MREDUCE(3, rm3)
+  FSMV_VBMI_MREDUCE(4, rm4)
+  FSMV_VBMI_MREDUCE(5, rm5)
+#undef FSMV_VBMI_MREDUCE
+}
+
+inline void scan_64_batched_masked(const uint8_t* const* luts, size_t nq,
+                                   const uint8_t* codes_ptr, uint32_t num_blocks,
+                                   int lo, int hi, RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 5 < nq; qi += 6)
+    scan_64_6q_running_min_masked(luts[qi], luts[qi + 1], luts[qi + 2], luts[qi + 3], luts[qi + 4],
+                                  luts[qi + 5], codes_ptr, num_blocks, lo, hi,
+                                  rmins[qi], rmins[qi + 1], rmins[qi + 2],
+                                  rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
+  for (; qi < nq; ++qi) {
+    uint16_t t = scan_64_chunk_min_masked(luts[qi], codes_ptr, num_blocks, lo, hi);
+    rmins[qi].v = _mm512_min_epu16(rmins[qi].v, _mm512_set1_epi16(static_cast<short>(t)));
+  }
+}
+
 #elif defined(__AVX512F__)
 // =========================================================================
 // 2. AVX512-F (1-Block Striped Layout)
@@ -581,6 +762,81 @@ inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
                            rmins[qi + 2], rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
   for (; qi < nq; ++qi)
     scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
+}
+
+inline void scan_64_6q_running_min_masked(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* lut3, const uint8_t* lut4, const uint8_t* lut5,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    int lo, int hi,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2,
+    RunningMinV& rm3, RunningMinV& rm4, RunningMinV& rm5) {
+
+  lo = std::max(lo, 0);
+  hi = std::min(hi, 64);
+  if (hi <= lo) return;
+
+  __m512i a0e = _mm512_setzero_si512(), a0o = _mm512_setzero_si512();
+  __m512i a1e = _mm512_setzero_si512(), a1o = _mm512_setzero_si512();
+  __m512i a2e = _mm512_setzero_si512(), a2o = _mm512_setzero_si512();
+  __m512i a3e = _mm512_setzero_si512(), a3o = _mm512_setzero_si512();
+  __m512i a4e = _mm512_setzero_si512(), a4o = _mm512_setzero_si512();
+  __m512i a5e = _mm512_setzero_si512(), a5o = _mm512_setzero_si512();
+
+  const __m256i low_mask = _mm256_set1_epi8(0x0F);
+
+  for (uint32_t b = 0; b < num_blocks; ++b) {
+    const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+    codes_ptr += 32;
+    const __m256i ce = _mm256_and_si256(packed, low_mask);
+    const __m256i co = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+
+#define FSMV_AVX512F_QM(Q, lp)                                                                    \
+    {                                                                                              \
+      const __m128i l128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&lp[b * 16]));         \
+      const __m256i l256 = _mm256_broadcastsi128_si256(l128);                                      \
+      a##Q##e = _mm512_add_epi16(a##Q##e, _mm512_cvtepu8_epi16(_mm256_shuffle_epi8(l256, ce)));    \
+      a##Q##o = _mm512_add_epi16(a##Q##o, _mm512_cvtepu8_epi16(_mm256_shuffle_epi8(l256, co)));    \
+    }
+    FSMV_AVX512F_QM(0, lut0)
+    FSMV_AVX512F_QM(1, lut1)
+    FSMV_AVX512F_QM(2, lut2)
+    FSMV_AVX512F_QM(3, lut3)
+    FSMV_AVX512F_QM(4, lut4)
+    FSMV_AVX512F_QM(5, lut5)
+#undef FSMV_AVX512F_QM
+  }
+
+  const __m512i INF = _mm512_set1_epi16(0xFFFF);
+  const __mmask32 me = mask_even_lanes(lo, hi);
+  const __mmask32 mo = mask_odd_lanes(lo, hi);
+
+#define FSMV_AVX512F_MREDUCE(Q, rm)                                                                \
+  rm.v = _mm512_min_epu16(rm.v, _mm512_min_epu16(                                                 \
+      _mm512_mask_mov_epi16(INF, me, a##Q##e),                                                    \
+      _mm512_mask_mov_epi16(INF, mo, a##Q##o)));
+  FSMV_AVX512F_MREDUCE(0, rm0)
+  FSMV_AVX512F_MREDUCE(1, rm1)
+  FSMV_AVX512F_MREDUCE(2, rm2)
+  FSMV_AVX512F_MREDUCE(3, rm3)
+  FSMV_AVX512F_MREDUCE(4, rm4)
+  FSMV_AVX512F_MREDUCE(5, rm5)
+#undef FSMV_AVX512F_MREDUCE
+}
+
+inline void scan_64_batched_masked(const uint8_t* const* luts, size_t nq,
+                                   const uint8_t* codes_ptr, uint32_t num_blocks,
+                                   int lo, int hi, RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 5 < nq; qi += 6)
+    scan_64_6q_running_min_masked(luts[qi], luts[qi + 1], luts[qi + 2], luts[qi + 3], luts[qi + 4],
+                                  luts[qi + 5], codes_ptr, num_blocks, lo, hi,
+                                  rmins[qi], rmins[qi + 1], rmins[qi + 2],
+                                  rmins[qi + 3], rmins[qi + 4], rmins[qi + 5]);
+  for (; qi < nq; ++qi) {
+    uint16_t t = scan_64_chunk_min_masked(luts[qi], codes_ptr, num_blocks, lo, hi);
+    rmins[qi].v = _mm512_min_epu16(rmins[qi].v, _mm512_set1_epi16(static_cast<short>(t)));
+  }
 }
 
 #elif defined(__AVX2__)
@@ -763,6 +1019,99 @@ inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
     scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
 
+inline void scan_64_3q_running_min_masked(
+    const uint8_t* lut0, const uint8_t* lut1, const uint8_t* lut2,
+    const uint8_t* codes_ptr, uint32_t num_blocks,
+    int lo, int hi,
+    RunningMinV& rm0, RunningMinV& rm1, RunningMinV& rm2) {
+
+  lo = std::max(lo, 0);
+  hi = std::min(hi, 64);
+  if (hi <= lo) return;
+
+  __m256i a0el = _mm256_setzero_si256(), a0eh = _mm256_setzero_si256();
+  __m256i a0ol = _mm256_setzero_si256(), a0oh = _mm256_setzero_si256();
+  __m256i a1el = _mm256_setzero_si256(), a1eh = _mm256_setzero_si256();
+  __m256i a1ol = _mm256_setzero_si256(), a1oh = _mm256_setzero_si256();
+  __m256i a2el = _mm256_setzero_si256(), a2eh = _mm256_setzero_si256();
+  __m256i a2ol = _mm256_setzero_si256(), a2oh = _mm256_setzero_si256();
+  const __m256i low_mask = _mm256_set1_epi8(0x0F);
+
+  for (uint32_t b = 0; b < num_blocks; ++b) {
+    const __m256i packed = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(codes_ptr));
+    codes_ptr += 32;
+    const __m256i ce = _mm256_and_si256(packed, low_mask);
+    const __m256i co = _mm256_and_si256(_mm256_srli_epi16(packed, 4), low_mask);
+
+#define FSMV_AVX2_QM(Q, lp)                                                                       \
+    {                                                                                              \
+      const __m128i l128 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&lp[b * 16]));         \
+      const __m256i l256 = _mm256_broadcastsi128_si256(l128);                                      \
+      const __m256i se = _mm256_shuffle_epi8(l256, ce);                                            \
+      const __m256i so = _mm256_shuffle_epi8(l256, co);                                            \
+      a##Q##el = _mm256_add_epi16(a##Q##el, _mm256_cvtepu8_epi16(_mm256_castsi256_si128(se)));     \
+      a##Q##eh =                                                                                   \
+          _mm256_add_epi16(a##Q##eh, _mm256_cvtepu8_epi16(_mm256_extracti128_si256(se, 1)));       \
+      a##Q##ol = _mm256_add_epi16(a##Q##ol, _mm256_cvtepu8_epi16(_mm256_castsi256_si128(so)));     \
+      a##Q##oh =                                                                                   \
+          _mm256_add_epi16(a##Q##oh, _mm256_cvtepu8_epi16(_mm256_extracti128_si256(so, 1)));       \
+    }
+    FSMV_AVX2_QM(0, lut0)
+    FSMV_AVX2_QM(1, lut1)
+    FSMV_AVX2_QM(2, lut2)
+#undef FSMV_AVX2_QM
+  }
+
+  const __m256i v_lo = _mm256_set1_epi16(static_cast<short>(lo));
+  const __m256i v_hi = _mm256_set1_epi16(static_cast<short>(hi));
+  __m256i idx_even_lo =
+      _mm256_set_epi16(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
+  __m256i idx_even_hi = _mm256_add_epi16(idx_even_lo, _mm256_set1_epi16(32));
+  __m256i idx_odd_lo = _mm256_add_epi16(idx_even_lo, _mm256_set1_epi16(1));
+  __m256i idx_odd_hi = _mm256_add_epi16(idx_even_hi, _mm256_set1_epi16(1));
+
+  auto get_mask = [&](__m256i idx) {
+    __m256i m_ge = _mm256_cmpgt_epi16(idx, v_lo);
+    __m256i m_eq = _mm256_cmpeq_epi16(idx, v_lo);
+    __m256i in_lo = _mm256_or_si256(m_ge, m_eq);
+    __m256i in_hi = _mm256_cmpgt_epi16(v_hi, idx);
+    return _mm256_and_si256(in_lo, in_hi);
+  };
+
+  const __m256i INF = _mm256_set1_epi16(static_cast<short>(0xFFFF));
+  const __m256i mel = get_mask(idx_even_lo);
+  const __m256i meh = get_mask(idx_even_hi);
+  const __m256i mol = get_mask(idx_odd_lo);
+  const __m256i moh = get_mask(idx_odd_hi);
+
+#define FSMV_AVX2_MREDUCE(Q, rm)                                                                   \
+  rm.lo = _mm256_min_epu16(rm.lo, _mm256_min_epu16(                                               \
+      _mm256_blendv_epi8(INF, a##Q##el, mel),                                                     \
+      _mm256_blendv_epi8(INF, a##Q##ol, mol)));                                                   \
+  rm.hi = _mm256_min_epu16(rm.hi, _mm256_min_epu16(                                               \
+      _mm256_blendv_epi8(INF, a##Q##eh, meh),                                                     \
+      _mm256_blendv_epi8(INF, a##Q##oh, moh)));
+  FSMV_AVX2_MREDUCE(0, rm0)
+  FSMV_AVX2_MREDUCE(1, rm1)
+  FSMV_AVX2_MREDUCE(2, rm2)
+#undef FSMV_AVX2_MREDUCE
+}
+
+inline void scan_64_batched_masked(const uint8_t* const* luts, size_t nq,
+                                   const uint8_t* codes_ptr, uint32_t num_blocks,
+                                   int lo, int hi, RunningMinV* rmins) {
+  size_t qi = 0;
+  for (; qi + 2 < nq; qi += 3)
+    scan_64_3q_running_min_masked(luts[qi], luts[qi + 1], luts[qi + 2], codes_ptr, num_blocks,
+                                  lo, hi, rmins[qi], rmins[qi + 1], rmins[qi + 2]);
+  for (; qi < nq; ++qi) {
+    uint16_t t = scan_64_chunk_min_masked(luts[qi], codes_ptr, num_blocks, lo, hi);
+    __m256i tv = _mm256_set1_epi16(static_cast<short>(t));
+    rmins[qi].lo = _mm256_min_epu16(rmins[qi].lo, tv);
+    rmins[qi].hi = _mm256_min_epu16(rmins[qi].hi, tv);
+  }
+}
+
 #else
 // =========================================================================
 // 4. SCALAR FALLBACK (No SIMD)
@@ -826,10 +1175,21 @@ inline void scan_64_batched(const uint8_t* const* luts, size_t nq,
   for (size_t qi = 0; qi < nq; ++qi)
     scan_64_running_min(luts[qi], codes_ptr, num_blocks, rmins[qi]);
 }
+
+inline void scan_64_batched_masked(const uint8_t* const* luts, size_t nq,
+                                   const uint8_t* codes_ptr, uint32_t num_blocks,
+                                   int lo, int hi, RunningMinV* rmins) {
+  for (size_t qi = 0; qi < nq; ++qi) {
+    uint16_t t = scan_64_chunk_min_masked(luts[qi], codes_ptr, num_blocks, lo, hi);
+    rmins[qi].data[0] = std::min(rmins[qi].data[0], t);
+  }
+}
 #endif
 
 // ------------------------------------------------------------------
 // Fused FastScan Kernel (Strip-outer, Query-inner, Code-load Amortized)
+// Unified 2-way dispatch: all full strips → batched, tail → batched_masked.
+// Exploits the invariant that start_vec is always 64-aligned (per-cloud padding).
 // ------------------------------------------------------------------
 template<bool Metric>
 inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_scales,
@@ -850,11 +1210,9 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
   }
 
   const size_t strip0 = start_vec / 64;
-  const int lane0 = static_cast<int>(start_vec % 64);
-  const size_t true_end = start_vec + cloud_size;
-  const size_t strip1 = true_end / 64;
-  const int lane1 = static_cast<int>(true_end % 64);
-  const bool fully_aligned = (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
+  const size_t num_full_strips = cloud_size / 64;
+  const int tail = static_cast<int>(cloud_size % 64);
+  const size_t total_strips = num_full_strips + (tail > 0 ? 1 : 0);
 
   auto strip_ptr = [&](size_t s) -> const uint8_t* { return strip_data + s * strip_stride; };
 
@@ -866,55 +1224,26 @@ inline void fastscan_mv_chamfer_fused(const uint8_t* fused_luts, const float* q_
     for (size_t qi = 0; qi < q_count; ++qi)
       lut_ptrs[qi] = fused_luts + (q_start + qi) * lut_stride;
 
-    scratch_min_raw.resize(q_count);
-    std::fill_n(scratch_min_raw.data(), q_count, static_cast<uint16_t>(0xFFFF));
+    scratch_combined.resize(q_count);
+    for (size_t qi = 0; qi < q_count; ++qi)
+      scratch_combined[qi] = RunningMinV::max();
 
-    if (strip0 == strip1) {
-      const int end_hi = (lane1 == 0) ? 64 : lane1;
-      for (size_t qi = 0; qi < q_count; ++qi) {
-        scratch_min_raw[qi] =
-            scan_64_chunk_min_masked(lut_ptrs[qi], strip_ptr(strip0), num_blocks, lane0, end_hi);
-      }
-    } else if (fully_aligned) {
-      scratch_combined.resize(q_count);
-      for (size_t qi = 0; qi < q_count; ++qi)
-        scratch_combined[qi] = RunningMinV::max();
-
-      for (size_t s = strip0; s < strip1; ++s) {
-        const uint8_t* sp = strip_ptr(s);
-        if (s + PREFETCH_STRIPS < strip1) __builtin_prefetch(strip_ptr(s + PREFETCH_STRIPS), 0, 3);
-        scan_64_batched(lut_ptrs, q_count, sp, num_blocks, scratch_combined.data());
-      }
-      for (size_t qi = 0; qi < q_count; ++qi)
-        scratch_min_raw[qi] = reduce_running_min(scratch_combined[qi]);
-    } else {
-      for (size_t qi = 0; qi < q_count; ++qi) {
-        scratch_min_raw[qi] =
-            scan_64_chunk_min_masked(lut_ptrs[qi], strip_ptr(strip0), num_blocks, lane0, 64);
-      }
-      if (strip0 + 1 < strip1) {
-        scratch_combined.resize(q_count);
-        for (size_t qi = 0; qi < q_count; ++qi)
-          scratch_combined[qi] = RunningMinV::max();
-        for (size_t s = strip0 + 1; s < strip1; ++s) {
-          const uint8_t* sp = strip_ptr(s);
-          if (s + PREFETCH_STRIPS < strip1)
-            __builtin_prefetch(strip_ptr(s + PREFETCH_STRIPS), 0, 3);
-          scan_64_batched(lut_ptrs, q_count, sp, num_blocks, scratch_combined.data());
-        }
-        for (size_t qi = 0; qi < q_count; ++qi) {
-          uint16_t d = reduce_running_min(scratch_combined[qi]);
-          if (d < scratch_min_raw[qi]) scratch_min_raw[qi] = d;
-        }
-      }
-      if (lane1 != 0) {
-        for (size_t qi = 0; qi < q_count; ++qi) {
-          uint16_t t =
-              scan_64_chunk_min_masked(lut_ptrs[qi], strip_ptr(strip1), num_blocks, 0, lane1);
-          if (t < scratch_min_raw[qi]) scratch_min_raw[qi] = t;
-        }
-      }
+    for (size_t s = 0; s < num_full_strips; ++s) {
+      const uint8_t* sp = strip_ptr(strip0 + s);
+      if (s + PREFETCH_STRIPS < total_strips)
+        __builtin_prefetch(strip_ptr(strip0 + s + PREFETCH_STRIPS), 0, 3);
+      scan_64_batched(lut_ptrs, q_count, sp, num_blocks, scratch_combined.data());
     }
+
+    if (tail > 0) {
+      scan_64_batched_masked(lut_ptrs, q_count,
+                             strip_ptr(strip0 + num_full_strips), num_blocks,
+                             0, tail, scratch_combined.data());
+    }
+
+    scratch_min_raw.resize(q_count);
+    for (size_t qi = 0; qi < q_count; ++qi)
+      scratch_min_raw[qi] = reduce_running_min(scratch_combined[qi]);
 
     for (size_t qi = 0; qi < q_count; ++qi) {
       size_t gqi = q_start + qi;
@@ -1103,7 +1432,8 @@ class Quantized_Point_Cloud_Set {
 };
 
 // =========================================================================
-// Chamfer distance: strip-outer, query-inner with fused code-load amortization
+// Chamfer distance: strip-outer, query-inner with fused code-load amortization.
+// Unified 2-way dispatch: full strips → batched, tail → batched_masked.
 // =========================================================================
 template<bool Metric>
 float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
@@ -1113,12 +1443,12 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
   if (num_q == 0) return 0.0f;
   if (true_end <= start) return std::numeric_limits<float>::max();
 
+  const size_t cloud_size = true_end - start;
   const size_t strip_stride = internal::compute_strip_stride(db.num_blocks);
   const size_t strip0 = start / 64;
-  const int lane0 = static_cast<int>(start % 64);
-  const size_t strip1 = true_end / 64;
-  const int lane1 = static_cast<int>(true_end % 64);
-  const bool fully_aligned = (lane0 == 0) && (lane1 == 0) && (strip1 > strip0);
+  const size_t num_full_strips = cloud_size / 64;
+  const int tail = static_cast<int>(cloud_size % 64);
+  const size_t total_strips = num_full_strips + (tail > 0 ? 1 : 0);
 
   auto strip_ptr = [&](size_t s) -> const uint8_t* { return &db.packed_codes[s * strip_stride]; };
 
@@ -1131,60 +1461,24 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
     for (size_t qi = 0; qi < q_count; ++qi)
       lut_ptrs[qi] = q.get_lut(q_base + qi);
 
-    uint16_t min_dist_raw[internal::NQ_BATCH];
-    std::fill_n(min_dist_raw, q_count, static_cast<uint16_t>(0xFFFF));
+    internal::RunningMinV rmins[internal::NQ_BATCH];
+    for (size_t qi = 0; qi < q_count; ++qi)
+      rmins[qi] = internal::RunningMinV::max();
 
-    if (strip0 == strip1) {
-      const int end_hi = (lane1 == 0) ? 64 : lane1;
-      for (size_t qi = 0; qi < q_count; ++qi) {
-        min_dist_raw[qi] = internal::scan_64_chunk_min_masked(lut_ptrs[qi], strip_ptr(strip0),
-                                                              db.num_blocks, lane0, end_hi);
-      }
-    } else if (fully_aligned) {
-      internal::RunningMinV rmins[internal::NQ_BATCH];
-      for (size_t qi = 0; qi < q_count; ++qi)
-        rmins[qi] = internal::RunningMinV::max();
+    for (size_t s = 0; s < num_full_strips; ++s) {
+      const uint8_t* sp = strip_ptr(strip0 + s);
+      if (s + 2 < total_strips) __builtin_prefetch(strip_ptr(strip0 + s + 2), 0, 3);
+      internal::scan_64_batched(lut_ptrs, q_count, sp, db.num_blocks, rmins);
+    }
 
-      for (size_t s = strip0; s < strip1; ++s) {
-        const uint8_t* sp = strip_ptr(s);
-        if (s + 2 < strip1) __builtin_prefetch(strip_ptr(s + 2), 0, 3);
-        internal::scan_64_batched(lut_ptrs, q_count, sp, db.num_blocks, rmins);
-      }
-      for (size_t qi = 0; qi < q_count; ++qi)
-        min_dist_raw[qi] = internal::reduce_running_min(rmins[qi]);
-    } else {
-      for (size_t qi = 0; qi < q_count; ++qi) {
-        min_dist_raw[qi] = internal::scan_64_chunk_min_masked(lut_ptrs[qi], strip_ptr(strip0),
-                                                              db.num_blocks, lane0, 64);
-      }
-
-      if (strip0 + 1 < strip1) {
-        internal::RunningMinV rmins[internal::NQ_BATCH];
-        for (size_t qi = 0; qi < q_count; ++qi)
-          rmins[qi] = internal::RunningMinV::max();
-
-        for (size_t s = strip0 + 1; s < strip1; ++s) {
-          const uint8_t* sp = strip_ptr(s);
-          if (s + 2 < strip1) __builtin_prefetch(strip_ptr(s + 2), 0, 3);
-          internal::scan_64_batched(lut_ptrs, q_count, sp, db.num_blocks, rmins);
-        }
-        for (size_t qi = 0; qi < q_count; ++qi) {
-          uint16_t d = internal::reduce_running_min(rmins[qi]);
-          if (d < min_dist_raw[qi]) min_dist_raw[qi] = d;
-        }
-      }
-
-      if (lane1 != 0) {
-        for (size_t qi = 0; qi < q_count; ++qi) {
-          uint16_t t = internal::scan_64_chunk_min_masked(lut_ptrs[qi], strip_ptr(strip1),
-                                                          db.num_blocks, 0, lane1);
-          if (t < min_dist_raw[qi]) min_dist_raw[qi] = t;
-        }
-      }
+    if (tail > 0) {
+      internal::scan_64_batched_masked(lut_ptrs, q_count,
+                                       strip_ptr(strip0 + num_full_strips), db.num_blocks,
+                                       0, tail, rmins);
     }
 
     for (size_t qi = 0; qi < q_count; ++qi)
-      total_chamfer += q.decode(q_base + qi, min_dist_raw[qi]);
+      total_chamfer += q.decode(q_base + qi, internal::reduce_running_min(rmins[qi]));
   }
 
   return total_chamfer / static_cast<float>(num_q);
@@ -1475,100 +1769,59 @@ class ManyToMany {
 
     const uint32_t num_blocks = B.num_blocks;
     const size_t db_strip_stride = internal::compute_strip_stride(num_blocks);
-    const uint32_t lpb = internal::lut_padded_blocks(num_blocks);
-    const size_t lut_stride = static_cast<size_t>(lpb) * 16;
-
-    static constexpr size_t ET_BATCH = internal::SCAN_Q_BATCH;
 
     auto process_chunk = [&](size_t q_start, size_t q_end) {
       thread_local M2MScratch scratch;
       const size_t nq_local = q_end - q_start;
       if (nq_local == 0) return;
 
-      // Per-query-cloud state for the DB-cloud-outer loop
-      using HeapEntry = std::pair<float, uint32_t>;
-      struct QCloudState {
-        size_t num_embeddings;
-        std::priority_queue<HeapEntry> heap;
-        float kth_best_dist;
-      };
-      std::vector<QCloudState> qs(nq_local);
-
       size_t max_embs = 0;
-      for (size_t qi = 0; qi < nq_local; ++qi) {
-        qs[qi].num_embeddings = A[q_start + qi]->num_queries;
-        qs[qi].kth_best_dist = std::numeric_limits<float>::max();
-        max_embs = std::max(max_embs, qs[qi].num_embeddings);
-      }
+      for (size_t qi = 0; qi < nq_local; ++qi)
+        max_embs = std::max(max_embs, static_cast<size_t>(A[q_start + qi]->num_queries));
       if (scratch.emb_min_dists.size() < max_embs)
         scratch.emb_min_dists.resize(max_embs);
 
-      // DB-cloud-outer: strip data stays hot in L1 across query clouds
-      for (size_t c = 0; c < num_db_clouds; ++c) {
-        const size_t start_vec = B.offsets[c];
-        const size_t cloud_size =
-            (B.sizes_unpadded.size() == num_db_clouds)
-                ? static_cast<size_t>(B.sizes_unpadded[c])
-                : (B.offsets[c + 1] - start_vec);
-        if (cloud_size == 0) continue;
+      // Initialize results with sentinels for sorted insertion
+      for (size_t qi = 0; qi < nq_local; ++qi)
+        for (size_t ki = 0; ki < k; ++ki)
+          results[(q_start + qi) * k + ki] = {UINT32_MAX, std::numeric_limits<float>::max()};
 
-        // Query-cloud-inner: each cloud keeps its own ET threshold
-        for (size_t qi = 0; qi < nq_local; ++qi) {
-          const size_t ne = qs[qi].num_embeddings;
-          if (ne == 0) continue;
-          const auto* qc = A[q_start + qi];
-
-          float partial_sum = 0.0f;
-          bool pruned = false;
-
-          for (size_t q_off = 0; q_off < ne; q_off += ET_BATCH) {
-            const size_t batch_end = std::min(q_off + ET_BATCH, ne);
-            const size_t batch_sz = batch_end - q_off;
-
-            internal::fastscan_mv_chamfer_fused<PCS::is_metric()>(
-                qc->flat_int_luts.data() + q_off * lut_stride, qc->scales.data() + q_off,
-                qc->min_dists.data() + q_off, batch_sz, num_blocks,
-                B.packed_codes.data(), db_strip_stride, start_vec, cloud_size,
-                scratch.emb_min_dists.data() + q_off,
-                scratch.running_mins, scratch.min_dist_raw);
-
-            for (size_t e = q_off; e < batch_end; ++e)
-              partial_sum += scratch.emb_min_dists[e];
-
-            if (partial_sum / static_cast<float>(ne) >= qs[qi].kth_best_dist) {
-              pruned = true;
-              break;
-            }
-          }
-
-          if (!pruned) {
-            const float chamfer_dist = partial_sum / static_cast<float>(ne);
-            if (qs[qi].heap.size() < k) {
-              qs[qi].heap.push({chamfer_dist, B.get_id(c)});
-              if (qs[qi].heap.size() == k) qs[qi].kth_best_dist = qs[qi].heap.top().first;
-            } else if (chamfer_dist < qs[qi].kth_best_dist) {
-              qs[qi].heap.pop();
-              qs[qi].heap.push({chamfer_dist, B.get_id(c)});
-              qs[qi].kth_best_dist = qs[qi].heap.top().first;
-            }
-          }
-        }
-      }
-
-      // Extract results from heaps
       for (size_t qi = 0; qi < nq_local; ++qi) {
-        const size_t idx = q_start + qi;
-        auto& heap = qs[qi].heap;
-        const size_t k_take = std::min(static_cast<size_t>(k), heap.size());
-        for (size_t ki = 0; ki < k_take; ++ki) {
-          auto [dist, id] = heap.top();
-          heap.pop();
-          results[idx * k + (k_take - 1 - ki)] = {id, dist};
-        }
-        for (size_t ki = k_take; ki < k; ++ki) {
-          results[idx * k + ki] = {0, std::numeric_limits<float>::max()};
+        const auto* qc = A[q_start + qi];
+        const size_t ne = qc->num_queries;
+        if (ne == 0) continue;
+        const float ne_f = static_cast<float>(ne);
+
+        for (size_t c = 0; c < num_db_clouds; ++c) {
+          const size_t start_vec = B.offsets[c];
+          const size_t cloud_size =
+              (B.sizes_unpadded.size() == num_db_clouds)
+                  ? static_cast<size_t>(B.sizes_unpadded[c])
+                  : (B.offsets[c + 1] - start_vec);
+          if (cloud_size == 0) continue;
+
+          internal::fastscan_mv_chamfer_fused<PCS::is_metric()>(
+              qc->flat_int_luts.data(), qc->scales.data(),
+              qc->min_dists.data(), ne, num_blocks,
+              B.packed_codes.data(), db_strip_stride, start_vec, cloud_size,
+              scratch.emb_min_dists.data(),
+              scratch.running_mins, scratch.min_dist_raw);
+
+          float chamfer_dist = 0.0f;
+          for (size_t e = 0; e < ne; ++e)
+            chamfer_dist += scratch.emb_min_dists[e];
+          chamfer_dist /= ne_f;
+
+          const size_t idx = (q_start + qi) * k;
+          if (chamfer_dist < results[idx + k - 1].second) {
+            results[idx + k - 1] = {B.get_id(c), chamfer_dist};
+            for (size_t j = k - 1; j > 0 && results[idx + j].second < results[idx + j - 1].second;
+                 --j)
+              std::swap(results[idx + j], results[idx + j - 1]);
+          }
         }
       }
+
     };
 
     if (parallel_query_blocks) {
