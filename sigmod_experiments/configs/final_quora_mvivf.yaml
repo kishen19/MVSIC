@@ -1,0 +1,66 @@
+name: "Final Experiments - Quora (MVIVF)"
+
+datasets:
+  - name: quora
+    path: data/beir/quora
+    results: results/final/quora
+
+indices:
+  - name: mvivf
+    build_configs:
+      - name: mvivf_500_fs_8_QC
+        params:
+          verbose: 1
+          pq_method: 3
+          block_size: 8
+          quantize_centers: true
+        search_configs:
+          - name: k=10
+            params: &nprobes
+              nprobes: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - {name: "nr0", num_rerank: 0}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr500", num_rerank: 500}
+                - {name: "nr5000", num_rerank: 5000}
+      - name: mvivf_500_tq_QC
+        params:
+          verbose: 1
+          pq_method: 4
+          quantize_centers: true
+        search_configs:
+          - name: k=10
+            params: 
+              nprobes: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - {name: "nr0", num_rerank: 0}
+                - {name: "nr20", num_rerank: 20}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr100", num_rerank: 100}
+
+  - name: mvivf_spill
+    build_configs:
+      - name: mvivf_spill_2_500_fs_8_QC
+        params:
+          verbose: 1
+          pq_method: 3
+          block_size: 8
+          quantize_centers: true
+          num_spill: 2
+        search_configs:
+          - name: k=10
+            params:
+              <<: *nprobes
+      - name: mvivf_spill_4_500_fs_8_QC
+        params:
+          verbose: 1
+          pq_method: 3
+          block_size: 8
+          quantize_centers: true
+          num_spill: 4
+        search_configs:
+          - name: k=10
+            params: 
+              <<: *nprobes

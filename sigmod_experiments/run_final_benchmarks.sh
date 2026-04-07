@@ -8,12 +8,17 @@ LOG_DIR="sigmod_experiments/logs"
 mkdir -p "${LOG_DIR}"
 
 CONFIGS=(
-  "sigmod_experiments/configs/final_beir5_tq.yaml"
-  "sigmod_experiments/configs/final_quora_tq.yaml"
-  "sigmod_experiments/configs/final_nq_tq.yaml"
-  "sigmod_experiments/configs/final_hotpotqa_tq.yaml"
+  "sigmod_experiments/configs/final_beir5_mvivf.yaml"
+  # "sigmod_experiments/configs/final_beir5_tq.yaml"
+  "sigmod_experiments/configs/final_quora_mvivf.yaml"
+  # "sigmod_experiments/configs/final_quora_tq.yaml"
+  "sigmod_experiments/configs/final_nq_mvivf.yaml"
+  # "sigmod_experiments/configs/final_nq_tq.yaml"
+  "sigmod_experiments/configs/final_hotpotqa_mvivf.yaml"
+  # "sigmod_experiments/configs/final_hotpotqa_tq.yaml"
   # "sigmod_experiments/configs/final_lotte_pooled_tq.yaml"
-  "sigmod_experiments/configs/final_vidore_tq.yaml"
+  "sigmod_experiments/configs/final_vidore_mvivf.yaml"
+  # "sigmod_experiments/configs/final_vidore_tq.yaml"
   "sigmod_experiments/configs/final_fastplaid_beir5.yaml"
 )
 

@@ -1,0 +1,80 @@
+name: "Final Experiments - ViDoRe Collection (MVIVF)"
+
+datasets:
+  - name: docvqa
+    path: data/vidore/docvqa
+    results: results/final/vidore/docvqa
+  - name: infovqa
+    path: data/vidore/infovqa
+    results: results/final/vidore/infovqa
+  - name: tatdqa
+    path: data/vidore/tatdqa
+    results: results/final/vidore/tatdqa
+  - name: arxivqa
+    path: data/vidore/arxivqa
+    results: results/final/vidore/arxivqa
+  - name: tabfquad
+    path: data/vidore/tabfquad
+    results: results/final/vidore/tabfquad
+  - name: chartqa
+    path: data/vidore/chartqa
+    results: results/final/vidore/chartqa
+
+indices:
+  - name: mvivf
+    build_configs:
+      - name: mvivf_500_fs_8_QC
+        params:
+          verbose: 1
+          pq_method: 3
+          block_size: 8
+          quantize_centers: true
+        search_configs:
+          - name: k=10
+            params: &nprobes
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+              k: [10]
+              config:
+                - {name: "nr0", num_rerank: 0}
+                - {name: "nr20", num_rerank: 20}
+                - {name: "nr50", num_rerank: 50}
+                - {name: "nr100", num_rerank: 100}
+      - name: mvivf_500_tq_QC
+        params:
+          verbose: 1
+          pq_method: 4
+          quantize_centers: true
+        search_configs:
+          - name: k=10
+            params: 
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+              k: [10]
+              config:
+                - {name: "nr0", num_rerank: 0}
+                - {name: "nr20", num_rerank: 20}
+                - {name: "nr50", num_rerank: 50}
+
+  - name: mvivf_spill
+    build_configs:
+      - name: mvivf_spill_2_500_fs_8_QC
+        params:
+          verbose: 1
+          pq_method: 3
+          block_size: 8
+          quantize_centers: true
+          num_spill: 2
+        search_configs:
+          - name: k=10
+            params:
+              <<: *nprobes
+      - name: mvivf_spill_4_500_fs_8_QC
+        params:
+          verbose: 1
+          pq_method: 3
+          block_size: 8
+          quantize_centers: true
+          num_spill: 4
+        search_configs:
+          - name: k=10
+            params: 
+              <<: *nprobes
