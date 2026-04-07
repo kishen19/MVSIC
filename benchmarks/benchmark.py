@@ -556,7 +556,7 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                                     single_df = single_df.loc[:, ~single_df.columns.duplicated()]
                                     single_df = _expand_method_timings(single_df, method_info)
                                     single_df = _reorder_result_columns(single_df, method_info)
-                                    single_df = single_df.applymap(_format_scalar_for_csv)
+                                    single_df = single_df.map(_format_scalar_for_csv)
 
                                     if os.path.exists(results_path):
                                         try:
