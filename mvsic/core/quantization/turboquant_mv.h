@@ -1,11 +1,45 @@
 #pragma once
 
+// Multi-vector 4-bit TurboQuant Chamfer with PRE-TRANSPOSED panel storage.
+//
+// Each cloud is stored as a contiguous run of "panels". A panel holds
+// kVnniPoints = 16 consecutive points laid out so that one VPDPBUSD instruction
+// produces one int32 lane per point. This is the same panel format used by the
+// reference many-to-many TurboQuant kernels in `many_to_many_code/`, but kept
+// here as raw AVX-512 intrinsics so we can reuse the existing micro-kernels.
+//
+// Pre-transposing the panels at *index build* time (instead of decoding strips
+// on every Chamfer call) is the main optimization: a query that visits the
+// same cluster multiple times no longer redoes the per-call decode.
+//
+// Encoding pipeline:
+//   floats --(BaseEncoder::encode_single)--> packed nibbles per point
+//   nibbles --(per-cloud temporary strip buffer)--> decode_strip_to_panel_simd
+//                                                  --> panel_data[cloud_offset..]
+//
+// Storage layout:
+//   panel_data        : concatenated panels for all clouds (aligned)
+//   panel_offsets[c]  : byte offset of cloud c's first panel within panel_data
+//   point_offsets[c]  : start of cloud c in the per-point arrays (padded to 16)
+//   norms / sqns      : per-point arrays, padded so each cloud is a multiple of 16
+//   cloud_sizes[c]    : unpadded number of points in cloud c
+//
+// Per-Chamfer:
+//   for each query batch of kVnniMq queries:
+//     decode is skipped, kernel runs straight on panel_data
+//     min over panels via vnni_micro_kernel_{1,2,4}panel<Mq> + epilogue
+//     final reduce_min per query, sum into chamfer
+//
+// kVnniMq is set to 6 to match the SPR sweet spot identified in the reference
+// (24 acc + 4 panel B + 1 broadcast Q + spill room = ~30 ZMM live registers).
+
 #include <vector>
 #include <cstdint>
 #include <immintrin.h>
 #include <limits>
 #include <algorithm>
 #include <cstring>
+#include <queue>
 
 #include "parlay/parallel.h"
 #include "parlay/sequence.h"
@@ -14,20 +48,24 @@
 namespace mvsic {
 namespace turboquant_mv {
 
-// =========================================================================
-// SIMD AVX Kernels
-// =========================================================================
 namespace internal {
 
-// Centroids shifted by +128 for native vpdpbusd (unsigned × signed).
+// Centroids shifted by +128 for native vpdpbusd (unsigned * signed). Same as
+// kTurboQuantCentroidsInt8 ^ 0x80.
 static constexpr std::array<uint8_t, 16> kCentroidsUint8 = {134, 146, 159, 172, 186, 203, 224, 255,
                                                             122, 110, 97,  84,  70,  53,  32,  1};
 
-static constexpr size_t kVnniPoints = 16;  // int32 lanes in __m512i
-static constexpr size_t kVnniMq = 8;       // queries per batch (2-panel path)
-static constexpr size_t kVnniMq4 = 4;      // queries per batch (4-panel path)
+static constexpr size_t kVnniPoints = 16;  // int32 lanes in __m512i (= panel point count)
+static constexpr size_t kVnniMq = 6;       // queries per batch (SPR sweet spot)
 
-// SIMD bulk decode: 16 points from a strip into one block-transposed panel.
+// =========================================================================
+// Panel build-time helpers
+// =========================================================================
+
+// Builds one block-transposed panel from a strip-laid-out source buffer
+// `strip_ptr` (byte j of point lane => strip_ptr[j*64 + lane]). Reads
+// kVnniPoints (= 16) consecutive lanes starting at `base_lane`. Pads any
+// trailing tile slots with the neutral byte (0x80) so they don't move the min.
 inline void decode_strip_to_panel_simd(const uint8_t* strip_ptr, size_t base_lane, size_t num_bytes,
                                        size_t total_tiles, uint8_t* panel) {
   const __m128i codebook_u8 =
@@ -93,6 +131,7 @@ inline void decode_strip_to_panel_simd(const uint8_t* strip_ptr, size_t base_lan
     ++tile;
   }
 
+  // Neutral pad: 0x80 = unsigned form of int8 0, zero contribution to dot product.
   const __m128i neutral = _mm_set1_epi8(static_cast<char>(0x80));
   for (; tile < total_tiles; ++tile) {
     _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * N + 0), neutral);
@@ -102,88 +141,9 @@ inline void decode_strip_to_panel_simd(const uint8_t* strip_ptr, size_t base_lan
   }
 }
 
-#if defined(__AVX512BW__) && defined(__AVX512VL__)
-// Fully SIMD version of gathering crossing points. Replaces the memcpy loop.
-inline void decode_crossing_panel_simd(const uint8_t* s0, const uint8_t* s1, size_t base_lane,
-                                       size_t num_bytes, size_t total_tiles, uint8_t* panel) {
-  const __m128i codebook_u8 =
-      _mm_loadu_si128(reinterpret_cast<const __m128i*>(kCentroidsUint8.data()));
-  const __m128i mask_0f = _mm_set1_epi8(0x0F);
-  const size_t in_this = 64 - base_lane;
-
-  // Masks to stitch Strip 0 and Strip 1 fragments together
-  const __mmask16 m_lo = (1U << in_this) - 1;
-  const __mmask16 m_hi = ~m_lo;
-
-  size_t tile = 0;
-  size_t j = 0;
-
-  // Main loop: Process 2 byte-positions (4 dimensions) at a time
-  for (; j + 1 < num_bytes; j += 2) {
-    // Stitch bytes for dimension j and j+1
-    __m128i p_j = _mm_maskz_loadu_epi8(m_lo, s0 + j * 64 + base_lane);
-    p_j = _mm_mask_loadu_epi8(p_j, m_hi, s1 + j * 64 - in_this);
-
-    __m128i p_j1 = _mm_maskz_loadu_epi8(m_lo, s0 + (j + 1) * 64 + base_lane);
-    p_j1 = _mm_mask_loadu_epi8(p_j1, m_hi, s1 + (j + 1) * 64 - in_this);
-
-    // Standard VNNI Transpose/Unpack logic
-    const __m128i ej = _mm_shuffle_epi8(codebook_u8, _mm_and_si128(p_j, mask_0f));
-    const __m128i oj =
-        _mm_shuffle_epi8(codebook_u8, _mm_and_si128(_mm_srli_epi16(p_j, 4), mask_0f));
-    const __m128i ej1 = _mm_shuffle_epi8(codebook_u8, _mm_and_si128(p_j1, mask_0f));
-    const __m128i oj1 =
-        _mm_shuffle_epi8(codebook_u8, _mm_and_si128(_mm_srli_epi16(p_j1, 4), mask_0f));
-
-    const __m128i pair_j = _mm_unpacklo_epi8(ej, oj);
-    const __m128i pair_j_hi = _mm_unpackhi_epi8(ej, oj);
-    const __m128i pair_j1 = _mm_unpacklo_epi8(ej1, oj1);
-    const __m128i pair_j1_hi = _mm_unpackhi_epi8(ej1, oj1);
-
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 0),
-                     _mm_unpacklo_epi16(pair_j, pair_j1));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 16),
-                     _mm_unpackhi_epi16(pair_j, pair_j1));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 32),
-                     _mm_unpacklo_epi16(pair_j_hi, pair_j1_hi));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 48),
-                     _mm_unpackhi_epi16(pair_j_hi, pair_j1_hi));
-    ++tile;
-  }
-
-  // Handle tail byte-position
-  if (j < num_bytes) {
-    __m128i p_j = _mm_maskz_loadu_epi8(m_lo, s0 + j * 64 + base_lane);
-    p_j = _mm_mask_loadu_epi8(p_j, m_hi, s1 + j * 64 - in_this);
-
-    const __m128i ej = _mm_shuffle_epi8(codebook_u8, _mm_and_si128(p_j, mask_0f));
-    const __m128i oj =
-        _mm_shuffle_epi8(codebook_u8, _mm_and_si128(_mm_srli_epi16(p_j, 4), mask_0f));
-    const __m128i zeros = _mm_setzero_si128();
-
-    const __m128i pair_j = _mm_unpacklo_epi8(ej, oj);
-    const __m128i pair_j_hi = _mm_unpackhi_epi8(ej, oj);
-
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 0),
-                     _mm_unpacklo_epi16(pair_j, zeros));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 16),
-                     _mm_unpackhi_epi16(pair_j, zeros));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 32),
-                     _mm_unpacklo_epi16(pair_j_hi, zeros));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + 48),
-                     _mm_unpackhi_epi16(pair_j_hi, zeros));
-    ++tile;
-  }
-
-  // Pad remaining tiles with neutral value (-128)
-  const __m128i neutral = _mm_set1_epi8(static_cast<char>(0x80));
-  for (; tile < total_tiles; ++tile) {
-    for (int k = 0; k < 4; ++k)
-      _mm_storeu_si128(reinterpret_cast<__m128i*>(panel + tile * 64 + k * 16), neutral);
-  }
-}
-#endif
-
+// =========================================================================
+// AVX-512 GEMM micro-kernels
+// =========================================================================
 #ifdef __AVX512F__
 inline __m512i tq_dpbusd(__m512i acc, __m512i a_unsigned, __m512i b_signed) {
 #ifdef __AVX512VNNI__
@@ -203,7 +163,7 @@ inline void vnni_micro_kernel_1panel(const int8_t* const* query_ptrs, const uint
     acc[q] = _mm512_setzero_si512();
 
   for (size_t t = 0; t < total_tiles; ++t) {
-    const __m512i b = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel + t * N));
+    const __m512i b = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel + t * N));
     for (size_t q = 0; q < Mq; ++q) {
       const __m512i qv = _mm512_set1_epi32(reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
       acc[q] = tq_dpbusd(acc[q], b, qv);
@@ -222,8 +182,8 @@ inline void vnni_micro_kernel_2panel(const int8_t* const* query_ptrs, const uint
   }
 
   for (size_t t = 0; t < total_tiles; ++t) {
-    const __m512i b0 = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel0 + t * N));
-    const __m512i b1 = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel1 + t * N));
+    const __m512i b0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel0 + t * N));
+    const __m512i b1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel1 + t * N));
     for (size_t q = 0; q < Mq; ++q) {
       const __m512i qv = _mm512_set1_epi32(reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
       acc0[q] = tq_dpbusd(acc0[q], b0, qv);
@@ -246,10 +206,10 @@ inline void vnni_micro_kernel_4panel(const int8_t* const* query_ptrs, const uint
   }
 
   for (size_t t = 0; t < total_tiles; ++t) {
-    const __m512i b0 = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel0 + t * N));
-    const __m512i b1 = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel1 + t * N));
-    const __m512i b2 = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel2 + t * N));
-    const __m512i b3 = _mm512_load_si512(reinterpret_cast<const __m512i*>(panel3 + t * N));
+    const __m512i b0 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel0 + t * N));
+    const __m512i b1 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel1 + t * N));
+    const __m512i b2 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel2 + t * N));
+    const __m512i b3 = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel3 + t * N));
     for (size_t q = 0; q < Mq; ++q) {
       const __m512i qv = _mm512_set1_epi32(reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
       acc0[q] = tq_dpbusd(acc0[q], b0, qv);
@@ -285,586 +245,227 @@ inline void vnni_chamfer_epilogue(__m512i acc, int32_t byte_sum, float q_nsf, fl
   running_min = _mm512_min_ps(running_min, dist);
 }
 
+// Core Chamfer over a single (queries, cloud) pair on PRE-TRANSPOSED panels.
+// Returns sum_{q in queries} min_{b in cloud} dist(q, b). Caller divides by
+// num_queries if a true mean is needed.
 template<bool Metric>
-inline float chamfer_vnni_gemm(const int8_t* q_flat_data, const float* q_norms, const float* q_sqns,
-                               const int32_t* q_bsums, size_t q_stride, size_t num_queries,
-                               const uint8_t* strip_data, const float* norms,
-                               const float* squared_norms, size_t strip_stride, size_t n_strips,
-                               size_t num_bytes_per_point, size_t cloud_size,
-                               size_t lane_offset = 0) {
-  const size_t decoded_dim = 2 * num_bytes_per_point;
-  const size_t padded_dim = (decoded_dim + 3) & ~3;
-  const size_t total_tiles = padded_dim / 4;
-  constexpr size_t N = kVnniPoints * 4;
-  const size_t panel_bytes = total_tiles * N;
-  const size_t n_panels = (cloud_size + kVnniPoints - 1) / kVnniPoints;
-
-  // Step 0 (Decode Queries): Already done during quantize_query using optimized flat arrays
-  // directly!
-
-  // Step 1: Decode DB cloud to block-transposed panels
-  thread_local std::vector<uint8_t> panels;
-  panels.resize(n_panels * panel_bytes + 64);
-  uint8_t* panels_aligned =
-      reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
-  thread_local std::vector<uint8_t> gather_buf;
-
-  for (size_t p = 0; p < n_panels; ++p) {
-    const size_t abs_point = lane_offset + p * kVnniPoints;
-    const size_t strip = abs_point / 64;
-    const size_t base_lane = abs_point % 64;
-
-    if (base_lane + kVnniPoints <= 64) {
-      decode_strip_to_panel_simd(strip_data + strip * strip_stride, base_lane, num_bytes_per_point,
-                                 total_tiles, panels_aligned + p * panel_bytes);
-    } else {
-#if defined(__AVX512BW__) && defined(__AVX512VL__)
-      const uint8_t* s0 = strip_data + strip * strip_stride;
-      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
-      // HIT THE RAW KERNEL: No more gather_buf, no more memcpy overhead.
-      decode_crossing_panel_simd(s0, s1, base_lane, num_bytes_per_point, total_tiles,
-                                 panels_aligned + p * panel_bytes);
-#else
-      // Scalar/Memcpy fallback for machines without AVX-512BW
-      const size_t in_this = 64 - base_lane;
-      const size_t in_next = kVnniPoints - in_this;
-      gather_buf.resize(num_bytes_per_point * 64);
-      const uint8_t* s0 = strip_data + strip * strip_stride;
-      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
-      for (size_t j = 0; j < num_bytes_per_point; ++j) {
-        std::memcpy(gather_buf.data() + j * 64, s0 + j * 64 + base_lane, in_this);
-        std::memcpy(gather_buf.data() + j * 64 + in_this, s1 + j * 64, in_next);
-      }
-      decode_strip_to_panel_simd(gather_buf.data(), 0, num_bytes_per_point, total_tiles,
-                                 panels_aligned + p * panel_bytes);
-#endif
-    }
-  }
-
-  // Step 2: Pad norm arrays
-  const size_t padded_pts = n_panels * kVnniPoints;
-  thread_local std::vector<float> padded_norms;
-  thread_local std::vector<float> padded_sqn;
-  padded_norms.resize(padded_pts);
-  std::memcpy(padded_norms.data(), norms, cloud_size * sizeof(float));
-  std::memset(padded_norms.data() + cloud_size, 0, (padded_pts - cloud_size) * sizeof(float));
-  if constexpr (Metric) {
-    padded_sqn.resize(padded_pts);
-    std::memcpy(padded_sqn.data(), squared_norms, cloud_size * sizeof(float));
-    std::memset(padded_sqn.data() + cloud_size, 0, (padded_pts - cloud_size) * sizeof(float));
-  }
-
-  // Step 3: Score all queries against all panels
+inline float chamfer_panels(const int8_t* q_flat_data, const float* q_norms, const float* q_sqns,
+                            const int32_t* q_bsums, size_t q_stride, size_t num_queries,
+                            const uint8_t* panel_data, const float* padded_norms,
+                            const float* padded_sqn, size_t total_tiles, size_t panel_bytes,
+                            size_t n_panels) {
   float total_chamfer = 0.0f;
   size_t qi = 0;
 
-  for (; qi + kVnniMq4 <= num_queries; qi += kVnniMq4) {
-    const int8_t* q_batch[kVnniMq4];
-    for (size_t q = 0; q < kVnniMq4; ++q) {
+  for (; qi + kVnniMq <= num_queries; qi += kVnniMq) {
+    const int8_t* q_batch[kVnniMq];
+    for (size_t q = 0; q < kVnniMq; ++q)
       q_batch[q] = q_flat_data + (qi + q) * q_stride;
-    }
 
-    __m512 mins[kVnniMq4];
-    for (size_t q = 0; q < kVnniMq4; ++q)
+    __m512 mins[kVnniMq];
+    for (size_t q = 0; q < kVnniMq; ++q)
       mins[q] = _mm512_set1_ps(std::numeric_limits<float>::max());
 
     size_t p = 0;
     for (; p + 4 <= n_panels; p += 4) {
-      __m512i a0[kVnniMq4], a1[kVnniMq4], a2[kVnniMq4], a3[kVnniMq4];
-      vnni_micro_kernel_4panel<kVnniMq4>(
-          q_batch, panels_aligned + p * panel_bytes, panels_aligned + (p + 1) * panel_bytes,
-          panels_aligned + (p + 2) * panel_bytes, panels_aligned + (p + 3) * panel_bytes,
+      __m512i a0[kVnniMq], a1[kVnniMq], a2[kVnniMq], a3[kVnniMq];
+      vnni_micro_kernel_4panel<kVnniMq>(
+          q_batch, panel_data + p * panel_bytes, panel_data + (p + 1) * panel_bytes,
+          panel_data + (p + 2) * panel_bytes, panel_data + (p + 3) * panel_bytes,
           total_tiles, a0, a1, a2, a3);
 
-      for (size_t q = 0; q < kVnniMq4; ++q) {
-        size_t query_idx = qi + q;
-        vnni_chamfer_epilogue<Metric>(a0[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx], padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(a1[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 1) * kVnniPoints,
-                                      padded_sqn.data() + (p + 1) * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(a2[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 2) * kVnniPoints,
-                                      padded_sqn.data() + (p + 2) * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(a3[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 3) * kVnniPoints,
-                                      padded_sqn.data() + (p + 3) * kVnniPoints, mins[q]);
+      for (size_t q = 0; q < kVnniMq; ++q) {
+        const size_t qg = qi + q;
+        vnni_chamfer_epilogue<Metric>(a0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + p * kVnniPoints,
+                                      padded_sqn + p * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(a1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 1) * kVnniPoints,
+                                      padded_sqn + (p + 1) * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(a2[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 2) * kVnniPoints,
+                                      padded_sqn + (p + 2) * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(a3[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 3) * kVnniPoints,
+                                      padded_sqn + (p + 3) * kVnniPoints, mins[q]);
       }
     }
     for (; p + 2 <= n_panels; p += 2) {
-      __m512i ac0[kVnniMq4], ac1[kVnniMq4];
-      vnni_micro_kernel_2panel<kVnniMq4>(q_batch, panels_aligned + p * panel_bytes,
-                                         panels_aligned + (p + 1) * panel_bytes, total_tiles, ac0,
-                                         ac1);
-
-      for (size_t q = 0; q < kVnniMq4; ++q) {
-        size_t query_idx = qi + q;
-        vnni_chamfer_epilogue<Metric>(ac0[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx], padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(ac1[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 1) * kVnniPoints,
-                                      padded_sqn.data() + (p + 1) * kVnniPoints, mins[q]);
+      __m512i ac0[kVnniMq], ac1[kVnniMq];
+      vnni_micro_kernel_2panel<kVnniMq>(q_batch, panel_data + p * panel_bytes,
+                                        panel_data + (p + 1) * panel_bytes, total_tiles, ac0, ac1);
+      for (size_t q = 0; q < kVnniMq; ++q) {
+        const size_t qg = qi + q;
+        vnni_chamfer_epilogue<Metric>(ac0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + p * kVnniPoints,
+                                      padded_sqn + p * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(ac1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 1) * kVnniPoints,
+                                      padded_sqn + (p + 1) * kVnniPoints, mins[q]);
       }
     }
     for (; p < n_panels; ++p) {
-      __m512i acc[kVnniMq4];
-      vnni_micro_kernel_1panel<kVnniMq4>(q_batch, panels_aligned + p * panel_bytes, total_tiles,
-                                         acc);
-
-      for (size_t q = 0; q < kVnniMq4; ++q) {
-        size_t query_idx = qi + q;
-        vnni_chamfer_epilogue<Metric>(acc[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx], padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
+      __m512i acc[kVnniMq];
+      vnni_micro_kernel_1panel<kVnniMq>(q_batch, panel_data + p * panel_bytes, total_tiles, acc);
+      for (size_t q = 0; q < kVnniMq; ++q) {
+        const size_t qg = qi + q;
+        vnni_chamfer_epilogue<Metric>(acc[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + p * kVnniPoints,
+                                      padded_sqn + p * kVnniPoints, mins[q]);
       }
     }
 
-    for (size_t q = 0; q < kVnniMq4; ++q)
+    for (size_t q = 0; q < kVnniMq; ++q)
       total_chamfer += _mm512_reduce_min_ps(mins[q]);
   }
 
-  // Tail: remaining queries.
+  // Tail: remaining queries (< kVnniMq).
   for (; qi < num_queries; ++qi) {
     const int8_t* qp = q_flat_data + qi * q_stride;
     __m512 running_min = _mm512_set1_ps(std::numeric_limits<float>::max());
 
     for (size_t p = 0; p < n_panels; ++p) {
       __m512i acc;
-      vnni_micro_kernel_1panel<1>(&qp, panels_aligned + p * panel_bytes, total_tiles, &acc);
+      vnni_micro_kernel_1panel<1>(&qp, panel_data + p * panel_bytes, total_tiles, &acc);
       vnni_chamfer_epilogue<Metric>(acc, q_bsums[qi], q_norms[qi], q_sqns[qi],
-                                    padded_norms.data() + p * kVnniPoints,
-                                    padded_sqn.data() + p * kVnniPoints, running_min);
+                                    padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                    running_min);
     }
     total_chamfer += _mm512_reduce_min_ps(running_min);
   }
 
   return total_chamfer;
 }
-#endif  // __AVX512F__
 
-// ------------------------------------------------------------------
-// Fused SIMD Kernel: Scores a flat array of embeddings against a DB cloud
-// ------------------------------------------------------------------
-#ifdef __AVX512F__
+// Multi-query variant: writes per-query min distance into out_dists. Used by
+// the many-to-many fused path so the caller can aggregate min distances per
+// source cloud.
 template<bool Metric>
-inline void chamfer_vnni_gemm_fused(const int8_t* q_flat_data, const float* q_norms,
-                                    const float* q_sqns, const int32_t* q_bsums, size_t q_stride,
-                                    size_t num_fused_embeddings, const uint8_t* strip_data,
-                                    const float* norms, const float* squared_norms,
-                                    size_t strip_stride, size_t n_strips,
-                                    size_t num_bytes_per_point, size_t cloud_size,
-                                    size_t lane_offset, float* out_dists) {
-
-  const size_t decoded_dim = 2 * num_bytes_per_point;
-  const size_t padded_dim = (decoded_dim + 3) & ~3;
-  const size_t total_tiles = padded_dim / 4;
-  constexpr size_t N = kVnniPoints * 4;
-  const size_t panel_bytes = total_tiles * N;
-  const size_t n_panels = (cloud_size + kVnniPoints - 1) / kVnniPoints;
-
-  // 1. Decode DB cloud to block-transposed panels (Done ONCE per cloud)
-  thread_local std::vector<uint8_t> panels;
-  panels.resize(n_panels * panel_bytes + 64);
-  uint8_t* panels_aligned =
-      reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
-  thread_local std::vector<uint8_t> gather_buf;
-
-  for (size_t p = 0; p < n_panels; ++p) {
-    const size_t abs_point = lane_offset + p * kVnniPoints;
-    const size_t strip = abs_point / 64;
-    const size_t base_lane = abs_point % 64;
-
-    if (base_lane + kVnniPoints <= 64) {
-      decode_strip_to_panel_simd(strip_data + strip * strip_stride, base_lane, num_bytes_per_point,
-                                 total_tiles, panels_aligned + p * panel_bytes);
-    } else {
-#if defined(__AVX512BW__) && defined(__AVX512VL__)
-      const uint8_t* s0 = strip_data + strip * strip_stride;
-      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
-      decode_crossing_panel_simd(s0, s1, base_lane, num_bytes_per_point, total_tiles,
-                                 panels_aligned + p * panel_bytes);
-#else
-      const size_t in_this = 64 - base_lane;
-      const size_t in_next = kVnniPoints - in_this;
-      gather_buf.resize(num_bytes_per_point * 64);
-      const uint8_t* s0 = strip_data + strip * strip_stride;
-      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
-      for (size_t j = 0; j < num_bytes_per_point; ++j) {
-        std::memcpy(gather_buf.data() + j * 64, s0 + j * 64 + base_lane, in_this);
-        std::memcpy(gather_buf.data() + j * 64 + in_this, s1 + j * 64, in_next);
-      }
-      decode_strip_to_panel_simd(gather_buf.data(), 0, num_bytes_per_point, total_tiles,
-                                 panels_aligned + p * panel_bytes);
-#endif
-    }
-  }
-
-  const size_t padded_pts = n_panels * kVnniPoints;
-  thread_local std::vector<float> padded_norms;
-  thread_local std::vector<float> padded_sqn;
-  padded_norms.resize(padded_pts);
-  std::memcpy(padded_norms.data(), norms, cloud_size * sizeof(float));
-  std::memset(padded_norms.data() + cloud_size, 0, (padded_pts - cloud_size) * sizeof(float));
-  if constexpr (Metric) {
-    padded_sqn.resize(padded_pts);
-    std::memcpy(padded_sqn.data(), squared_norms, cloud_size * sizeof(float));
-    std::memset(padded_sqn.data() + cloud_size, 0, (padded_pts - cloud_size) * sizeof(float));
-  }
-
-  // 2. Score ALL fused embeddings against the decoded panels
+inline void chamfer_panels_multi(const int8_t* q_flat_data, const float* q_norms,
+                                 const float* q_sqns, const int32_t* q_bsums, size_t q_stride,
+                                 size_t num_queries, const uint8_t* panel_data,
+                                 const float* padded_norms, const float* padded_sqn,
+                                 size_t total_tiles, size_t panel_bytes, size_t n_panels,
+                                 float* out_dists) {
   size_t qi = 0;
-  for (; qi + kVnniMq4 <= num_fused_embeddings; qi += kVnniMq4) {
-    const int8_t* q_batch[kVnniMq4];
-    for (size_t q = 0; q < kVnniMq4; ++q)
+  for (; qi + kVnniMq <= num_queries; qi += kVnniMq) {
+    const int8_t* q_batch[kVnniMq];
+    for (size_t q = 0; q < kVnniMq; ++q)
       q_batch[q] = q_flat_data + (qi + q) * q_stride;
 
-    __m512 mins[kVnniMq4];
-    for (size_t q = 0; q < kVnniMq4; ++q)
+    __m512 mins[kVnniMq];
+    for (size_t q = 0; q < kVnniMq; ++q)
       mins[q] = _mm512_set1_ps(std::numeric_limits<float>::max());
 
     size_t p = 0;
     for (; p + 4 <= n_panels; p += 4) {
-      __m512i a0[kVnniMq4], a1[kVnniMq4], a2[kVnniMq4], a3[kVnniMq4];
-      vnni_micro_kernel_4panel<kVnniMq4>(
-          q_batch, panels_aligned + p * panel_bytes, panels_aligned + (p + 1) * panel_bytes,
-          panels_aligned + (p + 2) * panel_bytes, panels_aligned + (p + 3) * panel_bytes,
+      __m512i a0[kVnniMq], a1[kVnniMq], a2[kVnniMq], a3[kVnniMq];
+      vnni_micro_kernel_4panel<kVnniMq>(
+          q_batch, panel_data + p * panel_bytes, panel_data + (p + 1) * panel_bytes,
+          panel_data + (p + 2) * panel_bytes, panel_data + (p + 3) * panel_bytes,
           total_tiles, a0, a1, a2, a3);
-
-      for (size_t q = 0; q < kVnniMq4; ++q) {
-        size_t q_idx = qi + q;
-        vnni_chamfer_epilogue<Metric>(a0[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(a1[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + (p + 1) * kVnniPoints,
-                                      padded_sqn.data() + (p + 1) * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(a2[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + (p + 2) * kVnniPoints,
-                                      padded_sqn.data() + (p + 2) * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(a3[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + (p + 3) * kVnniPoints,
-                                      padded_sqn.data() + (p + 3) * kVnniPoints, mins[q]);
+      for (size_t q = 0; q < kVnniMq; ++q) {
+        const size_t qg = qi + q;
+        vnni_chamfer_epilogue<Metric>(a0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + p * kVnniPoints,
+                                      padded_sqn + p * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(a1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 1) * kVnniPoints,
+                                      padded_sqn + (p + 1) * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(a2[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 2) * kVnniPoints,
+                                      padded_sqn + (p + 2) * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(a3[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 3) * kVnniPoints,
+                                      padded_sqn + (p + 3) * kVnniPoints, mins[q]);
       }
     }
     for (; p + 2 <= n_panels; p += 2) {
-      __m512i ac0[kVnniMq4], ac1[kVnniMq4];
-      vnni_micro_kernel_2panel<kVnniMq4>(q_batch, panels_aligned + p * panel_bytes,
-                                         panels_aligned + (p + 1) * panel_bytes, total_tiles, ac0,
-                                         ac1);
-      for (size_t q = 0; q < kVnniMq4; ++q) {
-        size_t q_idx = qi + q;
-        vnni_chamfer_epilogue<Metric>(ac0[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
-        vnni_chamfer_epilogue<Metric>(ac1[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + (p + 1) * kVnniPoints,
-                                      padded_sqn.data() + (p + 1) * kVnniPoints, mins[q]);
+      __m512i ac0[kVnniMq], ac1[kVnniMq];
+      vnni_micro_kernel_2panel<kVnniMq>(q_batch, panel_data + p * panel_bytes,
+                                        panel_data + (p + 1) * panel_bytes, total_tiles, ac0, ac1);
+      for (size_t q = 0; q < kVnniMq; ++q) {
+        const size_t qg = qi + q;
+        vnni_chamfer_epilogue<Metric>(ac0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + p * kVnniPoints,
+                                      padded_sqn + p * kVnniPoints, mins[q]);
+        vnni_chamfer_epilogue<Metric>(ac1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + (p + 1) * kVnniPoints,
+                                      padded_sqn + (p + 1) * kVnniPoints, mins[q]);
       }
     }
     for (; p < n_panels; ++p) {
-      __m512i acc[kVnniMq4];
-      vnni_micro_kernel_1panel<kVnniMq4>(q_batch, panels_aligned + p * panel_bytes, total_tiles,
-                                         acc);
-      for (size_t q = 0; q < kVnniMq4; ++q) {
-        size_t q_idx = qi + q;
-        vnni_chamfer_epilogue<Metric>(acc[q], q_bsums[q_idx], q_norms[q_idx], q_sqns[q_idx],
-                                      padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
+      __m512i acc[kVnniMq];
+      vnni_micro_kernel_1panel<kVnniMq>(q_batch, panel_data + p * panel_bytes, total_tiles, acc);
+      for (size_t q = 0; q < kVnniMq; ++q) {
+        const size_t qg = qi + q;
+        vnni_chamfer_epilogue<Metric>(acc[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
+                                      padded_norms + p * kVnniPoints,
+                                      padded_sqn + p * kVnniPoints, mins[q]);
       }
     }
 
-    for (size_t q = 0; q < kVnniMq4; ++q)
+    for (size_t q = 0; q < kVnniMq; ++q)
       out_dists[qi + q] = _mm512_reduce_min_ps(mins[q]);
   }
 
-  // Tail queries
-  for (; qi < num_fused_embeddings; ++qi) {
+  // Tail
+  for (; qi < num_queries; ++qi) {
     const int8_t* qp = q_flat_data + qi * q_stride;
     __m512 running_min = _mm512_set1_ps(std::numeric_limits<float>::max());
     for (size_t p = 0; p < n_panels; ++p) {
       __m512i acc;
-      vnni_micro_kernel_1panel<1>(&qp, panels_aligned + p * panel_bytes, total_tiles, &acc);
+      vnni_micro_kernel_1panel<1>(&qp, panel_data + p * panel_bytes, total_tiles, &acc);
       vnni_chamfer_epilogue<Metric>(acc, q_bsums[qi], q_norms[qi], q_sqns[qi],
-                                    padded_norms.data() + p * kVnniPoints,
-                                    padded_sqn.data() + p * kVnniPoints, running_min);
+                                    padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                    running_min);
     }
     out_dists[qi] = _mm512_reduce_min_ps(running_min);
   }
 }
 #endif  // __AVX512F__
 
-#if !defined(__AVX512F__) && defined(__AVX2__)
-static constexpr size_t kAvx2Points = 8;
-static constexpr size_t kAvx2Mq4 = 4;
-
-inline __m256i avx2_dpbusd(__m256i acc, __m256i a_unsigned, __m256i b_signed) {
-  const __m256i prod16 = _mm256_maddubs_epi16(a_unsigned, b_signed);
-  const __m256i prod32 = _mm256_madd_epi16(prod16, _mm256_set1_epi16(1));
-  return _mm256_add_epi32(acc, prod32);
-}
-
-template<size_t Mq>
-inline void avx2_micro_kernel_1panel(const int8_t* const* query_ptrs, const uint8_t* panel,
-                                     size_t total_tiles, __m256i* acc_lo, __m256i* acc_hi) {
-  constexpr size_t N = kVnniPoints * 4;
-  for (size_t q = 0; q < Mq; ++q) {
-    acc_lo[q] = _mm256_setzero_si256();
-    acc_hi[q] = _mm256_setzero_si256();
-  }
-
-  for (size_t t = 0; t < total_tiles; ++t) {
-    const __m256i b_lo = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel + t * N));
-    const __m256i b_hi = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel + t * N + 32));
-    for (size_t q = 0; q < Mq; ++q) {
-      const __m256i qv = _mm256_set1_epi32(reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
-      acc_lo[q] = avx2_dpbusd(acc_lo[q], b_lo, qv);
-      acc_hi[q] = avx2_dpbusd(acc_hi[q], b_hi, qv);
-    }
-  }
-}
-
-template<size_t Mq>
-inline void avx2_micro_kernel_4panel(const int8_t* const* query_ptrs, const uint8_t* panel0,
-                                     const uint8_t* panel1, const uint8_t* panel2,
-                                     const uint8_t* panel3, size_t total_tiles, __m256i* a0_lo,
-                                     __m256i* a0_hi, __m256i* a1_lo, __m256i* a1_hi, __m256i* a2_lo,
-                                     __m256i* a2_hi, __m256i* a3_lo, __m256i* a3_hi) {
-  constexpr size_t N = kVnniPoints * 4;
-  for (size_t q = 0; q < Mq; ++q) {
-    a0_lo[q] = a0_hi[q] = _mm256_setzero_si256();
-    a1_lo[q] = a1_hi[q] = _mm256_setzero_si256();
-    a2_lo[q] = a2_hi[q] = _mm256_setzero_si256();
-    a3_lo[q] = a3_hi[q] = _mm256_setzero_si256();
-  }
-
-  for (size_t t = 0; t < total_tiles; ++t) {
-    const __m256i b0_lo = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel0 + t * N));
-    const __m256i b0_hi = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel0 + t * N + 32));
-    const __m256i b1_lo = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel1 + t * N));
-    const __m256i b1_hi = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel1 + t * N + 32));
-    const __m256i b2_lo = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel2 + t * N));
-    const __m256i b2_hi = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel2 + t * N + 32));
-    const __m256i b3_lo = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel3 + t * N));
-    const __m256i b3_hi = _mm256_load_si256(reinterpret_cast<const __m256i*>(panel3 + t * N + 32));
-
-    for (size_t q = 0; q < Mq; ++q) {
-      const __m256i qv = _mm256_set1_epi32(reinterpret_cast<const int32_t*>(query_ptrs[q])[t]);
-      a0_lo[q] = avx2_dpbusd(a0_lo[q], b0_lo, qv);
-      a0_hi[q] = avx2_dpbusd(a0_hi[q], b0_hi, qv);
-      a1_lo[q] = avx2_dpbusd(a1_lo[q], b1_lo, qv);
-      a1_hi[q] = avx2_dpbusd(a1_hi[q], b1_hi, qv);
-      a2_lo[q] = avx2_dpbusd(a2_lo[q], b2_lo, qv);
-      a2_hi[q] = avx2_dpbusd(a2_hi[q], b2_hi, qv);
-      a3_lo[q] = avx2_dpbusd(a3_lo[q], b3_lo, qv);
-      a3_hi[q] = avx2_dpbusd(a3_hi[q], b3_hi, qv);
-    }
-  }
-}
-
+// =========================================================================
+// Scalar fallback (decodes panels on-the-fly; only used if AVX-512 is absent)
+// =========================================================================
 template<bool Metric>
-inline void avx2_chamfer_epilogue(__m256i acc, int32_t byte_sum, float q_nsf, float q_sqn,
-                                  const float* norms8, const float* sqn8, __m256& running_min) {
-  const __m256i bias = _mm256_set1_epi32(128 * byte_sum);
-  const __m256i corrected = _mm256_sub_epi32(acc, bias);
-
-  __m256 fdot = _mm256_cvtepi32_ps(corrected);
-  const __m256 norm = _mm256_loadu_ps(norms8);
-  const __m256 nsf = _mm256_set1_ps(q_nsf);
-
-  __m256 neg_dot = _mm256_mul_ps(fdot, norm);
-  neg_dot = _mm256_mul_ps(neg_dot, nsf);
-  neg_dot = _mm256_sub_ps(_mm256_setzero_ps(), neg_dot);
-
-  __m256 dist;
-  if constexpr (Metric) {
-    const __m256 sqn_v = _mm256_loadu_ps(sqn8);
-    const __m256 sqn_q = _mm256_set1_ps(q_sqn);
-    dist = _mm256_add_ps(sqn_v, _mm256_add_ps(_mm256_add_ps(neg_dot, neg_dot), sqn_q));
-  } else {
-    dist = neg_dot;
-  }
-  running_min = _mm256_min_ps(running_min, dist);
-}
-
-inline float avx2_reduce_min_ps(__m256 v) {
-  __m128 lo = _mm256_castps256_ps128(v);
-  __m128 hi = _mm256_extractf128_ps(v, 1);
-  __m128 m = _mm_min_ps(lo, hi);
-  __m128 m2 = _mm_shuffle_ps(m, m, _MM_SHUFFLE(1, 0, 3, 2));
-  m = _mm_min_ps(m, m2);
-  __m128 m3 = _mm_shuffle_ps(m, m, _MM_SHUFFLE(0, 1, 0, 1));
-  m = _mm_min_ps(m, m3);
-  return _mm_cvtss_f32(m);
-}
-
-template<bool Metric>
-inline float chamfer_avx2_gemm(const int8_t* q_flat_data, const float* q_norms, const float* q_sqns,
-                               const int32_t* q_bsums, size_t q_stride, size_t num_queries,
-                               const uint8_t* strip_data, const float* norms,
-                               const float* squared_norms, size_t strip_stride, size_t n_strips,
-                               size_t num_bytes_per_point, size_t cloud_size,
-                               size_t lane_offset = 0) {
-  const size_t decoded_dim = 2 * num_bytes_per_point;
-  const size_t padded_dim = (decoded_dim + 3) & ~3;
-  const size_t total_tiles = padded_dim / 4;
+inline float chamfer_panels_scalar(const int8_t* q_flat_data, const float* q_norms,
+                                   const float* q_sqns, const int32_t* q_bsums, size_t q_stride,
+                                   size_t num_queries, const uint8_t* panel_data,
+                                   const float* padded_norms, const float* padded_sqn,
+                                   size_t total_tiles, size_t panel_bytes, size_t n_panels,
+                                   size_t cloud_size) {
   constexpr size_t N = kVnniPoints * 4;
-  const size_t panel_bytes = total_tiles * N;
-  const size_t n_panels = (cloud_size + kVnniPoints - 1) / kVnniPoints;
-
-  thread_local std::vector<uint8_t> panels;
-  panels.resize(n_panels * panel_bytes + 64);
-  uint8_t* panels_aligned =
-      reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(panels.data()) + 63) & ~63);
-
-  thread_local std::vector<uint8_t> gather_buf;
-
-  for (size_t p = 0; p < n_panels; ++p) {
-    const size_t abs_point = lane_offset + p * kVnniPoints;
-    const size_t strip = abs_point / 64;
-    const size_t base_lane = abs_point % 64;
-
-    if (base_lane + kVnniPoints <= 64) {
-      decode_strip_to_panel_simd(strip_data + strip * strip_stride, base_lane, num_bytes_per_point,
-                                 total_tiles, panels_aligned + p * panel_bytes);
-    } else {
-      const size_t in_this = 64 - base_lane;
-      const size_t in_next = kVnniPoints - in_this;
-      gather_buf.resize(num_bytes_per_point * 64);
-      const uint8_t* s0 = strip_data + strip * strip_stride;
-      const uint8_t* s1 = strip_data + (strip + 1) * strip_stride;
-      for (size_t j = 0; j < num_bytes_per_point; ++j) {
-        std::memcpy(gather_buf.data() + j * 64, s0 + j * 64 + base_lane, in_this);
-        std::memcpy(gather_buf.data() + j * 64 + in_this, s1 + j * 64, in_next);
-      }
-      decode_strip_to_panel_simd(gather_buf.data(), 0, num_bytes_per_point, total_tiles,
-                                 panels_aligned + p * panel_bytes);
-    }
-  }
-
-  const size_t padded_pts = n_panels * kVnniPoints;
-  thread_local std::vector<float> padded_norms;
-  thread_local std::vector<float> padded_sqn;
-  padded_norms.resize(padded_pts);
-  std::memcpy(padded_norms.data(), norms, cloud_size * sizeof(float));
-  std::memset(padded_norms.data() + cloud_size, 0, (padded_pts - cloud_size) * sizeof(float));
-  if constexpr (Metric) {
-    padded_sqn.resize(padded_pts);
-    std::memcpy(padded_sqn.data(), squared_norms, cloud_size * sizeof(float));
-    std::memset(padded_sqn.data() + cloud_size, 0, (padded_pts - cloud_size) * sizeof(float));
-  }
-
-  float total_chamfer = 0.0f;
-  size_t qi = 0;
-
-  for (; qi + kAvx2Mq4 <= num_queries; qi += kAvx2Mq4) {
-    const int8_t* q_batch[kAvx2Mq4];
-    for (size_t q = 0; q < kAvx2Mq4; ++q) {
-      q_batch[q] = q_flat_data + (qi + q) * q_stride;
-    }
-
-    __m256 mins[kAvx2Mq4];
-    for (size_t q = 0; q < kAvx2Mq4; ++q)
-      mins[q] = _mm256_set1_ps(std::numeric_limits<float>::max());
-
-    size_t p = 0;
-    for (; p + 4 <= n_panels; p += 4) {
-      __m256i a0_lo[kAvx2Mq4], a0_hi[kAvx2Mq4];
-      __m256i a1_lo[kAvx2Mq4], a1_hi[kAvx2Mq4];
-      __m256i a2_lo[kAvx2Mq4], a2_hi[kAvx2Mq4];
-      __m256i a3_lo[kAvx2Mq4], a3_hi[kAvx2Mq4];
-      avx2_micro_kernel_4panel<kAvx2Mq4>(
-          q_batch, panels_aligned + p * panel_bytes, panels_aligned + (p + 1) * panel_bytes,
-          panels_aligned + (p + 2) * panel_bytes, panels_aligned + (p + 3) * panel_bytes,
-          total_tiles, a0_lo, a0_hi, a1_lo, a1_hi, a2_lo, a2_hi, a3_lo, a3_hi);
-
-      for (size_t q = 0; q < kAvx2Mq4; ++q) {
-        size_t query_idx = qi + q;
-        avx2_chamfer_epilogue<Metric>(a0_lo[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx], padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
-        avx2_chamfer_epilogue<Metric>(a0_hi[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + p * kVnniPoints + kAvx2Points,
-                                      padded_sqn.data() + p * kVnniPoints + kAvx2Points, mins[q]);
-
-        avx2_chamfer_epilogue<Metric>(a1_lo[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 1) * kVnniPoints,
-                                      padded_sqn.data() + (p + 1) * kVnniPoints, mins[q]);
-        avx2_chamfer_epilogue<Metric>(
-            a1_hi[q], q_bsums[query_idx], q_norms[query_idx], q_sqns[query_idx],
-            padded_norms.data() + (p + 1) * kVnniPoints + kAvx2Points,
-            padded_sqn.data() + (p + 1) * kVnniPoints + kAvx2Points, mins[q]);
-
-        avx2_chamfer_epilogue<Metric>(a2_lo[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 2) * kVnniPoints,
-                                      padded_sqn.data() + (p + 2) * kVnniPoints, mins[q]);
-        avx2_chamfer_epilogue<Metric>(
-            a2_hi[q], q_bsums[query_idx], q_norms[query_idx], q_sqns[query_idx],
-            padded_norms.data() + (p + 2) * kVnniPoints + kAvx2Points,
-            padded_sqn.data() + (p + 2) * kVnniPoints + kAvx2Points, mins[q]);
-
-        avx2_chamfer_epilogue<Metric>(a3_lo[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + (p + 3) * kVnniPoints,
-                                      padded_sqn.data() + (p + 3) * kVnniPoints, mins[q]);
-        avx2_chamfer_epilogue<Metric>(
-            a3_hi[q], q_bsums[query_idx], q_norms[query_idx], q_sqns[query_idx],
-            padded_norms.data() + (p + 3) * kVnniPoints + kAvx2Points,
-            padded_sqn.data() + (p + 3) * kVnniPoints + kAvx2Points, mins[q]);
-      }
-    }
-    for (; p < n_panels; ++p) {
-      __m256i acc_lo[kAvx2Mq4], acc_hi[kAvx2Mq4];
-      avx2_micro_kernel_1panel<kAvx2Mq4>(q_batch, panels_aligned + p * panel_bytes, total_tiles,
-                                         acc_lo, acc_hi);
-
-      for (size_t q = 0; q < kAvx2Mq4; ++q) {
-        size_t query_idx = qi + q;
-        avx2_chamfer_epilogue<Metric>(acc_lo[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx], padded_norms.data() + p * kVnniPoints,
-                                      padded_sqn.data() + p * kVnniPoints, mins[q]);
-        avx2_chamfer_epilogue<Metric>(acc_hi[q], q_bsums[query_idx], q_norms[query_idx],
-                                      q_sqns[query_idx],
-                                      padded_norms.data() + p * kVnniPoints + kAvx2Points,
-                                      padded_sqn.data() + p * kVnniPoints + kAvx2Points, mins[q]);
-      }
-    }
-
-    for (size_t q = 0; q < kAvx2Mq4; ++q)
-      total_chamfer += avx2_reduce_min_ps(mins[q]);
-  }
-
-  // Tail: remaining queries.
-  for (; qi < num_queries; ++qi) {
+  float total = 0.0f;
+  for (size_t qi = 0; qi < num_queries; ++qi) {
     const int8_t* qp = q_flat_data + qi * q_stride;
-    __m256 running_min = _mm256_set1_ps(std::numeric_limits<float>::max());
-
-    for (size_t p = 0; p < n_panels; ++p) {
-      __m256i acc_lo, acc_hi;
-      avx2_micro_kernel_1panel<1>(&qp, panels_aligned + p * panel_bytes, total_tiles, &acc_lo,
-                                  &acc_hi);
-      avx2_chamfer_epilogue<Metric>(acc_lo, q_bsums[qi], q_norms[qi], q_sqns[qi],
-                                    padded_norms.data() + p * kVnniPoints,
-                                    padded_sqn.data() + p * kVnniPoints, running_min);
-      avx2_chamfer_epilogue<Metric>(acc_hi, q_bsums[qi], q_norms[qi], q_sqns[qi],
-                                    padded_norms.data() + p * kVnniPoints + kAvx2Points,
-                                    padded_sqn.data() + p * kVnniPoints + kAvx2Points, running_min);
+    float min_d = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < cloud_size; ++i) {
+      const size_t panel = i / kVnniPoints;
+      const size_t lane = i % kVnniPoints;
+      const uint8_t* base = panel_data + panel * panel_bytes;
+      int32_t dot = 0;
+      for (size_t t = 0; t < total_tiles; ++t) {
+        const uint8_t* tile = base + t * N + lane * 4;
+        for (size_t k = 0; k < 4; ++k) {
+          dot += static_cast<int32_t>(tile[k]) * static_cast<int32_t>(qp[t * 4 + k]);
+        }
+      }
+      dot -= 128 * q_bsums[qi];
+      const float neg_dot =
+          -static_cast<float>(dot) * padded_norms[panel * kVnniPoints + lane] * q_norms[qi];
+      float d;
+      if constexpr (Metric) {
+        d = padded_sqn[panel * kVnniPoints + lane] + 2.0f * neg_dot + q_sqns[qi];
+      } else {
+        d = neg_dot;
+      }
+      if (d < min_d) min_d = d;
     }
-
-    total_chamfer += avx2_reduce_min_ps(running_min);
+    total += min_d;
   }
-
-  return total_chamfer;
+  return total;
 }
-#endif  // !__AVX512F__ && __AVX2__
 
 }  // namespace internal
 
@@ -878,24 +479,22 @@ class Quantized_Query_Point_Cloud;
 
 template<bool Metric>
 float turboquant_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
-                                     const Quantized_Point_Cloud_Set<Metric>& db, size_t start_vec,
-                                     size_t end_vec);
+                                     const Quantized_Point_Cloud_Set<Metric>& db, size_t cloud_idx);
 
 // =========================================================================
-// Proxy: flat vector index range [start_idx, end_idx) into a quantized set
+// Cloud handle: refers to one cloud (by index) within a set
 // =========================================================================
 template<bool Metric>
 class Quantized_Point_Cloud {
  public:
   const Quantized_Point_Cloud_Set<Metric>* db = nullptr;
-  size_t start_idx = 0;
-  size_t end_idx = 0;
+  size_t cloud_idx = 0;
 
   Quantized_Point_Cloud() = default;
-  Quantized_Point_Cloud(const Quantized_Point_Cloud_Set<Metric>* d, size_t s, size_t e) :
-      db(d), start_idx(s), end_idx(e) {}
+  Quantized_Point_Cloud(const Quantized_Point_Cloud_Set<Metric>* d, size_t idx) :
+      db(d), cloud_idx(idx) {}
 
-  size_t size() const { return end_idx - start_idx; }
+  size_t size() const;
 
   static constexpr bool is_metric() { return Metric; }
 
@@ -928,68 +527,90 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudView>
   float distance(const CloudView& cloud) const {
-    return turboquant_mv_chamfer_distance(*this, *cloud.db, cloud.start_idx, cloud.end_idx);
+    return turboquant_mv_chamfer_distance(*this, *cloud.db, cloud.cloud_idx);
   }
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
-    const size_t cloud_size = cloud.end_idx - cloud.start_idx;
     const size_t bytes_per_vec = cloud.db->num_bytes_per_datapoint + sizeof(float) +
                                  (Metric ? sizeof(float) : 0);
-    return {this->distance(cloud), cloud_size * bytes_per_vec};
+    return {this->distance(cloud), cloud.size() * bytes_per_vec};
   }
 
   static constexpr bool is_metric() { return Metric; }
 };
 
 // =========================================================================
-// Multi-Vector Set (Strip Layout)
+// Multi-Vector Set (Pre-Transposed Panel Layout)
 // =========================================================================
 template<bool Metric>
 class Quantized_Point_Cloud_Set {
  public:
+  // Encoder geometry (same for every cloud)
   size_t num_bytes_per_datapoint = 0;
-  size_t stride = 0;  // strip stride = num_bytes * 64
+  size_t total_tiles = 0;  // = ceil(2*num_bytes / 4) -- one VPDPBUSD's worth per tile
+  size_t panel_bytes = 0;  // = total_tiles * (kVnniPoints * 4)
 
-  parlay::sequence<uint8_t> packed_codes;
+  // Concatenated, pre-transposed panel data. Each cloud occupies
+  // n_panels(c) * panel_bytes bytes starting at panel_offsets[c].
+  parlay::sequence<uint8_t> panel_data;
+  parlay::sequence<size_t> panel_offsets;  // size: n_clouds + 1, in BYTES
+
+  // Per-point arrays, padded so each cloud is a multiple of kVnniPoints.
+  // point_offsets is in unpadded? -> NO, point_offsets is the padded offset
+  // such that norms[point_offsets[c] + lane] gives the lane'th point of
+  // cloud c. Padding lanes carry sentinel values that disqualify them from
+  // the min (norms = 0, sqns = +inf).
+  parlay::sequence<size_t> point_offsets;  // size: n_clouds + 1, in points
   parlay::sequence<float> norm_scaling_factors;
   parlay::sequence<float> unquantized_squared_norms;
 
-  parlay::sequence<size_t> offsets;
+  // Unpadded sizes per cloud (used to bound the on-the-fly scalar fallback
+  // and reported via Quantized_Point_Cloud::size()).
+  parlay::sequence<size_t> cloud_sizes;
   parlay::sequence<uint32_t> ids;
+
+  // Backwards-compat alias used by ManyToMany scaffolding.
+  // offsets[c] == point_offsets[c]; kept so external code that probes the
+  // padded layout still works.
+  inline size_t num_clouds() const noexcept {
+    return panel_offsets.size() > 0 ? panel_offsets.size() - 1 : 0;
+  }
+
+  inline size_t n_panels(size_t c) const noexcept {
+    return (panel_offsets[c + 1] - panel_offsets[c]) / panel_bytes;
+  }
+
+  inline size_t cloud_size(size_t c) const noexcept { return cloud_sizes[c]; }
 
   Quantized_Point_Cloud_Set() = default;
   static constexpr bool is_metric() noexcept { return Metric; }
 
   Quantized_Point_Cloud<Metric> operator[](size_t i) const {
-    const size_t start = offsets[i];
-    const size_t end = offsets[i + 1];
-    return Quantized_Point_Cloud<Metric>(this, start, end);
+    return Quantized_Point_Cloud<Metric>(this, i);
   }
 
   inline uint32_t get_id(size_t i) const noexcept {
     return (ids.size() > 0) ? ids[i] : static_cast<uint32_t>(i);
   }
-  inline size_t num_bytes() const noexcept { return packed_codes.size() * sizeof(uint8_t); }
+  inline size_t num_bytes() const noexcept {
+    return panel_data.size() * sizeof(uint8_t) +
+           norm_scaling_factors.size() * sizeof(float) +
+           unquantized_squared_norms.size() * sizeof(float);
+  }
 
   void distances_all(const Quantized_Query_Point_Cloud<Metric>& q,
                      std::pair<uint32_t, float>* results) const {
     const size_t num_q = q.num_queries;
-    const size_t num_clouds = (offsets.size() > 0) ? offsets.size() - 1 : 0;
+    const size_t nc = num_clouds();
+    if (num_q == 0 || nc == 0) return;
 
-    if (num_q == 0 || num_clouds == 0) return;
-
-    parlay::parallel_for(0, num_clouds, [&](size_t c) {
-      const size_t start_vec = offsets[c];
-      const size_t end_vec = offsets[c + 1];
-      const size_t cloud_size = end_vec - start_vec;
-
-      if (cloud_size == 0) {
+    parlay::parallel_for(0, nc, [&](size_t c) {
+      if (cloud_sizes[c] == 0) {
         results[c] = {get_id(c), std::numeric_limits<float>::max()};
         return;
       }
-
-      const float d = turboquant_mv_chamfer_distance(q, *this, start_vec, end_vec);
+      const float d = turboquant_mv_chamfer_distance(q, *this, c);
       results[c] = {get_id(c), d};
     });
   }
@@ -997,130 +618,80 @@ class Quantized_Point_Cloud_Set {
   void save(std::ofstream& out) const {
     out.write(reinterpret_cast<const char*>(&num_bytes_per_datapoint),
               sizeof(num_bytes_per_datapoint));
-    out.write(reinterpret_cast<const char*>(&stride), sizeof(stride));
+    out.write(reinterpret_cast<const char*>(&total_tiles), sizeof(total_tiles));
+    out.write(reinterpret_cast<const char*>(&panel_bytes), sizeof(panel_bytes));
 
-    size_t sz = packed_codes.size();
-    out.write(reinterpret_cast<const char*>(&sz), sizeof(sz));
-    if (sz) out.write(reinterpret_cast<const char*>(packed_codes.data()), sz);
-
-    size_t nsz = norm_scaling_factors.size();
-    out.write(reinterpret_cast<const char*>(&nsz), sizeof(nsz));
-    if (nsz)
-      out.write(reinterpret_cast<const char*>(norm_scaling_factors.data()), nsz * sizeof(float));
-
-    size_t ssz = unquantized_squared_norms.size();
-    out.write(reinterpret_cast<const char*>(&ssz), sizeof(ssz));
-    if (ssz)
-      out.write(reinterpret_cast<const char*>(unquantized_squared_norms.data()),
-                ssz * sizeof(float));
-
-    size_t osz = offsets.size();
-    out.write(reinterpret_cast<const char*>(&osz), sizeof(osz));
-    if (osz) out.write(reinterpret_cast<const char*>(offsets.data()), osz * sizeof(size_t));
-
-    size_t isz = ids.size();
-    out.write(reinterpret_cast<const char*>(&isz), sizeof(isz));
-    if (isz) out.write(reinterpret_cast<const char*>(ids.data()), isz * sizeof(uint32_t));
+    auto write_seq = [&](const auto& seq) {
+      using T = typename std::remove_reference_t<decltype(seq)>::value_type;
+      size_t sz = seq.size();
+      out.write(reinterpret_cast<const char*>(&sz), sizeof(sz));
+      if (sz) out.write(reinterpret_cast<const char*>(seq.data()), sz * sizeof(T));
+    };
+    write_seq(panel_data);
+    write_seq(panel_offsets);
+    write_seq(point_offsets);
+    write_seq(norm_scaling_factors);
+    write_seq(unquantized_squared_norms);
+    write_seq(cloud_sizes);
+    write_seq(ids);
   }
 
   void load(std::ifstream& in) {
     in.read(reinterpret_cast<char*>(&num_bytes_per_datapoint), sizeof(num_bytes_per_datapoint));
-    in.read(reinterpret_cast<char*>(&stride), sizeof(stride));
+    in.read(reinterpret_cast<char*>(&total_tiles), sizeof(total_tiles));
+    in.read(reinterpret_cast<char*>(&panel_bytes), sizeof(panel_bytes));
 
-    size_t sz = 0;
-    in.read(reinterpret_cast<char*>(&sz), sizeof(sz));
-    packed_codes.resize(sz);
-    if (sz) in.read(reinterpret_cast<char*>(packed_codes.data()), sz);
-
-    size_t nsz = 0;
-    in.read(reinterpret_cast<char*>(&nsz), sizeof(nsz));
-    norm_scaling_factors.resize(nsz);
-    if (nsz) in.read(reinterpret_cast<char*>(norm_scaling_factors.data()), nsz * sizeof(float));
-
-    size_t ssz = 0;
-    in.read(reinterpret_cast<char*>(&ssz), sizeof(ssz));
-    unquantized_squared_norms.resize(ssz);
-    if (ssz)
-      in.read(reinterpret_cast<char*>(unquantized_squared_norms.data()), ssz * sizeof(float));
-
-    size_t osz = 0;
-    in.read(reinterpret_cast<char*>(&osz), sizeof(osz));
-    offsets.resize(osz);
-    if (osz) in.read(reinterpret_cast<char*>(offsets.data()), osz * sizeof(size_t));
-
-    size_t isz = 0;
-    in.read(reinterpret_cast<char*>(&isz), sizeof(isz));
-    ids.resize(isz);
-    if (isz) in.read(reinterpret_cast<char*>(ids.data()), isz * sizeof(uint32_t));
+    auto read_seq = [&](auto& seq) {
+      using T = typename std::remove_reference_t<decltype(seq)>::value_type;
+      size_t sz = 0;
+      in.read(reinterpret_cast<char*>(&sz), sizeof(sz));
+      seq.resize(sz);
+      if (sz) in.read(reinterpret_cast<char*>(seq.data()), sz * sizeof(T));
+    };
+    read_seq(panel_data);
+    read_seq(panel_offsets);
+    read_seq(point_offsets);
+    read_seq(norm_scaling_factors);
+    read_seq(unquantized_squared_norms);
+    read_seq(cloud_sizes);
+    read_seq(ids);
   }
 };
 
+// Quantized_Point_Cloud::size needs the full Set definition.
+template<bool Metric>
+inline size_t Quantized_Point_Cloud<Metric>::size() const {
+  return db ? db->cloud_sizes[cloud_idx] : 0;
+}
+
 template<bool Metric>
 float turboquant_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
-                                     const Quantized_Point_Cloud_Set<Metric>& db, size_t start_vec,
-                                     size_t end_vec) {
+                                     const Quantized_Point_Cloud_Set<Metric>& db, size_t c) {
   const size_t num_q = q.num_queries;
   if (num_q == 0) return 0.0f;
-  if (end_vec <= start_vec) return std::numeric_limits<float>::max();
 
-  const size_t cloud_size = end_vec - start_vec;
-  const size_t strip_idx = start_vec / 64;
-  const size_t lane_offset = start_vec % 64;
-  const size_t n_strips = (lane_offset + cloud_size + 63) / 64;
+  const size_t cs = db.cloud_sizes[c];
+  if (cs == 0) return std::numeric_limits<float>::max();
 
-  const uint8_t* s_data = db.packed_codes.data() + strip_idx * db.stride;
-  const float* ns = db.norm_scaling_factors.data() + start_vec;
-  const float* sqn = db.unquantized_squared_norms.data() + start_vec;
+  const size_t panel_byte_off = db.panel_offsets[c];
+  const size_t pt_off = db.point_offsets[c];
+  const size_t np = (db.panel_offsets[c + 1] - panel_byte_off) / db.panel_bytes;
+  const uint8_t* panel_ptr = db.panel_data.data() + panel_byte_off;
+  const float* ns = db.norm_scaling_factors.data() + pt_off;
+  const float* sqn = db.unquantized_squared_norms.data() + pt_off;
 
   float dist_sum = 0.0f;
-
 #ifdef __AVX512F__
-  dist_sum = internal::chamfer_vnni_gemm<Metric>(
+  dist_sum = internal::chamfer_panels<Metric>(
       q.flat_query_data.data(), q.norm_scaling_factors.data(), q.unquantized_squared_norms.data(),
-      q.byte_sums.data(), q.q_stride, num_q, s_data, ns, sqn, db.stride, n_strips,
-      db.num_bytes_per_datapoint, cloud_size, lane_offset);
-#elif defined(__AVX2__)
-  dist_sum = internal::chamfer_avx2_gemm<Metric>(
-      q.flat_query_data.data(), q.norm_scaling_factors.data(), q.unquantized_squared_norms.data(),
-      q.byte_sums.data(), q.q_stride, num_q, s_data, ns, sqn, db.stride, n_strips,
-      db.num_bytes_per_datapoint, cloud_size, lane_offset);
+      q.byte_sums.data(), q.q_stride, num_q, panel_ptr, ns, sqn, db.total_tiles, db.panel_bytes,
+      np);
 #else
-  float total_chamfer = 0.0f;
-  for (size_t qi = 0; qi < num_q; ++qi) {
-    float min_d = std::numeric_limits<float>::max();
-    const int8_t* q_ptr = q.get_q_ptr(qi);
-
-    for (size_t i = 0; i < cloud_size; ++i) {
-      int32_t dot = 0;
-      const size_t pt_lane = (lane_offset + i) % 64;
-      const size_t pt_strip = (lane_offset + i) / 64;
-      const uint8_t* code_ptr = s_data + pt_strip * db.stride + pt_lane;
-
-      for (size_t j = 0; j < db.num_bytes_per_datapoint; ++j) {
-        const uint8_t byte = code_ptr[j * 64];
-        const uint8_t b_even = byte & 0xF;
-        const uint8_t b_odd = byte >> 4;
-        dot += static_cast<int32_t>(internal::kCentroidsUint8[b_even]) *
-               q_ptr[static_cast<size_t>(2 * j)];
-        dot += static_cast<int32_t>(internal::kCentroidsUint8[b_odd]) *
-               q_ptr[static_cast<size_t>(2 * j + 1)];
-      }
-
-      dot -= 128 * q.byte_sums[qi];
-      float neg_dot = -static_cast<float>(dot) * ns[i] * q.norm_scaling_factors[qi];
-      float d;
-      if constexpr (Metric) {
-        d = sqn[i] + 2.0f * neg_dot + q.unquantized_squared_norms[qi];
-      } else {
-        d = neg_dot;
-      }
-      if (d < min_d) min_d = d;
-    }
-    total_chamfer += min_d;
-  }
-  dist_sum = total_chamfer;
+  dist_sum = internal::chamfer_panels_scalar<Metric>(
+      q.flat_query_data.data(), q.norm_scaling_factors.data(), q.unquantized_squared_norms.data(),
+      q.byte_sums.data(), q.q_stride, num_q, panel_ptr, ns, sqn, db.total_tiles, db.panel_bytes,
+      np, cs);
 #endif
-
   return dist_sum / static_cast<float>(num_q);
 }
 
@@ -1143,53 +714,92 @@ class Model {
   Quantized_Point_Cloud_Set<Metric> encode(const PCSet& pcs) const {
     Quantized_Point_Cloud_Set<Metric> enc;
     enc.num_bytes_per_datapoint = encoder.num_bytes_per_datapoint;
-    enc.stride = enc.num_bytes_per_datapoint * 64;
+
+    const size_t decoded_dim = 2 * enc.num_bytes_per_datapoint;
+    const size_t padded_dim = (decoded_dim + 3) & ~3;
+    enc.total_tiles = padded_dim / 4;
+    constexpr size_t N = internal::kVnniPoints * 4;
+    enc.panel_bytes = enc.total_tiles * N;
 
     auto float_offsets = pcs.get_offsets();
-    size_t n_clouds = float_offsets.size() > 0 ? float_offsets.size() - 1 : 0;
+    const size_t n_clouds = float_offsets.size() > 0 ? float_offsets.size() - 1 : 0;
 
-    enc.offsets.resize(n_clouds + 1);
-    enc.offsets[0] = 0;
+    enc.panel_offsets.resize(n_clouds + 1);
+    enc.point_offsets.resize(n_clouds + 1);
+    enc.cloud_sizes.resize(n_clouds);
 
-    size_t cur_padded = 0;
+    size_t cur_panel_bytes = 0;
+    size_t cur_padded_pts = 0;
     for (size_t c = 0; c < n_clouds; ++c) {
-      enc.offsets[c] = cur_padded;
-      size_t n_vecs = (float_offsets[c + 1] - float_offsets[c]) / encoder.dim;
-      cur_padded += ((n_vecs + 63) / 64) * 64;  // Pad each cloud to 64!
+      const size_t n_vecs = (float_offsets[c + 1] - float_offsets[c]) / encoder.dim;
+      const size_t np = (n_vecs + internal::kVnniPoints - 1) / internal::kVnniPoints;
+      enc.panel_offsets[c] = cur_panel_bytes;
+      enc.point_offsets[c] = cur_padded_pts;
+      enc.cloud_sizes[c] = n_vecs;
+      cur_panel_bytes += np * enc.panel_bytes;
+      cur_padded_pts += np * internal::kVnniPoints;
     }
-    enc.offsets[n_clouds] = cur_padded;
+    enc.panel_offsets[n_clouds] = cur_panel_bytes;
+    enc.point_offsets[n_clouds] = cur_padded_pts;
 
-    size_t n_strips = cur_padded / 64;
-    enc.packed_codes.resize(n_strips * enc.stride, 0);
-    enc.norm_scaling_factors.resize(cur_padded, 0.0f);
-    enc.unquantized_squared_norms.resize(cur_padded, 0.0f);
+    enc.panel_data.resize(cur_panel_bytes, 0);
+    enc.norm_scaling_factors.resize(cur_padded_pts, 0.0f);
+    if constexpr (Metric) {
+      // Padding lanes get +inf so they can never win the min.
+      enc.unquantized_squared_norms.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
+    } else {
+      enc.unquantized_squared_norms.resize(cur_padded_pts, 0.0f);
+    }
 
     auto pcs_ids = pcs.get_ids();
     enc.ids = parlay::sequence<uint32_t>(pcs_ids.begin(), pcs_ids.end());
 
-    for (size_t c = 0; c < n_clouds; ++c) {
-      size_t src_start = float_offsets[c] / encoder.dim;
-      size_t n_vecs = (float_offsets[c + 1] - float_offsets[c]) / encoder.dim;
-      size_t dst_start = enc.offsets[c];
+    parlay::parallel_for(0, n_clouds, [&](size_t c) {
+      const size_t n_vecs = enc.cloud_sizes[c];
+      if (n_vecs == 0) return;
 
-      parlay::parallel_for(0, n_vecs, [&](size_t i) {
-        std::vector<float> ws(encoder.padded_dim);
-        std::vector<uint8_t> p_codes(enc.num_bytes_per_datapoint);
+      const size_t np = (n_vecs + internal::kVnniPoints - 1) / internal::kVnniPoints;
+      const size_t n_strips = (n_vecs + 63) / 64;  // 64 points per strip
+      const size_t strip_bytes = enc.num_bytes_per_datapoint * 64;
 
-        const float* p = reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
+      // Per-cloud temporary strip buffer (lives only inside this lambda).
+      // Layout: strip_buf[strip * strip_bytes + j * 64 + lane] = byte j of point lane.
+      std::vector<uint8_t> strip_buf(n_strips * strip_bytes, 0);
+      std::vector<uint8_t> p_codes(enc.num_bytes_per_datapoint);
+      std::vector<float> ws(encoder.padded_dim);
+
+      const size_t src_start = float_offsets[c] / encoder.dim;
+      const size_t pt_off = enc.point_offsets[c];
+
+      for (size_t i = 0; i < n_vecs; ++i) {
+        const float* p =
+            reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
         auto [sqn, nsf] = encoder.encode_single(p, p_codes.data(), ws);
 
-        size_t dst_idx = dst_start + i;
-        enc.norm_scaling_factors[dst_idx] = nsf;
-        enc.unquantized_squared_norms[dst_idx] = sqn;
+        enc.norm_scaling_factors[pt_off + i] = nsf;
+        enc.unquantized_squared_norms[pt_off + i] = sqn;
 
-        size_t strip = dst_idx / 64;
-        size_t lane = dst_idx % 64;
+        const size_t strip = i / 64;
+        const size_t lane = i % 64;
         for (size_t j = 0; j < enc.num_bytes_per_datapoint; ++j) {
-          enc.packed_codes[strip * enc.stride + j * 64 + lane] = p_codes[j];
+          strip_buf[strip * strip_bytes + j * 64 + lane] = p_codes[j];
         }
-      });
-    }
+      }
+
+      // Pre-transpose: walk panels of 16 points each, decode each one into the
+      // permanent panel_data buffer. All panels live within a single strip
+      // because each strip holds 64 points (4 panels per strip).
+      uint8_t* cloud_panels = enc.panel_data.data() + enc.panel_offsets[c];
+      for (size_t p = 0; p < np; ++p) {
+        const size_t abs = p * internal::kVnniPoints;
+        const size_t strip = abs / 64;
+        const size_t lane = abs % 64;
+        internal::decode_strip_to_panel_simd(strip_buf.data() + strip * strip_bytes, lane,
+                                             enc.num_bytes_per_datapoint, enc.total_tiles,
+                                             cloud_panels + p * enc.panel_bytes);
+      }
+    });
+
     return enc;
   }
 
@@ -1267,25 +877,26 @@ class ManyToMany {
       bool parallel_query_blocks = true) {
 
     const size_t num_q_clouds = A.size();
-    const size_t num_db_clouds = (B.offsets.size() > 0) ? B.offsets.size() - 1 : 0;
+    const size_t num_db_clouds = B.num_clouds();
     if (num_q_clouds == 0 || num_db_clouds == 0 || k == 0) return;
     if (q_block == 0) q_block = 1;
 
     auto process_query_range = [&](size_t q_start, size_t q_end) {
-      size_t q_count = q_end - q_start;
+      const size_t q_count = q_end - q_start;
       if (q_count == 0) return;
 
       std::vector<std::priority_queue<std::pair<float, uint32_t>>> heaps(q_count);
 
-      // --- 1. FUSE QUERIES ---
+      // Fuse all per-source-cloud queries into one flat array so the GEMM can
+      // saturate kernel utilization on every DB-cloud visit.
       size_t total_embeddings = 0;
       std::vector<size_t> emb_offsets(q_count + 1, 0);
       for (size_t i = 0; i < q_count; ++i) {
         total_embeddings += A[q_start + i]->num_queries;
         emb_offsets[i + 1] = total_embeddings;
       }
+      const size_t q_stride = A[0]->q_stride;
 
-      size_t q_stride = A[0]->q_stride;
       std::vector<int8_t> fused_q_data(total_embeddings * q_stride);
       std::vector<float> fused_q_norms(total_embeddings);
       std::vector<float> fused_q_sqns(total_embeddings);
@@ -1293,48 +904,50 @@ class ManyToMany {
 
       for (size_t i = 0; i < q_count; ++i) {
         const auto* qc = A[q_start + i];
-        size_t off = emb_offsets[i];
-        size_t count = qc->num_queries;
+        const size_t off = emb_offsets[i];
+        const size_t cnt = qc->num_queries;
         std::memcpy(fused_q_data.data() + off * q_stride, qc->flat_query_data.data(),
-                    count * q_stride);
+                    cnt * q_stride);
         std::memcpy(fused_q_norms.data() + off, qc->norm_scaling_factors.data(),
-                    count * sizeof(float));
+                    cnt * sizeof(float));
         std::memcpy(fused_q_sqns.data() + off, qc->unquantized_squared_norms.data(),
-                    count * sizeof(float));
-        std::memcpy(fused_q_bsums.data() + off, qc->byte_sums.data(), count * sizeof(int32_t));
+                    cnt * sizeof(float));
+        std::memcpy(fused_q_bsums.data() + off, qc->byte_sums.data(), cnt * sizeof(int32_t));
       }
 
       std::vector<float> emb_min_dists(total_embeddings);
 
-      // --- 2. DATABASE PROBING ---
       for (size_t c = 0; c < num_db_clouds; ++c) {
-        const size_t start_vec = B.offsets[c];
-        const size_t end_vec = B.offsets[c + 1];
-        const size_t cloud_size = end_vec - start_vec;
+        const size_t cs = B.cloud_sizes[c];
+        if (cs == 0) continue;
 
-        if (cloud_size == 0) continue;
+        const size_t panel_off = B.panel_offsets[c];
+        const size_t pt_off = B.point_offsets[c];
+        const size_t np = (B.panel_offsets[c + 1] - panel_off) / B.panel_bytes;
 
-// The Magic: One decode, full saturation.
 #ifdef __AVX512F__
-        internal::chamfer_vnni_gemm_fused<PCS::is_metric()>(
+        internal::chamfer_panels_multi<PCS::is_metric()>(
             fused_q_data.data(), fused_q_norms.data(), fused_q_sqns.data(), fused_q_bsums.data(),
-            q_stride, total_embeddings, B.packed_codes.data() + (start_vec / 64) * B.stride,
-            B.norm_scaling_factors.data() + start_vec,
-            B.unquantized_squared_norms.data() + start_vec, B.stride,
-            (start_vec % 64 + cloud_size + 63) / 64, B.num_bytes_per_datapoint, cloud_size,
-            start_vec % 64, emb_min_dists.data());
+            q_stride, total_embeddings, B.panel_data.data() + panel_off,
+            B.norm_scaling_factors.data() + pt_off, B.unquantized_squared_norms.data() + pt_off,
+            B.total_tiles, B.panel_bytes, np, emb_min_dists.data());
+#else
+        for (size_t qi = 0; qi < total_embeddings; ++qi) {
+          emb_min_dists[qi] = internal::chamfer_panels_scalar<PCS::is_metric()>(
+              fused_q_data.data() + qi * q_stride, fused_q_norms.data() + qi,
+              fused_q_sqns.data() + qi, fused_q_bsums.data() + qi, q_stride, 1,
+              B.panel_data.data() + panel_off, B.norm_scaling_factors.data() + pt_off,
+              B.unquantized_squared_norms.data() + pt_off, B.total_tiles, B.panel_bytes, np, cs);
+        }
 #endif
 
-        // Aggregate Chamfer distance for each query cloud
+        // Aggregate min sums into per-source-cloud Chamfer means and update heaps.
         for (size_t i = 0; i < q_count; ++i) {
           float dist_sum = 0.0f;
-          size_t e_start = emb_offsets[i];
-          size_t e_count = emb_offsets[i + 1] - e_start;
-
-          for (size_t e = 0; e < e_count; ++e) {
-            dist_sum += emb_min_dists[e_start + e];
-          }
-          float chamfer_dist = dist_sum / static_cast<float>(e_count);
+          const size_t e_start = emb_offsets[i];
+          const size_t e_count = emb_offsets[i + 1] - e_start;
+          for (size_t e = 0; e < e_count; ++e) dist_sum += emb_min_dists[e_start + e];
+          const float chamfer_dist = dist_sum / static_cast<float>(e_count);
 
           if (heaps[i].size() < k) {
             heaps[i].push({chamfer_dist, B.get_id(c)});
@@ -1345,16 +958,14 @@ class ManyToMany {
         }
       }
 
-      // --- 3. WRITE TO OUTPUT ---
       for (size_t i = 0; i < q_count; ++i) {
-        size_t count = heaps[i].size();
-        size_t global_idx = q_start + i;
-        for (size_t ki = 0; ki < count; ++ki) {
-          results[global_idx * k + (count - 1 - ki)] = {heaps[i].top().second,
-                                                        heaps[i].top().first};
+        const size_t cnt = heaps[i].size();
+        const size_t global_idx = q_start + i;
+        for (size_t ki = 0; ki < cnt; ++ki) {
+          results[global_idx * k + (cnt - 1 - ki)] = {heaps[i].top().second, heaps[i].top().first};
           heaps[i].pop();
         }
-        for (size_t ki = count; ki < k; ++ki) {
+        for (size_t ki = cnt; ki < k; ++ki) {
           results[global_idx * k + ki] = {0, std::numeric_limits<float>::max()};
         }
       }
