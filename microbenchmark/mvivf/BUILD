@@ -60,3 +60,35 @@ cc_binary(
         "@parlaylib//parlay:primitives",
     ],
 )
+
+cc_binary(
+    name = "bench_chamfer_scoring",
+    srcs = [
+        "bench_chamfer_scoring.cpp",
+        "legacy_tq_mv.h",
+    ],
+    deps = [
+        "//mvsic/core/quantization:turboquant_mv",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/mvivf:mvivf",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
+    name = "bench_chamfer_scoring_st",
+    srcs = [
+        "bench_chamfer_scoring_st.cpp",
+        "legacy_tq_mv.h",
+    ],
+    deps = [
+        "//mvsic/core/quantization:turboquant_mv",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+        "//mvsic/mvivf:mvivf",
+        "@parlaylib//parlay:primitives",
+    ],
+)

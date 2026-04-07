@@ -866,6 +866,158 @@ class Model {
 };
 
 // ------------------------------------------------------------------
+// Pre-Fused Query Batch
+//
+// Packs many `Quantized_Query_Point_Cloud<Metric>` into one flat layout
+// (flat_query_data + per-embedding norms / sqns / bsums + per-source
+// emb_offsets) so the GEMM kernel can score the whole batch against any
+// number of DB clouds without paying the per-call memcpy fusion cost the
+// older `ManyToMany::TopKIntoUninitialized` paid.
+//
+// Rule of thumb: build this ONCE per (set-of-queries, batch-of-leaves) and
+// reuse it across every leaf you score. Building it is parallelized over
+// source clouds.
+// ------------------------------------------------------------------
+template<bool Metric>
+struct FusedQueryBatch {
+  size_t num_source_clouds = 0;
+  size_t total_embeddings = 0;
+  size_t q_stride = 0;
+
+  std::vector<int8_t> flat_query_data;           // total_embeddings * q_stride
+  std::vector<float> norm_scaling_factors;       // total_embeddings
+  std::vector<float> unquantized_squared_norms;  // total_embeddings
+  std::vector<int32_t> byte_sums;                // total_embeddings
+  std::vector<size_t> emb_offsets;               // num_source_clouds + 1
+
+  void Build(const std::vector<const Quantized_Query_Point_Cloud<Metric>*>& A) {
+    num_source_clouds = A.size();
+    emb_offsets.assign(num_source_clouds + 1, 0);
+    if (num_source_clouds == 0) {
+      total_embeddings = 0;
+      q_stride = 0;
+      return;
+    }
+    q_stride = A[0]->q_stride;
+    for (size_t i = 0; i < num_source_clouds; ++i) {
+      emb_offsets[i + 1] = emb_offsets[i] + A[i]->num_queries;
+    }
+    total_embeddings = emb_offsets[num_source_clouds];
+
+    flat_query_data.resize(total_embeddings * q_stride);
+    norm_scaling_factors.resize(total_embeddings);
+    unquantized_squared_norms.resize(total_embeddings);
+    byte_sums.resize(total_embeddings);
+
+    parlay::parallel_for(0, num_source_clouds, [&](size_t i) {
+      const auto* qc = A[i];
+      const size_t off = emb_offsets[i];
+      const size_t cnt = qc->num_queries;
+      if (cnt == 0) return;
+      std::memcpy(flat_query_data.data() + off * q_stride, qc->flat_query_data.data(),
+                  cnt * q_stride);
+      std::memcpy(norm_scaling_factors.data() + off, qc->norm_scaling_factors.data(),
+                  cnt * sizeof(float));
+      std::memcpy(unquantized_squared_norms.data() + off, qc->unquantized_squared_norms.data(),
+                  cnt * sizeof(float));
+      std::memcpy(byte_sums.data() + off, qc->byte_sums.data(), cnt * sizeof(int32_t));
+    });
+  }
+};
+
+// ------------------------------------------------------------------
+// Fused-query Chamfer scoring against one Quantized_Point_Cloud_Set
+//
+// Computes per-(source-cloud, db-cloud) Chamfer distance for every source
+// cloud in `fq` against every DB cloud in `db`, writing into
+//   out[i * db.num_clouds() + c] = {db.get_id(c), chamfer_dist}.
+//
+// Parallelizes over DB clouds via parlay so each call uses many cores when
+// invoked from a per-leaf serial loop. Composes cleanly with an outer
+// parallel_for over leaves: parlay's nested scheduler handles it.
+//
+// `db_workspaces` may be nullptr; if non-null it must point to at least
+// `parlay::num_workers()` `std::vector<float>` slots, used as reusable
+// per-thread scratch for the per-DB-cloud per-embedding minima. Passing one
+// in eliminates the per-DB-cloud allocation; passing nullptr falls back to
+// per-call allocation (still correct, just slightly slower).
+// ------------------------------------------------------------------
+template<bool Metric>
+inline void chamfer_score_all_fused(const FusedQueryBatch<Metric>& fq,
+                                    const Quantized_Point_Cloud_Set<Metric>& db,
+                                    std::pair<uint32_t, float>* out,
+                                    std::vector<std::vector<float>>* db_workspaces = nullptr,
+                                    bool parallel_db = true) {
+  const size_t num_src = fq.num_source_clouds;
+  const size_t num_db = db.num_clouds();
+  if (num_src == 0 || num_db == 0) return;
+
+  auto process_one_db = [&](size_t c) {
+    const size_t cs = db.cloud_sizes[c];
+    const uint32_t id = db.get_id(c);
+    if (cs == 0) {
+      const float bad = std::numeric_limits<float>::max();
+      for (size_t i = 0; i < num_src; ++i) out[i * num_db + c] = {id, bad};
+      return;
+    }
+
+    const size_t panel_byte_off = db.panel_offsets[c];
+    const size_t pt_off = db.point_offsets[c];
+    const size_t np = (db.panel_offsets[c + 1] - panel_byte_off) / db.panel_bytes;
+
+    // Per-embedding mins scratch. Reuse a per-worker buffer if provided.
+    float* emb_min;
+    std::vector<float> local_buf;
+    if (db_workspaces != nullptr) {
+      auto& ws = (*db_workspaces)[parlay::worker_id()];
+      if (ws.size() < fq.total_embeddings) ws.resize(fq.total_embeddings);
+      emb_min = ws.data();
+    } else {
+      local_buf.resize(fq.total_embeddings);
+      emb_min = local_buf.data();
+    }
+
+#ifdef __AVX512F__
+    internal::chamfer_panels_multi<Metric>(
+        fq.flat_query_data.data(), fq.norm_scaling_factors.data(),
+        fq.unquantized_squared_norms.data(), fq.byte_sums.data(), fq.q_stride,
+        fq.total_embeddings, db.panel_data.data() + panel_byte_off,
+        db.norm_scaling_factors.data() + pt_off,
+        db.unquantized_squared_norms.data() + pt_off, db.total_tiles, db.panel_bytes, np, emb_min);
+#else
+    for (size_t qi = 0; qi < fq.total_embeddings; ++qi) {
+      emb_min[qi] = internal::chamfer_panels_scalar<Metric>(
+          fq.flat_query_data.data() + qi * fq.q_stride, fq.norm_scaling_factors.data() + qi,
+          fq.unquantized_squared_norms.data() + qi, fq.byte_sums.data() + qi, fq.q_stride, 1,
+          db.panel_data.data() + panel_byte_off, db.norm_scaling_factors.data() + pt_off,
+          db.unquantized_squared_norms.data() + pt_off, db.total_tiles, db.panel_bytes, np, cs);
+    }
+#endif
+
+    // Aggregate per source cloud → mean Chamfer.
+    for (size_t i = 0; i < num_src; ++i) {
+      const size_t e_start = fq.emb_offsets[i];
+      const size_t e_end = fq.emb_offsets[i + 1];
+      if (e_end == e_start) {
+        out[i * num_db + c] = {id, std::numeric_limits<float>::max()};
+        continue;
+      }
+      float dist_sum = 0.0f;
+      for (size_t e = e_start; e < e_end; ++e) dist_sum += emb_min[e];
+      out[i * num_db + c] = {id, dist_sum / static_cast<float>(e_end - e_start)};
+    }
+  };
+
+  if (parallel_db) {
+    // granularity=0 lets parlay's scheduler choose; empirically this beats a
+    // fixed block size on the dense (32 leaves × ~120 db clouds) workload.
+    parlay::parallel_for(0, num_db, process_one_db);
+  } else {
+    for (size_t c = 0; c < num_db; ++c) process_one_db(c);
+  }
+}
+
+// ------------------------------------------------------------------
 // ManyToMany Batch Operator
 // ------------------------------------------------------------------
 template<typename PCS>
