@@ -456,6 +456,10 @@ class IndexMVIVFSpill : public Index<metric> {
         process_probes_quant.template operator()<typename MVQT::PQTQ_Set>(
             std::get<typename MVQT::PQTQ_Query>(q_query_var));
         break;
+      case QT::OneBitTQ:
+        process_probes_quant.template operator()<typename MVQT::OBTQ_Set>(
+            std::get<typename MVQT::OBTQ_Query>(q_query_var));
+        break;
       case QT::None:
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t* leaf_node = probe_list[i].second;
@@ -881,6 +885,9 @@ class IndexMVIVFSpill : public Index<metric> {
         break;
       case QT::SPQTQ:
         quantizer.template emplace<typename MVQT::PQTQ_Model>().load(infile);
+        break;
+      case QT::OneBitTQ:
+        quantizer.template emplace<typename MVQT::OBTQ_Model>().load(infile);
         break;
       case QT::None:
       default: quantizer = std::monostate{}; break;

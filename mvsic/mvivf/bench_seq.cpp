@@ -53,6 +53,7 @@ int main(int argc, char* argv[]) {
   else if (quant_method == "FS") quant_method_t = 3;
   else if (quant_method == "TQ") quant_method_t = 4;
   else if (quant_method == "SPQTQ") quant_method_t = 5;
+  else if (quant_method == "1BTQ") quant_method_t = 6;
   else { std::cerr << "Unknown PQ method: " << quant_method << std::endl; return 1; }
 
   uint32_t block_size = P.getOptionIntValue("-m", 8);

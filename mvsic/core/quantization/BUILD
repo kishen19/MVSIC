@@ -115,3 +115,16 @@ cc_library(
         "@parlaylib//parlay:sequence",
     ],
 )
+
+cc_library(
+    name = "turboquant_1bit_mv",
+    hdrs = [
+        "turboquant_1bit_mv.h",
+        "turboquant_utils.h",
+    ],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
