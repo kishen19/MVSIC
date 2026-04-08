@@ -36,10 +36,15 @@
 //     // affine function of the integer Hamming count:
 //     //   metric (Euclidean):   dist = (4/padded_dim) * hamming
 //     //   non-metric (-IP):     dist = (2/padded_dim) * hamming - 1
-//     // We fold the Metric-dependent additive constant and the +inf "never
-//     // win" sentinel for padding lanes into one per-padded-point array
-//     // (`epilogue_addend`), so the inner-loop epilogue is just:
-//     //   dist = scale * hamming + epilogue_addend[lane]
+//     // Because that affine map is monotone in `hamming`, we can keep the
+//     // running min in INTEGER space across all panels and convert to
+//     // float exactly once at the end of the cloud:
+//     //   for p in panels: min_h = _mm512_min_epi32(min_h, hamming[p])
+//     //   dist = scale * reduce_min(min_h) + (Metric ? 0 : -1)
+//     // Padding lanes (only ever in the LAST panel of a cloud whose size
+//     // isn't a multiple of kPanelPoints) are excluded from the running
+//     // min via a per-lane mask derived from cloud_size — there is no
+//     // longer any per-padded-point sentinel array.
 //     min_q = min over panel-points of distance
 //   chamfer = sum_q(min_q) / num_queries
 //
@@ -230,25 +235,24 @@ inline void hamming_micro_kernel_4panel(const uint8_t* qbuf, size_t qbuf_tile_st
   }
 }
 
-// Convert int32 hamming acc (one lane per panel point) into a float distance
-// vector and merge into the per-query running min.
+// Convert a per-query int32 cross-panel min hamming into a float distance
+// and accumulate into the chamfer running total.
 //
 // Assuming all input vectors are unit-norm (which holds for every dataset
 // in this project), the per-vector norm-scaling factor and squared norm
-// are constants and the entire epilogue collapses to a single per-lane
-// affine map of the integer Hamming count:
-//   dist[lane] = scale * hamming[lane] + epilogue_addend[lane]
-// where `scale` is set by the caller (4/padded_dim for Metric=true,
-// 2/padded_dim for Metric=false) and `epilogue_addend` already encodes
-// the Metric-specific constant offset (0 for Metric, -1 for non-Metric)
-// for valid lanes and +inf for padding lanes (which makes them never win
-// the running min).
-inline void hamming_dist_epilogue(__m512i hamming, __m512 scale_v,
-                                  const float* epilogue_addend, __m512& running_min) {
-  const __m512 hamming_f = _mm512_cvtepi32_ps(hamming);
-  const __m512 addend_v = _mm512_loadu_ps(epilogue_addend);
-  const __m512 dist = _mm512_fmadd_ps(scale_v, hamming_f, addend_v);
-  running_min = _mm512_min_ps(running_min, dist);
+// are constants and distance reduces to a single affine map of the
+// integer Hamming count:
+//   dist = scale * hamming + (Metric ? 0 : -1)
+// where scale = (Metric ? 4 : 2) / padded_dim. Because the map is
+// monotone in `hamming`, we can keep the per-cloud running min in INTEGER
+// space and convert exactly once. Padding lanes that were never updated
+// (still INT32_MAX) are larger than any real hamming and so are ignored
+// by `_mm512_reduce_min_epi32`.
+template<bool Metric>
+inline float reduce_to_dist(__m512i min_h, float scale_f) {
+  const int32_t hmin = _mm512_reduce_min_epi32(min_h);
+  constexpr float kValidAddend = Metric ? 0.0f : -1.0f;
+  return scale_f * static_cast<float>(hmin) + kValidAddend;
 }
 
 // Core Chamfer kernel over PRE-PANELED 1-bit codes.
@@ -258,26 +262,36 @@ inline void hamming_dist_epilogue(__m512i hamming, __m512 scale_v,
 //   num_q: number of query embeddings
 //   num_bytes: bytes per encoded point (== (padded_dim + 7) / 8)
 //   panel_data: pre-built panels for one DB cloud
-//   epilogue_addend: per-padded-point addend (one float per lane, padded
-//                    so each panel sees 16 lanes); see hamming_dist_epilogue.
-//   panel_bytes / num_hamming_tiles / n_panels: panel geometry for the cloud
+//   panel_bytes / num_hamming_tiles: panel geometry for the cloud
+//   cloud_size: number of REAL points in the cloud (n_panels and the
+//               last-panel valid mask are derived from this)
 //   padded_dim: padded dimensionality (== num_bytes * 8 for full dim)
 //
 // Returns sum_{q} min_{point} dist(q, point); caller divides by num_q.
 template<bool Metric>
 inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, size_t num_q,
                             size_t num_bytes, const uint8_t* panel_data,
-                            const float* epilogue_addend, size_t panel_bytes,
-                            size_t num_hamming_tiles, size_t n_panels, size_t padded_dim) {
-  if (num_q == 0 || n_panels == 0) return 0.0f;
+                            size_t panel_bytes, size_t num_hamming_tiles,
+                            size_t cloud_size, size_t padded_dim) {
+  if (num_q == 0 || cloud_size == 0) return 0.0f;
 
-  // Affine map from integer Hamming -> float distance, derived under the
-  // unit-norm assumption (see hamming_dist_epilogue):
+  // Affine map from integer Hamming -> float distance under the unit-norm
+  // assumption. Used at the very end of the cloud, after the running int
+  // min has been collapsed across panels:
   //   Metric:    dist = (4/padded_dim) * hamming
-  //   non-Metric: dist = (2/padded_dim) * hamming - 1   (the -1 is folded
-  //                                                      into epilogue_addend)
+  //   non-Metric: dist = (2/padded_dim) * hamming - 1
   const float scale_f = (Metric ? 4.0f : 2.0f) / static_cast<float>(padded_dim);
-  const __m512 scale_v = _mm512_set1_ps(scale_f);
+
+  // Panel geometry: full panels are exactly 16 valid lanes; if cloud_size
+  // isn't a multiple of kPanelPoints, exactly one trailing partial panel
+  // has `tail_valid` < 16 lanes and the rest are padding. We exclude the
+  // padding lanes from the running min via _mm512_mask_min_epi32 on that
+  // last panel only.
+  const size_t full_np = cloud_size / kPanelPoints;
+  const size_t tail_valid = cloud_size - full_np * kPanelPoints;
+  const __mmask16 tail_mask =
+      (tail_valid == 0) ? __mmask16{0}
+                        : static_cast<__mmask16>((1u << tail_valid) - 1u);
   const size_t qbuf_tile_stride = num_hamming_tiles * kTileBytes;
 
   // Per-query broadcast buffer for up to kMq1bit queries at a time.
@@ -296,6 +310,7 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
 
   float total_chamfer = 0.0f;
   size_t qi = 0;
+  const __m512i kIntMaxV = _mm512_set1_epi32(std::numeric_limits<int32_t>::max());
 
   for (; qi + kMq1bit <= num_q; qi += kMq1bit) {
     // Build broadcast buffers for kMq1bit consecutive queries.
@@ -304,48 +319,71 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
                           num_hamming_tiles, qbuf + q * qbuf_tile_stride);
     }
 
-    __m512 mins[kMq1bit];
-    for (size_t q = 0; q < kMq1bit; ++q)
-      mins[q] = _mm512_set1_ps(std::numeric_limits<float>::max());
+    // Per-query running int-min hamming across all panels of this cloud.
+    __m512i min_h[kMq1bit];
+    for (size_t q = 0; q < kMq1bit; ++q) min_h[q] = kIntMaxV;
 
+    // Sweep the FULL panels (4-wide where possible, 1-wide for the tail).
+    // Padding never appears here, so the min is unmasked.
     size_t p = 0;
-    for (; p + 4 <= n_panels; p += 4) {
+    for (; p + 4 <= full_np; p += 4) {
       __m512i a0[kMq1bit], a1[kMq1bit], a2[kMq1bit], a3[kMq1bit];
       hamming_micro_kernel_4panel<kMq1bit>(
           qbuf, qbuf_tile_stride, panel_data + p * panel_bytes,
           panel_data + (p + 1) * panel_bytes, panel_data + (p + 2) * panel_bytes,
           panel_data + (p + 3) * panel_bytes, num_hamming_tiles, a0, a1, a2, a3);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        hamming_dist_epilogue(a0[q], scale_v, epilogue_addend + p * kPanelPoints, mins[q]);
-        hamming_dist_epilogue(a1[q], scale_v, epilogue_addend + (p + 1) * kPanelPoints, mins[q]);
-        hamming_dist_epilogue(a2[q], scale_v, epilogue_addend + (p + 2) * kPanelPoints, mins[q]);
-        hamming_dist_epilogue(a3[q], scale_v, epilogue_addend + (p + 3) * kPanelPoints, mins[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a0[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a1[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a2[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a3[q]);
       }
     }
-    for (; p < n_panels; ++p) {
+    for (; p < full_np; ++p) {
       __m512i acc[kMq1bit];
       hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
                                             panel_data + p * panel_bytes, num_hamming_tiles, acc);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        hamming_dist_epilogue(acc[q], scale_v, epilogue_addend + p * kPanelPoints, mins[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], acc[q]);
       }
     }
 
-    for (size_t q = 0; q < kMq1bit; ++q) total_chamfer += _mm512_reduce_min_ps(mins[q]);
+    // Optional partial trailing panel: only `tail_valid` lanes are real.
+    if (tail_valid > 0) {
+      __m512i acc[kMq1bit];
+      hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
+                                            panel_data + full_np * panel_bytes,
+                                            num_hamming_tiles, acc);
+      for (size_t q = 0; q < kMq1bit; ++q) {
+        min_h[q] = _mm512_mask_min_epi32(min_h[q], tail_mask, min_h[q], acc[q]);
+      }
+    }
+
+    // One float convert + horizontal-min per query at the end of the cloud.
+    for (size_t q = 0; q < kMq1bit; ++q) {
+      total_chamfer += reduce_to_dist<Metric>(min_h[q], scale_f);
+    }
   }
 
-  // Tail (< kMq1bit queries).
+  // Tail (< kMq1bit queries). Same int-min structure, Mq=1.
   for (; qi < num_q; ++qi) {
     pre_broadcast_query(q_packed_data + qi * q_byte_stride, num_bytes, num_hamming_tiles,
                         qbuf);
-    __m512 mv = _mm512_set1_ps(std::numeric_limits<float>::max());
-    for (size_t p = 0; p < n_panels; ++p) {
+    __m512i min_h_one = kIntMaxV;
+    for (size_t p = 0; p < full_np; ++p) {
       __m512i acc;
       hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride, panel_data + p * panel_bytes,
                                       num_hamming_tiles, &acc);
-      hamming_dist_epilogue(acc, scale_v, epilogue_addend + p * kPanelPoints, mv);
+      min_h_one = _mm512_min_epi32(min_h_one, acc);
     }
-    total_chamfer += _mm512_reduce_min_ps(mv);
+    if (tail_valid > 0) {
+      __m512i acc;
+      hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride,
+                                      panel_data + full_np * panel_bytes,
+                                      num_hamming_tiles, &acc);
+      min_h_one = _mm512_mask_min_epi32(min_h_one, tail_mask, min_h_one, acc);
+    }
+    total_chamfer += reduce_to_dist<Metric>(min_h_one, scale_f);
   }
 
   return total_chamfer;
@@ -355,19 +393,22 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
 
 // =========================================================================
 // Scalar fallback (correct, slow). Used when AVX-512 is unavailable.
-// Same unit-norm assumption as the AVX-512 path.
+// Same unit-norm assumption + int-min-throughout structure as the AVX-512
+// path: per query, find the min hamming over all REAL points in the cloud
+// (skipping padding lanes naturally because we only iterate i < cloud_size),
+// then convert that min once via the affine map.
 // =========================================================================
 template<bool Metric>
 inline float chamfer_panels_scalar(const uint8_t* q_packed_data, size_t q_byte_stride,
                                    size_t num_q, size_t num_bytes, const uint8_t* panel_data,
-                                   const float* epilogue_addend, size_t panel_bytes,
-                                   size_t num_hamming_tiles, size_t n_panels, size_t padded_dim,
-                                   size_t cloud_size) {
+                                   size_t panel_bytes, size_t num_hamming_tiles,
+                                   size_t cloud_size, size_t padded_dim) {
   const float scale = (Metric ? 4.0f : 2.0f) / static_cast<float>(padded_dim);
+  constexpr float kValidAddend = Metric ? 0.0f : -1.0f;
   float total = 0.0f;
   for (size_t qi = 0; qi < num_q; ++qi) {
     const uint8_t* qp = q_packed_data + qi * q_byte_stride;
-    float min_d = std::numeric_limits<float>::max();
+    int min_h = std::numeric_limits<int>::max();
     for (size_t i = 0; i < cloud_size; ++i) {
       const size_t panel = i / kPanelPoints;
       const size_t lane = i % kPanelPoints;
@@ -382,13 +423,10 @@ inline float chamfer_panels_scalar(const uint8_t* q_packed_data, size_t q_byte_s
           hamming += __builtin_popcount(static_cast<unsigned>(tile[b] ^ qb));
         }
       }
-      const float d = scale * static_cast<float>(hamming) +
-                      epilogue_addend[panel * kPanelPoints + lane];
-      if (d < min_d) min_d = d;
+      if (hamming < min_h) min_h = hamming;
     }
-    total += min_d;
+    total += scale * static_cast<float>(min_h) + kValidAddend;
   }
-  (void)n_panels;
   return total;
 }
 
@@ -458,9 +496,10 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
-    // bytes/vector now: packed code bytes + one float epilogue addend per
-    // padded point (no per-vector nsf or sqn).
-    const size_t bytes_per_vec = cloud.db->num_bytes_per_datapoint + sizeof(float);
+    // bytes/vector now: just the packed code bytes. With int-min throughout,
+    // padding handling is derived from cloud_size at scoring time, so we no
+    // longer touch any per-padded-point sidecar at scoring time.
+    const size_t bytes_per_vec = cloud.db->num_bytes_per_datapoint;
     return {this->distance(cloud), cloud.size() * bytes_per_vec};
   }
 
@@ -484,13 +523,11 @@ class Quantized_Point_Cloud_Set {
   parlay::sequence<uint8_t> panel_data;
   parlay::sequence<size_t> panel_offsets;  // size: n_clouds + 1, in BYTES
 
-  // Per-point arrays, padded so each cloud is a multiple of kPanelPoints.
+  // Per-point offsets, padded so each cloud is a multiple of kPanelPoints.
+  // Kept for downstream code that needs to address per-padded-point data;
+  // the kernel itself only needs cloud_sizes (it derives the partial-panel
+  // mask from cloud_size % kPanelPoints).
   parlay::sequence<size_t> point_offsets;  // size: n_clouds + 1, in points
-  // One float per padded point. For valid lanes: 0.0f when Metric=true,
-  // -1.0f when Metric=false. For padding lanes: +inf, so they can never
-  // win the running min in the kernel epilogue. See hamming_dist_epilogue
-  // for the affine map this is plugged into.
-  parlay::sequence<float> epilogue_addend;
 
   // Unpadded sizes per cloud.
   parlay::sequence<size_t> cloud_sizes;
@@ -515,8 +552,7 @@ class Quantized_Point_Cloud_Set {
     return (ids.size() > 0) ? ids[i] : static_cast<uint32_t>(i);
   }
   inline size_t num_bytes() const noexcept {
-    return panel_data.size() * sizeof(uint8_t) +
-           epilogue_addend.size() * sizeof(float);
+    return panel_data.size() * sizeof(uint8_t);
   }
 
   void distances_all(const Quantized_Query_Point_Cloud<Metric>& q,
@@ -551,7 +587,6 @@ class Quantized_Point_Cloud_Set {
     write_seq(panel_data);
     write_seq(panel_offsets);
     write_seq(point_offsets);
-    write_seq(epilogue_addend);
     write_seq(cloud_sizes);
     write_seq(ids);
   }
@@ -572,7 +607,6 @@ class Quantized_Point_Cloud_Set {
     read_seq(panel_data);
     read_seq(panel_offsets);
     read_seq(point_offsets);
-    read_seq(epilogue_addend);
     read_seq(cloud_sizes);
     read_seq(ids);
   }
@@ -596,22 +630,19 @@ float turboquant_1bit_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metr
   if (cs == 0) return std::numeric_limits<float>::max();
 
   const size_t panel_byte_off = db.panel_offsets[c];
-  const size_t pt_off = db.point_offsets[c];
-  const size_t np = db.n_panels(c);
   const uint8_t* panel_ptr = db.panel_data.data() + panel_byte_off;
-  const float* addend = db.epilogue_addend.data() + pt_off;
 
   float dist_sum = 0.0f;
 #ifdef __AVX512F__
   dist_sum = internal::chamfer_panels<Metric>(
       q.flat_query_codes.data(), q.num_bytes_per_datapoint, num_q,
-      q.num_bytes_per_datapoint, panel_ptr, addend, db.panel_bytes, db.num_hamming_tiles, np,
-      db.padded_dim);
+      q.num_bytes_per_datapoint, panel_ptr, db.panel_bytes, db.num_hamming_tiles,
+      cs, db.padded_dim);
 #else
   dist_sum = internal::chamfer_panels_scalar<Metric>(
       q.flat_query_codes.data(), q.num_bytes_per_datapoint, num_q,
-      q.num_bytes_per_datapoint, panel_ptr, addend, db.panel_bytes, db.num_hamming_tiles, np,
-      db.padded_dim, cs);
+      q.num_bytes_per_datapoint, panel_ptr, db.panel_bytes, db.num_hamming_tiles,
+      cs, db.padded_dim);
 #endif
   return dist_sum / static_cast<float>(num_q);
 }
@@ -684,11 +715,6 @@ class Model {
     enc.point_offsets[n_clouds] = cur_padded_pts;
 
     enc.panel_data.resize(cur_panel_bytes, 0);
-    // Initialize the per-padded-point epilogue addend to +inf (the padding
-    // sentinel). Valid lanes get overwritten below with the Metric-specific
-    // valid-lane constant (0 for Metric=true, -1 for Metric=false).
-    enc.epilogue_addend.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
-    constexpr float kValidAddend = Metric ? 0.0f : -1.0f;
 
     auto pcs_ids = pcs.get_ids();
     enc.ids = parlay::sequence<uint32_t>(pcs_ids.begin(), pcs_ids.end());
@@ -703,13 +729,11 @@ class Model {
       std::vector<float> ws(encoder.padded_dim);
 
       const size_t src_start = float_offsets[c] / encoder.dim;
-      const size_t pt_off = enc.point_offsets[c];
 
       for (size_t i = 0; i < n_vecs; ++i) {
         const float* p =
             reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
         encode_single_bits(p, ws, flat_codes.data() + i * enc.num_bytes_per_datapoint);
-        enc.epilogue_addend[pt_off + i] = kValidAddend;
       }
 
       // Repack into the panel layout: for each panel of kPanelPoints points,
@@ -722,9 +746,9 @@ class Model {
         for (size_t lane = 0; lane < internal::kPanelPoints; ++lane) {
           const size_t pt = base + lane;
           if (pt >= n_vecs) {
-            // Pad with zeros (panel was already memset). The corresponding
-            // epilogue_addend lane is +inf, so this point can never win
-            // the running min in the kernel.
+            // Pad with zeros (panel was already memset). Padding lanes are
+            // excluded from the running min at scoring time via the
+            // last-panel mask derived from cloud_size.
             continue;
           }
           const uint8_t* src = flat_codes.data() + pt * enc.num_bytes_per_datapoint;
@@ -853,10 +877,7 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
   }
 
   const size_t panel_byte_off = db.panel_offsets[c];
-  const size_t pt_off = db.point_offsets[c];
-  const size_t np = db.n_panels(c);
   const uint8_t* panel_ptr = db.panel_data.data() + panel_byte_off;
-  const float* addend = db.epilogue_addend.data() + pt_off;
   const size_t panel_bytes = db.panel_bytes;
   const size_t num_hamming_tiles = fq.num_hamming_tiles;
   const size_t qbuf_tile_stride = fq.qbuf_tile_stride;
@@ -866,20 +887,26 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
   using internal::kPanelPoints;
 
   // Affine map from integer Hamming -> float distance under unit-norm
-  // assumption. See chamfer_panels / hamming_dist_epilogue.
+  // assumption. Applied once per (cloud, embedding) at the end.
   const float scale_f = (Metric ? 4.0f : 2.0f) / static_cast<float>(fq.padded_dim);
-  const __m512 scale_v = _mm512_set1_ps(scale_f);
+
+  // Panel geometry derived from the unpadded cloud size: see chamfer_panels.
+  const size_t full_np = cs / kPanelPoints;
+  const size_t tail_valid = cs - full_np * kPanelPoints;
+  const __mmask16 tail_mask =
+      (tail_valid == 0) ? __mmask16{0}
+                        : static_cast<__mmask16>((1u << tail_valid) - 1u);
+  const __m512i kIntMaxV = _mm512_set1_epi32(std::numeric_limits<int32_t>::max());
 
   size_t qi = 0;
   for (; qi + kMq1bit <= num_emb; qi += kMq1bit) {
     const uint8_t* qbuf = fq.flat_qbuf.data() + qi * qbuf_tile_stride;
 
-    __m512 mins[kMq1bit];
-    for (size_t q = 0; q < kMq1bit; ++q)
-      mins[q] = _mm512_set1_ps(std::numeric_limits<float>::max());
+    __m512i min_h[kMq1bit];
+    for (size_t q = 0; q < kMq1bit; ++q) min_h[q] = kIntMaxV;
 
     size_t p = 0;
-    for (; p + 4 <= np; p += 4) {
+    for (; p + 4 <= full_np; p += 4) {
       __m512i a0[kMq1bit], a1[kMq1bit], a2[kMq1bit], a3[kMq1bit];
       internal::hamming_micro_kernel_4panel<kMq1bit>(
           qbuf, qbuf_tile_stride,
@@ -887,43 +914,59 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
           panel_ptr + (p + 2) * panel_bytes, panel_ptr + (p + 3) * panel_bytes,
           num_hamming_tiles, a0, a1, a2, a3);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        internal::hamming_dist_epilogue(a0[q], scale_v, addend + p * kPanelPoints, mins[q]);
-        internal::hamming_dist_epilogue(a1[q], scale_v, addend + (p + 1) * kPanelPoints, mins[q]);
-        internal::hamming_dist_epilogue(a2[q], scale_v, addend + (p + 2) * kPanelPoints, mins[q]);
-        internal::hamming_dist_epilogue(a3[q], scale_v, addend + (p + 3) * kPanelPoints, mins[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a0[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a1[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a2[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], a3[q]);
       }
     }
-    for (; p < np; ++p) {
+    for (; p < full_np; ++p) {
       __m512i acc[kMq1bit];
       internal::hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
                                                        panel_ptr + p * panel_bytes,
                                                        num_hamming_tiles, acc);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        internal::hamming_dist_epilogue(acc[q], scale_v, addend + p * kPanelPoints, mins[q]);
+        min_h[q] = _mm512_min_epi32(min_h[q], acc[q]);
+      }
+    }
+    if (tail_valid > 0) {
+      __m512i acc[kMq1bit];
+      internal::hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
+                                                       panel_ptr + full_np * panel_bytes,
+                                                       num_hamming_tiles, acc);
+      for (size_t q = 0; q < kMq1bit; ++q) {
+        min_h[q] = _mm512_mask_min_epi32(min_h[q], tail_mask, min_h[q], acc[q]);
       }
     }
 
-    for (size_t q = 0; q < kMq1bit; ++q)
-      emb_min[qi + q] = _mm512_reduce_min_ps(mins[q]);
+    for (size_t q = 0; q < kMq1bit; ++q) {
+      emb_min[qi + q] = internal::reduce_to_dist<Metric>(min_h[q], scale_f);
+    }
   }
 
   // Tail: < kMq1bit embeddings remaining.
   for (; qi < num_emb; ++qi) {
     const uint8_t* qbuf = fq.flat_qbuf.data() + qi * qbuf_tile_stride;
-    __m512 mv = _mm512_set1_ps(std::numeric_limits<float>::max());
-    for (size_t p = 0; p < np; ++p) {
+    __m512i min_h_one = kIntMaxV;
+    for (size_t p = 0; p < full_np; ++p) {
       __m512i acc;
       internal::hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride,
                                                 panel_ptr + p * panel_bytes,
                                                 num_hamming_tiles, &acc);
-      internal::hamming_dist_epilogue(acc, scale_v, addend + p * kPanelPoints, mv);
+      min_h_one = _mm512_min_epi32(min_h_one, acc);
     }
-    emb_min[qi] = _mm512_reduce_min_ps(mv);
+    if (tail_valid > 0) {
+      __m512i acc;
+      internal::hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride,
+                                                panel_ptr + full_np * panel_bytes,
+                                                num_hamming_tiles, &acc);
+      min_h_one = _mm512_mask_min_epi32(min_h_one, tail_mask, min_h_one, acc);
+    }
+    emb_min[qi] = internal::reduce_to_dist<Metric>(min_h_one, scale_f);
   }
 #else
   // Scalar fallback: leave +inf so callers see worst-case distances.
   (void)panel_ptr;
-  (void)addend;
   (void)panel_bytes;
   (void)num_hamming_tiles;
   (void)qbuf_tile_stride;
