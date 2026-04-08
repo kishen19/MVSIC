@@ -48,6 +48,17 @@ cc_binary(
 )
 
 cc_binary(
+    name = "build_index",
+    srcs = ["build_index.cpp"],
+    deps = [
+        ":mvivf",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+    ],
+)
+
+cc_binary(
     name = "bench_seq",
     srcs = ["bench_seq.cpp"],
     defines = ["PARLAY_SEQUENTIAL"],

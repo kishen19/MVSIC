@@ -17,6 +17,8 @@ cc_library(
         "//mvsic/core/quantization:rabitq_mv",
         "//mvsic/core/quantization:turboquant",
         "//mvsic/core/quantization:turboquant_mv",
+        "//mvsic/core/quantization:pqtq",
+        "//mvsic/core/quantization:pqtq_mv",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",

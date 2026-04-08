@@ -404,6 +404,10 @@ class IndexMVIVF : public Index<metric> {
         process_probes_quant.template operator()<typename MVQT::TQ_Set>(
             std::get<typename MVQT::TQ_Query>(q_query_var));
         break;
+      case QT::SPQTQ:
+        process_probes_quant.template operator()<typename MVQT::PQTQ_Set>(
+            std::get<typename MVQT::PQTQ_Query>(q_query_var));
+        break;
       case QT::None:
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t* leaf_node = probe_list[i].second;
@@ -450,11 +454,14 @@ class IndexMVIVF : public Index<metric> {
     const size_t num_leaves = leaves_flat.size();
     const double alpha = 1.0;  // heuristic threshold: TODO: set this
     bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+    t.start();
     if (use_flat) {
       gs = flat_leaf_search(query, q_center_query, nprobes);
     } else {
       gs = greedy_search(query, q_center_query, nprobes);
     }
+    double t_greedy = t.stop();
+    t.reset();
     auto& probe_list = gs.probe_list;
     bytes_accessed += gs.bytes_accessed;
     nprobes = std::min(nprobes, probe_list.size());
@@ -504,6 +511,7 @@ class IndexMVIVF : public Index<metric> {
     stats.push_back(t_distances);
     stats.push_back(t_rest);
     stats.push_back(t_rerank);
+    stats.push_back(t_greedy);
 
     return std::make_tuple(std::move(final_results), bytes_accessed, stats);
   }
@@ -680,6 +688,9 @@ class IndexMVIVF : public Index<metric> {
       case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(infile); break;
       case QT::TurboQuant:
         quantizer.template emplace<typename MVQT::TQ_Model>().load(infile);
+        break;
+      case QT::SPQTQ:
+        quantizer.template emplace<typename MVQT::PQTQ_Model>().load(infile);
         break;
       case QT::None:
       default: quantizer = std::monostate{}; break;
@@ -1239,6 +1250,11 @@ class IndexMVIVF : public Index<metric> {
         case QT::TurboQuant:
           process_leaf_quant.template operator()<typename MVQT::TQ_Set, typename MVQT::TQ_Query>(
               leaf, group, C);
+          break;
+        case QT::SPQTQ:
+          process_leaf_quant_m2m
+              .template operator()<typename MVQT::PQTQ_Set, typename MVQT::PQTQ_Query,
+                                   pqtq_mv::ManyToMany<typename MVQT::PQTQ_Set>>(leaf, group, C);
           break;
         case QT::None: {
           auto query_ids = parlay::delayed_tabulate(
