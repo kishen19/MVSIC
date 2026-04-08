@@ -4,7 +4,10 @@
 // sequentially. Trimmed to the IP + IndexMVIVF<false> path only -- no flat,
 // no spill, no L2, no Python bindings.
 #include <Eigen/Dense>
+#include <fstream>
 #include <iostream>
+#include <sstream>
+#include <unordered_map>
 
 #include "mvivf.h"
 #include "mvsic/core/stats.h"
@@ -17,7 +20,7 @@ using namespace mvsic;
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
                        "[-i <points>] [-q <queries>] [-gt <gt>] [-index <index>] "
-                       "[-max_leaf_size N] [-k_per_level N] [-quant_method TQ|FS|PQ|RQ|None] "
+                       "[-max_leaf_size N] [-k_per_level N] [-quant_method TQ|FS|PQ|RQ|SPQTQ|None] "
                        "[-qc] [-m N] [-num_clusters_per_block N] [-num_points_per_cluster N] "
                        "[-rbits N] [-k N] [-nprobes N] [-num_rerank N]");
 
@@ -49,6 +52,7 @@ int main(int argc, char* argv[]) {
   else if (quant_method == "RQ") quant_method_t = 2;
   else if (quant_method == "FS") quant_method_t = 3;
   else if (quant_method == "TQ") quant_method_t = 4;
+  else if (quant_method == "SPQTQ") quant_method_t = 5;
   else { std::cerr << "Unknown PQ method: " << quant_method << std::endl; return 1; }
 
   uint32_t block_size = P.getOptionIntValue("-m", 8);
@@ -65,7 +69,7 @@ int main(int argc, char* argv[]) {
   if (nprobes_set) {
     nprobes_list = {nprobes_single};
   } else {
-    nprobes_list = {32, 64, 128, 256};
+    nprobes_list = {32};
   }
 
   if (inFile == nullptr || qFile == nullptr || indexFile.empty() || gtFile.empty()) {
@@ -82,6 +86,45 @@ int main(int argc, char* argv[]) {
       quant_method_t, block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits,
       quantize_centers);
   IndexMVIVF<false> index(points.get_dims(), index_params);
+  // Verify index was built with the same parameters by reading the
+  // sidecar .params file written by build_index.
+  {
+    std::string params_path = indexFile;
+    auto dot = params_path.find_last_of('.');
+    if (dot != std::string::npos) params_path = params_path.substr(0, dot);
+    params_path += ".params";
+    std::ifstream pf(params_path);
+    if (!pf) {
+      std::cerr << "ERROR: missing params sidecar: " << params_path
+                << " (build the index with build_index)" << std::endl;
+      return 1;
+    }
+    std::unordered_map<std::string, std::string> kv;
+    std::string line;
+    while (std::getline(pf, line)) {
+      auto eq = line.find('=');
+      if (eq == std::string::npos) continue;
+      kv[line.substr(0, eq)] = line.substr(eq + 1);
+    }
+    auto check = [&](const char* k, const std::string& expected) {
+      auto it = kv.find(k);
+      if (it == kv.end() || it->second != expected) {
+        std::cerr << "ERROR: index param mismatch for '" << k
+                  << "': sidecar=" << (it == kv.end() ? "<missing>" : it->second)
+                  << " cli=" << expected << std::endl;
+        std::exit(1);
+      }
+    };
+    check("quant_method", quant_method);
+    check("block_size", std::to_string(block_size));
+    check("max_leaf_size", std::to_string(max_leaf_size));
+    check("k_per_level", std::to_string(k_per_level));
+    check("quantize_centers", std::string(quantize_centers ? "1" : "0"));
+    check("num_clusters_per_block", std::to_string(num_clusters_per_block));
+    check("num_points_per_cluster", std::to_string(num_points_per_cluster));
+    check("rabitq_bits", std::to_string(rabitq_bits));
+  }
+
   std::cout << "Loading index from " << indexFile << std::endl;
   index.load(indexFile, points);
 

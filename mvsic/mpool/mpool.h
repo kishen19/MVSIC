@@ -177,6 +177,10 @@ class IndexMPool : public Index<metric> {
         std::get<typename SVQT::TQ_Model>(quantizer).save(out);
         std::get<typename SVQT::TQ_Range>(quantized_data).save(out);
         break;
+      case QT::SPQTQ:
+        std::get<typename SVQT::PQTQ_Model>(quantizer).save(out);
+        std::get<typename SVQT::PQTQ_Range>(quantized_data).save(out);
+        break;
       case QT::None: parlayANN::io::save_point_range(points_mp, out); break;
     }
   }
@@ -220,6 +224,12 @@ class IndexMPool : public Index<metric> {
         std::get<typename SVQT::TQ_Model>(quantizer).load(in);
         quantized_data.template emplace<typename SVQT::TQ_Range>();
         std::get<typename SVQT::TQ_Range>(quantized_data).load(in);
+        break;
+      case QT::SPQTQ:
+        quantizer.template emplace<typename SVQT::PQTQ_Model>();
+        std::get<typename SVQT::PQTQ_Model>(quantizer).load(in);
+        quantized_data.template emplace<typename SVQT::PQTQ_Range>();
+        std::get<typename SVQT::PQTQ_Range>(quantized_data).load(in);
         break;
       case QT::None: {
         auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);

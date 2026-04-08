@@ -90,3 +90,28 @@ cc_library(
         "@parlaylib//parlay:sequence",
     ],
 )
+
+cc_library(
+    name = "pqtq",
+    hdrs = [
+        "pqtq.h",
+        "pqtq_codebooks.h",
+    ],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
+
+cc_library(
+    name = "pqtq_mv",
+    hdrs = [
+        "pqtq_mv.h",
+    ],
+    deps = [
+        ":pqtq",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+    ],
+)

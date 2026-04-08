@@ -24,6 +24,8 @@
 #include "mvsic/core/quantization/fastscan_mv.h"
 #include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
+#include "mvsic/core/quantization/pqtq.h"
+#include "mvsic/core/quantization/pqtq_mv.h"
 
 // Params
 #include "search_params.h"
@@ -39,20 +41,26 @@ struct QuantTypes {
   using RQ_Range = rabitq::Quantized_Point_Range<Range, metric>;
   using FS_Range = fastscan::Quantized_Point_Range<Range, metric>;
   using TQ_Range = turboquant::Quantized_Point_Range<Range, metric>;
+  using PQTQ_Range = pqtq::Quantized_Point_Range<Range, metric>;
   // Query Vector
   using PQ_Query = pq::Quantized_Query<metric>;
   using RQ_Query = rabitq::Quantized_Query<metric>;
   using FS_Query = fastscan::Quantized_Query<metric>;
   using TQ_Query = turboquant::Quantized_Query<metric>;
+  using PQTQ_Query = pqtq::Quantized_Query<metric>;
   // Main Model Object
   using PQ_Model = pq::Model<metric>;
   using RQ_Model = rabitq::Model<metric>;
   using FS_Model = fastscan::Model<metric>;
   using TQ_Model = turboquant::Model<metric>;
+  using PQTQ_Model = pqtq::Model<metric>;
   // Unified Objects
-  using QuantModel = std::variant<std::monostate, PQ_Model, RQ_Model, FS_Model, TQ_Model>;
-  using QuantQuery = std::variant<std::monostate, PQ_Query, RQ_Query, FS_Query, TQ_Query>;
-  using QuantRange = std::variant<std::monostate, PQ_Range, RQ_Range, FS_Range, TQ_Range>;
+  using QuantModel =
+      std::variant<std::monostate, PQ_Model, RQ_Model, FS_Model, TQ_Model, PQTQ_Model>;
+  using QuantQuery =
+      std::variant<std::monostate, PQ_Query, RQ_Query, FS_Query, TQ_Query, PQTQ_Query>;
+  using QuantRange =
+      std::variant<std::monostate, PQ_Range, RQ_Range, FS_Range, TQ_Range, PQTQ_Range>;
 };
 
 template<bool metric, typename ChPoint>
@@ -62,20 +70,25 @@ struct MVQuantTypes {
   using RQ_Set = rabitq_mv::Quantized_Point_Cloud_Set<metric>;
   using FS_Set = fastscan_mv::Quantized_Point_Cloud_Set<metric>;
   using TQ_Set = turboquant_mv::Quantized_Point_Cloud_Set<metric>;
+  using PQTQ_Set = pqtq_mv::Quantized_Point_Cloud_Set<metric>;
   // ChPoint (Query) Alternate
   using PQ_Query = pq_mv::Quantized_Query_Point_Cloud<metric>;
   using RQ_Query = rabitq_mv::Quantized_Query_Point_Cloud<metric>;
   using FS_Query = fastscan_mv::Quantized_Query_Point_Cloud<metric>;
   using TQ_Query = turboquant_mv::Quantized_Query_Point_Cloud<metric>;
+  using PQTQ_Query = pqtq_mv::Quantized_Query_Point_Cloud<metric>;
   // Main Model Object
   using PQ_Model = pq_mv::Model<metric>;
   using RQ_Model = rabitq_mv::Model<metric>;
   using FS_Model = fastscan_mv::Model<metric>;
   using TQ_Model = turboquant_mv::Model<metric>;
+  using PQTQ_Model = pqtq_mv::Model<metric>;
   // Unified Objects
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set>;
-  using QuantQuery = std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query>;
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model>;
+  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set, PQTQ_Set>;
+  using QuantQuery =
+      std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query, PQTQ_Query>;
+  using QuantModel =
+      std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model, PQTQ_Model>;
 };
 
 // Base Index Class
@@ -204,6 +217,11 @@ class Index {
         std::get<typename MVQT::TQ_Model>(Model).train(points);
         break;
       }
+      case QT::SPQTQ: {
+        Model.template emplace<typename MVQT::PQTQ_Model>();
+        std::get<typename MVQT::PQTQ_Model>(Model).train(points, params.pq.block_size);
+        break;
+      }
       default: Model = std::monostate{}; break;
     }
   }
@@ -236,6 +254,11 @@ class Index {
         std::get<typename SVTraits::TQ_Model>(Model).train(points);
         break;
       }
+      case QT::SPQTQ: {
+        Model.template emplace<typename SVTraits::PQTQ_Model>();
+        std::get<typename SVTraits::PQTQ_Model>(Model).train(points, params.pq.block_size);
+        break;
+      }
       default: Model = std::monostate{}; break;
     }
   }
@@ -247,6 +270,7 @@ class Index {
       case QT::RaBitQ: return std::get<typename MVQT::RQ_Model>(Model).encode(points);
       case QT::FastScan: return std::get<typename MVQT::FS_Model>(Model).encode(points);
       case QT::TurboQuant: return std::get<typename MVQT::TQ_Model>(Model).encode(points);
+      case QT::SPQTQ: return std::get<typename MVQT::PQTQ_Model>(Model).encode(points);
       case QT::None:
       default: return std::monostate{};
     }
@@ -260,6 +284,7 @@ class Index {
       case QT::RaBitQ: return std::get<typename SVTraits::RQ_Model>(Model).encode(points);
       case QT::FastScan: return std::get<typename SVTraits::FS_Model>(Model).encode(points);
       case QT::TurboQuant: return std::get<typename SVTraits::TQ_Model>(Model).encode(points);
+      case QT::SPQTQ: return std::get<typename SVTraits::PQTQ_Model>(Model).encode(points);
       case QT::None:
       default: return std::monostate{};
     }
@@ -272,6 +297,7 @@ class Index {
       case QT::RaBitQ: return std::get<typename MVQT::RQ_Model>(Model).quantize_query(query);
       case QT::FastScan: return std::get<typename MVQT::FS_Model>(Model).quantize_query(query);
       case QT::TurboQuant: return std::get<typename MVQT::TQ_Model>(Model).quantize_query(query);
+      case QT::SPQTQ: return std::get<typename MVQT::PQTQ_Model>(Model).quantize_query(query);
       case QT::None:
       default: return std::monostate{};
     }
@@ -286,6 +312,8 @@ class Index {
       case QT::FastScan: return std::get<typename SVTraits::FS_Model>(Model).quantize_query(query);
       case QT::TurboQuant:
         return std::get<typename SVTraits::TQ_Model>(Model).quantize_query(query);
+      case QT::SPQTQ:
+        return std::get<typename SVTraits::PQTQ_Model>(Model).quantize_query(query);
       case QT::None:
       default: return std::monostate{};
     }
@@ -309,6 +337,10 @@ class Index {
       case QT::TurboQuant:
         std::get<typename MVQT::TQ_Set>(s_var).distances_all(
             std::get<typename MVQT::TQ_Query>(q_var), out);
+        break;
+      case QT::SPQTQ:
+        std::get<typename MVQT::PQTQ_Set>(s_var).distances_all(
+            std::get<typename MVQT::PQTQ_Query>(q_var), out);
         break;
       case QT::None:
       default: break;
@@ -365,6 +397,18 @@ class Index {
         dist_cmps = cmps;
         bytes_accessed +=
             cmps * std::get<typename SVQT::TQ_Range>(quantized_points).num_bytes_per_point();
+        break;
+      }
+      case QT::SPQTQ: {
+        auto [result, cmps] =
+            parlayANN::beam_search<typename SVQT::PQTQ_Query, typename SVQT::PQTQ_Range,
+                                   uint32_t>(
+                std::get<typename SVQT::PQTQ_Query>(q_query), G,
+                std::get<typename SVQT::PQTQ_Range>(quantized_points), start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps;
+        bytes_accessed +=
+            cmps * std::get<typename SVQT::PQTQ_Range>(quantized_points).num_bytes_per_point();
         break;
       }
       case QT::None: {

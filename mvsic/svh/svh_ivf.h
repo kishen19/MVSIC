@@ -317,6 +317,10 @@ class IndexSVHIVF : public Index<metric> {
         process_probes_quant.template operator()<typename SVQT::TQ_Range>(
             std::get<typename SVQT::TQ_Query>(q_query_var));
         break;
+      case QT::SPQTQ:
+        process_probes_quant.template operator()<typename SVQT::PQTQ_Range>(
+            std::get<typename SVQT::PQTQ_Query>(q_query_var));
+        break;
       case QT::None:
         parlay::parallel_for(0, nprobes, [&](size_t i) {
           node_t* leaf_node = probe_list[i].second;
@@ -592,6 +596,7 @@ class IndexSVHIVF : public Index<metric> {
       case QT::FastScan: std::get<typename SVQT::FS_Model>(quantizer).save(outfile); break;
       case QT::RaBitQ: std::get<typename SVQT::RQ_Model>(quantizer).save(outfile); break;
       case QT::TurboQuant: std::get<typename SVQT::TQ_Model>(quantizer).save(outfile); break;
+      case QT::SPQTQ: std::get<typename SVQT::PQTQ_Model>(quantizer).save(outfile); break;
       case QT::None:
       default: break;
     }
@@ -647,6 +652,10 @@ class IndexSVHIVF : public Index<metric> {
       case QT::TurboQuant:
         quantizer.template emplace<typename SVQT::TQ_Model>();
         std::get<typename SVQT::TQ_Model>(quantizer).load(infile);
+        break;
+      case QT::SPQTQ:
+        quantizer.template emplace<typename SVQT::PQTQ_Model>();
+        std::get<typename SVQT::PQTQ_Model>(quantizer).load(infile);
         break;
       case QT::None:
       default: quantizer = std::monostate{}; break;
