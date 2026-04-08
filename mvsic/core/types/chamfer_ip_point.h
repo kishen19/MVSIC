@@ -31,7 +31,7 @@ struct ChamferIP_Point {
   // Returns id of the pointcloud
   inline uint32_t get_id() const noexcept { return id; }
   // Returns non-owning IP_Point view of the i-th embedding
-  inline auto operator[](size_t i) const noexcept {
+  inline IP_Point<float> operator[](size_t i) const noexcept {
     return IP_Point<float>(values + i * dims, dims, aligned_dims, id);
   }
   // Returns pointer to start of all embeddings

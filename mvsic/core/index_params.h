@@ -14,9 +14,9 @@ struct IndexParams {
   bool compress_input = false;  // Compress input points clouds using Ward's method
 
   // mvivf
-  uint32_t k_per_level = 0;       // Number of clusters at each node. [0 = 4*sqrt(n)]
-  uint32_t max_leaf_size = 500;   // Maximum size of leaves (enforced)
-  bool quantize_centers = false;  // Quantize center point clouds
+  uint32_t k_per_level = 0;      // Number of clusters at each node. [0 = 4*sqrt(n)]
+  uint32_t max_leaf_size = 500;  // Maximum size of leaves (enforced)
+  bool quantize_centers = true;  // Quantize center point clouds
 
   // MVIVFSpill: assign each point to its top num_spill nearest root centers.
   uint32_t num_spill = 2;
@@ -78,7 +78,7 @@ struct IndexParams {
                            uint32_t pq_method = 0, uint32_t block_size = 8,
                            uint32_t num_clusters_per_block = 16,
                            uint32_t num_points_per_cluster = 100, uint32_t rabitq_bits = 4,
-                           bool quantize_centers = false) {
+                           bool quantize_centers = true) {
     IndexParams params;
     params.method = "mvivf";
     params.k_per_level = k_per_level;
@@ -104,7 +104,7 @@ struct IndexParams {
                                 uint32_t pq_method = 0, uint32_t block_size = 8,
                                 uint32_t num_clusters_per_block = 16,
                                 uint32_t num_points_per_cluster = 100, uint32_t rabitq_bits = 4,
-                                bool quantize_centers = false) {
+                                bool quantize_centers = true) {
     IndexParams params;
     params.method = "mvivf_flat";
     params.k_per_level = k_per_level;
@@ -130,7 +130,7 @@ struct IndexParams {
                                  uint32_t pq_method = 0, uint32_t block_size = 8,
                                  uint32_t num_clusters_per_block = 16,
                                  uint32_t num_points_per_cluster = 100, uint32_t rabitq_bits = 4,
-                                 bool quantize_centers = false) {
+                                 bool quantize_centers = true) {
     IndexParams params;
     params.method = "mvivf_spill";
     params.k_per_level = k_per_level;
@@ -260,7 +260,7 @@ struct IndexParams {
                              uint32_t max_points_per_centroid = 100, uint32_t pq_method = 0,
                              uint32_t block_size = 8, uint32_t num_clusters_per_block = 16,
                              uint32_t num_points_per_cluster = 100, uint32_t rabitq_bits = 4,
-                             bool quantize_centers = false) {
+                             bool quantize_centers = true) {
     IndexParams params;
     params.method = "svh_ivf";
     params.k_per_level = k_per_level;

@@ -312,8 +312,7 @@ class Index {
       case QT::FastScan: return std::get<typename SVTraits::FS_Model>(Model).quantize_query(query);
       case QT::TurboQuant:
         return std::get<typename SVTraits::TQ_Model>(Model).quantize_query(query);
-      case QT::SPQTQ:
-        return std::get<typename SVTraits::PQTQ_Model>(Model).quantize_query(query);
+      case QT::SPQTQ: return std::get<typename SVTraits::PQTQ_Model>(Model).quantize_query(query);
       case QT::None:
       default: return std::monostate{};
     }
@@ -401,8 +400,7 @@ class Index {
       }
       case QT::SPQTQ: {
         auto [result, cmps] =
-            parlayANN::beam_search<typename SVQT::PQTQ_Query, typename SVQT::PQTQ_Range,
-                                   uint32_t>(
+            parlayANN::beam_search<typename SVQT::PQTQ_Query, typename SVQT::PQTQ_Range, uint32_t>(
                 std::get<typename SVQT::PQTQ_Query>(q_query), G,
                 std::get<typename SVQT::PQTQ_Range>(quantized_points), start_point, QP);
         visited = result.second;
