@@ -92,3 +92,9 @@ cc_binary(
         "@parlaylib//parlay:primitives",
     ],
 )
+
+cc_binary(
+    name = "bench_1btq_harley_seal",
+    srcs = ["bench_1btq_harley_seal.cpp"],
+    deps = [],
+)

@@ -78,7 +78,8 @@ static constexpr size_t kMaxSafeAccumTiles = 31;
 
 // Number of queries to batch together in the inner loop. 4 keeps register
 // pressure manageable (4 panels * 4 queries * 1 acc each = 16 zmm) and matches
-// the SPR sweet spot used elsewhere.
+// the SPR sweet spot used elsewhere. Tried Mq=5 and Mq=6: both regressed
+// (~157 vs 161 QPS) — see 1BTQ-Optimization-Ideas.md "Idea C" for analysis.
 static constexpr size_t kMq1bit = 4;
 
 // Compute number of tiles required to cover `nbytes` bytes per point. Each
@@ -106,6 +107,25 @@ inline __m512i popcnt_u8(__m512i x) {
   const __m512i lo = _mm512_and_si512(x, mask);
   const __m512i hi = _mm512_and_si512(_mm512_srli_epi16(x, 4), mask);
   return _mm512_add_epi8(_mm512_shuffle_epi8(lut, lo), _mm512_shuffle_epi8(lut, hi));
+#endif
+}
+
+// Per-32-bit-lane popcount (VPOPCNTD, requires VPOPCNTDQ). Each lane of `x`
+// is treated as a u32; output lane = popcount of that u32. This is the same
+// throughput as popcnt_epi8 (1/cycle, port 5 on SPR), but produces per-point
+// counts directly — no need for the sum_quad_accum fold afterwards. This
+// removes 16 vpdpbusd ops per 4-panel × Mq=4 outer iteration (~13% port-5
+// reduction; the rest of the inner loop is unchanged).
+inline __m512i popcnt_d32(__m512i x) {
+#if defined(__AVX512VPOPCNTDQ__)
+  return _mm512_popcnt_epi32(x);
+#else
+  // Fallback: u8 popcount + horizontal sum within each 32-bit lane.
+  const __m512i pc = popcnt_u8(x);
+  const __m512i ones16 = _mm512_set1_epi16(1);
+  const __m512i ones8 = _mm512_set1_epi8(1);
+  __m512i prod16 = _mm512_maddubs_epi16(pc, ones8);
+  return _mm512_madd_epi16(prod16, ones16);
 #endif
 }
 
@@ -151,142 +171,63 @@ inline __m512i sum_quad_accum(__m512i acc, __m512i u8_sum) {
 // into `acc[0..Mq)`. Each lane of acc[q] is the hamming distance of one of
 // the (up to) 16 panel points against query q.
 //
-// Fast path (num_hamming_tiles <= kMaxSafeAccumTiles, i.e. padded_dim <=
-// 992): single u8 popcount-byte accumulator per query, reduced to int32
-// lanes ONCE at the end. The split between u8 chunk-sums and i32 final
-// accumulators (and the kMaxSafeAccumTiles outer loop) collapses, dropping
-// ~16 zmm of live state on the 4-panel kernel so the compiler stops
-// spilling. Slow path retained for very-large padded_dim configurations.
+// Uses VPOPCNTD (per-32-bit-lane popcount): each lane is treated as a u32
+// and produces the per-point Hamming distance directly (no u8→i32 fold
+// needed). Same throughput as u8 popcount, but eliminates the final
+// sum_quad_accum stage entirely. Also removes the kMaxSafeAccumTiles
+// chunked fallback because i32 accumulators don't overflow at any
+// realistic padded_dim.
 template<size_t Mq>
 inline void hamming_micro_kernel_1panel(const uint8_t* qbuf, size_t qbuf_tile_stride,
                                         const uint8_t* panel, size_t num_hamming_tiles,
                                         __m512i* acc) {
-  if (num_hamming_tiles <= kMaxSafeAccumTiles) {
-    __m512i sum[Mq];
-    for (size_t q = 0; q < Mq; ++q) sum[q] = _mm512_setzero_si512();
-
-    for (size_t t = 0; t < num_hamming_tiles; ++t) {
-      const __m512i pv = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel + t * kTileBytes));
-      for (size_t q = 0; q < Mq; ++q) {
-        const __m512i qb = _mm512_loadu_si512(
-            reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
-        sum[q] = _mm512_add_epi8(sum[q], popcnt_u8(_mm512_xor_si512(pv, qb)));
-      }
-    }
-
-    const __m512i zero = _mm512_setzero_si512();
-    for (size_t q = 0; q < Mq; ++q) acc[q] = sum_quad_accum(zero, sum[q]);
-    return;
-  }
-
-  // Chunked fallback for very large padded_dim.
   for (size_t q = 0; q < Mq; ++q) acc[q] = _mm512_setzero_si512();
-  for (size_t t0 = 0; t0 < num_hamming_tiles; t0 += kMaxSafeAccumTiles) {
-    const size_t t_end = std::min(t0 + kMaxSafeAccumTiles, num_hamming_tiles);
-    __m512i sum[Mq];
-    for (size_t q = 0; q < Mq; ++q) sum[q] = _mm512_setzero_si512();
-    for (size_t t = t0; t < t_end; ++t) {
-      const __m512i pv = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel + t * kTileBytes));
-      for (size_t q = 0; q < Mq; ++q) {
-        const __m512i qb = _mm512_loadu_si512(
-            reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
-        sum[q] = _mm512_add_epi8(sum[q], popcnt_u8(_mm512_xor_si512(pv, qb)));
-      }
+
+  for (size_t t = 0; t < num_hamming_tiles; ++t) {
+    const __m512i pv = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i*>(panel + t * kTileBytes));
+    for (size_t q = 0; q < Mq; ++q) {
+      const __m512i qb = _mm512_loadu_si512(
+          reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
+      acc[q] = _mm512_add_epi32(acc[q], popcnt_d32(_mm512_xor_si512(pv, qb)));
     }
-    for (size_t q = 0; q < Mq; ++q) acc[q] = sum_quad_accum(acc[q], sum[q]);
   }
 }
 
-// Four-panel Hamming accumulation (best ILP). Same single-acc strategy as
-// the 1-panel kernel — see that comment for the safety argument. With Mq=4
-// this brings live state from ~38 zmm (16 u8 sums + 16 i32 accs + panel +
-// query temps, previously spilling) down to ~22 zmm: 16 u8 accumulators +
-// 4 panel loads + 1 query load + popcount intermediate. Within 32 zmm.
+// Four-panel Hamming accumulation (best ILP). Uses VPOPCNTD (per-32-bit-lane
+// popcount) so the inner loop accumulates directly into the i32 acc; no u8
+// staging and no terminal sum_quad_accum (saves 16 vpdpbusd ops per outer
+// iteration vs the previous u8-staged kernel). Live state with Mq=4: 16 i32
+// accs + 4 panel loads + 1 query load + popcount intermediate ≈ 22 zmm.
 template<size_t Mq>
 inline void hamming_micro_kernel_4panel(const uint8_t* qbuf, size_t qbuf_tile_stride,
                                         const uint8_t* panel0, const uint8_t* panel1,
                                         const uint8_t* panel2, const uint8_t* panel3,
                                         size_t num_hamming_tiles, __m512i* acc0,
                                         __m512i* acc1, __m512i* acc2, __m512i* acc3) {
-  if (num_hamming_tiles <= kMaxSafeAccumTiles) {
-    __m512i s0[Mq], s1[Mq], s2[Mq], s3[Mq];
-    for (size_t q = 0; q < Mq; ++q) {
-      s0[q] = _mm512_setzero_si512();
-      s1[q] = _mm512_setzero_si512();
-      s2[q] = _mm512_setzero_si512();
-      s3[q] = _mm512_setzero_si512();
-    }
-
-    for (size_t t = 0; t < num_hamming_tiles; ++t) {
-      const __m512i pa = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel0 + t * kTileBytes));
-      const __m512i pb = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel1 + t * kTileBytes));
-      const __m512i pc = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel2 + t * kTileBytes));
-      const __m512i pd = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel3 + t * kTileBytes));
-      for (size_t q = 0; q < Mq; ++q) {
-        const __m512i qb = _mm512_loadu_si512(
-            reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
-        s0[q] = _mm512_add_epi8(s0[q], popcnt_u8(_mm512_xor_si512(pa, qb)));
-        s1[q] = _mm512_add_epi8(s1[q], popcnt_u8(_mm512_xor_si512(pb, qb)));
-        s2[q] = _mm512_add_epi8(s2[q], popcnt_u8(_mm512_xor_si512(pc, qb)));
-        s3[q] = _mm512_add_epi8(s3[q], popcnt_u8(_mm512_xor_si512(pd, qb)));
-      }
-    }
-
-    const __m512i zero = _mm512_setzero_si512();
-    for (size_t q = 0; q < Mq; ++q) {
-      acc0[q] = sum_quad_accum(zero, s0[q]);
-      acc1[q] = sum_quad_accum(zero, s1[q]);
-      acc2[q] = sum_quad_accum(zero, s2[q]);
-      acc3[q] = sum_quad_accum(zero, s3[q]);
-    }
-    return;
-  }
-
-  // Chunked fallback for very large padded_dim.
   for (size_t q = 0; q < Mq; ++q) {
     acc0[q] = _mm512_setzero_si512();
     acc1[q] = _mm512_setzero_si512();
     acc2[q] = _mm512_setzero_si512();
     acc3[q] = _mm512_setzero_si512();
   }
-  for (size_t t0 = 0; t0 < num_hamming_tiles; t0 += kMaxSafeAccumTiles) {
-    const size_t t_end = std::min(t0 + kMaxSafeAccumTiles, num_hamming_tiles);
-    __m512i s0[Mq], s1[Mq], s2[Mq], s3[Mq];
+
+  for (size_t t = 0; t < num_hamming_tiles; ++t) {
+    const __m512i pa = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i*>(panel0 + t * kTileBytes));
+    const __m512i pb = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i*>(panel1 + t * kTileBytes));
+    const __m512i pc = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i*>(panel2 + t * kTileBytes));
+    const __m512i pd = _mm512_loadu_si512(
+        reinterpret_cast<const __m512i*>(panel3 + t * kTileBytes));
     for (size_t q = 0; q < Mq; ++q) {
-      s0[q] = _mm512_setzero_si512();
-      s1[q] = _mm512_setzero_si512();
-      s2[q] = _mm512_setzero_si512();
-      s3[q] = _mm512_setzero_si512();
-    }
-    for (size_t t = t0; t < t_end; ++t) {
-      const __m512i pa = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel0 + t * kTileBytes));
-      const __m512i pb = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel1 + t * kTileBytes));
-      const __m512i pc = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel2 + t * kTileBytes));
-      const __m512i pd = _mm512_loadu_si512(
-          reinterpret_cast<const __m512i*>(panel3 + t * kTileBytes));
-      for (size_t q = 0; q < Mq; ++q) {
-        const __m512i qb = _mm512_loadu_si512(
-            reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
-        s0[q] = _mm512_add_epi8(s0[q], popcnt_u8(_mm512_xor_si512(pa, qb)));
-        s1[q] = _mm512_add_epi8(s1[q], popcnt_u8(_mm512_xor_si512(pb, qb)));
-        s2[q] = _mm512_add_epi8(s2[q], popcnt_u8(_mm512_xor_si512(pc, qb)));
-        s3[q] = _mm512_add_epi8(s3[q], popcnt_u8(_mm512_xor_si512(pd, qb)));
-      }
-    }
-    for (size_t q = 0; q < Mq; ++q) {
-      acc0[q] = sum_quad_accum(acc0[q], s0[q]);
-      acc1[q] = sum_quad_accum(acc1[q], s1[q]);
-      acc2[q] = sum_quad_accum(acc2[q], s2[q]);
-      acc3[q] = sum_quad_accum(acc3[q], s3[q]);
+      const __m512i qb = _mm512_loadu_si512(
+          reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
+      acc0[q] = _mm512_add_epi32(acc0[q], popcnt_d32(_mm512_xor_si512(pa, qb)));
+      acc1[q] = _mm512_add_epi32(acc1[q], popcnt_d32(_mm512_xor_si512(pb, qb)));
+      acc2[q] = _mm512_add_epi32(acc2[q], popcnt_d32(_mm512_xor_si512(pc, qb)));
+      acc3[q] = _mm512_add_epi32(acc3[q], popcnt_d32(_mm512_xor_si512(pd, qb)));
     }
   }
 }
