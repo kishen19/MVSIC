@@ -98,3 +98,9 @@ cc_binary(
     srcs = ["bench_1btq_harley_seal.cpp"],
     deps = [],
 )
+
+cc_binary(
+    name = "bench_1btq_vbmi",
+    srcs = ["bench_1btq_vbmi.cpp"],
+    deps = [],
+)
