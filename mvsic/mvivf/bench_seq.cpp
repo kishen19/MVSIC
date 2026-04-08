@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
   if (nprobes_set) {
     nprobes_list = {nprobes_single};
   } else {
-    nprobes_list = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+    nprobes_list = {32, 64, 128, 256};
   }
 
   if (inFile == nullptr || qFile == nullptr || indexFile.empty() || gtFile.empty()) {
@@ -103,12 +103,19 @@ int main(int argc, char* argv[]) {
     }
 
     double best_time = 1e15;
+    double tot_t_greedy = 0.0;
+    double tot_t_distances = 0.0;
+    double tot_t_quantize = 0.0;
+    double tot_t_rerank = 0.0;
+    double tot_t_rest = 0.0;
     for (size_t it = 0; it < reps; it++) {
       parlay::internal::timer t;
       double iter_time = 0.0;
       for (size_t j = 0; j < queries.size(); j++) {
         if (it == 0) {
           // Use search_with_stats once to capture pointcloud cmps; stats[0]+stats[1].
+          // Stats layout: [0]=greedy_cmps, [1]=probe_cmps, [2..n-5]=greedy extras,
+          // then trailing: t_quantize, t_distances, t_rest, t_rerank, t_greedy.
           t.start();
           auto [p, b, stats] = index.search_with_stats(queries[j], points, search_params);
           t.stop();
@@ -116,6 +123,12 @@ int main(int argc, char* argv[]) {
           t.reset();
           pred[j] = p;
           cmps[j] = static_cast<size_t>(stats[0]) + static_cast<size_t>(stats[1]);
+          size_t n = stats.size();
+          tot_t_quantize  += stats[n - 5];
+          tot_t_distances += stats[n - 4];
+          tot_t_rest      += stats[n - 3];
+          tot_t_rerank    += stats[n - 2];
+          tot_t_greedy    += stats[n - 1];
         } else {
           t.start();
           auto [p, b] = index.search(queries[j], points, search_params);
@@ -132,12 +145,23 @@ int main(int argc, char* argv[]) {
     double recall_1_k = compute_recall(pred, gt, k, 1);
     double recall_k_k = compute_recall(pred, gt, k, k);
 
+    double t_score_total = tot_t_greedy + tot_t_distances;
+    double frac_hier = t_score_total > 0 ? tot_t_greedy / t_score_total : 0.0;
+    double frac_leaf = t_score_total > 0 ? tot_t_distances / t_score_total : 0.0;
+
     std::cout << "Number of Queries:    " << queries.size() << std::endl
               << "QPS:                  " << QPS << std::endl
               << "Avg pointcloud cmps:  " << avg_cmps << std::endl
               << "Total pointclouds:    " << points.size() << std::endl
               << "Recall 1@" << k << ":            " << recall_1_k << std::endl
-              << "Recall " << k << "@" << k << ":           " << recall_k_k << std::endl;
+              << "Recall " << k << "@" << k << ":           " << recall_k_k << std::endl
+              << "t_hierarchy (greedy): " << tot_t_greedy << " s" << std::endl
+              << "t_leaves (distances): " << tot_t_distances << " s" << std::endl
+              << "t_quantize:           " << tot_t_quantize << " s" << std::endl
+              << "t_rerank:             " << tot_t_rerank << " s" << std::endl
+              << "t_rest:               " << tot_t_rest << " s" << std::endl
+              << "frac scoring hier:    " << frac_hier << std::endl
+              << "frac scoring leaves:  " << frac_leaf << std::endl;
   }
   return 0;
 }
