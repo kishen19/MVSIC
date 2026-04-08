@@ -27,17 +27,19 @@
 //   for each query embedding q:
 //     // Broadcast each query tile (4 bytes) to a 64-byte vector.
 //     // For each panel, accumulate popcount(panel_tile XOR q_broadcast)
-//     // across tiles. Periodically dump uint8 sums into int32 via vpdpbusd
-//     // with ones to avoid u8 overflow (safe for up to 31 tiles per chunk).
+//     // across tiles using VPOPCNTD (per-32-bit-lane popcount), so each
+//     // i32 lane of acc[q] is the per-point Hamming count directly.
 //     hamming[p] = sum_t popcount(panel[t][p] XOR q_broadcast[t])  for p in panel
-//     // Convert hamming -> dot via the analytic formula:
-//     //   dot = 16129 * (padded_dim - 2 * hamming)        (16129 = 127^2)
-//     // (Each centroid is +/-127 because ws is rescaled by sqrt(padded_dim),
-//     //  so post-encode sqr norm = padded_dim * 127^2.)
-//     // Distance:
-//     //   neg_dot = -(dot * db_nsf * q_nsf)
-//     //   metric:   sqn_db + 2*neg_dot + sqn_q
-//     //   non-metric: neg_dot
+//     // ASSUMES INPUT VECTORS ARE UNIT-NORM. Under that assumption the
+//     // per-vector norm-scaling factor is the constant 1/(127*sqrt(padded_dim))
+//     // and ||q||^2 == ||d||^2 == 1, so the distance reduces to a single
+//     // affine function of the integer Hamming count:
+//     //   metric (Euclidean):   dist = (4/padded_dim) * hamming
+//     //   non-metric (-IP):     dist = (2/padded_dim) * hamming - 1
+//     // We fold the Metric-dependent additive constant and the +inf "never
+//     // win" sentinel for padding lanes into one per-padded-point array
+//     // (`epilogue_addend`), so the inner-loop epilogue is just:
+//     //   dist = scale * hamming + epilogue_addend[lane]
 //     min_q = min over panel-points of distance
 //   chamfer = sum_q(min_q) / num_queries
 //
@@ -62,10 +64,6 @@ namespace mvsic {
 namespace turboquant_1bit_mv {
 
 namespace internal {
-
-// Each centroid has magnitude 127, so squared dimension contribution is 127^2.
-static constexpr float k127Sq = 16129.0f;  // 127 * 127
-static constexpr float kNeg2x127Sq = -2.0f * k127Sq;
 
 // AVX-512 lane counts for the panel layout.
 static constexpr size_t kPanelPoints = 16;     // points per panel (matches int32 lanes)
@@ -233,29 +231,23 @@ inline void hamming_micro_kernel_4panel(const uint8_t* qbuf, size_t qbuf_tile_st
 }
 
 // Convert int32 hamming acc (one lane per panel point) into a float distance
-// vector and merge into the per-query running min. The dot is computed as
-// base_dot + (-2*16129)*hamming where base_dot = 16129 * padded_dim.
-template<bool Metric>
-inline void hamming_dist_epilogue(__m512i hamming, float q_nsf, float q_sqn, float base_dot,
-                                  const float* db_norms, const float* db_sqn,
-                                  __m512& running_min) {
+// vector and merge into the per-query running min.
+//
+// Assuming all input vectors are unit-norm (which holds for every dataset
+// in this project), the per-vector norm-scaling factor and squared norm
+// are constants and the entire epilogue collapses to a single per-lane
+// affine map of the integer Hamming count:
+//   dist[lane] = scale * hamming[lane] + epilogue_addend[lane]
+// where `scale` is set by the caller (4/padded_dim for Metric=true,
+// 2/padded_dim for Metric=false) and `epilogue_addend` already encodes
+// the Metric-specific constant offset (0 for Metric, -1 for non-Metric)
+// for valid lanes and +inf for padding lanes (which makes them never win
+// the running min).
+inline void hamming_dist_epilogue(__m512i hamming, __m512 scale_v,
+                                  const float* epilogue_addend, __m512& running_min) {
   const __m512 hamming_f = _mm512_cvtepi32_ps(hamming);
-  const __m512 dot_f =
-      _mm512_fmadd_ps(_mm512_set1_ps(kNeg2x127Sq), hamming_f, _mm512_set1_ps(base_dot));
-  const __m512 db_norm_v = _mm512_loadu_ps(db_norms);
-  const __m512 q_nsf_v = _mm512_set1_ps(q_nsf);
-  __m512 neg_dot = _mm512_mul_ps(dot_f, db_norm_v);
-  neg_dot = _mm512_mul_ps(neg_dot, q_nsf_v);
-  neg_dot = _mm512_sub_ps(_mm512_setzero_ps(), neg_dot);
-
-  __m512 dist;
-  if constexpr (Metric) {
-    const __m512 sqn_v = _mm512_loadu_ps(db_sqn);
-    const __m512 sqn_qv = _mm512_set1_ps(q_sqn);
-    dist = _mm512_add_ps(sqn_v, _mm512_add_ps(_mm512_add_ps(neg_dot, neg_dot), sqn_qv));
-  } else {
-    dist = neg_dot;
-  }
+  const __m512 addend_v = _mm512_loadu_ps(epilogue_addend);
+  const __m512 dist = _mm512_fmadd_ps(scale_v, hamming_f, addend_v);
   running_min = _mm512_min_ps(running_min, dist);
 }
 
@@ -263,24 +255,29 @@ inline void hamming_dist_epilogue(__m512i hamming, float q_nsf, float q_sqn, flo
 //
 // Inputs:
 //   q_packed_data: contiguous packed-bit query codes, num_q * num_bytes
-//   q_norms / q_sqns: per-query norm scaling factor and unquantized sqr norm
 //   num_q: number of query embeddings
 //   num_bytes: bytes per encoded point (== (padded_dim + 7) / 8)
 //   panel_data: pre-built panels for one DB cloud
-//   db_norms / db_sqn: per-point arrays (padded so each panel sees 16 lanes)
+//   epilogue_addend: per-padded-point addend (one float per lane, padded
+//                    so each panel sees 16 lanes); see hamming_dist_epilogue.
 //   panel_bytes / num_hamming_tiles / n_panels: panel geometry for the cloud
 //   padded_dim: padded dimensionality (== num_bytes * 8 for full dim)
 //
 // Returns sum_{q} min_{point} dist(q, point); caller divides by num_q.
 template<bool Metric>
-inline float chamfer_panels(const uint8_t* q_packed_data, const float* q_norms,
-                            const float* q_sqns, size_t q_byte_stride, size_t num_q,
-                            size_t num_bytes, const uint8_t* panel_data, const float* db_norms,
-                            const float* db_sqn, size_t panel_bytes, size_t num_hamming_tiles,
-                            size_t n_panels, size_t padded_dim) {
+inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, size_t num_q,
+                            size_t num_bytes, const uint8_t* panel_data,
+                            const float* epilogue_addend, size_t panel_bytes,
+                            size_t num_hamming_tiles, size_t n_panels, size_t padded_dim) {
   if (num_q == 0 || n_panels == 0) return 0.0f;
 
-  const float base_dot = k127Sq * static_cast<float>(padded_dim);
+  // Affine map from integer Hamming -> float distance, derived under the
+  // unit-norm assumption (see hamming_dist_epilogue):
+  //   Metric:    dist = (4/padded_dim) * hamming
+  //   non-Metric: dist = (2/padded_dim) * hamming - 1   (the -1 is folded
+  //                                                      into epilogue_addend)
+  const float scale_f = (Metric ? 4.0f : 2.0f) / static_cast<float>(padded_dim);
+  const __m512 scale_v = _mm512_set1_ps(scale_f);
   const size_t qbuf_tile_stride = num_hamming_tiles * kTileBytes;
 
   // Per-query broadcast buffer for up to kMq1bit queries at a time.
@@ -319,20 +316,10 @@ inline float chamfer_panels(const uint8_t* q_packed_data, const float* q_norms,
           panel_data + (p + 1) * panel_bytes, panel_data + (p + 2) * panel_bytes,
           panel_data + (p + 3) * panel_bytes, num_hamming_tiles, a0, a1, a2, a3);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        const float qn = q_norms[qi + q];
-        const float qs = q_sqns[qi + q];
-        hamming_dist_epilogue<Metric>(a0[q], qn, qs, base_dot,
-                                       db_norms + p * kPanelPoints,
-                                       db_sqn + p * kPanelPoints, mins[q]);
-        hamming_dist_epilogue<Metric>(a1[q], qn, qs, base_dot,
-                                       db_norms + (p + 1) * kPanelPoints,
-                                       db_sqn + (p + 1) * kPanelPoints, mins[q]);
-        hamming_dist_epilogue<Metric>(a2[q], qn, qs, base_dot,
-                                       db_norms + (p + 2) * kPanelPoints,
-                                       db_sqn + (p + 2) * kPanelPoints, mins[q]);
-        hamming_dist_epilogue<Metric>(a3[q], qn, qs, base_dot,
-                                       db_norms + (p + 3) * kPanelPoints,
-                                       db_sqn + (p + 3) * kPanelPoints, mins[q]);
+        hamming_dist_epilogue(a0[q], scale_v, epilogue_addend + p * kPanelPoints, mins[q]);
+        hamming_dist_epilogue(a1[q], scale_v, epilogue_addend + (p + 1) * kPanelPoints, mins[q]);
+        hamming_dist_epilogue(a2[q], scale_v, epilogue_addend + (p + 2) * kPanelPoints, mins[q]);
+        hamming_dist_epilogue(a3[q], scale_v, epilogue_addend + (p + 3) * kPanelPoints, mins[q]);
       }
     }
     for (; p < n_panels; ++p) {
@@ -340,9 +327,7 @@ inline float chamfer_panels(const uint8_t* q_packed_data, const float* q_norms,
       hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
                                             panel_data + p * panel_bytes, num_hamming_tiles, acc);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        hamming_dist_epilogue<Metric>(acc[q], q_norms[qi + q], q_sqns[qi + q], base_dot,
-                                       db_norms + p * kPanelPoints,
-                                       db_sqn + p * kPanelPoints, mins[q]);
+        hamming_dist_epilogue(acc[q], scale_v, epilogue_addend + p * kPanelPoints, mins[q]);
       }
     }
 
@@ -358,9 +343,7 @@ inline float chamfer_panels(const uint8_t* q_packed_data, const float* q_norms,
       __m512i acc;
       hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride, panel_data + p * panel_bytes,
                                       num_hamming_tiles, &acc);
-      hamming_dist_epilogue<Metric>(acc, q_norms[qi], q_sqns[qi], base_dot,
-                                     db_norms + p * kPanelPoints,
-                                     db_sqn + p * kPanelPoints, mv);
+      hamming_dist_epilogue(acc, scale_v, epilogue_addend + p * kPanelPoints, mv);
     }
     total_chamfer += _mm512_reduce_min_ps(mv);
   }
@@ -372,15 +355,15 @@ inline float chamfer_panels(const uint8_t* q_packed_data, const float* q_norms,
 
 // =========================================================================
 // Scalar fallback (correct, slow). Used when AVX-512 is unavailable.
+// Same unit-norm assumption as the AVX-512 path.
 // =========================================================================
 template<bool Metric>
-inline float chamfer_panels_scalar(const uint8_t* q_packed_data, const float* q_norms,
-                                   const float* q_sqns, size_t q_byte_stride, size_t num_q,
-                                   size_t num_bytes, const uint8_t* panel_data,
-                                   const float* db_norms, const float* db_sqn, size_t panel_bytes,
+inline float chamfer_panels_scalar(const uint8_t* q_packed_data, size_t q_byte_stride,
+                                   size_t num_q, size_t num_bytes, const uint8_t* panel_data,
+                                   const float* epilogue_addend, size_t panel_bytes,
                                    size_t num_hamming_tiles, size_t n_panels, size_t padded_dim,
                                    size_t cloud_size) {
-  const float base_dot = k127Sq * static_cast<float>(padded_dim);
+  const float scale = (Metric ? 4.0f : 2.0f) / static_cast<float>(padded_dim);
   float total = 0.0f;
   for (size_t qi = 0; qi < num_q; ++qi) {
     const uint8_t* qp = q_packed_data + qi * q_byte_stride;
@@ -399,18 +382,13 @@ inline float chamfer_panels_scalar(const uint8_t* q_packed_data, const float* q_
           hamming += __builtin_popcount(static_cast<unsigned>(tile[b] ^ qb));
         }
       }
-      const float dot = base_dot + kNeg2x127Sq * static_cast<float>(hamming);
-      const float neg_dot = -(dot * db_norms[panel * kPanelPoints + lane] * q_norms[qi]);
-      float d;
-      if constexpr (Metric) {
-        d = db_sqn[panel * kPanelPoints + lane] + 2.0f * neg_dot + q_sqns[qi];
-      } else {
-        d = neg_dot;
-      }
+      const float d = scale * static_cast<float>(hamming) +
+                      epilogue_addend[panel * kPanelPoints + lane];
       if (d < min_d) min_d = d;
     }
     total += min_d;
   }
+  (void)n_panels;
   return total;
 }
 
@@ -462,10 +440,10 @@ class Quantized_Query_Point_Cloud {
   size_t num_bytes_per_datapoint = 0;
   size_t padded_dim = 0;
 
-  // Flat per-query packed bit codes: num_queries * num_bytes_per_datapoint
+  // Flat per-query packed bit codes: num_queries * num_bytes_per_datapoint.
+  // No norm-scaling factor / squared-norm arrays: under the unit-norm
+  // assumption these are constants and folded into the kernel epilogue.
   std::vector<uint8_t> flat_query_codes;
-  std::vector<float> norm_scaling_factors;       // size: num_queries
-  std::vector<float> unquantized_squared_norms;  // size: num_queries
 
   Quantized_Query_Point_Cloud() = default;
 
@@ -480,8 +458,9 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
-    const size_t bytes_per_vec =
-        cloud.db->num_bytes_per_datapoint + sizeof(float) + (Metric ? sizeof(float) : 0);
+    // bytes/vector now: packed code bytes + one float epilogue addend per
+    // padded point (no per-vector nsf or sqn).
+    const size_t bytes_per_vec = cloud.db->num_bytes_per_datapoint + sizeof(float);
     return {this->distance(cloud), cloud.size() * bytes_per_vec};
   }
 
@@ -507,8 +486,11 @@ class Quantized_Point_Cloud_Set {
 
   // Per-point arrays, padded so each cloud is a multiple of kPanelPoints.
   parlay::sequence<size_t> point_offsets;  // size: n_clouds + 1, in points
-  parlay::sequence<float> norm_scaling_factors;
-  parlay::sequence<float> unquantized_squared_norms;
+  // One float per padded point. For valid lanes: 0.0f when Metric=true,
+  // -1.0f when Metric=false. For padding lanes: +inf, so they can never
+  // win the running min in the kernel epilogue. See hamming_dist_epilogue
+  // for the affine map this is plugged into.
+  parlay::sequence<float> epilogue_addend;
 
   // Unpadded sizes per cloud.
   parlay::sequence<size_t> cloud_sizes;
@@ -534,8 +516,7 @@ class Quantized_Point_Cloud_Set {
   }
   inline size_t num_bytes() const noexcept {
     return panel_data.size() * sizeof(uint8_t) +
-           norm_scaling_factors.size() * sizeof(float) +
-           unquantized_squared_norms.size() * sizeof(float);
+           epilogue_addend.size() * sizeof(float);
   }
 
   void distances_all(const Quantized_Query_Point_Cloud<Metric>& q,
@@ -570,8 +551,7 @@ class Quantized_Point_Cloud_Set {
     write_seq(panel_data);
     write_seq(panel_offsets);
     write_seq(point_offsets);
-    write_seq(norm_scaling_factors);
-    write_seq(unquantized_squared_norms);
+    write_seq(epilogue_addend);
     write_seq(cloud_sizes);
     write_seq(ids);
   }
@@ -592,8 +572,7 @@ class Quantized_Point_Cloud_Set {
     read_seq(panel_data);
     read_seq(panel_offsets);
     read_seq(point_offsets);
-    read_seq(norm_scaling_factors);
-    read_seq(unquantized_squared_norms);
+    read_seq(epilogue_addend);
     read_seq(cloud_sizes);
     read_seq(ids);
   }
@@ -620,21 +599,18 @@ float turboquant_1bit_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metr
   const size_t pt_off = db.point_offsets[c];
   const size_t np = db.n_panels(c);
   const uint8_t* panel_ptr = db.panel_data.data() + panel_byte_off;
-  const float* ns = db.norm_scaling_factors.data() + pt_off;
-  const float* sqn = db.unquantized_squared_norms.data() + pt_off;
+  const float* addend = db.epilogue_addend.data() + pt_off;
 
   float dist_sum = 0.0f;
 #ifdef __AVX512F__
   dist_sum = internal::chamfer_panels<Metric>(
-      q.flat_query_codes.data(), q.norm_scaling_factors.data(),
-      q.unquantized_squared_norms.data(), q.num_bytes_per_datapoint, num_q,
-      q.num_bytes_per_datapoint, panel_ptr, ns, sqn, db.panel_bytes, db.num_hamming_tiles, np,
+      q.flat_query_codes.data(), q.num_bytes_per_datapoint, num_q,
+      q.num_bytes_per_datapoint, panel_ptr, addend, db.panel_bytes, db.num_hamming_tiles, np,
       db.padded_dim);
 #else
   dist_sum = internal::chamfer_panels_scalar<Metric>(
-      q.flat_query_codes.data(), q.norm_scaling_factors.data(),
-      q.unquantized_squared_norms.data(), q.num_bytes_per_datapoint, num_q,
-      q.num_bytes_per_datapoint, panel_ptr, ns, sqn, db.panel_bytes, db.num_hamming_tiles, np,
+      q.flat_query_codes.data(), q.num_bytes_per_datapoint, num_q,
+      q.num_bytes_per_datapoint, panel_ptr, addend, db.panel_bytes, db.num_hamming_tiles, np,
       db.padded_dim, cs);
 #endif
   return dist_sum / static_cast<float>(num_q);
@@ -657,20 +633,18 @@ class Model {
     encoder.train(pcs.get_dims());
   }
 
-  // Encode a single rotated, normalized vector into 1-bit codes (sign bits).
-  // Sets `*out_sqn` to the unquantized squared norm and returns the
-  // norm-scaling-factor (norm / (127 * sqrt(padded_dim))).
-  inline float encode_single_bits(const float* p, std::vector<float>& ws, uint8_t* out_codes,
-                                  float* out_sqn) const {
+  // Encode a single rotated vector into 1-bit codes (sign bits).
+  //
+  // Assumes the input vector is unit-norm (true for every dataset in this
+  // project), so the rotated `ws` is also unit-norm and the per-vector
+  // norm-scaling-factor / squared-norm are constants. We therefore drop
+  // them entirely and store only the sign bits.
+  inline void encode_single_bits(const float* p, std::vector<float>& ws,
+                                 uint8_t* out_codes) const {
     const size_t pdim = encoder.padded_dim;
     const size_t nbytes = (pdim + 7) / 8;
     std::memset(out_codes, 0, nbytes);
     encoder.rotator->rotate(p, ws.data());
-
-    float sqr_norm = 0.0f;
-    for (size_t i = 0; i < pdim; ++i) sqr_norm += ws[i] * ws[i];
-    *out_sqn = sqr_norm;
-    if (sqr_norm == 0.0f) return 0.0f;
 
     // Sign bit only. Convention (matches one_to_many_1bit.cc / hamming_1bit.h):
     //   bit set  => coordinate is *negative*  (so XOR Hamming counts mismatches)
@@ -678,9 +652,6 @@ class Model {
     for (size_t i = 0; i < pdim; ++i) {
       if (ws[i] < 0.0f) out_codes[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
     }
-    // Encoded sqr norm = padded_dim * 127^2.
-    const float q_sqr = static_cast<float>(pdim) * internal::k127Sq;
-    return std::sqrt(sqr_norm / q_sqr);
   }
 
   template<typename PCSet>
@@ -713,13 +684,11 @@ class Model {
     enc.point_offsets[n_clouds] = cur_padded_pts;
 
     enc.panel_data.resize(cur_panel_bytes, 0);
-    enc.norm_scaling_factors.resize(cur_padded_pts, 0.0f);
-    if constexpr (Metric) {
-      // Padding lanes get +inf so they can never win the min.
-      enc.unquantized_squared_norms.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
-    } else {
-      enc.unquantized_squared_norms.resize(cur_padded_pts, 0.0f);
-    }
+    // Initialize the per-padded-point epilogue addend to +inf (the padding
+    // sentinel). Valid lanes get overwritten below with the Metric-specific
+    // valid-lane constant (0 for Metric=true, -1 for Metric=false).
+    enc.epilogue_addend.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
+    constexpr float kValidAddend = Metric ? 0.0f : -1.0f;
 
     auto pcs_ids = pcs.get_ids();
     enc.ids = parlay::sequence<uint32_t>(pcs_ids.begin(), pcs_ids.end());
@@ -739,12 +708,8 @@ class Model {
       for (size_t i = 0; i < n_vecs; ++i) {
         const float* p =
             reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
-        float sqn = 0.0f;
-        const float nsf = encode_single_bits(p, ws,
-                                             flat_codes.data() + i * enc.num_bytes_per_datapoint,
-                                             &sqn);
-        enc.norm_scaling_factors[pt_off + i] = nsf;
-        enc.unquantized_squared_norms[pt_off + i] = sqn;
+        encode_single_bits(p, ws, flat_codes.data() + i * enc.num_bytes_per_datapoint);
+        enc.epilogue_addend[pt_off + i] = kValidAddend;
       }
 
       // Repack into the panel layout: for each panel of kPanelPoints points,
@@ -757,8 +722,9 @@ class Model {
         for (size_t lane = 0; lane < internal::kPanelPoints; ++lane) {
           const size_t pt = base + lane;
           if (pt >= n_vecs) {
-            // Pad with zeros (panel was already memset). Padding norm is 0
-            // and sqn is +inf (metric) so this point can never win the min.
+            // Pad with zeros (panel was already memset). The corresponding
+            // epilogue_addend lane is +inf, so this point can never win
+            // the running min in the kernel.
             continue;
           }
           const uint8_t* src = flat_codes.data() + pt * enc.num_bytes_per_datapoint;
@@ -785,19 +751,12 @@ class Model {
     if (res.num_queries == 0) return res;
 
     res.flat_query_codes.assign(res.num_queries * res.num_bytes_per_datapoint, 0);
-    res.norm_scaling_factors.assign(res.num_queries, 0.0f);
-    res.unquantized_squared_norms.assign(res.num_queries, 0.0f);
 
     const float* base_ptr = query_cloud.data();
     std::vector<float> ws(encoder.padded_dim);
     for (size_t qi = 0; qi < res.num_queries; ++qi) {
-      float sqn = 0.0f;
-      const float nsf = encode_single_bits(base_ptr + qi * encoder.dim, ws,
-                                           res.flat_query_codes.data() +
-                                               qi * res.num_bytes_per_datapoint,
-                                           &sqn);
-      res.norm_scaling_factors[qi] = nsf;
-      res.unquantized_squared_norms[qi] = sqn;
+      encode_single_bits(base_ptr + qi * encoder.dim, ws,
+                         res.flat_query_codes.data() + qi * res.num_bytes_per_datapoint);
     }
     return res;
   }
@@ -823,9 +782,9 @@ struct FusedQueryBatch {
 
   // Pre-broadcasted query data, total_embeddings * qbuf_tile_stride bytes.
   // Layout: [embedding][tile * 64 bytes (broadcasted)].
+  // No per-query nsf / sqn arrays — under the unit-norm assumption these
+  // are constants and folded into the kernel epilogue.
   std::vector<uint8_t> flat_qbuf;
-  std::vector<float> norm_scaling_factors;       // size: total_embeddings
-  std::vector<float> unquantized_squared_norms;  // size: total_embeddings
   std::vector<size_t> emb_offsets;               // size: num_source_clouds + 1
 
   void Build(const std::vector<const Quantized_Query_Point_Cloud<Metric>*>& A) {
@@ -847,8 +806,6 @@ struct FusedQueryBatch {
     if (total_embeddings == 0) return;
 
     flat_qbuf.assign(total_embeddings * qbuf_tile_stride, 0);
-    norm_scaling_factors.resize(total_embeddings);
-    unquantized_squared_norms.resize(total_embeddings);
 
     parlay::parallel_for(0, num_source_clouds, [&](size_t i) {
       const auto* qc = A[i];
@@ -876,10 +833,6 @@ struct FusedQueryBatch {
         }
 #endif
       }
-      std::memcpy(norm_scaling_factors.data() + off, qc->norm_scaling_factors.data(),
-                  cnt * sizeof(float));
-      std::memcpy(unquantized_squared_norms.data() + off,
-                  qc->unquantized_squared_norms.data(), cnt * sizeof(float));
     });
   }
 };
@@ -903,16 +856,19 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
   const size_t pt_off = db.point_offsets[c];
   const size_t np = db.n_panels(c);
   const uint8_t* panel_ptr = db.panel_data.data() + panel_byte_off;
-  const float* db_norms = db.norm_scaling_factors.data() + pt_off;
-  const float* db_sqn = db.unquantized_squared_norms.data() + pt_off;
+  const float* addend = db.epilogue_addend.data() + pt_off;
   const size_t panel_bytes = db.panel_bytes;
   const size_t num_hamming_tiles = fq.num_hamming_tiles;
   const size_t qbuf_tile_stride = fq.qbuf_tile_stride;
-  const float base_dot = internal::k127Sq * static_cast<float>(fq.padded_dim);
 
 #ifdef __AVX512F__
   using internal::kMq1bit;
   using internal::kPanelPoints;
+
+  // Affine map from integer Hamming -> float distance under unit-norm
+  // assumption. See chamfer_panels / hamming_dist_epilogue.
+  const float scale_f = (Metric ? 4.0f : 2.0f) / static_cast<float>(fq.padded_dim);
+  const __m512 scale_v = _mm512_set1_ps(scale_f);
 
   size_t qi = 0;
   for (; qi + kMq1bit <= num_emb; qi += kMq1bit) {
@@ -931,20 +887,10 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
           panel_ptr + (p + 2) * panel_bytes, panel_ptr + (p + 3) * panel_bytes,
           num_hamming_tiles, a0, a1, a2, a3);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        const float qn = fq.norm_scaling_factors[qi + q];
-        const float qs = fq.unquantized_squared_norms[qi + q];
-        internal::hamming_dist_epilogue<Metric>(a0[q], qn, qs, base_dot,
-                                                 db_norms + p * kPanelPoints,
-                                                 db_sqn + p * kPanelPoints, mins[q]);
-        internal::hamming_dist_epilogue<Metric>(a1[q], qn, qs, base_dot,
-                                                 db_norms + (p + 1) * kPanelPoints,
-                                                 db_sqn + (p + 1) * kPanelPoints, mins[q]);
-        internal::hamming_dist_epilogue<Metric>(a2[q], qn, qs, base_dot,
-                                                 db_norms + (p + 2) * kPanelPoints,
-                                                 db_sqn + (p + 2) * kPanelPoints, mins[q]);
-        internal::hamming_dist_epilogue<Metric>(a3[q], qn, qs, base_dot,
-                                                 db_norms + (p + 3) * kPanelPoints,
-                                                 db_sqn + (p + 3) * kPanelPoints, mins[q]);
+        internal::hamming_dist_epilogue(a0[q], scale_v, addend + p * kPanelPoints, mins[q]);
+        internal::hamming_dist_epilogue(a1[q], scale_v, addend + (p + 1) * kPanelPoints, mins[q]);
+        internal::hamming_dist_epilogue(a2[q], scale_v, addend + (p + 2) * kPanelPoints, mins[q]);
+        internal::hamming_dist_epilogue(a3[q], scale_v, addend + (p + 3) * kPanelPoints, mins[q]);
       }
     }
     for (; p < np; ++p) {
@@ -953,10 +899,7 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
                                                        panel_ptr + p * panel_bytes,
                                                        num_hamming_tiles, acc);
       for (size_t q = 0; q < kMq1bit; ++q) {
-        internal::hamming_dist_epilogue<Metric>(
-            acc[q], fq.norm_scaling_factors[qi + q],
-            fq.unquantized_squared_norms[qi + q], base_dot,
-            db_norms + p * kPanelPoints, db_sqn + p * kPanelPoints, mins[q]);
+        internal::hamming_dist_epilogue(acc[q], scale_v, addend + p * kPanelPoints, mins[q]);
       }
     }
 
@@ -973,21 +916,17 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
       internal::hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride,
                                                 panel_ptr + p * panel_bytes,
                                                 num_hamming_tiles, &acc);
-      internal::hamming_dist_epilogue<Metric>(
-          acc, fq.norm_scaling_factors[qi], fq.unquantized_squared_norms[qi], base_dot,
-          db_norms + p * kPanelPoints, db_sqn + p * kPanelPoints, mv);
+      internal::hamming_dist_epilogue(acc, scale_v, addend + p * kPanelPoints, mv);
     }
     emb_min[qi] = _mm512_reduce_min_ps(mv);
   }
 #else
   // Scalar fallback: leave +inf so callers see worst-case distances.
   (void)panel_ptr;
-  (void)db_norms;
-  (void)db_sqn;
+  (void)addend;
   (void)panel_bytes;
   (void)num_hamming_tiles;
   (void)qbuf_tile_stride;
-  (void)base_dot;
   for (size_t i = 0; i < num_emb; ++i) emb_min[i] = std::numeric_limits<float>::max();
 #endif
 }
