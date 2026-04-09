@@ -56,7 +56,7 @@ struct IndexParams {
   bool two_pass = false;
 
   // PQ params
-  enum class QuantizerType { None, PQ, RaBitQ, FastScan, TurboQuant, SPQTQ };
+  enum class QuantizerType { None, PQ, RaBitQ, FastScan, TurboQuant, SPQTQ, OneBitTQ };
 
   struct pq_config {
     QuantizerType method = QuantizerType::None;  // PQ method

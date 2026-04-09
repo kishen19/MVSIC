@@ -26,6 +26,7 @@
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/quantization/pqtq.h"
 #include "mvsic/core/quantization/pqtq_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_mv.h"
 
 // Params
 #include "search_params.h"
@@ -71,24 +72,28 @@ struct MVQuantTypes {
   using FS_Set = fastscan_mv::Quantized_Point_Cloud_Set<metric>;
   using TQ_Set = turboquant_mv::Quantized_Point_Cloud_Set<metric>;
   using PQTQ_Set = pqtq_mv::Quantized_Point_Cloud_Set<metric>;
+  using OBTQ_Set = turboquant_1bit_mv::Quantized_Point_Cloud_Set<metric>;
   // ChPoint (Query) Alternate
   using PQ_Query = pq_mv::Quantized_Query_Point_Cloud<metric>;
   using RQ_Query = rabitq_mv::Quantized_Query_Point_Cloud<metric>;
   using FS_Query = fastscan_mv::Quantized_Query_Point_Cloud<metric>;
   using TQ_Query = turboquant_mv::Quantized_Query_Point_Cloud<metric>;
   using PQTQ_Query = pqtq_mv::Quantized_Query_Point_Cloud<metric>;
+  using OBTQ_Query = turboquant_1bit_mv::Quantized_Query_Point_Cloud<metric>;
   // Main Model Object
   using PQ_Model = pq_mv::Model<metric>;
   using RQ_Model = rabitq_mv::Model<metric>;
   using FS_Model = fastscan_mv::Model<metric>;
   using TQ_Model = turboquant_mv::Model<metric>;
   using PQTQ_Model = pqtq_mv::Model<metric>;
+  using OBTQ_Model = turboquant_1bit_mv::Model<metric>;
   // Unified Objects
-  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set, PQTQ_Set>;
-  using QuantQuery =
-      std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query, PQTQ_Query>;
-  using QuantModel =
-      std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model, PQTQ_Model>;
+  using QuantSet =
+      std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set, PQTQ_Set, OBTQ_Set>;
+  using QuantQuery = std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query,
+                                   PQTQ_Query, OBTQ_Query>;
+  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model,
+                                   PQTQ_Model, OBTQ_Model>;
 };
 
 // Base Index Class
@@ -222,6 +227,11 @@ class Index {
         std::get<typename MVQT::PQTQ_Model>(Model).train(points, params.pq.block_size);
         break;
       }
+      case QT::OneBitTQ: {
+        Model.template emplace<typename MVQT::OBTQ_Model>();
+        std::get<typename MVQT::OBTQ_Model>(Model).train(points);
+        break;
+      }
       default: Model = std::monostate{}; break;
     }
   }
@@ -271,6 +281,7 @@ class Index {
       case QT::FastScan: return std::get<typename MVQT::FS_Model>(Model).encode(points);
       case QT::TurboQuant: return std::get<typename MVQT::TQ_Model>(Model).encode(points);
       case QT::SPQTQ: return std::get<typename MVQT::PQTQ_Model>(Model).encode(points);
+      case QT::OneBitTQ: return std::get<typename MVQT::OBTQ_Model>(Model).encode(points);
       case QT::None:
       default: return std::monostate{};
     }
@@ -298,6 +309,7 @@ class Index {
       case QT::FastScan: return std::get<typename MVQT::FS_Model>(Model).quantize_query(query);
       case QT::TurboQuant: return std::get<typename MVQT::TQ_Model>(Model).quantize_query(query);
       case QT::SPQTQ: return std::get<typename MVQT::PQTQ_Model>(Model).quantize_query(query);
+      case QT::OneBitTQ: return std::get<typename MVQT::OBTQ_Model>(Model).quantize_query(query);
       case QT::None:
       default: return std::monostate{};
     }
@@ -340,6 +352,10 @@ class Index {
       case QT::SPQTQ:
         std::get<typename MVQT::PQTQ_Set>(s_var).distances_all(
             std::get<typename MVQT::PQTQ_Query>(q_var), out);
+        break;
+      case QT::OneBitTQ:
+        std::get<typename MVQT::OBTQ_Set>(s_var).distances_all(
+            std::get<typename MVQT::OBTQ_Query>(q_var), out);
         break;
       case QT::None:
       default: break;
