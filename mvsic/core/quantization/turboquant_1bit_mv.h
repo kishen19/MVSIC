@@ -85,6 +85,11 @@ static constexpr size_t kMaxSafeAccumTiles = 31;
 // (~157 vs 161 QPS) — see 1BTQ-Optimization-Ideas.md "Idea C" for analysis.
 static constexpr size_t kMq1bit = 4;
 
+// Maximum supported top-k bucket capacity. 64 covers common num_rerank
+// values (up to 64) without heap allocation. Bounded by a constant so the
+// bucket can live in stack-allocated SoA arrays.
+static constexpr size_t kMaxBucketK = 64;
+
 // Compute number of tiles required to cover `nbytes` bytes per point. Each
 // tile holds 4 bytes per point.
 inline size_t num_hamming_tiles_for(size_t nbytes) { return (nbytes + 3) / 4; }
@@ -255,24 +260,83 @@ inline float reduce_to_dist(__m512i min_h, float scale_f) {
   return scale_f * static_cast<float>(hmin) + kValidAddend;
 }
 
-// Core Chamfer kernel over PRE-PANELED 1-bit codes.
+// Bulk horizontal-min of 4 __m512i's → sum of the 4 scalar mins (int32).
 //
-// Inputs:
-//   q_packed_data: contiguous packed-bit query codes, num_q * num_bytes
-//   num_q: number of query embeddings
-//   num_bytes: bytes per encoded point (== (padded_dim + 7) / 8)
-//   panel_data: pre-built panels for one DB cloud
-//   panel_bytes / num_hamming_tiles: panel geometry for the cloud
-//   cloud_size: number of REAL points in the cloud (n_panels and the
-//               last-panel valid mask are derived from this)
-//   padded_dim: padded dimensionality (== num_bytes * 8 for full dim)
+// Instead of 4 independent `_mm512_reduce_min_epi32` calls (each doing its
+// own 4-level shuffle+min tree to collapse one 16-lane vector to a scalar),
+// we:
+//   (1) reduce each 512 → 128-bit chunk (4 lanes per query), which is
+//       2 half-shuffles + 2 mins per query (same as step 1+2 of the stock
+//       reduce), AND
+//   (2) reduce those four 4-lane vectors to four scalars in a single
+//       shared shuffle tree: min across lanes [0..3] after a 4x4 transpose
+//       uses 8 unpacks + 3 mins for 4 queries (vs 4*2 = 8 shuffles + 4*2
+//       = 8 mins for four independent step-3-and-4 tails).
+//
+// Net vs 4 × reduce_min_epi32: same p5 shuffle count, but 5 fewer p0/1
+// mins and (more importantly) a SHORTER critical-path latency — the 8
+// lane-4 reduces run in parallel across queries, then the final shuffle
+// tree is shared. The tail scalar sum is then a single int add per query.
+inline int32_t reduce4_min_sum_epi32(const __m512i (&min_h)[4]) {
+  // Step 1: each 512-bit → 256-bit pairwise min.
+  const __m256i a0 = _mm256_min_epi32(_mm512_castsi512_si256(min_h[0]),
+                                       _mm512_extracti32x8_epi32(min_h[0], 1));
+  const __m256i a1 = _mm256_min_epi32(_mm512_castsi512_si256(min_h[1]),
+                                       _mm512_extracti32x8_epi32(min_h[1], 1));
+  const __m256i a2 = _mm256_min_epi32(_mm512_castsi512_si256(min_h[2]),
+                                       _mm512_extracti32x8_epi32(min_h[2], 1));
+  const __m256i a3 = _mm256_min_epi32(_mm512_castsi512_si256(min_h[3]),
+                                       _mm512_extracti32x8_epi32(min_h[3], 1));
+
+  // Step 2: each 256-bit → 128-bit pairwise min (4 lanes per query).
+  const __m128i b0 = _mm_min_epi32(_mm256_castsi256_si128(a0),
+                                    _mm256_extracti128_si256(a0, 1));
+  const __m128i b1 = _mm_min_epi32(_mm256_castsi256_si128(a1),
+                                    _mm256_extracti128_si256(a1, 1));
+  const __m128i b2 = _mm_min_epi32(_mm256_castsi256_si128(a2),
+                                    _mm256_extracti128_si256(a2, 1));
+  const __m128i b3 = _mm_min_epi32(_mm256_castsi256_si128(a3),
+                                    _mm256_extracti128_si256(a3, 1));
+
+  // Step 3: 4x4 int32 transpose via unpack{lo,hi}_epi{32,64}.
+  //   b0 = [q0a, q0b, q0c, q0d], similarly for b1,b2,b3
+  // After transpose, t[k] = [q0_k, q1_k, q2_k, q3_k] for k=0..3.
+  const __m128i t01lo = _mm_unpacklo_epi32(b0, b1);  // [q0a, q1a, q0b, q1b]
+  const __m128i t01hi = _mm_unpackhi_epi32(b0, b1);  // [q0c, q1c, q0d, q1d]
+  const __m128i t23lo = _mm_unpacklo_epi32(b2, b3);  // [q2a, q3a, q2b, q3b]
+  const __m128i t23hi = _mm_unpackhi_epi32(b2, b3);  // [q2c, q3c, q2d, q3d]
+
+  const __m128i r_a = _mm_unpacklo_epi64(t01lo, t23lo);  // [q0a, q1a, q2a, q3a]
+  const __m128i r_b = _mm_unpackhi_epi64(t01lo, t23lo);  // [q0b, q1b, q2b, q3b]
+  const __m128i r_c = _mm_unpacklo_epi64(t01hi, t23hi);  // [q0c, q1c, q2c, q3c]
+  const __m128i r_d = _mm_unpackhi_epi64(t01hi, t23hi);  // [q0d, q1d, q2d, q3d]
+
+  // Step 4: 3 element-wise mins collapse 4 sets of 4 lanes into 1 set of
+  // 4 lanes holding [q0_min, q1_min, q2_min, q3_min].
+  const __m128i m01 = _mm_min_epi32(r_a, r_b);
+  const __m128i m23 = _mm_min_epi32(r_c, r_d);
+  const __m128i h4  = _mm_min_epi32(m01, m23);
+
+  // Step 5: horizontal sum of 4 int32 lanes.
+  //   [q0_min, q1_min, q2_min, q3_min] → scalar sum
+  const __m128i h4_hi = _mm_shuffle_epi32(h4, _MM_SHUFFLE(1, 0, 3, 2));
+  const __m128i s2 = _mm_add_epi32(h4, h4_hi);           // lanes: [q0+q2, q1+q3, ...]
+  const __m128i s2_hi = _mm_shuffle_epi32(s2, _MM_SHUFFLE(2, 3, 0, 1));
+  const __m128i s1 = _mm_add_epi32(s2, s2_hi);           // lane 0 holds q0+q1+q2+q3
+  return _mm_cvtsi128_si32(s1);
+}
+
+// Core Chamfer kernel over PRE-PANELED 1-bit codes, taking a qbuf that has
+// already been pre-broadcasted for all num_q query embeddings. Layout is the
+// same as `FusedQueryBatch::flat_qbuf`: qbuf + q * qbuf_tile_stride holds the
+// `num_hamming_tiles * 64`-byte broadcast form for query embedding `q`.
 //
 // Returns sum_{q} min_{point} dist(q, point); caller divides by num_q.
 template<bool Metric>
-inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, size_t num_q,
-                            size_t num_bytes, const uint8_t* panel_data,
-                            size_t panel_bytes, size_t num_hamming_tiles,
-                            size_t cloud_size, size_t padded_dim) {
+inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride,
+                                 size_t num_q, const uint8_t* panel_data,
+                                 size_t panel_bytes, size_t num_hamming_tiles,
+                                 size_t cloud_size, size_t padded_dim) {
   if (num_q == 0 || cloud_size == 0) return 0.0f;
 
   // Affine map from integer Hamming -> float distance under the unit-norm
@@ -292,32 +356,27 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
   const __mmask16 tail_mask =
       (tail_valid == 0) ? __mmask16{0}
                         : static_cast<__mmask16>((1u << tail_valid) - 1u);
-  const size_t qbuf_tile_stride = num_hamming_tiles * kTileBytes;
 
-  // Per-query broadcast buffer for up to kMq1bit queries at a time.
-  // Inline scratch covers kMaxInlineTiles tiles per query (== 32 -> 1024-dim
-  // packed at full density). Anything larger falls back to a heap allocation.
-  static constexpr size_t kMaxInlineTiles = 32;
-  alignas(64) uint8_t qbuf_storage[kMq1bit * kMaxInlineTiles * kTileBytes];
-  std::vector<uint8_t> qbuf_heap;
-  uint8_t* qbuf;
-  if (num_hamming_tiles <= kMaxInlineTiles) {
-    qbuf = qbuf_storage;
-  } else {
-    qbuf_heap.resize(num_hamming_tiles * kMq1bit * kTileBytes);
-    qbuf = qbuf_heap.data();
-  }
-
-  float total_chamfer = 0.0f;
+  // Accumulate the per-query horizontal-min Hamming counts as INT32 across
+  // all Mq batches, and defer the single `scale_f * hi + addend` affine map
+  // until the very end of the cloud. The map is linear in hi, so
+  //   sum_q (scale_f * hi + addend) == scale_f * sum_q(hi) + num_q * addend
+  // With num_q <= 32, padded_dim <= 16384, each hi <= padded_dim and
+  // sum_q(hi) <= 2^19 — well within int32. Benefits:
+  //   - Removes `num_q` scalar cvt+fmadd+add off the critical path and
+  //     replaces with one cvt + one fmadd at the end of the cloud.
+  //   - Removes the FP dependency chain from the reduce_min_epi32 critical
+  //     path: each reduce is now followed by a cheap scalar int add instead
+  //     of cvt → fmadd → scalar add (~4 fewer ops on that chain).
+  //   - For the common Mq=4 case we sum h0..h3 into an int running total
+  //     before accumulating into h_sum, which lets the compiler schedule
+  //     the 4 horizontal reduces in parallel.
+  int32_t h_sum = 0;
   size_t qi = 0;
   const __m512i kIntMaxV = _mm512_set1_epi32(std::numeric_limits<int32_t>::max());
 
   for (; qi + kMq1bit <= num_q; qi += kMq1bit) {
-    // Build broadcast buffers for kMq1bit consecutive queries.
-    for (size_t q = 0; q < kMq1bit; ++q) {
-      pre_broadcast_query(q_packed_data + (qi + q) * q_byte_stride, num_bytes,
-                          num_hamming_tiles, qbuf + q * qbuf_tile_stride);
-    }
+    const uint8_t* qbuf_local = qbuf + qi * qbuf_tile_stride;
 
     // Per-query running int-min hamming across all panels of this cloud.
     __m512i min_h[kMq1bit];
@@ -329,7 +388,7 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
     for (; p + 4 <= full_np; p += 4) {
       __m512i a0[kMq1bit], a1[kMq1bit], a2[kMq1bit], a3[kMq1bit];
       hamming_micro_kernel_4panel<kMq1bit>(
-          qbuf, qbuf_tile_stride, panel_data + p * panel_bytes,
+          qbuf_local, qbuf_tile_stride, panel_data + p * panel_bytes,
           panel_data + (p + 1) * panel_bytes, panel_data + (p + 2) * panel_bytes,
           panel_data + (p + 3) * panel_bytes, num_hamming_tiles, a0, a1, a2, a3);
       for (size_t q = 0; q < kMq1bit; ++q) {
@@ -341,7 +400,7 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
     }
     for (; p < full_np; ++p) {
       __m512i acc[kMq1bit];
-      hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
+      hamming_micro_kernel_1panel<kMq1bit>(qbuf_local, qbuf_tile_stride,
                                             panel_data + p * panel_bytes, num_hamming_tiles, acc);
       for (size_t q = 0; q < kMq1bit; ++q) {
         min_h[q] = _mm512_min_epi32(min_h[q], acc[q]);
@@ -351,7 +410,7 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
     // Optional partial trailing panel: only `tail_valid` lanes are real.
     if (tail_valid > 0) {
       __m512i acc[kMq1bit];
-      hamming_micro_kernel_1panel<kMq1bit>(qbuf, qbuf_tile_stride,
+      hamming_micro_kernel_1panel<kMq1bit>(qbuf_local, qbuf_tile_stride,
                                             panel_data + full_np * panel_bytes,
                                             num_hamming_tiles, acc);
       for (size_t q = 0; q < kMq1bit; ++q) {
@@ -359,34 +418,69 @@ inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, 
       }
     }
 
-    // One float convert + horizontal-min per query at the end of the cloud.
-    for (size_t q = 0; q < kMq1bit; ++q) {
-      total_chamfer += reduce_to_dist<Metric>(min_h[q], scale_f);
+    // Horizontally reduce Mq independent int mins and accumulate. For the
+    // common Mq=4 case use the parallel bulk reducer that shares the final
+    // 4x4 transpose+min across all four queries. For other Mq values we
+    // fall back to 4 independent reduces.
+    if constexpr (kMq1bit == 4) {
+      h_sum += reduce4_min_sum_epi32(min_h);
+    } else {
+      int32_t mq_sum = 0;
+      for (size_t q = 0; q < kMq1bit; ++q) {
+        mq_sum += _mm512_reduce_min_epi32(min_h[q]);
+      }
+      h_sum += mq_sum;
     }
   }
 
   // Tail (< kMq1bit queries). Same int-min structure, Mq=1.
   for (; qi < num_q; ++qi) {
-    pre_broadcast_query(q_packed_data + qi * q_byte_stride, num_bytes, num_hamming_tiles,
-                        qbuf);
+    const uint8_t* qbuf_local = qbuf + qi * qbuf_tile_stride;
     __m512i min_h_one = kIntMaxV;
     for (size_t p = 0; p < full_np; ++p) {
       __m512i acc;
-      hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride, panel_data + p * panel_bytes,
+      hamming_micro_kernel_1panel<1>(qbuf_local, qbuf_tile_stride,
+                                      panel_data + p * panel_bytes,
                                       num_hamming_tiles, &acc);
       min_h_one = _mm512_min_epi32(min_h_one, acc);
     }
     if (tail_valid > 0) {
       __m512i acc;
-      hamming_micro_kernel_1panel<1>(qbuf, qbuf_tile_stride,
+      hamming_micro_kernel_1panel<1>(qbuf_local, qbuf_tile_stride,
                                       panel_data + full_np * panel_bytes,
                                       num_hamming_tiles, &acc);
       min_h_one = _mm512_mask_min_epi32(min_h_one, tail_mask, min_h_one, acc);
     }
-    total_chamfer += reduce_to_dist<Metric>(min_h_one, scale_f);
+    h_sum += _mm512_reduce_min_epi32(min_h_one);
   }
 
-  return total_chamfer;
+  // Single affine map at the very end of the cloud:
+  //   total_chamfer = scale_f * h_sum + num_q * kValidAddend
+  constexpr float kValidAddend = Metric ? 0.0f : -1.0f;
+  return scale_f * static_cast<float>(h_sum) +
+         static_cast<float>(num_q) * kValidAddend;
+}
+
+// Backwards-compatible wrapper: builds the qbuf once for all num_q queries
+// then delegates to `chamfer_panels_qbuf`. Used by the (rare) one-off
+// `Quantized_Query_Point_Cloud::distance(cloud)` path; the hot
+// `distances_all` path hoists the qbuf build to leaf scope and calls
+// `chamfer_panels_qbuf` directly.
+template<bool Metric>
+inline float chamfer_panels(const uint8_t* q_packed_data, size_t q_byte_stride, size_t num_q,
+                            size_t num_bytes, const uint8_t* panel_data,
+                            size_t panel_bytes, size_t num_hamming_tiles,
+                            size_t cloud_size, size_t padded_dim) {
+  if (num_q == 0 || cloud_size == 0) return 0.0f;
+  const size_t qbuf_tile_stride = num_hamming_tiles * kTileBytes;
+  std::vector<uint8_t> qbuf_storage(num_q * qbuf_tile_stride);
+  for (size_t q = 0; q < num_q; ++q) {
+    pre_broadcast_query(q_packed_data + q * q_byte_stride, num_bytes,
+                        num_hamming_tiles, qbuf_storage.data() + q * qbuf_tile_stride);
+  }
+  return chamfer_panels_qbuf<Metric>(qbuf_storage.data(), qbuf_tile_stride, num_q,
+                                     panel_data, panel_bytes, num_hamming_tiles,
+                                     cloud_size, padded_dim);
 }
 
 #endif  // __AVX512F__
@@ -429,6 +523,136 @@ inline float chamfer_panels_scalar(const uint8_t* q_packed_data, size_t q_byte_s
   }
   return total;
 }
+
+#ifdef __AVX512F__
+// Vectorized sum-reduction over `n` consecutive floats. Used to compute the
+// chamfer distance (sum of per-embedding mins) once per (query, db-cloud)
+// pair inside the M2M top-k loop. Replaces a scalar `for` loop that the
+// compiler was not auto-vectorizing (non-restrict pointer + runtime n).
+inline float reduce_sum_ps_n(const float* __restrict p, size_t n) {
+  __m512 acc = _mm512_setzero_ps();
+  size_t i = 0;
+  for (; i + 16 <= n; i += 16) {
+    acc = _mm512_add_ps(acc, _mm512_loadu_ps(p + i));
+  }
+  if (i < n) {
+    const __mmask16 tail_mask = static_cast<__mmask16>((1u << (n - i)) - 1u);
+    acc = _mm512_mask_add_ps(acc, tail_mask, acc,
+                             _mm512_maskz_loadu_ps(tail_mask, p + i));
+  }
+  return _mm512_reduce_add_ps(acc);
+}
+#endif
+
+// Bounded-capacity top-k bucket stored as parallel `float dists[]` and
+// `uint32_t ids[]` arrays. Replaces `std::priority_queue<std::pair<float,
+// uint32_t>>` in the 1BTQ (and PQTQ) M2M top-k loop: no heap allocation,
+// inlined hot-path, vectorized max-refresh, and allows the compiler to keep
+// the current-max in a register across consecutive db-cloud iterations.
+//
+// Typical usage (k <= kMaxBucketK, bucket reused across db-clouds):
+//   BoundedTopKBucket bucket; bucket.init(k);
+//   for each db cloud c:
+//     bucket.try_insert(chamfer_dist, id);
+//   bucket.finalize_sorted(out);  // writes k entries, padded with sentinel
+struct BoundedTopKBucket {
+  alignas(64) float dists[kMaxBucketK];
+  alignas(64) uint32_t ids[kMaxBucketK];
+  size_t k = 0;
+  size_t size = 0;
+  float current_max = std::numeric_limits<float>::infinity();
+  size_t max_lane = 0;
+
+  void init(size_t k_in) {
+    k = k_in;
+    size = 0;
+    current_max = std::numeric_limits<float>::infinity();
+    max_lane = 0;
+    // Initialize all lanes to sentinel values so padding never wins the
+    // max-refresh scan and finalize_sorted produces correct output when the
+    // bucket is under-filled (size < k).
+    for (size_t i = 0; i < kMaxBucketK; ++i) {
+      dists[i] = std::numeric_limits<float>::infinity();
+      ids[i] = UINT32_MAX;
+    }
+  }
+
+  // Refresh current_max and max_lane via a vectorized max-reduce over the
+  // `k` real entries (padding lanes stay at +inf, which is fine because
+  // we're looking for the LARGEST stored distance and +inf always wins —
+  // so we restrict the vectorized reduce to the first k lanes and then
+  // find the argmax with a scalar scan (k <= 64, cheap).
+  void refresh_max() {
+#ifdef __AVX512F__
+    __m512 vmax = _mm512_loadu_ps(dists);
+    for (size_t off = 16; off < k; off += 16) {
+      vmax = _mm512_max_ps(vmax, _mm512_loadu_ps(dists + off));
+    }
+    // Mask lanes beyond k in the LAST block to -inf so they don't pollute
+    // reduce_max. (Earlier blocks are fully within [0,k) because k > off
+    // when we entered the loop.)
+    const size_t last_block_start = (k >= 16) ? ((k - 1) & ~size_t{15}) : 0;
+    const size_t real_in_last = k - last_block_start;
+    if (real_in_last < 16) {
+      const __mmask16 keep = static_cast<__mmask16>((1u << real_in_last) - 1u);
+      __m512 last = _mm512_loadu_ps(dists + last_block_start);
+      const __m512 neg_inf = _mm512_set1_ps(-std::numeric_limits<float>::infinity());
+      last = _mm512_mask_blend_ps(keep, neg_inf, last);
+      // Recompute vmax from scratch using the masked last block to avoid
+      // double-counting it.
+      if (last_block_start == 0) {
+        vmax = last;
+      } else {
+        vmax = _mm512_loadu_ps(dists);
+        for (size_t off = 16; off < last_block_start; off += 16) {
+          vmax = _mm512_max_ps(vmax, _mm512_loadu_ps(dists + off));
+        }
+        vmax = _mm512_max_ps(vmax, last);
+      }
+    }
+    const float mx = _mm512_reduce_max_ps(vmax);
+#else
+    float mx = dists[0];
+    for (size_t i = 1; i < k; ++i) if (dists[i] > mx) mx = dists[i];
+#endif
+    current_max = mx;
+    // Scalar argmax — k <= 64, so this is ~trivial compared to any heap op.
+    for (size_t i = 0; i < k; ++i) {
+      if (dists[i] == mx) { max_lane = i; break; }
+    }
+  }
+
+  // Fast-path insert. Common case (d >= current_max after bucket is full)
+  // returns on a single compare.
+  inline void try_insert(float d, uint32_t id) {
+    if (size < k) {
+      dists[size] = d;
+      ids[size] = id;
+      ++size;
+      if (size == k) refresh_max();
+      return;
+    }
+    if (d >= current_max) return;
+    dists[max_lane] = d;
+    ids[max_lane] = id;
+    refresh_max();
+  }
+
+  // Drain into `out` in ascending-distance order. Unfilled slots become
+  // {UINT32_MAX, FLT_MAX} sentinel so downstream (mvivf.h candidate
+  // compaction) can strip them the same way it did for the heap path.
+  void finalize_sorted(std::pair<uint32_t, float>* out) const {
+    std::pair<float, uint32_t> tmp[kMaxBucketK];
+    for (size_t i = 0; i < size; ++i) tmp[i] = {dists[i], ids[i]};
+    std::sort(tmp, tmp + size,
+              [](const std::pair<float, uint32_t>& a,
+                 const std::pair<float, uint32_t>& b) { return a.first < b.first; });
+    for (size_t i = 0; i < size; ++i) out[i] = {tmp[i].second, tmp[i].first};
+    for (size_t i = size; i < k; ++i) {
+      out[i] = {UINT32_MAX, std::numeric_limits<float>::max()};
+    }
+  }
+};
 
 }  // namespace internal
 
@@ -561,6 +785,49 @@ class Quantized_Point_Cloud_Set {
     const size_t nc = num_clouds();
     if (num_q == 0 || nc == 0) return;
 
+#ifdef __AVX512F__
+    // Hoist the per-query broadcast out of the per-cloud loop: every cloud
+    // in this leaf re-broadcasts the *same* query bytes into the same qbuf
+    // shape, so we build one shared qbuf per distances_all call and pass it
+    // into the scoring kernel via `chamfer_panels_qbuf`. On fiqa this was
+    // ~14% of t_leaves (0.32s/rep out of 2.27s) — see
+    // 1BTQ-Optimization-Ideas.md "Profiling: t_leaves sub-breakdown".
+    const size_t qbuf_tile_stride = num_hamming_tiles * internal::kTileBytes;
+    const size_t qbuf_total = num_q * qbuf_tile_stride;
+
+    // Inline scratch covers the common fiqa-class case (num_q=32, nht=4 →
+    // 8192 bytes). Larger (higher-dim or more query embeddings) falls back
+    // to a heap allocation.
+    static constexpr size_t kMaxInlineQbufBytes = 8192;
+    alignas(64) uint8_t qbuf_storage[kMaxInlineQbufBytes];
+    std::vector<uint8_t> qbuf_heap;
+    uint8_t* qbuf;
+    if (qbuf_total <= kMaxInlineQbufBytes) {
+      qbuf = qbuf_storage;
+    } else {
+      qbuf_heap.resize(qbuf_total);
+      qbuf = qbuf_heap.data();
+    }
+    const uint8_t* q_codes = q.flat_query_codes.data();
+    const size_t q_stride = num_bytes_per_datapoint;
+    for (size_t qi = 0; qi < num_q; ++qi) {
+      internal::pre_broadcast_query(q_codes + qi * q_stride, q_stride,
+                                    num_hamming_tiles,
+                                    qbuf + qi * qbuf_tile_stride);
+    }
+
+    parlay::parallel_for(0, nc, [&](size_t c) {
+      if (cloud_sizes[c] == 0) {
+        results[c] = {get_id(c), std::numeric_limits<float>::max()};
+        return;
+      }
+      const uint8_t* panel_ptr = panel_data.data() + panel_offsets[c];
+      const float dist_sum = internal::chamfer_panels_qbuf<Metric>(
+          qbuf, qbuf_tile_stride, num_q, panel_ptr, panel_bytes,
+          num_hamming_tiles, cloud_sizes[c], padded_dim);
+      results[c] = {get_id(c), dist_sum / static_cast<float>(num_q)};
+    });
+#else
     parlay::parallel_for(0, nc, [&](size_t c) {
       if (cloud_sizes[c] == 0) {
         results[c] = {get_id(c), std::numeric_limits<float>::max()};
@@ -569,6 +836,7 @@ class Quantized_Point_Cloud_Set {
       const float d = turboquant_1bit_mv_chamfer_distance(q, *this, c);
       results[c] = {get_id(c), d};
     });
+#endif
   }
 
   void save(std::ofstream& out) const {
@@ -990,11 +1258,75 @@ class ManyToMany {
     if (num_q_clouds == 0 || num_db_clouds == 0 || k == 0) return;
     if (q_block == 0) q_block = 1;
 
+    // Bounded-capacity bucket replaces std::priority_queue for the per-leaf
+    // top-k. Safe because `k` is `num_rerank` from the search params and the
+    // indexer caps that at `kMaxBucketK`. If a future caller exceeds it we
+    // fall back to the heap path at the bottom of this function.
+    if (k > internal::kMaxBucketK) {
+      // Fallback: use the legacy heap path for any unusually-large k.
+      auto process_query_range_heap = [&](size_t q_start, size_t q_end) {
+        const size_t q_count = q_end - q_start;
+        if (q_count == 0) return;
+        std::vector<std::priority_queue<std::pair<float, uint32_t>>> heaps(q_count);
+        std::vector<const Quantized_Query_Point_Cloud<Metric>*> slice(q_count);
+        for (size_t i = 0; i < q_count; ++i) slice[i] = A[q_start + i];
+        FusedQueryBatch<Metric> fq;
+        fq.Build(slice);
+        std::vector<float> emb_min_dists(fq.total_embeddings);
+        for (size_t c = 0; c < num_db_clouds; ++c) {
+          const size_t cs = B.cloud_sizes[c];
+          if (cs == 0) continue;
+          score_one_db_cloud<Metric>(fq, B, c, emb_min_dists.data());
+          for (size_t i = 0; i < q_count; ++i) {
+            const size_t e_start = fq.emb_offsets[i];
+            const size_t e_count = fq.emb_offsets[i + 1] - e_start;
+            if (e_count == 0) continue;
+            float dist_sum = 0.0f;
+            for (size_t e = 0; e < e_count; ++e) dist_sum += emb_min_dists[e_start + e];
+            const float chamfer_dist = dist_sum / static_cast<float>(e_count);
+            if (heaps[i].size() < k) {
+              heaps[i].push({chamfer_dist, B.get_id(c)});
+            } else if (chamfer_dist < heaps[i].top().first) {
+              heaps[i].pop();
+              heaps[i].push({chamfer_dist, B.get_id(c)});
+            }
+          }
+        }
+        for (size_t i = 0; i < q_count; ++i) {
+          const size_t cnt = heaps[i].size();
+          const size_t global_idx = q_start + i;
+          for (size_t ki = 0; ki < cnt; ++ki) {
+            results[global_idx * k + (cnt - 1 - ki)] = {heaps[i].top().second,
+                                                          heaps[i].top().first};
+            heaps[i].pop();
+          }
+          for (size_t ki = cnt; ki < k; ++ki) {
+            results[global_idx * k + ki] = {UINT32_MAX, std::numeric_limits<float>::max()};
+          }
+        }
+      };
+      if (parallel_query_blocks) {
+        parlay::blocked_for(0, num_q_clouds, q_block,
+                            [&](size_t /*block_idx*/, size_t q_start, size_t q_end) {
+                              process_query_range_heap(q_start, q_end);
+                            });
+      } else {
+        for (size_t q_start = 0; q_start < num_q_clouds; q_start += q_block) {
+          const size_t q_end = std::min(q_start + q_block, num_q_clouds);
+          process_query_range_heap(q_start, q_end);
+        }
+      }
+      return;
+    }
+
     auto process_query_range = [&](size_t q_start, size_t q_end) {
       const size_t q_count = q_end - q_start;
       if (q_count == 0) return;
 
-      std::vector<std::priority_queue<std::pair<float, uint32_t>>> heaps(q_count);
+      // Stack-allocated bucket array: k <= kMaxBucketK and q_block is
+      // typically tiny (4 on the fiqa call site). Heap-free hot path.
+      std::vector<internal::BoundedTopKBucket> buckets(q_count);
+      for (size_t i = 0; i < q_count; ++i) buckets[i].init(k);
 
       std::vector<const Quantized_Query_Point_Cloud<Metric>*> slice(q_count);
       for (size_t i = 0; i < q_count; ++i) slice[i] = A[q_start + i];
@@ -1008,35 +1340,27 @@ class ManyToMany {
         if (cs == 0) continue;
 
         score_one_db_cloud<Metric>(fq, B, c, emb_min_dists.data());
+        const uint32_t cid = B.get_id(c);
 
         for (size_t i = 0; i < q_count; ++i) {
           const size_t e_start = fq.emb_offsets[i];
           const size_t e_count = fq.emb_offsets[i + 1] - e_start;
           if (e_count == 0) continue;
+#ifdef __AVX512F__
+          const float dist_sum =
+              internal::reduce_sum_ps_n(emb_min_dists.data() + e_start, e_count);
+#else
           float dist_sum = 0.0f;
           for (size_t e = 0; e < e_count; ++e) dist_sum += emb_min_dists[e_start + e];
+#endif
           const float chamfer_dist = dist_sum / static_cast<float>(e_count);
-
-          if (heaps[i].size() < k) {
-            heaps[i].push({chamfer_dist, B.get_id(c)});
-          } else if (chamfer_dist < heaps[i].top().first) {
-            heaps[i].pop();
-            heaps[i].push({chamfer_dist, B.get_id(c)});
-          }
+          buckets[i].try_insert(chamfer_dist, cid);
         }
       }
 
       for (size_t i = 0; i < q_count; ++i) {
-        const size_t cnt = heaps[i].size();
         const size_t global_idx = q_start + i;
-        for (size_t ki = 0; ki < cnt; ++ki) {
-          results[global_idx * k + (cnt - 1 - ki)] = {heaps[i].top().second,
-                                                        heaps[i].top().first};
-          heaps[i].pop();
-        }
-        for (size_t ki = cnt; ki < k; ++ki) {
-          results[global_idx * k + ki] = {UINT32_MAX, std::numeric_limits<float>::max()};
-        }
+        buckets[i].finalize_sorted(results + global_idx * k);
       }
     };
 
