@@ -32,6 +32,18 @@ cc_library(
 )
 
 cc_library(
+    name = "query_compression",
+    hdrs = ["query_compression.h"],
+    deps = [
+        ":index_params",
+        ":search_params",
+        "//mvsic/core/types:point_cloud_set",
+        "@eigen",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
     name = "index_params",
     hdrs = ["index_params.h"],
     deps = [
@@ -50,6 +62,22 @@ cc_library(
     deps = [
         ":search_params",
         "//mvsic/core/utils:csvfile",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_library(
+    name = "bench_utils",
+    hdrs = ["bench_utils.h"],
+    deps = [
+        ":query_compression",
+        ":search_params",
+        ":stats",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+        "//mvsic/core/utils:parse_command_line",
+        "@eigen",
         "@parlaylib//parlay:primitives",
     ],
 )

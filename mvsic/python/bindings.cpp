@@ -177,7 +177,7 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
                   py::arg("rabitq_bits") = 4);
 
-  py::class_<mvsic::SearchParams>(m, "SearchParams")
+  auto sp = py::class_<mvsic::SearchParams>(m, "SearchParams")
       .def(py::init([]() { return mvsic::SearchParams(); }))
       .def_readwrite("method", &mvsic::SearchParams::method)
       .def_readwrite("k", &mvsic::SearchParams::k)
@@ -186,6 +186,9 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("L", &mvsic::SearchParams::L)
       .def_readwrite("cut", &mvsic::SearchParams::cut)
       .def_readwrite("norerank", &mvsic::SearchParams::norerank)
+      .def_readwrite("query_compression", &mvsic::SearchParams::query_compression)
+      .def_readwrite("query_compression_threshold", &mvsic::SearchParams::query_compression_threshold)
+      .def_readwrite("compress_rerank", &mvsic::SearchParams::compress_rerank)
       .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
                   py::arg("num_rerank") = 0)
       .def_static("mvivf_spill", &mvsic::SearchParams::mvivf_spill, py::arg("k"),
@@ -202,6 +205,12 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("num_rerank"), py::arg("norerank") = false)
       .def_static("svh_graph", &mvsic::SearchParams::svh_graph, py::arg("k"), py::arg("L"),
                   py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false);
+
+  py::enum_<mvsic::SearchParams::QueryCompression>(sp, "QueryCompression")
+      .value("NONE", mvsic::SearchParams::QueryCompression::None)
+      .value("CARVE", mvsic::SearchParams::QueryCompression::Carve)
+      .value("WARDS", mvsic::SearchParams::QueryCompression::Wards)
+      .export_values();
 
   //======================================
   // Point Cloud and Point Types

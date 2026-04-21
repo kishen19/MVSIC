@@ -22,6 +22,17 @@ struct SearchParams {
   // muvera, mpool, vamana
   bool norerank = false;
 
+  // Query point cloud compression before search.
+  // Carve: greedy ball-carving clustering (MUVERA paper).
+  //   IP metric: merge if <q_i, q_j> >= threshold (default 0.7). Centroids = sum.
+  //   L2 metric: merge if ||q_i - q_j||^2 <= threshold. Centroids = mean.
+  // Wards: agglomerative clustering with Ward linkage criterion.
+  //   merge while Ward distance <= threshold. Centroids = weighted mean.
+  enum class QueryCompression : uint8_t { None = 0, Carve = 1, Wards = 2 };
+  QueryCompression query_compression = QueryCompression::None;
+  float query_compression_threshold = 0.7f;
+  bool compress_rerank = false;  // If true, use compressed query for reranking too
+
   // mvivf search params
   static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0) {
     SearchParams params;

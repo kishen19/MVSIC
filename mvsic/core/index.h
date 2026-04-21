@@ -3,6 +3,8 @@
 #include <vector>
 #include <tuple>
 #include <variant>
+#include <cstdint>
+#include <type_traits>
 #include "parlay/primitives.h"
 
 // Data Types and Kernels
@@ -88,12 +90,11 @@ struct MVQuantTypes {
   using PQTQ_Model = pqtq_mv::Model<metric>;
   using OBTQ_Model = turboquant_1bit_mv::Model<metric>;
   // Unified Objects
-  using QuantSet =
-      std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set, PQTQ_Set, OBTQ_Set>;
-  using QuantQuery = std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query,
-                                   PQTQ_Query, OBTQ_Query>;
-  using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model,
-                                   PQTQ_Model, OBTQ_Model>;
+  using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set, PQTQ_Set, OBTQ_Set>;
+  using QuantQuery =
+      std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query, PQTQ_Query, OBTQ_Query>;
+  using QuantModel =
+      std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model, PQTQ_Model, OBTQ_Model>;
 };
 
 // Base Index Class

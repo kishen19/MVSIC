@@ -7,6 +7,7 @@ cc_library(
     hdrs = ["mpool.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core:query_compression",
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",

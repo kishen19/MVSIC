@@ -6,6 +6,7 @@
 #include <iostream>
 
 #include "mvsic/core/index.h"
+#include "mvsic/core/query_compression.h"
 #include "mvsic/core/types/io.h"
 #include "mvsic/core/utils/util.h"
 
@@ -131,35 +132,44 @@ class IndexSVHGraph : public Index<metric> {
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
                     const SearchParams& search_params) override {
     parlay::internal::timer t;
-    std::vector<double> timings;  // [time_graph_search, time_aggregation, time_rerank]
+    std::vector<double> timings;
 
     size_t k = search_params.k;
     size_t num_rerank = search_params.num_rerank;
-    size_t q_size = query.size();  // Number of vectors in query point cloud
+
+    // Step 0: Compress query point cloud (optional)
+    t.start();
+    CompressedPointCloud<ChPoint> compressed_storage;
+    ChPoint effective_query = query;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      compressed_storage = compress_query<ChPoint>(
+          query, search_params.query_compression,
+          search_params.query_compression_threshold);
+      effective_query = compressed_storage.view();
+    }
+    timings.push_back(t.stop());  // t_compress
+    t.reset();
+
+    size_t q_size = effective_query.size();
 
     // Step 1: Search each query vector independently in the Graph
     t.start();
 
-    // Every query vector fetches num_rerank neighbors to ensure high recall for aggregation
     auto all_candidates =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q_size * num_rerank);
     auto dist_cmps_seq = parlay::sequence<size_t>::uninitialized(q_size);
     auto bytes_accessed_seq = parlay::sequence<size_t>::uninitialized(q_size);
 
-    // Use graph cardinality for max_visited. In quantized load paths we may not
-    // materialize flattened_points, but G is always present.
     auto QP = parlayANN::QueryParams(num_rerank, search_params.L, search_params.cut, G.size(),
                                      params.ann.R);
 
     parlay::parallel_for(0, q_size, [&](size_t i) {
-      // Create parlayANN Point view of i-th query vector
       typename Point::parameters p_params(d);
-      Point query_vec_p(reinterpret_cast<typename Point::byte*>(query[i].data()), -1, p_params);
+      Point query_vec_p(reinterpret_cast<typename Point::byte*>(effective_query[i].data()), -1,
+                        p_params);
 
-      // Quantize query vector
       QuantQuery q_query_var = this->template quantize_query_point<SVQT>(query_vec_p, quantizer);
 
-      // Navigate Graph
       parlay::sequence<std::pair<uint32_t, float>> visited;
       size_t comps;
       size_t bytes;
@@ -169,13 +179,11 @@ class IndexSVHGraph : public Index<metric> {
       dist_cmps_seq[i] = comps;
       bytes_accessed_seq[i] = bytes;
 
-      // Fill candidates: Map global vector ID -> Cloud ID
       size_t count = std::min(num_rerank, visited.size());
       for (size_t j = 0; j < count; ++j) {
         uint32_t cloud_id = vector_to_id[visited[j].first].first;
         all_candidates[i * num_rerank + j] = {cloud_id, visited[j].second};
       }
-      // Pad remainder with max dist
       for (size_t j = count; j < num_rerank; ++j) {
         all_candidates[i * num_rerank + j] = {UINT32_MAX, std::numeric_limits<float>::max()};
       }
@@ -183,19 +191,17 @@ class IndexSVHGraph : public Index<metric> {
 
     size_t total_dist_cmps = parlay::reduce(dist_cmps_seq);
     size_t total_bytes_accessed = parlay::reduce(bytes_accessed_seq);
-    timings.push_back(t.stop());
+    timings.push_back(t.stop());  // t_graph_search
     t.reset();
 
     // Step 2: Aggregate across query vectors and Deduplicate Cloud IDs
     t.start();
-    // Sort all candidates globally by distance
     parlay::sort_inplace(all_candidates,
                          [](const auto& a, const auto& b) { return a.second < b.second; });
 
     parlay::sequence<std::pair<uint32_t, float>> unique_clouds;
     unique_clouds.reserve(num_rerank);
 
-    // Hash filter for fast dedup
     int bits = std::max<int>(10, std::ceil(std::log2(num_rerank)) - 2);
     std::vector<uint32_t> hash_filter(1 << bits, -1);
     auto is_duplicate = [&](uint32_t id) -> bool {
@@ -214,23 +220,24 @@ class IndexSVHGraph : public Index<metric> {
         cloud_count++;
       }
     }
-    timings.push_back(t.stop());
+    timings.push_back(t.stop());  // t_aggregate
     t.reset();
 
     // Step 3: Final Re-ranking with exact Chamfer Distance
     t.start();
+    const ChPoint& rerank_query = search_params.compress_rerank ? effective_query : query;
     auto final_results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
         std::min(k, unique_clouds.size()));
     if (!search_params.norerank && !unique_clouds.empty()) {
       size_t actual_rerank_count = std::min(num_rerank, unique_clouds.size());
       total_bytes_accessed +=
-          this->rerank(query, points, unique_clouds, actual_rerank_count, final_results);
+          this->rerank(rerank_query, points, unique_clouds, actual_rerank_count, final_results);
       total_dist_cmps += actual_rerank_count;
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = unique_clouds[i]; });
     }
-    timings.push_back(t.stop());
+    timings.push_back(t.stop());  // t_rerank
 
     std::vector<double> stats;
     stats.reserve(timings.size() + 1);

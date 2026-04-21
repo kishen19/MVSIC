@@ -13,6 +13,23 @@
 
 using namespace mvsic;
 
+static void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P) {
+  std::string qc = P.getOptionValue("-query_compress", "none");
+  if (qc == "none" || qc == "off" || qc == "0") {
+    sp.query_compression = SearchParams::QueryCompression::None;
+  } else if (qc == "ball" || qc == "ballcarving" || qc == "muvera") {
+    sp.query_compression = SearchParams::QueryCompression::Carve;
+  } else if (qc == "wards" || qc == "ward") {
+    sp.query_compression = SearchParams::QueryCompression::Wards;
+  } else {
+    std::cerr << "Unknown -query_compress: " << qc << " (none, ball, wards)" << std::endl;
+    std::exit(1);
+  }
+  sp.query_compression_threshold =
+      static_cast<float>(P.getOptionDoubleValue("-query_compress_threshold", 0.7));
+  sp.compress_rerank = P.getOption("-compress_rerank");
+}
+
 template<typename ChPoint, bool metric>
 void run_benchmark(mvsic::commandLine& P) {
   Eigen::setNbThreads(1);
@@ -31,7 +48,8 @@ void run_benchmark(mvsic::commandLine& P) {
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
   if (inFile.empty() || qFile.empty() || indexFile.empty()) {
-    std::cerr << "Usage: -i <inFile> -q <qFile> -index <indexFile> [-gt <gtFile>] [-mode old|new|both]"
+    std::cerr << "Usage: -i <inFile> -q <qFile> -index <indexFile> [-gt <gtFile>] [-mode old|new|both] "
+                 "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] [-compress_rerank]"
               << std::endl;
     exit(1);
   }
@@ -62,6 +80,15 @@ void run_benchmark(mvsic::commandLine& P) {
   index.load(indexFile, points);
 
   SearchParams search_params = SearchParams::mvivf(k, nprobes, num_rerank);
+  apply_query_compression_opts(search_params, P);
+  if (search_params.query_compression != SearchParams::QueryCompression::None) {
+    const char* mname = (search_params.query_compression == SearchParams::QueryCompression::Carve)
+                            ? "ball"
+                            : "wards";
+    std::cout << "Query compression: " << mname
+              << " tau=" << search_params.query_compression_threshold
+              << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
+  }
 
   bool run_old = (mode == "both" || mode == "old");
   bool run_new = (mode == "both" || mode == "new");
@@ -123,7 +150,9 @@ void run_benchmark(mvsic::commandLine& P) {
 
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
-                       "[-i <inFile>] [-q <qFile>] [-index <indexFile>] [-dist_func <dist_func>]");
+                       "[-i <inFile>] [-q <qFile>] [-index <indexFile>] [-dist_func IP|L2] "
+                       "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
+                       "[-compress_rerank]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {

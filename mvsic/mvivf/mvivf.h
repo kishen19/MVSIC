@@ -12,6 +12,7 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
+#include "mvsic/core/query_compression.h"
 #include "mvsic/core/utils/util.h"
 
 namespace mvsic {
@@ -434,19 +435,36 @@ class IndexMVIVF : public Index<metric> {
 
     std::vector<double> stats;
     size_t dist_cmps = 0;
+    double t_compress = 0.0;
     double t_quantize = 0.0;
     double t_distances = 0.0;
     double t_rest = 0.0;
     double t_rerank = 0.0;
 
     // -------------------------
+    // Step -1: Compress query point cloud (optional)
+    // -------------------------
+    t.start();
+    CompressedPointCloud<ChPoint> compressed_storage;
+    ChPoint effective_query = query;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      uint32_t ba = qc_internal::batch_alignment(quantization_mode);
+      compressed_storage = compress_query<ChPoint>(
+          query, search_params.query_compression,
+          search_params.query_compression_threshold, ba);
+      effective_query = compressed_storage.view();
+    }
+    t_compress = t.stop();
+    t.reset();
+
+    // -------------------------
     // Step 0: Quantize Query
     // -------------------------
-    QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
+    QuantQuery q_query_var = this->quantize_query_point_cloud(effective_query, quantizer);
     TQ_Query q_center_query;
     t.start();
     if (params.quantize_centers) {
-      q_center_query = center_quantizer.quantize_query(query);
+      q_center_query = center_quantizer.quantize_query(effective_query);
     }
     t_quantize = t.stop();
     t.reset();
@@ -460,9 +478,9 @@ class IndexMVIVF : public Index<metric> {
     bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
     t.start();
     if (use_flat) {
-      gs = flat_leaf_search(query, q_center_query, nprobes);
+      gs = flat_leaf_search(effective_query, q_center_query, nprobes);
     } else {
-      gs = greedy_search(query, q_center_query, nprobes);
+      gs = greedy_search(effective_query, q_center_query, nprobes);
     }
     double t_greedy = t.stop();
     t.reset();
@@ -478,7 +496,8 @@ class IndexMVIVF : public Index<metric> {
     t.start();
     parlay::sequence<std::pair<uint32_t, float>> visited;
     size_t bytes_accessed_pp;
-    std::tie(visited, bytes_accessed_pp) = process_probes(query, q_query_var, probe_list);
+    std::tie(visited, bytes_accessed_pp) =
+        process_probes(effective_query, q_query_var, probe_list);
     bytes_accessed += bytes_accessed_pp;
     dist_cmps += visited.size();
     t_distances = t.stop();
@@ -491,12 +510,14 @@ class IndexMVIVF : public Index<metric> {
     // -------------------------
     // Step 3: Re-ranking
     // -------------------------
+    // Use the original query for reranking unless compress_rerank is set.
+    const ChPoint& rerank_query = search_params.compress_rerank ? effective_query : query;
     t.start();
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
+      bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -511,6 +532,7 @@ class IndexMVIVF : public Index<metric> {
       stats.push_back(gs.stats[i]);
     }
     // Stats from probing and reranking
+    stats.push_back(t_compress);
     stats.push_back(t_quantize);
     stats.push_back(t_distances);
     stats.push_back(t_rest);
@@ -1107,13 +1129,31 @@ class IndexMVIVF : public Index<metric> {
     size_t dist_cmps = 0;
 
     // ---------------------------------------------------------------------
+    // Step -1: Compress Queries (optional)
+    // ---------------------------------------------------------------------
+    PointCloudSet<ChPoint> compressed_queries_storage;
+    const PointCloudSet<ChPoint>* eff_queries_ptr = &query_points;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      t.start();
+      uint32_t ba = qc_internal::batch_alignment(quantization_mode);
+      compressed_queries_storage = compress_point_cloud_set<ChPoint>(
+          query_points, search_params.query_compression,
+          search_params.query_compression_threshold, ba);
+      eff_queries_ptr = &compressed_queries_storage;
+      t.stop();
+      std::cout << "[MVIVF] Query Compression: " << t.total_time() << " sec" << std::endl;
+      t.reset();
+    }
+    const auto& eff_queries = *eff_queries_ptr;
+
+    // ---------------------------------------------------------------------
     // Step 0: Pre-Quantize Queries
     // ---------------------------------------------------------------------
     t.start();
     auto q_queries = parlay::sequence<QuantQuery>(num_q);
     if (quantization_mode != QT::None) {
       parlay::parallel_for(0, num_q, [&](size_t i) {
-        q_queries[i] = this->quantize_query_point_cloud(query_points[i], quantizer);
+        q_queries[i] = this->quantize_query_point_cloud(eff_queries[i], quantizer);
       });
     }
     t.stop();
@@ -1133,15 +1173,15 @@ class IndexMVIVF : public Index<metric> {
     parlay::parallel_for(0, num_q, [&](uint32_t i) {
       TQ_Query q_center_query;
       if (params.quantize_centers) {
-        q_center_query = center_quantizer.quantize_query(query_points[i]);
+        q_center_query = center_quantizer.quantize_query(eff_queries[i]);
       }
       const double alpha = 1.0;  // heuristic threshold: TODO: set this
       bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
       GreedySearchResult gs;
       if (use_flat) {
-        gs = flat_leaf_search(query_points[i], q_center_query, nprobes);
+        gs = flat_leaf_search(eff_queries[i], q_center_query, nprobes);
       } else {
-        gs = greedy_search(query_points[i], q_center_query, nprobes);
+        gs = greedy_search(eff_queries[i], q_center_query, nprobes);
       }
       auto& probe_list = gs.probe_list;
       dist_cmps_gs[i] = static_cast<size_t>(gs.stats[0]);
@@ -1272,7 +1312,7 @@ class IndexMVIVF : public Index<metric> {
         case QT::None: {
           auto query_ids = parlay::delayed_tabulate(
               num_queries_in_group, [&](size_t j) { return group[j].second.first; });
-          PointCloudSet<ChPoint> batched_queries(query_points.filter(query_ids), d);
+          PointCloudSet<ChPoint> batched_queries(eff_queries.filter(query_ids), d);
           auto leaf_results = leaf->data.distances(batched_queries, num_rerank);
           parlay::parallel_for(0, num_queries_in_group, [&](size_t j) {
             uint32_t q_id = group[j].second.first;
@@ -1292,6 +1332,9 @@ class IndexMVIVF : public Index<metric> {
     // ---------------------------------------------------------------------
     // Step 4: Aggregation and Re-ranking
     // ---------------------------------------------------------------------
+    // Use original queries for reranking unless compress_rerank is set.
+    const auto& rerank_queries =
+        search_params.compress_rerank ? eff_queries : query_points;
     t.start();
     auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
     auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
@@ -1329,7 +1372,7 @@ class IndexMVIVF : public Index<metric> {
       if (search_params.num_rerank > 0) {
         size_t actual_rerank = std::min(num_rerank, top_cands.size());
         bytes_accessed_rerank[q_id] =
-            this->rerank(query_points[q_id], points, top_cands, actual_rerank, q_final);
+            this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
       } else {
         for (size_t c = 0; c < q_final.size(); ++c) {
           q_final[c] = top_cands[c];

@@ -4,6 +4,6 @@ refresh_compile_commands(
     name = "refresh_compile_commands",
     # This disables header-parsing analysis during generation, preventing the AssertionError
     targets = {
-        "//...": "--features=-parse_headers",
+        "//mvsic/...": "--features=-parse_headers",
     },
 )

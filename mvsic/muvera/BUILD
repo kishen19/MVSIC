@@ -7,6 +7,7 @@ cc_library(
     hdrs = ["muvera.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core:query_compression",
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
@@ -34,5 +35,51 @@ cc_binary(
         "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/utils:parse_command_line",
         "@eigen",
+    ],
+)
+
+cc_binary(
+    name = "quick_bench",
+    srcs = ["quick_bench.cpp"],
+    deps = [
+        ":muvera",
+        "//mvsic/core:bench_utils",
+    ],
+)
+
+cc_binary(
+    name = "bench_build",
+    srcs = ["bench_build.cpp"],
+    deps = [
+        ":muvera",
+        "//mvsic/core:bench_utils",
+    ],
+)
+
+cc_binary(
+    name = "bench_search",
+    srcs = ["bench_search.cpp"],
+    deps = [
+        ":muvera",
+        "//mvsic/core:bench_utils",
+    ],
+)
+
+cc_binary(
+    name = "bench_search_all",
+    srcs = ["bench_search_all.cpp"],
+    deps = [
+        ":muvera",
+        "//mvsic/core:bench_utils",
+    ],
+)
+
+cc_binary(
+    name = "bench_search_seq",
+    srcs = ["bench_search_seq.cpp"],
+    defines = ["PARLAY_SEQUENTIAL"],
+    deps = [
+        ":muvera",
+        "//mvsic/core:bench_utils",
     ],
 )

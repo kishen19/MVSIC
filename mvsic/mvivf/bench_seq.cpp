@@ -17,12 +17,31 @@
 
 using namespace mvsic;
 
+static void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P) {
+  std::string qc = P.getOptionValue("-query_compress", "none");
+  if (qc == "none" || qc == "off" || qc == "0") {
+    sp.query_compression = SearchParams::QueryCompression::None;
+  } else if (qc == "ball" || qc == "ballcarving" || qc == "muvera") {
+    sp.query_compression = SearchParams::QueryCompression::Carve;
+  } else if (qc == "wards" || qc == "ward") {
+    sp.query_compression = SearchParams::QueryCompression::Wards;
+  } else {
+    std::cerr << "Unknown -query_compress: " << qc << " (none, ball, wards)" << std::endl;
+    std::exit(1);
+  }
+  sp.query_compression_threshold =
+      static_cast<float>(P.getOptionDoubleValue("-query_compress_threshold", 0.7));
+  sp.compress_rerank = P.getOption("-compress_rerank");
+}
+
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
                        "[-i <points>] [-q <queries>] [-gt <gt>] [-index <index>] "
                        "[-max_leaf_size N] [-k_per_level N] [-quant_method TQ|FS|PQ|RQ|SPQTQ|None] "
                        "[-qc] [-m N] [-num_clusters_per_block N] [-num_points_per_cluster N] "
-                       "[-rbits N] [-k N] [-nprobes N] [-num_rerank N]");
+                       "[-rbits N] [-k N] [-nprobes N] [-num_rerank N] "
+                       "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
+                       "[-compress_rerank]");
 
   Eigen::setNbThreads(1);
   using ChPoint = ChamferIP_Point;
@@ -136,6 +155,14 @@ int main(int argc, char* argv[]) {
   const size_t reps = 3;
   for (size_t nprobes : nprobes_list) {
     SearchParams search_params = SearchParams::mvivf(k, nprobes, num_rerank);
+    apply_query_compression_opts(search_params, P);
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      const char* mname = (search_params.query_compression == SearchParams::QueryCompression::Carve)
+                              ? "ball"
+                              : "wards";
+      std::cout << "query_compress=" << mname << " tau=" << search_params.query_compression_threshold
+                << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
+    }
     std::cout << "\n=== nprobes=" << nprobes << " ===" << std::endl;
 
     parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> pred(queries.size());
@@ -147,6 +174,7 @@ int main(int argc, char* argv[]) {
     }
 
     double best_time = 1e15;
+    double tot_t_compress = 0.0;
     double tot_t_greedy = 0.0;
     double tot_t_distances = 0.0;
     double tot_t_quantize = 0.0;
@@ -158,8 +186,8 @@ int main(int argc, char* argv[]) {
       for (size_t j = 0; j < queries.size(); j++) {
         if (it == 0) {
           // Use search_with_stats once to capture pointcloud cmps; stats[0]+stats[1].
-          // Stats layout: [0]=greedy_cmps, [1]=probe_cmps, [2..n-5]=greedy extras,
-          // then trailing: t_quantize, t_distances, t_rest, t_rerank, t_greedy.
+          // Trailing timings (last 6): t_compress, t_quantize, t_distances, t_rest,
+          // t_rerank, t_greedy (see IndexMVIVF::search_with_stats).
           t.start();
           auto [p, b, stats] = index.search_with_stats(queries[j], points, search_params);
           t.stop();
@@ -168,6 +196,12 @@ int main(int argc, char* argv[]) {
           pred[j] = p;
           cmps[j] = static_cast<size_t>(stats[0]) + static_cast<size_t>(stats[1]);
           size_t n = stats.size();
+          if (n < 6) {
+            std::cerr << "search_with_stats: expected at least 6 trailing timings, got n=" << n
+                      << std::endl;
+            std::exit(1);
+          }
+          tot_t_compress  += stats[n - 6];
           tot_t_quantize  += stats[n - 5];
           tot_t_distances += stats[n - 4];
           tot_t_rest      += stats[n - 3];
@@ -201,6 +235,7 @@ int main(int argc, char* argv[]) {
               << "Recall " << k << "@" << k << ":           " << recall_k_k << std::endl
               << "t_hierarchy (greedy): " << tot_t_greedy << " s" << std::endl
               << "t_leaves (distances): " << tot_t_distances << " s" << std::endl
+              << "t_compress:           " << tot_t_compress << " s" << std::endl
               << "t_quantize:           " << tot_t_quantize << " s" << std::endl
               << "t_rerank:             " << tot_t_rerank << " s" << std::endl
               << "t_rest:               " << tot_t_rest << " s" << std::endl

@@ -303,6 +303,9 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
         print(f"\n--- Processing dataset: {dataset_config['name']} ---", flush=True)
 
         base_results_dir = dataset_config.get('results', os.path.join('results', experiment_name))
+        # Index .bin files can go to a separate directory (not synced from cloud).
+        # If 'index_dir' is not specified, indices are stored alongside results.
+        base_index_dir = dataset_config.get('index_dir', base_results_dir)
 
         for index_details in config['indices']:
             index_name = index_details['name']
@@ -322,8 +325,12 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                     index_class_name = f"Index{method_info['class']}IP"
                     index_class = getattr(mvsic, index_class_name)
 
-                index_dir = os.path.join(base_results_dir, index_name, build_name)
-                os.makedirs(index_dir, exist_ok=True)
+                # results_dir: CSVs, build_stats.json, index_params.json (small, synced)
+                # index_store_dir: index .bin files (large, not synced)
+                results_dir = os.path.join(base_results_dir, index_name, build_name)
+                index_store_dir = os.path.join(base_index_dir, index_name, build_name)
+                os.makedirs(results_dir, exist_ok=True)
+                os.makedirs(index_store_dir, exist_ok=True)
 
                 # Use a hash of fully materialized IndexParams (includes defaults) for stable naming.
                 # fastplaid uses its own wrapper params.
@@ -335,12 +342,12 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                     build_params = build_params_func(**build_params_dict)
                     index_params_dict = index_params_to_dict(build_params)
                     params_hash = get_params_hash(index_params_dict)
-                    index_params_path = os.path.join(index_dir, "index_params.json")
+                    index_params_path = os.path.join(results_dir, "index_params.json")
                     with open(index_params_path, "w") as f:
                         json.dump(index_params_dict, f, indent=2, sort_keys=True)
 
                 index_filename = f"index_{params_hash}.bin"
-                index_path = os.path.join(index_dir, index_filename)
+                index_path = os.path.join(index_store_dir, index_filename)
 
                 # --- Build Task ---
                 if 'build' in tasks:
@@ -389,7 +396,7 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                             if index_name == 'mvivf':
                                 build_stats['kmeans_tree_height'] = index.get_height()
                                 build_stats.update(mvsic.get_mvivf_tree_stats(index))
-                            stats_path = os.path.join(index_dir, 'build_stats.json')
+                            stats_path = os.path.join(results_dir, 'build_stats.json')
                             with open(stats_path, 'w') as f:
                                 json.dump(build_stats, f, indent=2)
                             print(
@@ -454,13 +461,13 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
                                 flush=True,
                             )
 
-                            results_dir = os.path.join(index_dir, search_name)
-                            os.makedirs(results_dir, exist_ok=True)
+                            search_results_dir = os.path.join(results_dir, search_name)
+                            os.makedirs(search_results_dir, exist_ok=True)
                             if num_threads:
-                                results_filename = f"seq_{variant_name}_results.csv" if variant_name else "seq_results.csv"
+                                results_filename = f"latency_{variant_name}_results.csv" if variant_name else "latency_results.csv"
                             else:
                                 results_filename = f"{variant_name}_results.csv" if variant_name else "results.csv"
-                            results_path = os.path.join(results_dir, results_filename)
+                            results_path = os.path.join(search_results_dir, results_filename)
 
                             append_results = search_config.get('append', True)
                             if os.path.exists(results_path) and not append_results:
@@ -609,8 +616,13 @@ def main():
     parser.add_argument(
         "--task",
         type=str,
-        choices=["build", "search"],
-        help="The task to perform. If not specified, runs build and search.",
+        choices=["build", "search", "latency"],
+        help=(
+            "The task to perform. If not specified, runs build and search. "
+            "'latency' runs the search flow with single-threaded per-query timing "
+            "(compute_stats_extended_p_threaded, num_threads=1) and writes results "
+            "with a 'latency_' CSV prefix."
+        ),
     )
 
     # Args for build/search
@@ -635,13 +647,19 @@ def main():
     experiment_name = os.path.splitext(os.path.basename(args.config))[0]
 
     tasks_to_run = []
+    num_threads = args.num_threads
     if args.task is None:
         tasks_to_run = ["build", "search"]
+    elif args.task == "latency":
+        # Latency is the search flow forced to single-threaded per-query timing.
+        tasks_to_run = ["search"]
+        if num_threads is None:
+            num_threads = 1
     else:
         tasks_to_run = [args.task]
 
     if tasks_to_run:
-        run(config, methods, experiment_name, tasks_to_run, args.num_threads)
+        run(config, methods, experiment_name, tasks_to_run, num_threads)
 
 
 if __name__ == "__main__":

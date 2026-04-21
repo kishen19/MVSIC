@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "mvsic/core/index.h"
+#include "mvsic/core/query_compression.h"
 #include "mvsic/core/utils/util.h"
 #include "mvsic/core/utils/kmeans_util.h"
 #include "mvsic/core/types/point_range.h"
@@ -439,8 +440,23 @@ class IndexSVHIVF : public Index<metric> {
     size_t num_rerank = search_params.num_rerank;
     size_t dist_cmps = 0;
     size_t bytes_accessed = 0;
-    size_t q = query.size();
-    // Step 1: Search each query independently to obtain candidates
+
+    // Step 0: Compress query point cloud (optional)
+    t.start();
+    CompressedPointCloud<ChPoint> compressed_storage;
+    ChPoint effective_query = query;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      compressed_storage = compress_query<ChPoint>(
+          query, search_params.query_compression,
+          search_params.query_compression_threshold);
+      effective_query = compressed_storage.view();
+    }
+    timings.push_back(t.stop());  // t_compress (index 0 of timings)
+    t.reset();
+
+    size_t q = effective_query.size();
+
+    // Step 1: Search each query vector independently
     t.start();
     auto results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q * num_rerank);
     auto in_dist_cmps = parlay::sequence<size_t>::uninitialized(q);
@@ -448,11 +464,11 @@ class IndexSVHIVF : public Index<metric> {
     auto timings_each = parlay::sequence<std::vector<double>>(q);
     parlay::parallel_for(0, q, [&](size_t i) {
       std::tie(in_dist_cmps[i], in_bytes_accessed[i], timings_each[i]) =
-          search_each(query[i], nprobes, num_rerank, &results[i * num_rerank]);
+          search_each(effective_query[i], nprobes, num_rerank, &results[i * num_rerank]);
     });
     dist_cmps += parlay::reduce(in_dist_cmps);
     bytes_accessed += parlay::reduce(in_bytes_accessed);
-    timings.push_back(t.stop());
+    timings.push_back(t.stop());  // t_search_each_total
     t.reset();
 
     // Step 2: Dedup
@@ -477,22 +493,23 @@ class IndexSVHIVF : public Index<metric> {
         count++;
       }
     }
-    timings.push_back(t.stop());
+    timings.push_back(t.stop());  // t_merge_dedup
     t.reset();
 
     // Step 3: Re-ranking
     t.start();
+    const ChPoint& rerank_query = search_params.compress_rerank ? effective_query : query;
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
-      size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
-      dist_cmps += num_rerank;
+      size_t nr = std::min(search_params.num_rerank, visited.size());
+      bytes_accessed += this->rerank(rerank_query, points, visited, nr, final_results);
+      dist_cmps += nr;
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    timings.push_back(t.stop());
+    timings.push_back(t.stop());  // t_rerank
     t.reset();
 
     std::vector<double> stats;
@@ -500,13 +517,15 @@ class IndexSVHIVF : public Index<metric> {
     stats.push_back(static_cast<double>(dist_cmps));
     stats.insert(stats.end(), timings.begin(), timings.end());
 
-    size_t cur = stats.size();
-    for (size_t i = 0; i < timings_each[0].size(); i++) {
-      stats.push_back(0.0);
-    }
-    for (auto& v : timings_each) {
-      for (size_t i = 0; i < v.size(); i++) {
-        stats[cur + i] += v[i];
+    if (!timings_each.empty() && !timings_each[0].empty()) {
+      size_t cur = stats.size();
+      for (size_t i = 0; i < timings_each[0].size(); i++) {
+        stats.push_back(0.0);
+      }
+      for (auto& v : timings_each) {
+        for (size_t i = 0; i < v.size(); i++) {
+          stats[cur + i] += v[i];
+        }
       }
     }
     return std::make_tuple(final_results, bytes_accessed, stats);

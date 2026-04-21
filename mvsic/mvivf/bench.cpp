@@ -11,6 +11,24 @@
 
 using namespace mvsic;
 
+// Parse -query_compress {none,ball,wards}, -query_compress_threshold, -compress_rerank
+inline void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P) {
+  std::string qc = P.getOptionValue("-query_compress", "none");
+  if (qc == "none" || qc == "off" || qc == "0") {
+    sp.query_compression = SearchParams::QueryCompression::None;
+  } else if (qc == "ball" || qc == "ballcarving" || qc == "muvera") {
+    sp.query_compression = SearchParams::QueryCompression::Carve;
+  } else if (qc == "wards" || qc == "ward") {
+    sp.query_compression = SearchParams::QueryCompression::Wards;
+  } else {
+    std::cerr << "Unknown -query_compress value: " << qc << " (use none, ball, wards)" << std::endl;
+    std::exit(1);
+  }
+  sp.query_compression_threshold =
+      static_cast<float>(P.getOptionDoubleValue("-query_compress_threshold", 0.7));
+  sp.compress_rerank = P.getOption("-compress_rerank");
+}
+
 template<typename ChPoint, bool metric>
 void bench(mvsic::commandLine& P) {
   Eigen::setNbThreads(1);
@@ -81,6 +99,7 @@ void bench(mvsic::commandLine& P) {
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
   auto points = PC(inFile, is_mmap);
+  std::cout << "Avg points per cloud: " << points.average_size() << std::endl;
   IndexParams index_params;
   SearchParams search_params;
   if (is_flat) {
@@ -105,6 +124,15 @@ void bench(mvsic::commandLine& P) {
         quantize_centers);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
+  apply_query_compression_opts(search_params, P);
+  if (search_params.query_compression != SearchParams::QueryCompression::None) {
+    const char* mname = (search_params.query_compression == SearchParams::QueryCompression::Carve)
+                            ? "ball"
+                            : "wards";
+    std::cout << "Query compression: method=" << mname
+              << " threshold=" << search_params.query_compression_threshold
+              << " compress_rerank=" << (search_params.compress_rerank ? "1" : "0") << std::endl;
+  }
 
   auto run_bench = [&](auto& index) {
     if (indexFile != "") {
@@ -127,6 +155,22 @@ void bench(mvsic::commandLine& P) {
 
     if (QFile != "") {
       auto queries = PC(qFile);
+      if (search_params.query_compression != SearchParams::QueryCompression::None) {
+        uint32_t ba = qc_internal::batch_alignment(index.quantization_mode);
+        double sum_orig = 0.0;
+        double sum_comp = 0.0;
+        for (size_t j = 0; j < queries.size(); ++j) {
+          sum_orig += static_cast<double>(queries[j].size());
+          auto c = compress_query<ChPoint>(queries[j], search_params.query_compression,
+                                           search_params.query_compression_threshold, ba);
+          sum_comp += static_cast<double>(c.n);
+        }
+        const double nq = static_cast<double>(queries.size());
+        std::cout << "Avg query points (raw):        " << (sum_orig / nq) << std::endl
+                  << "Avg query points (compressed): " << (sum_comp / nq) << std::endl
+                  << "Compression ratio (raw/compr): " << (sum_comp > 0 ? sum_orig / sum_comp : 0.0)
+                  << std::endl;
+      }
       auto gt = ReadGT(gtFile, queries.size());
       double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
       std::cout << "Computing stats..." << std::endl;
@@ -159,9 +203,9 @@ void bench(mvsic::commandLine& P) {
 
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
-                       "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
-                       "[-data_type <tp>] [-dist_func <dist_func>]"
-                       "[-seed <algorithm>] [-iters <num_iters>]");
+                       "[-i <inFile>] [-q <queries>] [-dist_func IP|L2] "
+                       "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
+                       "[-compress_rerank] ...");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {

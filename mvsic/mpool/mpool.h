@@ -3,6 +3,7 @@
 #include <variant>
 
 #include "mvsic/core/index.h"
+#include "mvsic/core/query_compression.h"
 #include "mvsic/core/types/io.h"
 
 // ParlayANN (Vamana) includes
@@ -92,14 +93,29 @@ class IndexMPool : public Index<metric> {
     size_t bytes_accessed = 0;
 
     size_t dist_cmps = 0;
+    double t_compress = 0.0;
     double t_mean_pooling = 0.0;
     double t_quantize = 0.0;
     double t_search = 0.0;
     double t_rerank = 0.0;
     size_t k = search_params.k;
-    // Step 1: Compute mean-pooling of the query point cloud
+
+    // Step 0: Compress query point cloud (optional)
     t.start();
-    std::vector<float> query_mpv = mean_pooling(query, false);
+    CompressedPointCloud<ChPoint> compressed_storage;
+    ChPoint effective_query = query;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      compressed_storage = compress_query<ChPoint>(
+          query, search_params.query_compression,
+          search_params.query_compression_threshold);
+      effective_query = compressed_storage.view();
+    }
+    t_compress = t.stop();
+    t.reset();
+
+    // Step 1: Compute mean-pooling of the (possibly compressed) query
+    t.start();
+    std::vector<float> query_mpv = mean_pooling(effective_query, false);
     typename Point::parameters parlayann_pr_params(d);
     Point query_point(reinterpret_cast<typename Point::byte*>(query_mpv.data()), -1,
                       parlayann_pr_params);
@@ -112,12 +128,11 @@ class IndexMPool : public Index<metric> {
                                      points.size(), params.ann.R);
     parlay::sequence<std::pair<uint32_t, float>> visited;
 
-    // Quantize query
     t.start();
     QuantQuery q_query_var = this->quantize_query_point(query_point, quantizer);
     t_quantize = t.stop();
     t.reset();
-    // Run beam search
+
     t.start();
     std::tie(visited, dist_cmps, bytes_accessed) = this->quant_beam_search(
         query_point, q_query_var, points_mp, quantized_data, G, start_point, QP);
@@ -126,11 +141,12 @@ class IndexMPool : public Index<metric> {
 
     // Step 3: Re-ranking
     t.start();
+    const ChPoint& rerank_query = search_params.compress_rerank ? effective_query : query;
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (!search_params.norerank) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
+      bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -139,6 +155,7 @@ class IndexMPool : public Index<metric> {
     t.reset();
 
     std::vector<double> stats;
+    stats.push_back(t_compress);
     stats.push_back(t_mean_pooling);
     stats.push_back(t_quantize);
     stats.push_back(t_search);

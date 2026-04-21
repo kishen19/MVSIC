@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fstream>
 #include "parlay/primitives.h"
 #include "search_params.h"
 
@@ -42,9 +43,10 @@ struct StatsExtended {
 };
 }  // namespace mvsic
 
-double compute_recall(const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
-                      const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-                      size_t k, size_t k_gt) {
+inline double compute_recall(
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& pred,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt, size_t k,
+    size_t k_gt) {
   if (k_gt > gt[0].size()) {
     std::cerr << "Not enough gt values" << std::endl;
     exit(-1);
@@ -80,15 +82,14 @@ double compute_recall(const parlay::sequence<parlay::sequence<std::pair<uint32_t
     }
     return static_cast<double>(correct) / static_cast<double>(k_gt);
   });
-  auto val = parlay::reduce(ind_recall);
   return parlay::reduce(ind_recall) / static_cast<double>(ind_recall.size());
 }
 
 template<typename Index, typename PC>
 parlay::sequence<mvsic::Stats> compute_stats(
-    Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-    const parlay::sequence<mvsic::SearchParams> &params) {
+    Index& index, const PC& points, const PC& query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+    const parlay::sequence<mvsic::SearchParams>& params) {
   auto results = parlay::sequence<mvsic::Stats>(params.size());
   size_t reps = 3;
   for (size_t i = 0; i < params.size(); i++) {
@@ -140,9 +141,9 @@ parlay::sequence<mvsic::Stats> compute_stats(
 
 template<typename Index, typename PC>
 parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
-    Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-    const parlay::sequence<mvsic::SearchParams> &params) {
+    Index& index, const PC& points, const PC& query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+    const parlay::sequence<mvsic::SearchParams>& params) {
   auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
   size_t reps = 3;
   for (size_t i = 0; i < params.size(); i++) {
@@ -212,9 +213,9 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended(
 
 template<typename Index, typename PC>
 parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
-    Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-    const parlay::sequence<mvsic::SearchParams> &params, size_t num_threads = 1) {
+    Index& index, const PC& points, const PC& query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+    const parlay::sequence<mvsic::SearchParams>& params, size_t num_threads = 1) {
   // Single-Threaded Version
   auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
   auto func = [&]() {
@@ -267,90 +268,58 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
     }
   };
   parlay::execute_with_scheduler(num_threads, func);
-
-  // Batch Run (all queries on all cores, each running single-threaded)
-  for (size_t i = 0; i < params.size(); i++) {
-    size_t Q = query_points.size();
-    size_t P = parlay::num_workers();
-    constexpr size_t B = 2;  // block size (tune)
-    std::atomic<size_t> next{0};
-
-    parlay::internal::timer t;
-    t.start();
-
-    parlay::parallel_for(
-        0, P,
-        [&](size_t wid) {
-          auto worker_func = [&]() {
-            while (true) {
-              size_t start = next.fetch_add(B, std::memory_order_relaxed);
-              if (start >= Q) break;
-              size_t end = std::min(start + B, Q);
-
-              for (size_t j = start; j < end; j++) {
-                auto [p, c] = index.search(query_points[j], points, params[i]);
-              }
-            }
-          };
-          parlay::execute_with_scheduler(num_threads, worker_func);
-        },
-        1);
-    t.stop();
-    double total_time = t.total_time();
-    results[i].QPS_par = (total_time > 0.0) ? (static_cast<double>(Q) / total_time) : 0.0;
-  }
   return results;
 }
 
 template<typename Index, typename PC>
-mvsic::Stats compute_stats(Index &index, const PC &points, const PC &query_points,
-                           const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-                           const mvsic::SearchParams &params) {
+mvsic::Stats compute_stats(Index& index, const PC& points, const PC& query_points,
+                           const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+                           const mvsic::SearchParams& params) {
   return compute_stats(index, points, query_points, gt,
                        parlay::sequence<mvsic::SearchParams>{params})[0];
 }
 
 template<typename Index, typename PC>
 mvsic::StatsExtended compute_stats_extended(
-    Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-    const mvsic::SearchParams &params) {
+    Index& index, const PC& points, const PC& query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+    const mvsic::SearchParams& params) {
   return compute_stats_extended(index, points, query_points, gt,
                                 parlay::sequence<mvsic::SearchParams>{params})[0];
 }
 
 template<typename Index, typename PC>
 mvsic::StatsExtended compute_stats_extended_p_threaded(
-    Index &index, const PC &points, const PC &query_points,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt,
-    const mvsic::SearchParams &params, size_t num_threads = 1) {
+    Index& index, const PC& points, const PC& query_points,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
+    const mvsic::SearchParams& params, size_t num_threads = 1) {
   return compute_stats_extended_p_threaded(index, points, query_points, gt,
                                            parlay::sequence<mvsic::SearchParams>{params},
                                            num_threads)[0];
 }
 
-std::pair<double, double> compute_scores(
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &pred,
-    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> &gt, size_t k) {
+inline std::pair<double, double> compute_scores(
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& pred,
+    const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt, size_t k) {
   double recall_1_k = compute_recall(pred, gt, k, 1);
   double recall_k_k = compute_recall(pred, gt, k, k);
   return std::make_pair(recall_1_k, recall_k_k);
 }
 
-parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGT(std::string &file_path,
-                                                                      size_t num_points) {
+inline parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGT(std::string& file_path,
+                                                                             size_t num_points) {
   std::ifstream file(file_path, std::ios::binary | std::ios::in);
   if (!file.is_open()) {
     throw std::runtime_error("Could not open file for reading: " + file_path);
   }
 
   int num_neighbors = 0;
-  file.read(reinterpret_cast<char *>(&num_neighbors), sizeof(num_neighbors));
+  file.read(reinterpret_cast<char*>(&num_neighbors), sizeof(num_neighbors));
 
   parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> result(num_points);
   for (int i = 0; i < num_points; ++i) {
     parlay::sequence<std::pair<float, uint32_t>> neighbors(num_neighbors);
-    file.read(reinterpret_cast<char *>(neighbors.data()),
+    file.read(reinterpret_cast<char*>(neighbors.data()),
               num_neighbors * sizeof(std::pair<float, uint32_t>));
     auto neighbors_flipped = parlay::sequence<std::pair<uint32_t, float>>::from_function(
         num_neighbors,
@@ -361,8 +330,8 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGT(std::strin
   return result;
 }
 
-parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGoldGT(std::string &file_path,
-                                                                          size_t num_points) {
+inline parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGoldGT(
+    std::string& file_path, size_t num_points) {
   std::ifstream file(file_path, std::ios::binary | std::ios::in);
   if (!file.is_open()) {
     throw std::runtime_error("Could not open file for reading: " + file_path);
@@ -370,13 +339,13 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> ReadGoldGT(std::s
   size_t num_offsets;
   size_t num_gt_entries;
   // Read sizes
-  file.read(reinterpret_cast<char *>(&num_offsets), sizeof(num_offsets));
-  file.read(reinterpret_cast<char *>(&num_gt_entries), sizeof(num_gt_entries));
+  file.read(reinterpret_cast<char*>(&num_offsets), sizeof(num_offsets));
+  file.read(reinterpret_cast<char*>(&num_gt_entries), sizeof(num_gt_entries));
   std::vector<size_t> offsets(num_offsets);
   std::vector<uint32_t> ground_truth(num_gt_entries);
   // Read offset and ground truth data
-  file.read(reinterpret_cast<char *>(offsets.data()), num_offsets * sizeof(size_t));
-  file.read(reinterpret_cast<char *>(ground_truth.data()), num_gt_entries * sizeof(uint32_t));
+  file.read(reinterpret_cast<char*>(offsets.data()), num_offsets * sizeof(size_t));
+  file.read(reinterpret_cast<char*>(ground_truth.data()), num_gt_entries * sizeof(uint32_t));
   file.close();
   parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> result(num_points);
   parlay::parallel_for(0, num_points, [&](size_t i) {

@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "mvsic/core/index.h"
+#include "mvsic/core/query_compression.h"
 
 #include "graph.h"
 #include "beam_search.h"
@@ -275,13 +276,28 @@ class IndexVamana : public Index<metric> {
     size_t bytes_accessed = 0;
 
     size_t dist_cmps = 0;
+    double t_compress = 0.0;
     double t_quantize = 0.0;
     double t_search = 0.0;
     double t_rerank = 0.0;
 
+    // Step 0: Compress query point cloud (optional)
+    t.start();
+    CompressedPointCloud<ChPoint> compressed_storage;
+    ChPoint effective_query = query;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      uint32_t ba = qc_internal::batch_alignment(quantization_mode);
+      compressed_storage = compress_query<ChPoint>(
+          query, search_params.query_compression,
+          search_params.query_compression_threshold, ba);
+      effective_query = compressed_storage.view();
+    }
+    t_compress = t.stop();
+    t.reset();
+
     // Step 1: Quantize Query
     t.start();
-    QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
+    QuantQuery q_query_var = this->quantize_query_point_cloud(effective_query, quantizer);
     t_quantize = t.stop();
     t.reset();
 
@@ -332,7 +348,7 @@ class IndexVamana : public Index<metric> {
       }
       case QT::None: {
         auto [result, cmps, bytes_acc] =
-            mvsic::vamana::beam_search(query, G, points, start_point, search_params);
+            mvsic::vamana::beam_search(effective_query, G, points, start_point, search_params);
         visited = result.second;
         dist_cmps = cmps;
         bytes_accessed = bytes_acc;
@@ -345,11 +361,12 @@ class IndexVamana : public Index<metric> {
 
     // Step 3: Re-ranking
     t.start();
+    const ChPoint& rerank_query = search_params.compress_rerank ? effective_query : query;
     auto final_results =
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
+      bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -359,6 +376,7 @@ class IndexVamana : public Index<metric> {
 
     std::vector<double> stats;
     stats.push_back(static_cast<double>(dist_cmps));
+    stats.push_back(t_compress);
     stats.push_back(t_quantize);
     stats.push_back(t_search);
     stats.push_back(t_rerank);
