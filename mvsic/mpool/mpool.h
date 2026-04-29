@@ -4,6 +4,7 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/query_compression.h"
+#include "mvsic/core/quantization/variant_io.h"
 #include "mvsic/core/types/io.h"
 
 // ParlayANN (Vamana) includes
@@ -25,7 +26,11 @@ template<typename ChPoint>
 std::vector<float> mean_pooling(const ChPoint& point, bool normalize = true);
 
 /* =============================Mean-Pooling + Vamana Index Class============================ */
-template<bool metric>
+// Template parameter `LeafModel` is used for type-level variant separation
+// (so pybind11 sees distinct classes per quantizer), with the constructor
+// auto-setting `params.pq.method`; internal hot path retains the variant-based
+// dispatch until full compile-time specialization lands.
+template<bool metric, class LeafModel = NoQuantizer<metric>>
 class IndexMPool : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
@@ -39,6 +44,8 @@ class IndexMPool : public Index<metric> {
   using Index<metric>::d;  // Embedding dimension
   using Index<metric>::params;
   using Index<metric>::quantization_mode;
+
+  static constexpr QT kLeafMethod = quantizer_method_of_v<LeafModel, metric>;
 
   Range points_mp;                                 // Mean-Pooled vectors
   parlayANN::Graph<uint32_t> G;                    // Vamana graph
@@ -54,12 +61,14 @@ class IndexMPool : public Index<metric> {
       BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
+    if constexpr (kLeafMethod != QT::None) params.pq.method = kLeafMethod;
   }
   IndexMPool(uint32_t d_, const IndexParams& params_) noexcept :
       Index<metric>(params_),
       BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
+    if constexpr (kLeafMethod != QT::None) params.pq.method = kLeafMethod;
   }
 
   // Builds the index given PointCloudSet object.
@@ -78,8 +87,8 @@ class IndexMPool : public Index<metric> {
     parlayANN::stats<uint32_t> BuildStats(G.size());
     I.build_index(G, points_mp, points_mp, BuildStats);
 
-    // Step3: Quantization
-    quantization_mode = params.pq.method;
+    // Step3: Quantization — resolved from the compile-time `LeafModel`.
+    quantization_mode = kLeafMethod;
     this->train_quantizer(points_mp, quantizer);
     quantized_data = this->encode_range_quantized(points_mp, quantizer);
   }
@@ -164,96 +173,138 @@ class IndexMPool : public Index<metric> {
     return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
-  // Write the index to a file in disk
+  // ---------------------------------------------------------------------------
+  // Save / load (v2 skeleton format).
+  //
+  // Layout:
+  //   magic       : uint32 = 'MPOO'
+  //   version     : uint32 = 2
+  //   class_id    : uint32 = static_cast<uint32_t>(kLeafMethod)
+  //   graph       : parlayANN::io::save_graph payload
+  //   points_mp   : raw mean-pooled single-vector data (via save_point_range)
+  //
+  // The leaf quantizer codebook and encoded single-vector data are NOT
+  // persisted.  `load()` re-trains and re-encodes from `points_mp`.  The
+  // internal hot path still uses variant-based dispatch (single-vector
+  // quantizer Models do not yet expose the uniform `kClassId` / `Params` /
+  // `EncodedSet` surface that MVIVF / Vamana use).
+  //
+  // See `save_with_quantizer` / `load_with_quantizer` below for a richer
+  // format that persists the trained codebook + encoded set for fast reload.
+  // ---------------------------------------------------------------------------
+  static constexpr uint32_t kMagic = 0x4D504F4Fu;  // 'MPOO'
+  static constexpr uint32_t kVersion = 2u;
+  static uint32_t compute_class_id_() { return static_cast<uint32_t>(kLeafMethod); }
+
   void save(const std::string& filename) override {
     std::ofstream out(filename, std::ios::binary);
     if (!out) throw std::runtime_error("save: cannot open file: " + filename);
-
-    // 1. Save graph
+    const uint32_t magic = kMagic;
+    const uint32_t ver = kVersion;
+    const uint32_t cid = compute_class_id_();
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
     parlayANN::io::save_graph(G, out);
-
-    // 2. Save Quantizer Type Header
-    int type_id = static_cast<int>(quantization_mode);
-    out.write((char*)&type_id, sizeof(int));
-
-    // 3. Save Quantizer Model and encodings OR Exact Vectors
-    switch (quantization_mode) {
-      case QT::PQ:
-        std::get<typename SVQT::PQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::PQ_Range>(quantized_data).save(out);
-        break;
-      case QT::RaBitQ:
-        std::get<typename SVQT::RQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::RQ_Range>(quantized_data).save(out);
-        break;
-      case QT::FastScan:
-        std::get<typename SVQT::FS_Model>(quantizer).save(out);
-        std::get<typename SVQT::FS_Range>(quantized_data).save(out);
-        break;
-      case QT::TurboQuant:
-        std::get<typename SVQT::TQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::TQ_Range>(quantized_data).save(out);
-        break;
-      case QT::SPQTQ:
-        std::get<typename SVQT::PQTQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::PQTQ_Range>(quantized_data).save(out);
-        break;
-      case QT::None: parlayANN::io::save_point_range(points_mp, out); break;
-    }
+    parlayANN::io::save_point_range(points_mp, out);
+    out.close();
   }
 
-  // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& /*points*/) override {
     std::ifstream in(filename, std::ios::binary);
     if (!in) throw std::runtime_error("load: cannot open file: " + filename);
-
-    // 1. Load Graph
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic) {
+      throw std::runtime_error("[MPool] bad magic: file is not an MPOO v2 index.");
+    }
+    if (ver != kVersion) {
+      throw std::runtime_error("[MPool] unsupported version " + std::to_string(ver));
+    }
+    if (cid != compute_class_id_()) {
+      throw std::runtime_error("[MPool] class_id mismatch: file has " + std::to_string(cid) +
+                               ", this instance is " + std::to_string(compute_class_id_()));
+    }
     G = parlayANN::io::load_graph<uint32_t>(in);
     I.set_start();
+    auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
+    points_mp = Range(mp_data, loaded_d);
+    in.close();
 
-    // 2. Load Quantizer Type
-    int type_id;
-    in.read((char*)&type_id, sizeof(int));
-    quantization_mode = static_cast<QT>(type_id);
+    // Re-train + re-encode leaf quantizer from the loaded mean-pooled data.
+    quantization_mode = kLeafMethod;
+    this->train_quantizer(points_mp, quantizer);
+    quantized_data = this->encode_range_quantized(points_mp, quantizer);
+  }
 
-    // 3. Load Data
-    switch (quantization_mode) {
-      case QT::PQ:
-        quantizer.template emplace<typename SVQT::PQ_Model>();
-        std::get<typename SVQT::PQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::PQ_Range>();
-        std::get<typename SVQT::PQ_Range>(quantized_data).load(in);
-        break;
-      case QT::RaBitQ:
-        quantizer.template emplace<typename SVQT::RQ_Model>();
-        std::get<typename SVQT::RQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::RQ_Range>();
-        std::get<typename SVQT::RQ_Range>(quantized_data).load(in);
-        break;
-      case QT::FastScan:
-        quantizer.template emplace<typename SVQT::FS_Model>();
-        std::get<typename SVQT::FS_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::FS_Range>();
-        std::get<typename SVQT::FS_Range>(quantized_data).load(in);
-        break;
-      case QT::TurboQuant:
-        quantizer.template emplace<typename SVQT::TQ_Model>();
-        std::get<typename SVQT::TQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::TQ_Range>();
-        std::get<typename SVQT::TQ_Range>(quantized_data).load(in);
-        break;
-      case QT::SPQTQ:
-        quantizer.template emplace<typename SVQT::PQTQ_Model>();
-        std::get<typename SVQT::PQTQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::PQTQ_Range>();
-        std::get<typename SVQT::PQTQ_Range>(quantized_data).load(in);
-        break;
-      case QT::None: {
-        auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
-        points_mp = Range(mp_data, loaded_d);
-        break;
-      }
+  // ---------------------------------------------------------------------------
+  // Extended save: also persists the trained leaf quantizer + encoded data so
+  // a subsequent `load_with_quantizer()` can skip training / encoding.  Only
+  // loadable by the exact same concrete `IndexMPool<metric, LeafModel>` class
+  // (the `class_id` check still applies).
+  //
+  // Layout extends v2 with:
+  //   [has_q : uint8]  1 if a quantizer payload follows.
+  //   [quantizer model.save(...)]  when has_q == 1 && kLeafMethod != None
+  //   [quantized_data.save(...)]   when has_q == 1 && kLeafMethod != None
+  // ---------------------------------------------------------------------------
+  void save_with_quantizer(const std::string& filename) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) throw std::runtime_error("save_with_quantizer: cannot open: " + filename);
+    const uint32_t magic = kMagic, ver = kVersion, cid = compute_class_id_();
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
+    parlayANN::io::save_graph(G, out);
+    parlayANN::io::save_point_range(points_mp, out);
+    const uint8_t has_q = (kLeafMethod != QT::None) ? 1u : 0u;
+    out.write(reinterpret_cast<const char*>(&has_q), sizeof(has_q));
+    if (has_q) {
+      variant_io::save(quantizer, out);
+      variant_io::save(quantized_data, out);
     }
+    out.close();
+  }
+
+  void load_with_quantizer(const std::string& filename,
+                           const PointCloudSet<ChPoint>& /*points*/) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load_with_quantizer: cannot open: " + filename);
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic || ver != kVersion || cid != compute_class_id_()) {
+      throw std::runtime_error("[MPool] load_with_quantizer: header mismatch.");
+    }
+    G = parlayANN::io::load_graph<uint32_t>(in);
+    I.set_start();
+    auto [mp_data, loaded_d] = parlayANN::io::read_point_range<Point>(in);
+    points_mp = Range(mp_data, loaded_d);
+    uint8_t has_q = 0;
+    in.read(reinterpret_cast<char*>(&has_q), sizeof(has_q));
+    quantization_mode = kLeafMethod;
+    if (has_q) {
+      if (kLeafMethod == QT::None) {
+        throw std::runtime_error(
+            "[MPool] load_with_quantizer: file has a quantizer payload but "
+            "this concrete class is NoQuantizer.");
+      }
+      variant_io::load_sv<QuantModel,
+                          typename SVQT::PQ_Model, typename SVQT::RQ_Model,
+                          typename SVQT::FS_Model, typename SVQT::TQ_Model,
+                          typename SVQT::PQTQ_Model>(quantizer, in, kLeafMethod);
+      variant_io::load_sv<QuantRange,
+                          typename SVQT::PQ_Range, typename SVQT::RQ_Range,
+                          typename SVQT::FS_Range, typename SVQT::TQ_Range,
+                          typename SVQT::PQTQ_Range>(quantized_data, in, kLeafMethod);
+    } else if (kLeafMethod != QT::None) {
+      this->train_quantizer(points_mp, quantizer);
+      quantized_data = this->encode_range_quantized(points_mp, quantizer);
+    }
+    in.close();
   }
 };
 
@@ -279,7 +330,24 @@ std::vector<float> mean_pooling(const ChPoint& point, bool normalize) {
   return mpv;
 }
 
-using IndexMPoolL2 = IndexMPool<true>;   // L2 metric
-using IndexMPoolIP = IndexMPool<false>;  // MIPS
+using IndexMPoolIP          = IndexMPool<false, NoQuantizer<false>>;
+using IndexMPoolL2          = IndexMPool<true,  NoQuantizer<true>>;
+using IndexMPoolPQIP        = IndexMPool<false, pq::Model<false>>;
+using IndexMPoolPQL2        = IndexMPool<true,  pq::Model<true>>;
+using IndexMPoolRaBitQIP    = IndexMPool<false, rabitq::Model<false>>;
+using IndexMPoolRaBitQL2    = IndexMPool<true,  rabitq::Model<true>>;
+using IndexMPoolFastScanIP  = IndexMPool<false, fastscan::Model<false>>;
+using IndexMPoolFastScanL2  = IndexMPool<true,  fastscan::Model<true>>;
+using IndexMPoolTQIP        = IndexMPool<false, turboquant::Model<false>>;
+using IndexMPoolTQL2        = IndexMPool<true,  turboquant::Model<true>>;
+using IndexMPoolSPQTQIP     = IndexMPool<false, pqtq::Model<false>>;
+using IndexMPoolSPQTQL2     = IndexMPool<true,  pqtq::Model<true>>;
+
+// 1-bit TurboQuant: requires a non-_mv port of turboquant_1bit (only the
+// `turboquant_1bit_mv` multi-vector variant exists today).  Uncomment the
+// aliases below once a `turboquant_1bit::Model<bool>` SV-variant is ported.
+//
+// using IndexMPoolOneBitTQIP  = IndexMPool<false, turboquant_1bit::Model<false>>;
+// using IndexMPoolOneBitTQL2  = IndexMPool<true,  turboquant_1bit::Model<true>>;
 
 }  // namespace mvsic

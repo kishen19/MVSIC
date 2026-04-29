@@ -14,6 +14,7 @@ void run(commandLine& P) {
   auto io = bench::parse_io_args(P);
   auto qa = bench::parse_quant_args(P, "None");
 
+  // Defaults mirror IndexParams::muvera_custom.
   int32_t num_reps = P.getOptionIntValue("-num_reps", 20);
   int32_t num_simhash = P.getOptionIntValue("-num_simhash", 4);
   int32_t projd = P.getOptionIntValue("-projd", 8);
@@ -22,7 +23,7 @@ void run(commandLine& P) {
   bool no_norm = P.getOption("-no_norm");
   uint32_t R = P.getOptionIntValue("-R", 200);
   uint32_t L_build = P.getOptionIntValue("-L_build", 600);
-  double alpha = P.getOptionDoubleValue("-a", 1.2);
+  double alpha = P.getOptionDoubleValue("-a", 1.1);
   int num_pass = P.getOptionIntValue("-np", 1);
 
   size_t k = P.getOptionLongValue("-k", 10);
@@ -65,5 +66,21 @@ void run(commandLine& P) {
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
-    "-d <dataset> -index <path> [-L 16,32,...] [-k N] [-num_rerank N] "
-    "[-compress none|carve|wards] [-csv <path>]")
+    "MUVERA sequential search benchmark (PARLAY_SEQUENTIAL, latency-focused).\n\n"
+    "Dataset / I/O:\n"
+    "  -d <name> | -i <points> -q <queries> -gt <gt>\n"
+    "  -index <path>  -o <save_path>  -csv <path>\n"
+    "  -mm  -v <level>  -compress_input  -dist_func IP|L2\n\n"
+    "MUVERA FDE params (build; defaults mirror IndexParams::muvera_custom):\n"
+    "  -num_reps <N> (20)   -num_simhash <N> (4)   -projd <N> (8)\n"
+    "  -fill_empty_partitions (off)   -final_projd <N> (0)   -no_norm (normalized)\n\n"
+    "Underlying Vamana params (build):\n"
+    "  -R <N> (200)   -L_build <N> (600)   -a <f> (1.1)   -np <N> (1)\n\n"
+    "Leaf quantization:\n"
+    "  -quant_method None|PQ|FS|RQ|TQ    (default None)\n"
+    "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
+    "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n\n"
+    "Search sweep:\n"
+    "  -k <N>  -L <csv>  -num_rerank <N>  -norerank\n\n"
+    "Query compression:\n"
+    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n")

@@ -18,6 +18,7 @@ cc_library(
     hdrs = ["mvivf_spill.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core:query_compression",
         "//mvsic/core/mvclustering",
         "//mvsic/core/utils:util",
     ],
@@ -28,6 +29,7 @@ cc_library(
     hdrs = ["mvivf_flat.h"],
     deps = [
         "//mvsic/core:index",
+        "//mvsic/core:query_compression",
         "//mvsic/core/mvclustering",
         "//mvsic/core/utils:util",
     ],
@@ -65,8 +67,11 @@ cc_binary(
     defines = ["PARLAY_SEQUENTIAL"],
     deps = [
         ":mvivf",
+        ":mvivf_flat",
+        ":mvivf_spill",
         "//mvsic/core:stats",
         "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/utils:parse_command_line",
     ],

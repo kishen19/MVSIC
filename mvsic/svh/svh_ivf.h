@@ -8,6 +8,7 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/query_compression.h"
+#include "mvsic/core/quantization/variant_io.h"
 #include "mvsic/core/utils/util.h"
 #include "mvsic/core/utils/kmeans_util.h"
 #include "mvsic/core/types/point_range.h"
@@ -23,7 +24,14 @@ namespace mvsic {
   cluster with `num_clusters` clusters. Each cluster is represented by its center point.
   Search:
 */
-template<bool metric>
+// Template parameters:
+//   metric          true = L2, false = IP.
+//   CompressCenters if true, `params.quantize_centers` is forced to true at
+//                   construction (TQ-encoded internal centers).
+//   LeafModel       concrete quantizer Model (SV-variant) for leaf points;
+//                   NoQuantizer = raw leaves.  Used today for type-level
+//                   class separation with auto-set `params.pq.method`.
+template<bool metric, bool CompressCenters = false, class LeafModel = NoQuantizer<metric>>
 class IndexSVHIVF : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
@@ -41,6 +49,9 @@ class IndexSVHIVF : public Index<metric> {
   using Index<metric>::d;       // Embedding dimension
   using Index<metric>::params;  // Index Params
   using Index<metric>::quantization_mode;
+
+  static constexpr QT kLeafMethod = quantizer_method_of_v<LeafModel, metric>;
+  static constexpr bool kHasCenterQuant = CompressCenters;
 
   struct node_t {
     parlay::sequence<node_t*> children;
@@ -64,10 +75,14 @@ class IndexSVHIVF : public Index<metric> {
   IndexSVHIVF(size_t d_) noexcept {
     d = d_;
     params = IndexParams::svh_ivf();
+    if constexpr (kLeafMethod != QT::None) params.pq.method = kLeafMethod;
+    if constexpr (kHasCenterQuant) params.quantize_centers = true;
   }
   IndexSVHIVF(size_t d_, const IndexParams& params_) noexcept {
     d = d_;
     params = params_;
+    if constexpr (kLeafMethod != QT::None) params.pq.method = kLeafMethod;
+    if constexpr (kHasCenterQuant) params.quantize_centers = true;
   }
 
   // Quantization Helpers
@@ -157,8 +172,9 @@ class IndexSVHIVF : public Index<metric> {
       }
     });
 
-    // Quantization: Training
-    quantization_mode = params.pq.method;
+    // Quantization: Training — resolved from compile-time `LeafModel` /
+    // `CompressCenters` template parameters.
+    quantization_mode = kLeafMethod;
     FlatRange flat_points(points);
     this->template train_quantizer<SVQT>(flat_points, quantizer);
     init_tq_quantizer(flat_points);
@@ -531,6 +547,28 @@ class IndexSVHIVF : public Index<metric> {
     return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
+  // ---------------------------------------------------------------------------
+  // Save / load (v2 skeleton format).
+  //
+  // Layout:
+  //   magic     : uint32 = 'SVHI'
+  //   version   : uint32 = 2
+  //   class_id  : uint32 = (static_cast<uint32_t>(kLeafMethod) << 1)
+  //                        | (kHasCenterQuant ? 1 : 0)
+  //   d, num_nodes, center_offsets[num_nodes], raw center data,
+  //   children_offsets[num_nodes], children_indices[],
+  //   point_id_offsets[num_nodes], point_ids[]
+  //
+  // Neither the leaf quantizer codebook nor the center TurboQuant codebook is
+  // persisted.  `load()` retrains both from the supplied base points and then
+  // re-encodes the tree.  Internal hot path remains variant-based.
+  // ---------------------------------------------------------------------------
+  static constexpr uint32_t kMagic = 0x53564849u;  // 'SVHI'
+  static constexpr uint32_t kVersion = 2u;
+  static uint32_t compute_class_id_() {
+    return (static_cast<uint32_t>(kLeafMethod) << 1) | (kHasCenterQuant ? 1u : 0u);
+  }
+
   void save(const std::string& filename) override {
     if (root == nullptr) {
       std::cerr << "IndexSVHIVF::save: root is null (index not built).\n";
@@ -541,6 +579,12 @@ class IndexSVHIVF : public Index<metric> {
       std::cerr << "Error opening file for writing: " << filename << std::endl;
       return;
     }
+    const uint32_t magic = kMagic;
+    const uint32_t ver = kVersion;
+    const uint32_t cid = compute_class_id_();
+    outfile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    outfile.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    outfile.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
 
     // Collect data by traversing the tree
     parlay::sequence<node_t*> ind_to_node;
@@ -606,19 +650,6 @@ class IndexSVHIVF : public Index<metric> {
                   num_nodes * sizeof(size_t));
     outfile.write(reinterpret_cast<const char*>(point_ids.data()),
                   point_ids.size() * sizeof(std::pair<size_t, size_t>));
-
-    // Leaf / flat-vector quantization model (SVQT, same as build).
-    int type_id = static_cast<int>(quantization_mode);
-    outfile.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
-    switch (quantization_mode) {
-      case QT::PQ: std::get<typename SVQT::PQ_Model>(quantizer).save(outfile); break;
-      case QT::FastScan: std::get<typename SVQT::FS_Model>(quantizer).save(outfile); break;
-      case QT::RaBitQ: std::get<typename SVQT::RQ_Model>(quantizer).save(outfile); break;
-      case QT::TurboQuant: std::get<typename SVQT::TQ_Model>(quantizer).save(outfile); break;
-      case QT::SPQTQ: std::get<typename SVQT::PQTQ_Model>(quantizer).save(outfile); break;
-      case QT::None:
-      default: break;
-    }
     outfile.close();
   }
 
@@ -626,6 +657,24 @@ class IndexSVHIVF : public Index<metric> {
     std::ifstream infile(filename, std::ios::binary);
     if (!infile.is_open()) {
       std::cerr << "Error opening file for reading: " << filename << std::endl;
+      return;
+    }
+    uint32_t magic = 0, ver = 0, cid = 0;
+    infile.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    infile.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    infile.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic) {
+      std::cerr << "[SVHIVF] bad magic: file is not an SVHI v2 index." << std::endl;
+      return;
+    }
+    if (ver != kVersion) {
+      std::cerr << "[SVHIVF] unsupported version " << ver << " (expected " << kVersion << ")."
+                << std::endl;
+      return;
+    }
+    if (cid != compute_class_id_()) {
+      std::cerr << "[SVHIVF] class_id mismatch: file has " << cid << ", this instance is "
+                << compute_class_id_() << "." << std::endl;
       return;
     }
 
@@ -651,35 +700,18 @@ class IndexSVHIVF : public Index<metric> {
     parlay::sequence<std::pair<size_t, size_t>> point_ids(total_ids);
     infile.read(reinterpret_cast<char*>(point_ids.data()),
                 total_ids * sizeof(std::pair<size_t, size_t>));
-
-    int type_id;
-    infile.read(reinterpret_cast<char*>(&type_id), sizeof(int));
-    quantization_mode = static_cast<QT>(type_id);
-    switch (quantization_mode) {
-      case QT::PQ:
-        quantizer.template emplace<typename SVQT::PQ_Model>();
-        std::get<typename SVQT::PQ_Model>(quantizer).load(infile);
-        break;
-      case QT::FastScan:
-        quantizer.template emplace<typename SVQT::FS_Model>();
-        std::get<typename SVQT::FS_Model>(quantizer).load(infile);
-        break;
-      case QT::RaBitQ:
-        quantizer.template emplace<typename SVQT::RQ_Model>();
-        std::get<typename SVQT::RQ_Model>(quantizer).load(infile);
-        break;
-      case QT::TurboQuant:
-        quantizer.template emplace<typename SVQT::TQ_Model>();
-        std::get<typename SVQT::TQ_Model>(quantizer).load(infile);
-        break;
-      case QT::SPQTQ:
-        quantizer.template emplace<typename SVQT::PQTQ_Model>();
-        std::get<typename SVQT::PQTQ_Model>(quantizer).load(infile);
-        break;
-      case QT::None:
-      default: quantizer = std::monostate{}; break;
-    }
     infile.close();
+
+    // Leaf-level and center-level codebooks are not persisted in v2.  We retrain
+    // them from the supplied base points using the compile-time-selected model.
+    quantization_mode = kLeafMethod;
+    {
+      FlatRange flat_points(points);
+      this->template train_quantizer<SVQT>(flat_points, quantizer);
+      if constexpr (kHasCenterQuant) {
+        init_tq_quantizer(flat_points);
+      }
+    }
 
     auto ind_to_node =
         parlay::sequence<node_t*>::from_function(num_nodes, [&](size_t i) { return new node_t(); });
@@ -723,19 +755,13 @@ class IndexSVHIVF : public Index<metric> {
 
     root = ind_to_node[0];
 
-    // Center TurboQuant is not serialized; retrain on the full dataset (same idea as MVIVF spill).
-    if (params.quantize_centers) {
-      FlatRange flat_points(points);
-      init_tq_quantizer(flat_points);
-    }
-
     // Re-encode: internal nodes use center_quantizer (encode_tq); leaves use leaf quantizer.
     parlay::parallel_for(
         0, num_nodes,
         [&](size_t i) {
           node_t* node = ind_to_node[i];
           if (!node->children.empty()) {
-            if (params.quantize_centers) {
+            if constexpr (kHasCenterQuant) {
               node->quantized_data = encode_tq(node->data);
             } else {
               node->quantized_data = std::monostate{};
@@ -746,6 +772,109 @@ class IndexSVHIVF : public Index<metric> {
           }
         },
         1);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Extended save / load: writes the full v2 skeleton *and* the trained leaf
+  // / center quantizer codebooks, so a subsequent `load_with_quantizer()` can
+  // skip retraining (it still re-encodes tree nodes on the fly, which is fast
+  // compared to codebook training).
+  //
+  // Layout: v2 skeleton as in save() + suffix:
+  //   has_q       : uint8   1 if a quantizer payload follows
+  //   leaf_model  : quantizer.save(...)         (when has_q && kLeafMethod != None)
+  //   leaf_range  : quantized_data.save(...)    (per-leaf encoded sets, serialised in DFS)
+  //   center_tq   : center_quantizer.save(...)  (when kHasCenterQuant)
+  // ---------------------------------------------------------------------------
+  void save_with_quantizer(const std::string& filename) {
+    if (root == nullptr) {
+      std::cerr << "IndexSVHIVF::save_with_quantizer: root is null.\n";
+      return;
+    }
+    save(filename);  // writes the v2 skeleton header + body.
+    std::ofstream out(filename, std::ios::binary | std::ios::app);
+    if (!out) {
+      throw std::runtime_error("save_with_quantizer: cannot open for append: " + filename);
+    }
+    const uint8_t has_q = (kLeafMethod != QT::None || kHasCenterQuant) ? 1u : 0u;
+    out.write(reinterpret_cast<const char*>(&has_q), sizeof(has_q));
+    if (!has_q) return;
+
+    if constexpr (kLeafMethod != QT::None) {
+      variant_io::save(quantizer, out);
+      // Persist per-leaf encoded sets in DFS order.  Matches the traversal
+      // used by save()/load() for centers / children / point_ids.
+      parlay::sequence<node_t*> ind_to_node;
+      std::unordered_map<node_t*, size_t> node_to_ind;
+      parlay::sequence<size_t> co, ch, po;
+      traverse_tree(root, ind_to_node, node_to_ind, co, ch, po);
+      for (node_t* node : ind_to_node) {
+        if (node->children.empty() && !node->ids.empty()) {
+          variant_io::save(node->quantized_data, out);
+        }
+      }
+    }
+    if constexpr (kHasCenterQuant) {
+      center_quantizer.save(out);
+    }
+    out.close();
+  }
+
+  void load_with_quantizer(const std::string& filename,
+                           const PointCloudSet<ChPoint>& points) {
+    load(filename, points);  // rebuilds tree + already retrains leaf/center quantizers.
+
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load_with_quantizer: cannot open: " + filename);
+    // Skip to the suffix: we replay the skeleton-read logic to advance the stream.
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    unsigned d_tmp;
+    size_t num_nodes;
+    in.read(reinterpret_cast<char*>(&d_tmp), sizeof(unsigned));
+    in.read(reinterpret_cast<char*>(&num_nodes), sizeof(size_t));
+    auto skip_offsets = [&](size_t elem_size) {
+      parlay::sequence<size_t> offs(num_nodes);
+      in.read(reinterpret_cast<char*>(offs.data()), num_nodes * sizeof(size_t));
+      size_t total = parlay::reduce(offs);
+      in.seekg(total * elem_size, std::ios::cur);
+    };
+    skip_offsets(4 * d_tmp);     // centers
+    skip_offsets(sizeof(size_t)); // children
+    skip_offsets(16);             // point_ids (pair<size_t,size_t>)
+
+    uint8_t has_q = 0;
+    in.read(reinterpret_cast<char*>(&has_q), sizeof(has_q));
+    if (!has_q || !in) {
+      in.close();
+      return;  // no quantizer payload -> fall back to the retrained state from load().
+    }
+
+    if constexpr (kLeafMethod != QT::None) {
+      variant_io::load_sv<QuantModel,
+                          typename SVQT::PQ_Model, typename SVQT::RQ_Model,
+                          typename SVQT::FS_Model, typename SVQT::TQ_Model,
+                          typename SVQT::PQTQ_Model>(quantizer, in, kLeafMethod);
+
+      parlay::sequence<node_t*> ind_to_node;
+      std::unordered_map<node_t*, size_t> node_to_ind;
+      parlay::sequence<size_t> co, ch, po;
+      traverse_tree(root, ind_to_node, node_to_ind, co, ch, po);
+      for (node_t* node : ind_to_node) {
+        if (node->children.empty() && !node->ids.empty()) {
+          variant_io::load_sv<QuantRange,
+                              typename SVQT::PQ_Range, typename SVQT::RQ_Range,
+                              typename SVQT::FS_Range, typename SVQT::TQ_Range,
+                              typename SVQT::PQTQ_Range>(node->quantized_data, in, kLeafMethod);
+        }
+      }
+    }
+    if constexpr (kHasCenterQuant) {
+      center_quantizer.load(in);
+    }
+    in.close();
   }
 
   void traverse_tree(node_t* node, parlay::sequence<node_t*>& ind_to_node,
@@ -781,7 +910,38 @@ class IndexSVHIVF : public Index<metric> {
   }
 };
 
-using IndexSVHIVFL2 = IndexSVHIVF<true>;   // Instantiates for L2 metric (metric = true)
-using IndexSVHIVFIP = IndexSVHIVF<false>;  // Instantiates for MIPS      (metric = false)
+using IndexSVHIVFIP                  = IndexSVHIVF<false, false, NoQuantizer<false>>;
+using IndexSVHIVFL2                  = IndexSVHIVF<true,  false, NoQuantizer<true>>;
+using IndexSVHIVFCompressIP          = IndexSVHIVF<false, true,  NoQuantizer<false>>;
+using IndexSVHIVFCompressL2          = IndexSVHIVF<true,  true,  NoQuantizer<true>>;
+using IndexSVHIVFPQIP                = IndexSVHIVF<false, false, pq::Model<false>>;
+using IndexSVHIVFPQL2                = IndexSVHIVF<true,  false, pq::Model<true>>;
+using IndexSVHIVFCompressPQIP        = IndexSVHIVF<false, true,  pq::Model<false>>;
+using IndexSVHIVFCompressPQL2        = IndexSVHIVF<true,  true,  pq::Model<true>>;
+using IndexSVHIVFRaBitQIP            = IndexSVHIVF<false, false, rabitq::Model<false>>;
+using IndexSVHIVFRaBitQL2            = IndexSVHIVF<true,  false, rabitq::Model<true>>;
+using IndexSVHIVFCompressRaBitQIP    = IndexSVHIVF<false, true,  rabitq::Model<false>>;
+using IndexSVHIVFCompressRaBitQL2    = IndexSVHIVF<true,  true,  rabitq::Model<true>>;
+using IndexSVHIVFFastScanIP          = IndexSVHIVF<false, false, fastscan::Model<false>>;
+using IndexSVHIVFFastScanL2          = IndexSVHIVF<true,  false, fastscan::Model<true>>;
+using IndexSVHIVFCompressFastScanIP  = IndexSVHIVF<false, true,  fastscan::Model<false>>;
+using IndexSVHIVFCompressFastScanL2  = IndexSVHIVF<true,  true,  fastscan::Model<true>>;
+using IndexSVHIVFTQIP                = IndexSVHIVF<false, false, turboquant::Model<false>>;
+using IndexSVHIVFTQL2                = IndexSVHIVF<true,  false, turboquant::Model<true>>;
+using IndexSVHIVFCompressTQIP        = IndexSVHIVF<false, true,  turboquant::Model<false>>;
+using IndexSVHIVFCompressTQL2        = IndexSVHIVF<true,  true,  turboquant::Model<true>>;
+using IndexSVHIVFSPQTQIP             = IndexSVHIVF<false, false, pqtq::Model<false>>;
+using IndexSVHIVFSPQTQL2             = IndexSVHIVF<true,  false, pqtq::Model<true>>;
+using IndexSVHIVFCompressSPQTQIP     = IndexSVHIVF<false, true,  pqtq::Model<false>>;
+using IndexSVHIVFCompressSPQTQL2     = IndexSVHIVF<true,  true,  pqtq::Model<true>>;
+
+// 1-bit TurboQuant: requires a non-_mv port of turboquant_1bit (only the
+// `turboquant_1bit_mv` multi-vector variant exists today).  Uncomment the
+// aliases below once a `turboquant_1bit::Model<bool>` SV-variant is ported.
+//
+// using IndexSVHIVFOneBitTQIP          = IndexSVHIVF<false, false, turboquant_1bit::Model<false>>;
+// using IndexSVHIVFOneBitTQL2          = IndexSVHIVF<true,  false, turboquant_1bit::Model<true>>;
+// using IndexSVHIVFCompressOneBitTQIP  = IndexSVHIVF<false, true,  turboquant_1bit::Model<false>>;
+// using IndexSVHIVFCompressOneBitTQL2  = IndexSVHIVF<true,  true,  turboquant_1bit::Model<true>>;
 
 }  // namespace mvsic

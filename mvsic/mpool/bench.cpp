@@ -114,11 +114,25 @@ void bench(mvsic::commandLine& P) {
 
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
-                       "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
-                       "[-data_type <tp>] [-dist_func <dist_func>]"
-                       "[-seed <algorithm>] [-iters <num_iters>]"
-                       // "[-kmeans_seed <algorithm>] [-kmeans_dist <algorithm>]"
-  );
+      "MPool combined build+search benchmark (single-point).\n\n"
+      "Dataset / I/O:\n"
+      "  -i <points>  -q <queries>  -gt <gt>\n"
+      "  -o <save_path>  -index <path>\n"
+      "  -mm  -v <level>  -compress_input  -dist_func IP|L2\n\n"
+      "MPool (Vamana-based) build params:\n"
+      "  -R <N>                         Graph out-degree (default 200)\n"
+      "  -L_build <N>                   Build beam width (default 600)\n"
+      "  -a <f>                         alpha (default 1.2)\n"
+      "  -np <N>                        Num passes (default 1)\n"
+      "  -no_norm                       Disable normalization\n\n"
+      "Leaf quantization:\n"
+      "  -quant_method None|PQ|FS|RQ|TQ\n"
+      "  -m <N>  -num_clusters_per_block <N>  -num_points_per_cluster <N>  -rbits <N>\n\n"
+      "Search:\n"
+      "  -k <N>                         Top-k (default 10)\n"
+      "  -L <N>                         Search beam width (default 16)\n"
+      "  -num_rerank <N>                Rerank width (default k)\n"
+      "  -norerank                      Disable rerank stage\n");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {

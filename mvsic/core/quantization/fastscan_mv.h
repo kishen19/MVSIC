@@ -1490,6 +1490,15 @@ float fastscan_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
 template<bool Metric>
 class Model {
  public:
+  static constexpr uint32_t kClassId = 2;  // QuantizerTag::kFastScan
+  static constexpr uint32_t kBatchAlignment = 6;  // SCAN_Q_BATCH
+  static constexpr const char* kName = "fastscan";
+  using EncodedSet = ::mvsic::fastscan_mv::Quantized_Point_Cloud_Set<Metric>;
+  using EncodedQuery = ::mvsic::fastscan_mv::Quantized_Query_Point_Cloud<Metric>;
+  struct Params {
+    uint32_t block_size = 32;
+  };
+
   uint32_t num_blocks = 0;
   size_t dim = 0;
   size_t dim_per_block = 0;
@@ -1499,6 +1508,11 @@ class Model {
   std::vector<Eigen::VectorXf> codebook_norms;
 
   Model() = default;
+
+  template<typename PCSet>
+  void train(const PCSet& pcs, const Params& p) {
+    train(pcs, p.block_size);
+  }
 
   template<typename PCSet>
   void train(const PCSet& pcs, uint32_t block_size = 32) {

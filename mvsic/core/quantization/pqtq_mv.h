@@ -520,6 +520,15 @@ float pqtq_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
 template<bool Metric>
 class Model {
  public:
+  static constexpr uint32_t kClassId = 5;  // QuantizerTag::kSPQTQ
+  static constexpr uint32_t kBatchAlignment = 3;  // kMvBatch
+  static constexpr const char* kName = "spqtq";
+  using EncodedSet = ::mvsic::pqtq_mv::Quantized_Point_Cloud_Set<Metric>;
+  using EncodedQuery = ::mvsic::pqtq_mv::Quantized_Query_Point_Cloud<Metric>;
+  struct Params {
+    uint32_t block_size = 8;
+  };
+
   ::mvsic::pqtq::Encoder encoder;
   size_t block_size = 8;
 
@@ -528,6 +537,11 @@ class Model {
   Model& operator=(Model&&) = default;
   Model(const Model&) = delete;
   Model& operator=(const Model&) = delete;
+
+  template<typename PCSet>
+  void train(const PCSet& pcs, const Params& p) {
+    train(pcs, static_cast<size_t>(p.block_size));
+  }
 
   template<typename PCSet>
   void train(const PCSet& pcs, size_t bs = 8) {

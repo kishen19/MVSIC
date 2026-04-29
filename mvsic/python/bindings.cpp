@@ -96,8 +96,10 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("compress_input", &mvsic::IndexParams::compress_input)
       .def_readwrite("k_per_level", &mvsic::IndexParams::k_per_level)
       .def_readwrite("max_leaf_size", &mvsic::IndexParams::max_leaf_size)
+      .def_readwrite("max_depth", &mvsic::IndexParams::max_depth)
       .def_readwrite("quantize_centers", &mvsic::IndexParams::quantize_centers)
       .def_readwrite("num_spill", &mvsic::IndexParams::num_spill)
+      .def_readwrite("num_spill_l2", &mvsic::IndexParams::num_spill_l2)
       .def_readwrite("mvclus", &mvsic::IndexParams::mvclus)
       .def_readwrite("s", &mvsic::IndexParams::s)
       .def_readwrite("fde", &mvsic::IndexParams::fde)
@@ -115,26 +117,20 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("max_point_clouds_per_cluster") = 100,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
-                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
-                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = true)
+                  py::arg("s") = 0, py::arg("max_depth") = 0)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 100,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
-                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
-                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = true)
+                  py::arg("s") = 0)
       .def_static("mvivf_spill", &mvsic::IndexParams::mvivf_spill, py::arg("k_per_level") = 0,
                   py::arg("max_leaf_size") = 500, py::arg("num_spill") = 2,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 100,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
-                  py::arg("s") = 0, py::arg("pq_method") = 0, py::arg("block_size") = 8,
-                  py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
-                  py::arg("rabitq_bits") = 4, py::arg("quantize_centers") = true)
+                  py::arg("s") = 0, py::arg("max_depth") = 0, py::arg("num_spill_l2") = 1)
       .def_static(
           "muvera_custom", &mvsic::IndexParams::muvera_custom, py::arg("num_repetitions") = 20,
           py::arg("num_simhash_projections") = 4, py::arg("seed") = 1,
@@ -346,20 +342,182 @@ PYBIND11_MODULE(mvsic, m) {
       },
       py::arg("index"), "Returns tree stats for an MVIVF IP index.");
 
+  // ---- MVIVF family (compile-time templated: CompressCenters x LeafModel) ----
+  // Compress variants (TQ-compressed internal centers) keep raw leaves.
+  BIND_INDEX(IndexMVIVFCompressL2, ChamferL2_Point, "IndexMVIVFCompressL2")
+  BIND_INDEX(IndexMVIVFCompressIP, ChamferIP_Point, "IndexMVIVFCompressIP")
+  // Leaf-quantized (raw centers + Foo leaves).
+  BIND_INDEX(IndexMVIVFPQL2,        ChamferL2_Point, "IndexMVIVFPQL2")
+  BIND_INDEX(IndexMVIVFPQIP,        ChamferIP_Point, "IndexMVIVFPQIP")
+  BIND_INDEX(IndexMVIVFFastScanL2,  ChamferL2_Point, "IndexMVIVFFastScanL2")
+  BIND_INDEX(IndexMVIVFFastScanIP,  ChamferIP_Point, "IndexMVIVFFastScanIP")
+  BIND_INDEX(IndexMVIVFRaBitQL2,    ChamferL2_Point, "IndexMVIVFRaBitQL2")
+  BIND_INDEX(IndexMVIVFRaBitQIP,    ChamferIP_Point, "IndexMVIVFRaBitQIP")
+  BIND_INDEX(IndexMVIVFTQL2,        ChamferL2_Point, "IndexMVIVFTQL2")
+  BIND_INDEX(IndexMVIVFTQIP,        ChamferIP_Point, "IndexMVIVFTQIP")
+  BIND_INDEX(IndexMVIVFSPQTQL2,     ChamferL2_Point, "IndexMVIVFSPQTQL2")
+  BIND_INDEX(IndexMVIVFSPQTQIP,     ChamferIP_Point, "IndexMVIVFSPQTQIP")
+  BIND_INDEX(IndexMVIVFOneBitTQL2,  ChamferL2_Point, "IndexMVIVFOneBitTQL2")
+  BIND_INDEX(IndexMVIVFOneBitTQIP,  ChamferIP_Point, "IndexMVIVFOneBitTQIP")
+  // Compress + Foo leaves (TQ centers + Foo leaves).
+  BIND_INDEX(IndexMVIVFCompressPQL2,        ChamferL2_Point, "IndexMVIVFCompressPQL2")
+  BIND_INDEX(IndexMVIVFCompressPQIP,        ChamferIP_Point, "IndexMVIVFCompressPQIP")
+  BIND_INDEX(IndexMVIVFCompressFastScanL2,  ChamferL2_Point, "IndexMVIVFCompressFastScanL2")
+  BIND_INDEX(IndexMVIVFCompressFastScanIP,  ChamferIP_Point, "IndexMVIVFCompressFastScanIP")
+  BIND_INDEX(IndexMVIVFCompressRaBitQL2,    ChamferL2_Point, "IndexMVIVFCompressRaBitQL2")
+  BIND_INDEX(IndexMVIVFCompressRaBitQIP,    ChamferIP_Point, "IndexMVIVFCompressRaBitQIP")
+  BIND_INDEX(IndexMVIVFCompressTQL2,        ChamferL2_Point, "IndexMVIVFCompressTQL2")
+  BIND_INDEX(IndexMVIVFCompressTQIP,        ChamferIP_Point, "IndexMVIVFCompressTQIP")
+  BIND_INDEX(IndexMVIVFCompressSPQTQL2,     ChamferL2_Point, "IndexMVIVFCompressSPQTQL2")
+  BIND_INDEX(IndexMVIVFCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFCompressSPQTQIP")
+  BIND_INDEX(IndexMVIVFCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFCompressOneBitTQL2")
+  BIND_INDEX(IndexMVIVFCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFCompressOneBitTQIP")
+
+  // ---- MVIVF Flat family ----
   BIND_INDEX(IndexMVIVFFlatL2, ChamferL2_Point, "IndexMVIVFFlatL2")
   BIND_INDEX(IndexMVIVFFlatIP, ChamferIP_Point, "IndexMVIVFFlatIP")
+  BIND_INDEX(IndexMVIVFFlatCompressL2, ChamferL2_Point, "IndexMVIVFFlatCompressL2")
+  BIND_INDEX(IndexMVIVFFlatCompressIP, ChamferIP_Point, "IndexMVIVFFlatCompressIP")
+  BIND_INDEX(IndexMVIVFFlatPQL2,        ChamferL2_Point, "IndexMVIVFFlatPQL2")
+  BIND_INDEX(IndexMVIVFFlatPQIP,        ChamferIP_Point, "IndexMVIVFFlatPQIP")
+  BIND_INDEX(IndexMVIVFFlatFastScanL2,  ChamferL2_Point, "IndexMVIVFFlatFastScanL2")
+  BIND_INDEX(IndexMVIVFFlatFastScanIP,  ChamferIP_Point, "IndexMVIVFFlatFastScanIP")
+  BIND_INDEX(IndexMVIVFFlatRaBitQL2,    ChamferL2_Point, "IndexMVIVFFlatRaBitQL2")
+  BIND_INDEX(IndexMVIVFFlatRaBitQIP,    ChamferIP_Point, "IndexMVIVFFlatRaBitQIP")
+  BIND_INDEX(IndexMVIVFFlatTQL2,        ChamferL2_Point, "IndexMVIVFFlatTQL2")
+  BIND_INDEX(IndexMVIVFFlatTQIP,        ChamferIP_Point, "IndexMVIVFFlatTQIP")
+  BIND_INDEX(IndexMVIVFFlatSPQTQL2,     ChamferL2_Point, "IndexMVIVFFlatSPQTQL2")
+  BIND_INDEX(IndexMVIVFFlatSPQTQIP,     ChamferIP_Point, "IndexMVIVFFlatSPQTQIP")
+  BIND_INDEX(IndexMVIVFFlatOneBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatOneBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatOneBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatOneBitTQIP")
+
+  BIND_INDEX(IndexMVIVFFlatCompressPQL2,        ChamferL2_Point, "IndexMVIVFFlatCompressPQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressPQIP,        ChamferIP_Point, "IndexMVIVFFlatCompressPQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressFastScanL2,  ChamferL2_Point, "IndexMVIVFFlatCompressFastScanL2")
+  BIND_INDEX(IndexMVIVFFlatCompressFastScanIP,  ChamferIP_Point, "IndexMVIVFFlatCompressFastScanIP")
+  BIND_INDEX(IndexMVIVFFlatCompressRaBitQL2,    ChamferL2_Point, "IndexMVIVFFlatCompressRaBitQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressRaBitQIP,    ChamferIP_Point, "IndexMVIVFFlatCompressRaBitQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressTQL2,        ChamferL2_Point, "IndexMVIVFFlatCompressTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressTQIP,        ChamferIP_Point, "IndexMVIVFFlatCompressTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressSPQTQL2,     ChamferL2_Point, "IndexMVIVFFlatCompressSPQTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFFlatCompressSPQTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatCompressOneBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatCompressOneBitTQIP")
+
+  // ---- MVIVF Spill family ----
   BIND_INDEX(IndexMVIVFSpillL2, ChamferL2_Point, "IndexMVIVFSpillL2")
   BIND_INDEX(IndexMVIVFSpillIP, ChamferIP_Point, "IndexMVIVFSpillIP")
+  BIND_INDEX(IndexMVIVFSpillCompressL2, ChamferL2_Point, "IndexMVIVFSpillCompressL2")
+  BIND_INDEX(IndexMVIVFSpillCompressIP, ChamferIP_Point, "IndexMVIVFSpillCompressIP")
+  BIND_INDEX(IndexMVIVFSpillPQL2,        ChamferL2_Point, "IndexMVIVFSpillPQL2")
+  BIND_INDEX(IndexMVIVFSpillPQIP,        ChamferIP_Point, "IndexMVIVFSpillPQIP")
+  BIND_INDEX(IndexMVIVFSpillFastScanL2,  ChamferL2_Point, "IndexMVIVFSpillFastScanL2")
+  BIND_INDEX(IndexMVIVFSpillFastScanIP,  ChamferIP_Point, "IndexMVIVFSpillFastScanIP")
+  BIND_INDEX(IndexMVIVFSpillRaBitQL2,    ChamferL2_Point, "IndexMVIVFSpillRaBitQL2")
+  BIND_INDEX(IndexMVIVFSpillRaBitQIP,    ChamferIP_Point, "IndexMVIVFSpillRaBitQIP")
+  BIND_INDEX(IndexMVIVFSpillTQL2,        ChamferL2_Point, "IndexMVIVFSpillTQL2")
+  BIND_INDEX(IndexMVIVFSpillTQIP,        ChamferIP_Point, "IndexMVIVFSpillTQIP")
+  BIND_INDEX(IndexMVIVFSpillSPQTQL2,     ChamferL2_Point, "IndexMVIVFSpillSPQTQL2")
+  BIND_INDEX(IndexMVIVFSpillSPQTQIP,     ChamferIP_Point, "IndexMVIVFSpillSPQTQIP")
+  BIND_INDEX(IndexMVIVFSpillOneBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillOneBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillOneBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillOneBitTQIP")
+
+  BIND_INDEX(IndexMVIVFSpillCompressPQL2,        ChamferL2_Point, "IndexMVIVFSpillCompressPQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressPQIP,        ChamferIP_Point, "IndexMVIVFSpillCompressPQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressFastScanL2,  ChamferL2_Point, "IndexMVIVFSpillCompressFastScanL2")
+  BIND_INDEX(IndexMVIVFSpillCompressFastScanIP,  ChamferIP_Point, "IndexMVIVFSpillCompressFastScanIP")
+  BIND_INDEX(IndexMVIVFSpillCompressRaBitQL2,    ChamferL2_Point, "IndexMVIVFSpillCompressRaBitQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressRaBitQIP,    ChamferIP_Point, "IndexMVIVFSpillCompressRaBitQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressTQL2,        ChamferL2_Point, "IndexMVIVFSpillCompressTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressTQIP,        ChamferIP_Point, "IndexMVIVFSpillCompressTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressSPQTQL2,     ChamferL2_Point, "IndexMVIVFSpillCompressSPQTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFSpillCompressSPQTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillCompressOneBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillCompressOneBitTQIP")
+
+  // ---- MUVERA family ----
   BIND_INDEX(IndexMUVERAL2, ChamferL2_Point, "IndexMUVERAL2")
   BIND_INDEX(IndexMUVERAIP, ChamferIP_Point, "IndexMUVERAIP")
+  BIND_INDEX(IndexMUVERAPQL2,        ChamferL2_Point, "IndexMUVERAPQL2")
+  BIND_INDEX(IndexMUVERAPQIP,        ChamferIP_Point, "IndexMUVERAPQIP")
+  BIND_INDEX(IndexMUVERAFastScanL2,  ChamferL2_Point, "IndexMUVERAFastScanL2")
+  BIND_INDEX(IndexMUVERAFastScanIP,  ChamferIP_Point, "IndexMUVERAFastScanIP")
+  BIND_INDEX(IndexMUVERARaBitQL2,    ChamferL2_Point, "IndexMUVERARaBitQL2")
+  BIND_INDEX(IndexMUVERARaBitQIP,    ChamferIP_Point, "IndexMUVERARaBitQIP")
+  BIND_INDEX(IndexMUVERATQL2,        ChamferL2_Point, "IndexMUVERATQL2")
+  BIND_INDEX(IndexMUVERATQIP,        ChamferIP_Point, "IndexMUVERATQIP")
+  BIND_INDEX(IndexMUVERASPQTQL2,     ChamferL2_Point, "IndexMUVERASPQTQL2")
+  BIND_INDEX(IndexMUVERASPQTQIP,     ChamferIP_Point, "IndexMUVERASPQTQIP")
+
+  // ---- Vamana family ----
   BIND_INDEX(IndexVamanaL2, ChamferL2_Point, "IndexVamanaL2")
   BIND_INDEX(IndexVamanaIP, ChamferIP_Point, "IndexVamanaIP")
+  BIND_INDEX(IndexVamanaPQL2,        ChamferL2_Point, "IndexVamanaPQL2")
+  BIND_INDEX(IndexVamanaPQIP,        ChamferIP_Point, "IndexVamanaPQIP")
+  BIND_INDEX(IndexVamanaFastScanL2,  ChamferL2_Point, "IndexVamanaFastScanL2")
+  BIND_INDEX(IndexVamanaFastScanIP,  ChamferIP_Point, "IndexVamanaFastScanIP")
+  BIND_INDEX(IndexVamanaRaBitQL2,    ChamferL2_Point, "IndexVamanaRaBitQL2")
+  BIND_INDEX(IndexVamanaRaBitQIP,    ChamferIP_Point, "IndexVamanaRaBitQIP")
+  BIND_INDEX(IndexVamanaTQL2,        ChamferL2_Point, "IndexVamanaTQL2")
+  BIND_INDEX(IndexVamanaTQIP,        ChamferIP_Point, "IndexVamanaTQIP")
+  BIND_INDEX(IndexVamanaSPQTQL2,     ChamferL2_Point, "IndexVamanaSPQTQL2")
+  BIND_INDEX(IndexVamanaSPQTQIP,     ChamferIP_Point, "IndexVamanaSPQTQIP")
+  BIND_INDEX(IndexVamanaOneBitTQL2,  ChamferL2_Point, "IndexVamanaOneBitTQL2")
+  BIND_INDEX(IndexVamanaOneBitTQIP,  ChamferIP_Point, "IndexVamanaOneBitTQIP")
+
+  // ---- MPool family ----
   BIND_INDEX(IndexMPoolL2, ChamferL2_Point, "IndexMPoolL2")
   BIND_INDEX(IndexMPoolIP, ChamferIP_Point, "IndexMPoolIP")
+  BIND_INDEX(IndexMPoolPQL2,        ChamferL2_Point, "IndexMPoolPQL2")
+  BIND_INDEX(IndexMPoolPQIP,        ChamferIP_Point, "IndexMPoolPQIP")
+  BIND_INDEX(IndexMPoolFastScanL2,  ChamferL2_Point, "IndexMPoolFastScanL2")
+  BIND_INDEX(IndexMPoolFastScanIP,  ChamferIP_Point, "IndexMPoolFastScanIP")
+  BIND_INDEX(IndexMPoolRaBitQL2,    ChamferL2_Point, "IndexMPoolRaBitQL2")
+  BIND_INDEX(IndexMPoolRaBitQIP,    ChamferIP_Point, "IndexMPoolRaBitQIP")
+  BIND_INDEX(IndexMPoolTQL2,        ChamferL2_Point, "IndexMPoolTQL2")
+  BIND_INDEX(IndexMPoolTQIP,        ChamferIP_Point, "IndexMPoolTQIP")
+  BIND_INDEX(IndexMPoolSPQTQL2,     ChamferL2_Point, "IndexMPoolSPQTQL2")
+  BIND_INDEX(IndexMPoolSPQTQIP,     ChamferIP_Point, "IndexMPoolSPQTQIP")
+
+  // ---- SVH IVF family (CompressCenters x LeafModel) ----
   BIND_INDEX(IndexSVHIVFL2, ChamferL2_Point, "IndexSVHIVFL2")
   BIND_INDEX(IndexSVHIVFIP, ChamferIP_Point, "IndexSVHIVFIP")
+  BIND_INDEX(IndexSVHIVFCompressL2, ChamferL2_Point, "IndexSVHIVFCompressL2")
+  BIND_INDEX(IndexSVHIVFCompressIP, ChamferIP_Point, "IndexSVHIVFCompressIP")
+  BIND_INDEX(IndexSVHIVFPQL2,        ChamferL2_Point, "IndexSVHIVFPQL2")
+  BIND_INDEX(IndexSVHIVFPQIP,        ChamferIP_Point, "IndexSVHIVFPQIP")
+  BIND_INDEX(IndexSVHIVFFastScanL2,  ChamferL2_Point, "IndexSVHIVFFastScanL2")
+  BIND_INDEX(IndexSVHIVFFastScanIP,  ChamferIP_Point, "IndexSVHIVFFastScanIP")
+  BIND_INDEX(IndexSVHIVFRaBitQL2,    ChamferL2_Point, "IndexSVHIVFRaBitQL2")
+  BIND_INDEX(IndexSVHIVFRaBitQIP,    ChamferIP_Point, "IndexSVHIVFRaBitQIP")
+  BIND_INDEX(IndexSVHIVFTQL2,        ChamferL2_Point, "IndexSVHIVFTQL2")
+  BIND_INDEX(IndexSVHIVFTQIP,        ChamferIP_Point, "IndexSVHIVFTQIP")
+  BIND_INDEX(IndexSVHIVFSPQTQL2,     ChamferL2_Point, "IndexSVHIVFSPQTQL2")
+  BIND_INDEX(IndexSVHIVFSPQTQIP,     ChamferIP_Point, "IndexSVHIVFSPQTQIP")
+  BIND_INDEX(IndexSVHIVFCompressPQL2,        ChamferL2_Point, "IndexSVHIVFCompressPQL2")
+  BIND_INDEX(IndexSVHIVFCompressPQIP,        ChamferIP_Point, "IndexSVHIVFCompressPQIP")
+  BIND_INDEX(IndexSVHIVFCompressFastScanL2,  ChamferL2_Point, "IndexSVHIVFCompressFastScanL2")
+  BIND_INDEX(IndexSVHIVFCompressFastScanIP,  ChamferIP_Point, "IndexSVHIVFCompressFastScanIP")
+  BIND_INDEX(IndexSVHIVFCompressRaBitQL2,    ChamferL2_Point, "IndexSVHIVFCompressRaBitQL2")
+  BIND_INDEX(IndexSVHIVFCompressRaBitQIP,    ChamferIP_Point, "IndexSVHIVFCompressRaBitQIP")
+  BIND_INDEX(IndexSVHIVFCompressTQL2,        ChamferL2_Point, "IndexSVHIVFCompressTQL2")
+  BIND_INDEX(IndexSVHIVFCompressTQIP,        ChamferIP_Point, "IndexSVHIVFCompressTQIP")
+  BIND_INDEX(IndexSVHIVFCompressSPQTQL2,     ChamferL2_Point, "IndexSVHIVFCompressSPQTQL2")
+  BIND_INDEX(IndexSVHIVFCompressSPQTQIP,     ChamferIP_Point, "IndexSVHIVFCompressSPQTQIP")
+
+  // ---- SVH Graph family ----
   BIND_INDEX(IndexSVHGraphL2, ChamferL2_Point, "IndexSVHGraphL2")
   BIND_INDEX(IndexSVHGraphIP, ChamferIP_Point, "IndexSVHGraphIP")
+  BIND_INDEX(IndexSVHGraphPQL2,        ChamferL2_Point, "IndexSVHGraphPQL2")
+  BIND_INDEX(IndexSVHGraphPQIP,        ChamferIP_Point, "IndexSVHGraphPQIP")
+  BIND_INDEX(IndexSVHGraphFastScanL2,  ChamferL2_Point, "IndexSVHGraphFastScanL2")
+  BIND_INDEX(IndexSVHGraphFastScanIP,  ChamferIP_Point, "IndexSVHGraphFastScanIP")
+  BIND_INDEX(IndexSVHGraphRaBitQL2,    ChamferL2_Point, "IndexSVHGraphRaBitQL2")
+  BIND_INDEX(IndexSVHGraphRaBitQIP,    ChamferIP_Point, "IndexSVHGraphRaBitQIP")
+  BIND_INDEX(IndexSVHGraphTQL2,        ChamferL2_Point, "IndexSVHGraphTQL2")
+  BIND_INDEX(IndexSVHGraphTQIP,        ChamferIP_Point, "IndexSVHGraphTQIP")
+  BIND_INDEX(IndexSVHGraphSPQTQL2,     ChamferL2_Point, "IndexSVHGraphSPQTQL2")
+  BIND_INDEX(IndexSVHGraphSPQTQIP,     ChamferIP_Point, "IndexSVHGraphSPQTQIP")
 
   //======================================
   // Stats Functions

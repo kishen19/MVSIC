@@ -215,6 +215,24 @@ class Quantized_Point_Cloud_Set {
 template<bool Metric>
 class Model {
  public:
+  // Compile-time identity for save-format dispatch, CSV / log strings, and the
+  // query-compression batch width (replaces qc_internal::batch_alignment).
+  static constexpr uint32_t kClassId = 1;  // QuantizerTag::kPQ
+  static constexpr uint32_t kBatchAlignment = 1;
+  static constexpr const char* kName = "pq";
+  // Convenience aliases so index classes can write `LeafModel::EncodedSet`.
+  // NOTE: intentionally NOT named `Quantized_Point_Cloud_Set` to avoid
+  // shadowing the outer-namespace template inside the class body.
+  using EncodedSet = ::mvsic::pq_mv::Quantized_Point_Cloud_Set<Metric>;
+  using EncodedQuery = ::mvsic::pq_mv::Quantized_Query_Point_Cloud<Metric>;
+  // Typed hyper-parameter struct passed to the templated index's constructor;
+  // avoids bloating IndexParams with quantizer-specific fields.
+  struct Params {
+    uint32_t block_size = 8;
+    uint32_t num_clusters_per_block = 256;
+    uint32_t num_points_per_cluster = 20;
+  };
+
   uint32_t num_blocks = 0;              // m
   uint32_t num_clusters_per_block = 0;  // K
   uint32_t num_points_per_cluster = 0;  // subsample_mult
@@ -229,6 +247,11 @@ class Model {
   Model(const PCSet& train_data, uint32_t block_size = 8, uint32_t k = 256,
         uint32_t subsample_mult = 20) {
     train(train_data, block_size, k, subsample_mult);
+  }
+
+  template<typename PCSet>
+  void train(const PCSet& pcs, const Params& p) {
+    train(pcs, p.block_size, p.num_clusters_per_block, p.num_points_per_cluster);
   }
 
   template<typename PCSet>

@@ -1,0 +1,49 @@
+name: "MVIVF Ablation (build)"
+
+datasets:
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: experiments/mvivf_ablation/indices/nq500k
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: experiments/mvivf_ablation/indices/fiqa
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      # ---------- Stage 1: k_per_level ----------
+      - name: mvivf_k0_l500
+        params: &stage1_defaults
+          k_per_level: 0
+          max_leaf_size: 500
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+      - name: mvivf_k4_l500
+        params: { <<: *stage1_defaults, k_per_level: 4 }
+      - name: mvivf_k8_l500
+        params: { <<: *stage1_defaults, k_per_level: 8 }
+      - name: mvivf_k16_l500
+        params: { <<: *stage1_defaults, k_per_level: 16 }
+      - name: mvivf_k32_l500
+        params: { <<: *stage1_defaults, k_per_level: 32 }
+
+      # ---------- Stage 2: max_depth (update k_per_level to stage-1 winner) ----------
+      # - name: mvivf_k16_d3
+      #   params: { <<: *stage1_defaults, k_per_level: 16, max_depth: 3 }
+      # - name: mvivf_k16_d4
+      #   params: { <<: *stage1_defaults, k_per_level: 16, max_depth: 4 }
+
+      # ---------- Stage 3: max_leaf_size ----------
+      # (enable after Stage 2)
+
+      # ---------- Stage 4: niters ----------
+      # (enable after Stage 3)
+
+      # ---------- Stage 5: mpcc / mpcik ----------
+      # (enable after Stage 4)
+
+      # ---------- Stage 6: s ----------
+      # (enable after Stage 5)

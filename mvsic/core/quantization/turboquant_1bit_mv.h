@@ -921,11 +921,23 @@ float turboquant_1bit_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metr
 template<bool Metric>
 class Model {
  public:
+  static constexpr uint32_t kClassId = 6;  // QuantizerTag::kOneBitTQ
+  static constexpr uint32_t kBatchAlignment = 4;  // kMq1bit
+  static constexpr const char* kName = "1bit_tq";
+  using EncodedSet = ::mvsic::turboquant_1bit_mv::Quantized_Point_Cloud_Set<Metric>;
+  using EncodedQuery = ::mvsic::turboquant_1bit_mv::Quantized_Query_Point_Cloud<Metric>;
+  struct Params {};
+
   // Reuses the TQ rotator (FhtKacRotator). We don't use BaseEncoder's 4-bit
   // encode_single — only its rotator setup.
   turboquant::BaseEncoder encoder;
 
   Model() = default;
+
+  template<typename PCSet>
+  void train(const PCSet& pcs, const Params& /*p*/) {
+    train(pcs);
+  }
 
   template<typename PCSet>
   void train(const PCSet& pcs) {

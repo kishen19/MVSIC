@@ -109,12 +109,18 @@ struct QuantArgs {
 };
 
 inline QuantArgs parse_quant_args(commandLine& P, const std::string& default_method = "None") {
+  // Defaults here must match the factory defaults in
+  // mvsic/core/index_params.h (muvera_custom / mpool / vamana / svh_*):
+  //   block_size                 = 8
+  //   num_clusters_per_block     = 16
+  //   num_points_per_cluster     = 100
+  //   rabitq_bits                = 4
   QuantArgs qa;
   qa.pq_method = parse_quant_method(P.getOptionValue("-quant_method", default_method));
   qa.block_size = P.getOptionIntValue("-m", 8);
-  qa.num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 256);
-  qa.num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 20);
-  qa.rabitq_bits = P.getOptionIntValue("-rbits", 8);
+  qa.num_clusters_per_block = P.getOptionIntValue("-num_clusters_per_block", 16);
+  qa.num_points_per_cluster = P.getOptionIntValue("-num_points_per_cluster", 100);
+  qa.rabitq_bits = P.getOptionIntValue("-rbits", 4);
   return qa;
 }
 

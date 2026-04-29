@@ -1,8 +1,31 @@
 # This file defines schema and metadata for each indexing method.
+#
+# Top-level fields per method:
+#   class:             C++/pybind class-name stem after `Index`
+#                      (e.g. "MVIVF" -> IndexMVIVFIP / IndexMVIVFL2 / ...)
+#   variable_param:    sweep axis used by plotting tooling
+#   labels:            ordered list of timer/stat labels returned by
+#                      search_with_stats
+#   supports_compress: true iff the family exposes a `CompressCenters=true`
+#                      templated variant (IndexXxxCompress...).  Only MVIVF
+#                      family + SVH_IVF today.
+#   quantizers:        list of leaf-quantizer names the family accepts in
+#                      `variants[].quantizer`.  "None" is always supported.
+#
+# Quantizer names (shared vocabulary, case-insensitive):
+#   None, PQ, FastScan, RaBitQ, TQ (aka TurboQuant), SPQTQ, OneBitTQ.
+#   OneBitTQ currently requires the multi-vector (_mv) quantizer family,
+#   so it is only listed for MVIVF / Vamana at the moment.
+#
+# The actual compile-time class resolution lives in benchmark_search.py
+# (`_resolve_class`).  This file is the single source of truth for which
+# combinations are expected to exist in the pybind module.
 
 mvivf:
   variable_param: nprobes
-  class: "MVIVF" 
+  class: "MVIVF"
+  supports_compress: true
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
   labels:
     [
       "search_cmps",
@@ -18,12 +41,16 @@ mvivf:
 
 mvivf_flat:
   variable_param: nprobes
-  class: "MVIVFFlat" 
+  class: "MVIVFFlat"
+  supports_compress: true
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
   labels: ["search_L", "search_cmps", "t_search", "t_leaf_dists", "t_leaf_rest", "t_rerank"]
 
 mvivf_spill:
   variable_param: nprobes
-  class: "MVIVFSpill" 
+  class: "MVIVFSpill"
+  supports_compress: true
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
   labels:
     [
       "search_cmps",
@@ -41,21 +68,32 @@ mvivf_spill:
 muvera:
   variable_param: L
   class: "MUVERA"
+  supports_compress: false
+  # OneBitTQ pending a non-_mv port of turboquant_1bit; see muvera.h comments.
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
   labels: ["search_cmps", "t_fde", "t_quant", "t_search", "t_rerank"]
 
 mpool:
   variable_param: L
   class: "MPool"
+  supports_compress: false
+  # OneBitTQ pending a non-_mv port of turboquant_1bit; see mpool.h comments.
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
   labels: ["t_mean_pool", "t_quant", "t_search", "t_rerank"]
 
 vamana:
   variable_param: L
   class: "Vamana"
+  supports_compress: false
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
   labels: ["search_cmps", "t_quant", "t_search", "t_rerank"]
 
 svh_ivf:
   variable_param: nprobes
   class: "SVHIVF"
+  supports_compress: true
+  # OneBitTQ pending a non-_mv port of turboquant_1bit; see svh_ivf.h comments.
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
   labels:
     [
       "search_cmps",
@@ -75,9 +113,14 @@ svh_ivf:
 svh_graph:
   variable_param: L
   class: "SVHGraph"
+  supports_compress: false
+  # OneBitTQ pending a non-_mv port of turboquant_1bit; see svh_graph.h comments.
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
   labels: ["search_cmps", "t_graph_search", "t_aggregate", "t_rerank"]
 
 fastplaid:
   variable_param: n_ivf_probe
   class: "FastPlaid"
+  supports_compress: false
+  quantizers: [None]
   labels: ["t_batch_search"]

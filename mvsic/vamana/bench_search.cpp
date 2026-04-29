@@ -56,5 +56,22 @@ void run(commandLine& P) {
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
-    "-d <dataset> -index <path> [-L 16,32,...] [-k N] [-num_rerank N] "
-    "[-compress none|carve|wards] [-csv <path>]")
+    "Vamana search benchmark (parallel). Loads (or builds) IndexVamana and sweeps -L.\n\n"
+    "Dataset / I/O:\n"
+    "  -d <name> | -i <points> -q <queries> -gt <gt>\n"
+    "  -index <path>                  Pre-built index to load\n"
+    "  -o <save_path>                 Save index after build (optional)\n"
+    "  -csv <path>                    Append per-sweep-point rows to CSV\n"
+    "  -mm  -v <level>  -compress_input  -dist_func IP|L2\n\n"
+    "Vamana build params (only if building; defaults mirror IndexParams::vamana):\n"
+    "  -R <N> (200)   -L_build <N> (600)   -a <f> (1.2)   -tp (off)\n\n"
+    "Leaf quantization:\n"
+    "  -quant_method None|PQ|FS|RQ|TQ    (default None)\n"
+    "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
+    "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n\n"
+    "Search sweep:\n"
+    "  -k <N>                         Top-k (default 10)\n"
+    "  -L <csv>                       Beam widths to sweep (default 16,32,...,2048)\n"
+    "  -num_rerank <N>                Rerank width (0 = off)\n\n"
+    "Query compression:\n"
+    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n")

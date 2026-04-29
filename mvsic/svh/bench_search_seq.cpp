@@ -61,7 +61,8 @@ void run(commandLine& P) {
     uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
     uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 500);
     uint32_t max_ppc = P.getOptionIntValue("-max_points_per_centroid", 100);
-    bool quantize_centers = P.getOption("-qc");
+    // Factory default for quantize_centers = true; use -qc 0 to disable.
+    bool quantize_centers = P.getOptionIntValue("-qc", 1) != 0;
     IndexParams ip = IndexParams::svh_ivf(k_per_level, max_leaf_size, io.compress_input,
         io.verbose, max_ppc, qa.pq_method, qa.block_size, qa.num_clusters_per_block,
         qa.num_points_per_cluster, qa.rabitq_bits, quantize_centers);
@@ -91,5 +92,24 @@ void run(commandLine& P) {
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
-    "-d <dataset> -index <path> [-graph] [-nprobes 1,2,...] [-L 16,32,...] "
-    "[-k N] [-num_rerank N] [-compress none|carve|wards] [-csv <path>]")
+    "SVH sequential search benchmark (PARLAY_SEQUENTIAL, latency-focused).\n\n"
+    "Dataset / I/O:\n"
+    "  -d <name> | -i <points> -q <queries> -gt <gt>\n"
+    "  -index <path>  -o <save_path>  -csv <path>\n"
+    "  -mm  -v <level>  -compress_input  -dist_func IP|L2\n\n"
+    "SVH variant:\n"
+    "  -graph                         IndexSVHGraph\n"
+    "  (no flag)                      IndexSVHIVF\n\n"
+    "SVHGraph build params (defaults mirror IndexParams::svh_graph):\n"
+    "  -R <N> (200)   -L_build <N> (600)   -a <f> (1.2)   -np <N> (1)\n\n"
+    "SVHIVF build params (defaults mirror IndexParams::svh_ivf):\n"
+    "  -k_per_level <N> (0)   -max_leaf_size <N> (500)\n"
+    "  -max_points_per_centroid <N> (100)   -qc 0|1 (1)\n\n"
+    "Leaf quantization:\n"
+    "  -quant_method None|PQ|FS|RQ|TQ    (default None)\n"
+    "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
+    "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n\n"
+    "Search sweep:\n"
+    "  -k <N>  -L <csv>  -nprobes <csv>  -num_rerank <N>\n\n"
+    "Query compression:\n"
+    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n")

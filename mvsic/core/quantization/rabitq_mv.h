@@ -255,6 +255,15 @@ float rabitq_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& q,
 template<bool Metric>
 class Model {
  public:
+  static constexpr uint32_t kClassId = 3;  // QuantizerTag::kRaBitQ
+  static constexpr uint32_t kBatchAlignment = 1;
+  static constexpr const char* kName = "rabitq";
+  using EncodedSet = ::mvsic::rabitq_mv::Quantized_Point_Cloud_Set<Metric>;
+  using EncodedQuery = ::mvsic::rabitq_mv::Quantized_Query_Point_Cloud<Metric>;
+  struct Params {
+    uint32_t bits = 4;
+  };
+
   static constexpr bool is_fastscan = false;
   size_t dim = 0;
   size_t padded_dim = 0;
@@ -274,6 +283,11 @@ class Model {
   template<typename PCSet>
   Model(const PCSet& train_data, size_t bits = 8) {
     train(train_data, bits);
+  }
+
+  template<typename PCSet>
+  void train(const PCSet& pcs, const Params& p) {
+    train(pcs, static_cast<size_t>(p.bits));
   }
 
   template<typename PCSet>

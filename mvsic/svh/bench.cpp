@@ -140,9 +140,23 @@ void bench(mvsic::commandLine& P) {
 
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
-                       "[-i <inFile>] [-k <num_centers>] [-s <num_embeddings>]"
-                       "[-data_type <tp>] [-dist_func <dist_func>]"
-                       "[-seed <algorithm>] [-iters <num_iters>]");
+      "SVH combined build+search benchmark (single-point).\n\n"
+      "Dataset / I/O:\n"
+      "  -i <points>  -q <queries>  -gt <gt>\n"
+      "  -o <save_path>  -index <path>\n"
+      "  -mm  -v <level>  -compress_input  -dist_func IP|L2\n\n"
+      "SVH variant:\n"
+      "  -graph                         IndexSVHGraph\n"
+      "  (no flag)                      IndexSVHIVF\n\n"
+      "SVHGraph build params:\n"
+      "  -R <N>  -L_build <N>  -a <f>  -np <N>\n\n"
+      "SVHIVF build params:\n"
+      "  -k_per_level <N>  -max_leaf_size <N>  -max_points_per_centroid <N>  -qc\n\n"
+      "Leaf quantization:\n"
+      "  -quant_method None|PQ|FS|RQ|TQ\n"
+      "  -m <N>  -num_clusters_per_block <N>  -num_points_per_cluster <N>  -rbits <N>\n\n"
+      "Search:\n"
+      "  -k <N>  -L <N>  -nprobes <N>  -num_rerank <N>\n");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {

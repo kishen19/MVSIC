@@ -12,37 +12,68 @@
 
 namespace mvsic {
 
+namespace vamana_internal { struct Empty {}; }
+
 /* Multi-vector Vamana
  - Computes Vamana Index with Chamfer Distances
 */
-template<bool metric>
+// Template parameters:
+//   metric     false = IP, true = L2
+//   LeafModel  multi-vector quantizer `Model` used to encode base points for
+//              fast beam search.  `NoQuantizer<metric>` falls through to the
+//              raw (exact) PointCloudSet kernels.  Concrete aliases below.
+//
+// Save/load is the v2 skeleton format: the graph topology is persisted but
+// the leaf quantizer codebook and encoded leaves are NOT saved by default —
+// they are re-trained and re-encoded in `load()` from the same base points.
+// `save_with_quantizer()` / `load_with_quantizer()` offer the legacy format
+// that bakes the trained model into the file for fast reload.
+template<bool metric, class LeafModel = NoQuantizer<metric>>
 class IndexVamana : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
   using pid = std::pair<uint32_t, float>;
-  using MVQT = typename Index<metric>::MVQT;
-  using QuantSet = typename MVQT::QuantSet;
-  using QuantQuery = typename MVQT::QuantQuery;
-  using QuantModel = typename MVQT::QuantModel;
   using QT = typename Index<metric>::QT;
   using Index<metric>::d;       // Embedding dimension
   using Index<metric>::params;  // Index Params
   using Index<metric>::quantization_mode;
 
-  vamana::Graph<uint32_t> G;  // Vamana Graph
-  uint32_t start_point;       // Starting Point of the graph
+  static constexpr QT kLeafMethod = quantizer_method_of_v<LeafModel, metric>;
+  static constexpr bool kHasLeafQuant = !std::is_same_v<LeafModel, NoQuantizer<metric>>;
 
-  // Quantizer Storage
-  QuantModel quantizer = std::monostate{};
-  QuantSet quantized_points = std::monostate{};
+  using LeafSet = typename LeafModel::EncodedSet;
+  using LeafQuery = typename LeafModel::EncodedQuery;
+  using LeafParams = typename LeafModel::Params;
+
+  vamana::Graph<uint32_t> G;  // Vamana Graph
+  uint32_t start_point = 0;   // Starting Point of the graph
+
+  // Trained leaf model + encoded points.  Collapsed to zero bytes when unused
+  // via `[[no_unique_address]]` + `Empty` sentinel.
+  [[no_unique_address]]
+  std::conditional_t<kHasLeafQuant, LeafModel, vamana_internal::Empty> leaf_model_;
+  [[no_unique_address]]
+  std::conditional_t<kHasLeafQuant, LeafSet, vamana_internal::Empty> leaf_encoded_;
+  [[no_unique_address]]
+  std::conditional_t<kHasLeafQuant, LeafParams, vamana_internal::Empty> leaf_params_;
 
   IndexVamana(uint32_t d_) noexcept {
     d = d_;
     params = IndexParams::vamana();
+    quantization_mode = kLeafMethod;
   }
   IndexVamana(uint32_t d_, const IndexParams& params_) noexcept {
     d = d_;
     params = params_;
+    quantization_mode = kLeafMethod;
+  }
+  template <class LP = LeafParams,
+            std::enable_if_t<kHasLeafQuant && std::is_same_v<LP, LeafParams>, int> = 0>
+  IndexVamana(uint32_t d_, const IndexParams& params_, const LP& lp) noexcept {
+    d = d_;
+    params = params_;
+    quantization_mode = kLeafMethod;
+    if constexpr (kHasLeafQuant) leaf_params_ = lp;
   }
 
   inline void set_start() noexcept { start_point = 0; }
@@ -243,14 +274,14 @@ class IndexVamana : public Index<metric> {
 
   // Builds the index given PointCloudSet object.
   void build(const PointCloudSet<ChPoint>& points) override {
-    // Step 1: Train Quantizer
-    quantization_mode = params.pq.method;
-    this->train_quantizer(points, quantizer);
+    // Step 1: Train leaf quantizer (compile-time dispatched; no-op when
+    // LeafModel == NoQuantizer).
+    if constexpr (kHasLeafQuant) {
+      leaf_model_.train(points, leaf_params_);
+      leaf_encoded_ = leaf_model_.encode(points);
+    }
 
-    // Step 2: Encode Data
-    quantized_points = this->encode_points_quantized(points, quantizer);
-
-    // Step 3: Build Graph (uses exact distances)
+    // Step 2: Build Graph (uses exact distances)
     if (params.verbose >= 1) std::cout << "Building graph..." << std::endl;
     set_start();
     G = vamana::Graph<uint32_t>(params.R, points.size());
@@ -286,7 +317,8 @@ class IndexVamana : public Index<metric> {
     CompressedPointCloud<ChPoint> compressed_storage;
     ChPoint effective_query = query;
     if (search_params.query_compression != SearchParams::QueryCompression::None) {
-      uint32_t ba = qc_internal::batch_alignment(quantization_mode);
+      uint32_t ba = 1;
+      if constexpr (kHasLeafQuant) ba = LeafModel::kBatchAlignment;
       compressed_storage = compress_query<ChPoint>(
           query, search_params.query_compression,
           search_params.query_compression_threshold, ba);
@@ -295,69 +327,34 @@ class IndexVamana : public Index<metric> {
     t_compress = t.stop();
     t.reset();
 
-    // Step 1: Quantize Query
-    t.start();
-    QuantQuery q_query_var = this->quantize_query_point_cloud(effective_query, quantizer);
-    t_quantize = t.stop();
-    t.reset();
-
-    // Step 2: Run beam search
-    t.start();
+    // Step 1 + 2: Quantize query + run beam search (compile-time dispatched on
+    // LeafModel).  No variant / switch — every branch is mono-typed.
     parlay::sequence<pid> visited;
+    if constexpr (kHasLeafQuant) {
+      t.start();
+      LeafQuery q_query = leaf_model_.quantize_query(effective_query);
+      t_quantize = t.stop();
+      t.reset();
 
-    switch (quantization_mode) {
-      case QT::PQ: {
-        auto& q = std::get<typename MVQT::PQ_Query>(q_query_var);
-        auto& d = std::get<typename MVQT::PQ_Set>(quantized_points);
-        auto [result, cmps, bytes_acc] =
-            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
-        visited = result.second;
-        dist_cmps = cmps;
-        bytes_accessed = bytes_acc;
-        break;
-      }
-      case QT::RaBitQ: {
-        auto& q = std::get<typename MVQT::RQ_Query>(q_query_var);
-        auto& d = std::get<typename MVQT::RQ_Set>(quantized_points);
-        auto [result, cmps, bytes_acc] =
-            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
-        visited = result.second;
-        dist_cmps = cmps;
-        bytes_accessed = bytes_acc;
-        break;
-      }
-      case QT::FastScan: {
-        auto& q = std::get<typename MVQT::FS_Query>(q_query_var);
-        auto& d = std::get<typename MVQT::FS_Set>(quantized_points);
-        auto [result, cmps, bytes_acc] =
-            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
-        visited = result.second;
-        dist_cmps = cmps;
-        bytes_accessed = bytes_acc;
-        break;
-      }
-      case QT::TurboQuant: {
-        auto& q = std::get<typename MVQT::TQ_Query>(q_query_var);
-        auto& d = std::get<typename MVQT::TQ_Set>(quantized_points);
-        auto [result, cmps, bytes_acc] =
-            mvsic::vamana::beam_search(q, G, d, start_point, search_params);
-        visited = result.second;
-        dist_cmps = cmps;
-        bytes_accessed = bytes_acc;
-        break;
-      }
-      case QT::None: {
-        auto [result, cmps, bytes_acc] =
-            mvsic::vamana::beam_search(effective_query, G, points, start_point, search_params);
-        visited = result.second;
-        dist_cmps = cmps;
-        bytes_accessed = bytes_acc;
-        break;
-      }
-      default: break;
+      t.start();
+      auto [result, cmps, bytes_acc] =
+          mvsic::vamana::beam_search(q_query, G, leaf_encoded_, start_point, search_params);
+      visited = result.second;
+      dist_cmps = cmps;
+      bytes_accessed = bytes_acc;
+      t_search = t.stop();
+      t.reset();
+    } else {
+      t_quantize = 0.0;
+      t.start();
+      auto [result, cmps, bytes_acc] =
+          mvsic::vamana::beam_search(effective_query, G, points, start_point, search_params);
+      visited = result.second;
+      dist_cmps = cmps;
+      bytes_accessed = bytes_acc;
+      t_search = t.stop();
+      t.reset();
     }
-    t_search = t.stop();
-    t.reset();
 
     // Step 3: Re-ranking
     t.start();
@@ -384,58 +381,138 @@ class IndexVamana : public Index<metric> {
     return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
-  // Write the index to a file in disk
+  // ---------------------------------------------------------------------------
+  // Save / load (v2 skeleton format).
+  //
+  // Layout:
+  //   magic       : uint32 = 'VAMA'
+  //   version     : uint32 = 2
+  //   class_id    : uint32 = LeafModel::kClassId
+  //   start_point : uint32
+  //   graph       : vamana::Graph::save(...) payload
+  //
+  // The leaf quantizer codebook and the encoded point set are NOT persisted.
+  // On `load()` they are re-trained / re-encoded from the supplied base
+  // `points`.  Use `save_with_quantizer` / `load_with_quantizer` to persist
+  // and reload the trained model (bound to this exact concrete class).
+  // ---------------------------------------------------------------------------
+  static constexpr uint32_t kMagic = 0x56414D41u;  // 'VAMA'
+  static constexpr uint32_t kVersion = 2u;
+  static uint32_t compute_class_id_() { return LeafModel::kClassId; }
+
   void save(const std::string& filename) override {
     std::ofstream out(filename, std::ios::binary);
-    if (!out) {
-      throw std::runtime_error("save: cannot open file: " + filename);
-    }
-    // 1. Save graph
+    if (!out) throw std::runtime_error("save: cannot open file: " + filename);
+    const uint32_t magic = kMagic;
+    const uint32_t ver = kVersion;
+    const uint32_t cid = compute_class_id_();
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
+    out.write(reinterpret_cast<const char*>(&start_point), sizeof(start_point));
     G.save(out);
-    // 2. Save Quantizer Model
-    int type_id = static_cast<int>(quantization_mode);
-    out.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
-    switch (quantization_mode) {
-      case QT::PQ: std::get<typename MVQT::PQ_Model>(quantizer).save(out); break;
-      case QT::FastScan: std::get<typename MVQT::FS_Model>(quantizer).save(out); break;
-      case QT::RaBitQ: std::get<typename MVQT::RQ_Model>(quantizer).save(out); break;
-      case QT::TurboQuant: std::get<typename MVQT::TQ_Model>(quantizer).save(out); break;
-      case QT::None: break;
-      default: break;
+    out.close();
+  }
+
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load: cannot open file: " + filename);
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic) {
+      throw std::runtime_error("[Vamana] bad magic: file is not a VAMA v2 index.");
+    }
+    if (ver != kVersion) {
+      throw std::runtime_error("[Vamana] unsupported version " + std::to_string(ver));
+    }
+    if (cid != compute_class_id_()) {
+      throw std::runtime_error("[Vamana] class_id mismatch: file has " + std::to_string(cid) +
+                               ", this instance is " + std::to_string(compute_class_id_()));
+    }
+    in.read(reinterpret_cast<char*>(&start_point), sizeof(start_point));
+    G = vamana::Graph<uint32_t>(in);
+    in.close();
+
+    // Re-train + re-encode leaf quantizer from the supplied base points.
+    if constexpr (kHasLeafQuant) {
+      leaf_model_.train(points, leaf_params_);
+      leaf_encoded_ = leaf_model_.encode(points);
+    }
+  }
+
+  // Extended save: also persist the trained leaf quantizer + encoded points,
+  // so a subsequent `load_with_quantizer()` can skip training / encoding.
+  // Only loadable by the exact same `IndexVamana<metric, LeafModel>` concrete
+  // class (the `class_id` check in load still applies).
+  void save_with_quantizer(const std::string& filename) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) throw std::runtime_error("save_with_quantizer: cannot open: " + filename);
+    const uint32_t magic = kMagic;
+    const uint32_t ver = kVersion;
+    const uint32_t cid = compute_class_id_();
+    const uint8_t has_q = kHasLeafQuant ? 1u : 0u;
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
+    out.write(reinterpret_cast<const char*>(&start_point), sizeof(start_point));
+    G.save(out);
+    out.write(reinterpret_cast<const char*>(&has_q), sizeof(has_q));
+    if constexpr (kHasLeafQuant) {
+      leaf_model_.save(out);
+      leaf_encoded_.save(out);
     }
     out.close();
   }
 
-  // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+  void load_with_quantizer(const std::string& filename,
+                           const PointCloudSet<ChPoint>& points) {
     std::ifstream in(filename, std::ios::binary);
-    if (!in) {
-      throw std::runtime_error("load: cannot open file: " + filename);
+    if (!in) throw std::runtime_error("load_with_quantizer: cannot open: " + filename);
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic || ver != kVersion || cid != compute_class_id_()) {
+      throw std::runtime_error("[Vamana] load_with_quantizer: header mismatch.");
     }
-    // 1. Load Graph
+    in.read(reinterpret_cast<char*>(&start_point), sizeof(start_point));
     G = vamana::Graph<uint32_t>(in);
-    set_start();
-
-    // 2. Load Quantizer Model
-    int type_id;
-    in.read(reinterpret_cast<char*>(&type_id), sizeof(int));
-    quantization_mode = static_cast<QT>(type_id);
-    switch (quantization_mode) {
-      case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(in); break;
-      case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(in); break;
-      case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(in); break;
-      case QT::TurboQuant: quantizer.template emplace<typename MVQT::TQ_Model>().load(in); break;
-      case QT::None: break;
-      default: break;
+    uint8_t has_q = 0;
+    in.read(reinterpret_cast<char*>(&has_q), sizeof(has_q));
+    if (has_q) {
+      if constexpr (kHasLeafQuant) {
+        leaf_model_.load(in);
+        leaf_encoded_.load(in);
+      } else {
+        throw std::runtime_error(
+            "[Vamana] load_with_quantizer: file has quantizer payload but this "
+            "concrete class is NoQuantizer.");
+      }
+    } else {
+      if constexpr (kHasLeafQuant) {
+        leaf_model_.train(points, leaf_params_);
+        leaf_encoded_ = leaf_model_.encode(points);
+      }
     }
     in.close();
-
-    // 3. Re-encode data
-    quantized_points = this->encode_points_quantized(points, quantizer);
   }
 };
 
-using IndexVamanaL2 = IndexVamana<true>;   // L2 metric
-using IndexVamanaIP = IndexVamana<false>;  // MIPS
+using IndexVamanaIP          = IndexVamana<false, NoQuantizer<false>>;
+using IndexVamanaL2          = IndexVamana<true,  NoQuantizer<true>>;
+using IndexVamanaPQIP        = IndexVamana<false, pq_mv::Model<false>>;
+using IndexVamanaPQL2        = IndexVamana<true,  pq_mv::Model<true>>;
+using IndexVamanaRaBitQIP    = IndexVamana<false, rabitq_mv::Model<false>>;
+using IndexVamanaRaBitQL2    = IndexVamana<true,  rabitq_mv::Model<true>>;
+using IndexVamanaFastScanIP  = IndexVamana<false, fastscan_mv::Model<false>>;
+using IndexVamanaFastScanL2  = IndexVamana<true,  fastscan_mv::Model<true>>;
+using IndexVamanaTQIP        = IndexVamana<false, turboquant_mv::Model<false>>;
+using IndexVamanaTQL2        = IndexVamana<true,  turboquant_mv::Model<true>>;
+using IndexVamanaSPQTQIP     = IndexVamana<false, pqtq_mv::Model<false>>;
+using IndexVamanaSPQTQL2     = IndexVamana<true,  pqtq_mv::Model<true>>;
+using IndexVamanaOneBitTQIP  = IndexVamana<false, turboquant_1bit_mv::Model<false>>;
+using IndexVamanaOneBitTQL2  = IndexVamana<true,  turboquant_1bit_mv::Model<true>>;
 
 }  // namespace mvsic

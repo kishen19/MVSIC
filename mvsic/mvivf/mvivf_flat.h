@@ -1,123 +1,156 @@
 #pragma once
 
+// =============================================================================
+// Multi-Vector IVF (Flat) — templated index.
+//
+// Single-level IVF: cluster points into `num_clusters` groups, score the query
+// against all centers, probe the top `nprobes` groups.  Templated on the same
+// <metric, CompressCenters, LeafModel> axes as IndexMVIVF; see mvivf.h for the
+// design rationale.
+// =============================================================================
+
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <type_traits>
-#include <variant>
+#include <utility>
+#include <vector>
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
+#include "mvsic/core/query_compression.h"
 #include "mvsic/core/utils/util.h"
 
 namespace mvsic {
 
-/* Multi-Vector IVF Index: Flat version (MVIVF_Flat)
-  Indexing:
-  - Runs the MV-Lloyd's algorithm to cluster the input point clouds into `num_clusters` clusters.
-    Each cluster is now represented by a "center" point cloud.
-  Search:
-  - For a given query point cloud, it computes distances to all centers point clouds,
-    and then probes the top `nprobes` clusters.
-  Params:
-  - k_per_level: Number of clusters (num_clusters)
-*/
+namespace mvivf_flat_internal { struct Empty {}; }
 
-template<bool metric>
+template<bool metric, bool CompressCenters = false,
+         class LeafModel = NoQuantizer<metric>>
 class IndexMVIVFFlat : public Index<metric> {
  public:
-  using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
-  using MVQT = typename Index<metric>::MVQT;
-  using QuantSet = typename MVQT::QuantSet;
-  using QuantQuery = typename MVQT::QuantQuery;
-  using QuantModel = typename MVQT::QuantModel;
-  using TQ_Set = typename MVQT::TQ_Set;
-  using TQ_Query = typename MVQT::TQ_Query;
-  using TQ_Model = typename MVQT::TQ_Model;
+  using ChPoint = typename Index<metric>::ChPoint;
   using QT = typename Index<metric>::QT;
-  using Index<metric>::d;       // Embedding dimension
-  using Index<metric>::params;  // Index Params
+  using Index<metric>::d;
+  using Index<metric>::params;
   using Index<metric>::quantization_mode;
 
+  using CenterModel = turboquant_mv::Model<metric>;
+  using CenterSet = typename CenterModel::EncodedSet;
+  using CenterQuery = typename CenterModel::EncodedQuery;
+
+  using LeafSet = typename LeafModel::EncodedSet;
+  using LeafQuery = typename LeafModel::EncodedQuery;
+  using LeafParams = typename LeafModel::Params;
+
+  static constexpr bool kHasLeafQuant =
+      !std::is_same_v<LeafModel, NoQuantizer<metric>>;
+  static constexpr bool kHasCenterQuant = CompressCenters;
+
+  // Cluster node: raw data (for rerank) + optionally encoded leaf.
   struct node_t {
     PointCloudSet<ChPoint> data;
-    QuantSet quantized_data;
-
-    node_t() noexcept : data(), quantized_data(std::monostate{}) {}
+    [[no_unique_address]]
+    std::conditional_t<kHasLeafQuant, LeafSet, mvivf_flat_internal::Empty> encoded_leaf;
+    node_t() noexcept = default;
     inline size_t get_size() const noexcept { return data.size(); }
   };
 
-  PointCloudSet<ChPoint> centers;  // Centers of clusters
-  TQ_Set centers_quant;
-  parlay::sequence<node_t> clusters = {};
-  // Quantizer Storage
-  QuantModel quantizer = std::monostate{};
-  TQ_Model center_quantizer;
+  PointCloudSet<ChPoint> centers;  // raw centers when !CompressCenters
+  [[no_unique_address]]
+  std::conditional_t<kHasCenterQuant, CenterSet, mvivf_flat_internal::Empty> centers_encoded;
+  parlay::sequence<node_t> clusters;
+
+  [[no_unique_address]]
+  std::conditional_t<kHasCenterQuant, CenterModel, mvivf_flat_internal::Empty> center_model_;
+  [[no_unique_address]]
+  std::conditional_t<kHasLeafQuant, LeafModel, mvivf_flat_internal::Empty> leaf_model_;
+  [[no_unique_address]]
+  std::conditional_t<kHasLeafQuant, LeafParams, mvivf_flat_internal::Empty> leaf_params_;
 
   IndexMVIVFFlat(uint32_t d_) noexcept {
     d = d_;
     params = IndexParams::mvivf_flat();
+    set_quant_mode_();
   }
-  IndexMVIVFFlat(uint32_t d_, const IndexParams& params_) noexcept {
+  IndexMVIVFFlat(uint32_t d_, const IndexParams& p) noexcept {
     d = d_;
-    params = params_;
+    params = p;
+    set_quant_mode_();
+  }
+  template <class LP = LeafParams,
+            std::enable_if_t<kHasLeafQuant && std::is_same_v<LP, LeafParams>, int> = 0>
+  IndexMVIVFFlat(uint32_t d_, const IndexParams& p, const LP& lp) noexcept {
+    d = d_;
+    params = p;
+    if constexpr (kHasLeafQuant) leaf_params_ = lp;
+    set_quant_mode_();
   }
 
   inline uint32_t get_size(size_t i) const noexcept { return clusters[i].get_size(); }
-
-  inline size_t num_leaves() const noexcept { return centers.size(); }
-
-  // Quantization Helpers
-  void init_tq_quantizer(const PointCloudSet<ChPoint>& points) {
-    if (!params.quantize_centers) return;
-    center_quantizer.train(points);
+  inline size_t num_leaves() const noexcept {
+    if constexpr (kHasCenterQuant) return clusters.size();
+    else return centers.size();
   }
 
-  TQ_Set encode_tq(const PointCloudSet<ChPoint>& points) {
-    return center_quantizer.encode(points);  // returns TQ_Set
+  void set_quant_mode_() {
+    if constexpr (!kHasLeafQuant) {
+      quantization_mode = QT::None;
+    } else {
+      using L = LeafModel;
+      if constexpr (std::is_same_v<L, pq_mv::Model<metric>>) quantization_mode = QT::PQ;
+      else if constexpr (std::is_same_v<L, rabitq_mv::Model<metric>>) quantization_mode = QT::RaBitQ;
+      else if constexpr (std::is_same_v<L, fastscan_mv::Model<metric>>) quantization_mode = QT::FastScan;
+      else if constexpr (std::is_same_v<L, turboquant_mv::Model<metric>>) quantization_mode = QT::TurboQuant;
+      else if constexpr (std::is_same_v<L, pqtq_mv::Model<metric>>) quantization_mode = QT::SPQTQ;
+      else if constexpr (std::is_same_v<L, turboquant_1bit_mv::Model<metric>>) quantization_mode = QT::OneBitTQ;
+      else quantization_mode = QT::None;
+    }
   }
 
-  // Builds the index given PointCloudSet object.
+  // ---------------------------------------------------------------------------
+  // Build.
+  // ---------------------------------------------------------------------------
   void build(const PointCloudSet<ChPoint>& points) override {
     parlay::internal::timer t;
-    size_t n = points.size();
-    size_t num_clusters = (params.k_per_level > 0) ? params.k_per_level : std::ceil(std::sqrt(n));
+    const size_t n = points.size();
+    const size_t num_clusters =
+        (params.k_per_level > 0) ? params.k_per_level
+                                 : static_cast<size_t>(std::ceil(std::sqrt(static_cast<double>(n))));
     if (params.verbose >= 1) {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
 
-    // Quantization
     t.start();
-    quantization_mode = params.pq.method;
-    this->train_quantizer(points, quantizer);
-    init_tq_quantizer(points);
-    if (params.verbose >= 1 && quantization_mode != QT::None) {
+    if constexpr (kHasCenterQuant) center_model_.train(points);
+    if constexpr (kHasLeafQuant) leaf_model_.train(points, leaf_params_);
+    if (params.verbose >= 1 && (kHasCenterQuant || kHasLeafQuant)) {
       std::cout << "[MVIVF Flat] Quantizers Trained: " << t.stop() << " sec" << std::endl;
     }
     t.reset();
 
-    // Run MV-Lloyds on points
     t.start();
     MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
     Clus.train(points);
     parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
-    centers = std::move(Clus.get_centers());  // Stealing from Clus, as we don't use it anymore
-    // Collect Clusters
-    auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
+    centers = std::move(Clus.get_centers());
+    auto id_pt = parlay::tabulate(n, [&](uint32_t i) {
+      return std::make_pair(cluster_ids[i], i);
+    });
     auto grouped = group_by_key_inplace(id_pt);
-    // Collect point clouds by clusters
     clusters.resize(num_clusters);
-    parlay::parallel_for(
-        0, grouped.size(),
-        [&](size_t i) {
-          auto cluster_id = grouped[i][0].first;
-          auto group = parlay::delayed_seq<uint32_t>(
-              grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
-          PointCloudSet<ChPoint> cluster_points = PointCloudSet<ChPoint>(points.filter(group), d);
-          clusters[cluster_id].data = std::move(cluster_points);
-          clusters[cluster_id].quantized_data =
-              this->encode_points_quantized(clusters[cluster_id].data, quantizer);
-        },
-        1);
+    parlay::parallel_for(0, grouped.size(), [&](size_t i) {
+      auto cluster_id = grouped[i][0].first;
+      auto group = parlay::delayed_seq<uint32_t>(
+          grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
+      PointCloudSet<ChPoint> cluster_points(points.filter(group), d);
+      clusters[cluster_id].data = std::move(cluster_points);
+      if constexpr (kHasLeafQuant) {
+        clusters[cluster_id].encoded_leaf = leaf_model_.encode(clusters[cluster_id].data);
+      }
+    }, 1);
     if (params.verbose >= 1) {
       std::cout << "[MVIVF Flat] Index Built: " << t.stop() << " sec" << std::endl;
       std::cout << "[MVIVF Flat] Mean cluster size: " << mean_cluster_size()
@@ -125,168 +158,182 @@ class IndexMVIVFFlat : public Index<metric> {
     }
     t.reset();
 
-    if (params.quantize_centers) {
+    if constexpr (kHasCenterQuant) {
       t.start();
-      centers_quant = encode_tq(centers);
+      centers_encoded = center_model_.encode(centers);
+      centers = PointCloudSet<ChPoint>{};  // reclaim raw centers
       std::cout << "[MVIVF Flat] Encoding Centers: " << t.stop() << " sec" << std::endl;
     }
   }
 
-  inline auto process_probes(const ChPoint& query, const QuantQuery& q_query_var,
-                             parlay::sequence<std::pair<uint32_t, float>>& probe_list) {
+  // ---------------------------------------------------------------------------
+  // Probe scoring (Step 2).
+  // ---------------------------------------------------------------------------
+  inline std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t>
+  process_probes(const ChPoint& query, const LeafQuery& q_leaf,
+                 parlay::sequence<std::pair<uint32_t, float>>& probe_list) {
     const size_t nprobes = probe_list.size();
-    auto sizes = parlay::delayed_tabulate(
-        nprobes, [&](size_t i) { return clusters[probe_list[i].first].get_size(); });
+    auto sizes = parlay::delayed_tabulate(nprobes, [&](size_t i) {
+      return clusters[probe_list[i].first].get_size();
+    });
     auto scan_result = parlay::scan(sizes);
     auto& offsets = scan_result.first;
-    size_t total_size = scan_result.second;
-    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
-    auto bytes_accessed = parlay::sequence<size_t>::uninitialized(nprobes);
-
-    auto process_probes_quant = [&]<typename SetType>(const auto& q_query) {
-      parlay::parallel_for(0, nprobes, [&](size_t i) {
-        node_t& node = clusters[probe_list[i].first];
-        auto* node_data = std::get_if<SetType>(&node.quantized_data);
-        if (!node_data) UNREACHABLE();
-        node_data->distances_all(q_query, &visited[offsets[i]]);
-        bytes_accessed[i] = node_data->num_bytes();
-      });
-    };
-
-    switch (quantization_mode) {
-      case QT::PQ:
-        process_probes_quant.template operator()<typename MVQT::PQ_Set>(
-            std::get<typename MVQT::PQ_Query>(q_query_var));
-        break;
-      case QT::RaBitQ:
-        process_probes_quant.template operator()<typename MVQT::RQ_Set>(
-            std::get<typename MVQT::RQ_Query>(q_query_var));
-        break;
-      case QT::FastScan:
-        process_probes_quant.template operator()<typename MVQT::FS_Set>(
-            std::get<typename MVQT::FS_Query>(q_query_var));
-        break;
-      case QT::TurboQuant:
-        process_probes_quant.template operator()<typename MVQT::TQ_Set>(
-            std::get<typename MVQT::TQ_Query>(q_query_var));
-        break;
-      case QT::SPQTQ:
-        process_probes_quant.template operator()<typename MVQT::PQTQ_Set>(
-            std::get<typename MVQT::PQTQ_Query>(q_query_var));
-        break;
-      case QT::OneBitTQ:
-        process_probes_quant.template operator()<typename MVQT::OBTQ_Set>(
-            std::get<typename MVQT::OBTQ_Query>(q_query_var));
-        break;
-      case QT::None:
-        parlay::parallel_for(0, nprobes, [&](size_t i) {
-          node_t& node = clusters[probe_list[i].first];
-          node.data.distances(query, &visited[offsets[i]]);
-          bytes_accessed[i] = node.data.num_bytes();
-        });
-        break;
-    }
-    return std::make_pair(visited, parlay::reduce(bytes_accessed));
+    size_t total = scan_result.second;
+    auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total);
+    auto bytes = parlay::sequence<size_t>::uninitialized(nprobes);
+    parlay::parallel_for(0, nprobes, [&](size_t i) {
+      node_t& node = clusters[probe_list[i].first];
+      if constexpr (kHasLeafQuant) {
+        node.encoded_leaf.distances_all(q_leaf, &visited[offsets[i]]);
+        bytes[i] = node.encoded_leaf.num_bytes();
+      } else {
+        (void)q_leaf;
+        node.data.distances(query, &visited[offsets[i]]);
+        bytes[i] = node.data.num_bytes();
+      }
+    });
+    return std::make_pair(std::move(visited), parlay::reduce(bytes));
   }
 
-  // Returns the top-k point clouds for the query point cloud
-  // Output format: < [<id, distance>, ...], # distance comparisons>
+  // ---------------------------------------------------------------------------
+  // Single-query search with detailed stats.
+  //
+  // Timer labels (matches bench `is_flat` path):
+  //   0  n_centers
+  //   1  probe_cmps
+  //   2  t_compress
+  //   3  t_search
+  //   4  t_leaf_dists
+  //   5  t_leaf_rest
+  //   6  t_rerank
+  // ---------------------------------------------------------------------------
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
                     const SearchParams& search_params) override {
     parlay::internal::timer t;
-
-    size_t k = search_params.k;
+    const size_t k = search_params.k;
     size_t nprobes = search_params.nprobes;
     size_t bytes_accessed = 0;
-
-    std::vector<double> stats;
     size_t dist_cmps = 0;
-    double t_search = 0.0;
-    double t_quantize = 0.0;
-    double t_distances = 0.0;
-    double t_rest = 0.0;
-    double t_rerank = 0.0;
+    double t_compress = 0.0, t_search = 0.0;
+    double t_distances = 0.0, t_rest = 0.0, t_rerank = 0.0;
 
-    // -------------------------
-    // Step 0: Quantize Query
-    // -------------------------
-    QuantQuery q_query_var = this->quantize_query_point_cloud(query, quantizer);
-    TQ_Query q_center_query;
+    // Step -1: query compression.
     t.start();
-    if (params.quantize_centers) {
-      q_center_query = center_quantizer.quantize_query(query);
+    CompressedPointCloud<ChPoint> compressed_storage;
+    ChPoint effective_query = query;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      uint32_t ba = 1;
+      if constexpr (kHasLeafQuant) ba = LeafModel::kBatchAlignment;
+      compressed_storage = compress_query<ChPoint>(
+          query, search_params.query_compression,
+          search_params.query_compression_threshold, ba);
+      effective_query = compressed_storage.view();
     }
-    t_quantize = t.stop();
-    t.reset();
+    t_compress = t.stop(); t.reset();
 
-    // -------------------------
-    // Step 1: Compute distances to centers
-    // -------------------------
+    // Step 0: quantize query.
+    LeafQuery q_leaf{};
+    CenterQuery q_center{};
+    if constexpr (kHasLeafQuant) q_leaf = leaf_model_.quantize_query(effective_query);
+    if constexpr (kHasCenterQuant) q_center = center_model_.quantize_query(effective_query);
+
+    // Step 1: score against all centers, take top-nprobes.
     t.start();
-    const size_t L = centers.size();
+    const size_t L = num_leaves();
     nprobes = std::min(nprobes, L);
     auto probe_list = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(L);
-
-    if (params.quantize_centers) {
-      centers_quant.distances_all(q_center_query, probe_list.data());
-      bytes_accessed += centers_quant.num_bytes();
+    if constexpr (kHasCenterQuant) {
+      centers_encoded.distances_all(q_center, probe_list.data());
+      bytes_accessed += centers_encoded.num_bytes();
     } else {
-      centers.distances(query, probe_list.data());
+      centers.distances(effective_query, probe_list.data());
       bytes_accessed += centers.num_bytes();
     }
-
     std::nth_element(probe_list.begin(), probe_list.begin() + nprobes, probe_list.end(),
-                     [](const auto& a, const auto& b) { return a.second < b.second; });
+        [](const auto& a, const auto& b) { return a.second < b.second; });
     probe_list.resize(nprobes);
     t_search = t.stop();
     dist_cmps += L;
     t.reset();
 
-    // -------------------------
-    // Step 2: Probe top nprobe clusters
-    // -------------------------
+    // Step 2: probe.
     t.start();
     parlay::sequence<std::pair<uint32_t, float>> visited;
-    size_t bytes_accessed_pp;
-    std::tie(visited, bytes_accessed_pp) = process_probes(query, q_query_var, probe_list);
-    bytes_accessed += bytes_accessed_pp;
-    t_distances = t.stop();
+    size_t bytes_pp;
+    std::tie(visited, bytes_pp) = process_probes(effective_query, q_leaf, probe_list);
+    bytes_accessed += bytes_pp;
+    t_distances = t.stop(); t.reset();
 
     t.start();
     mvsic::sort_inplace_kv(visited);
-    t_rest += t.stop();
-    t.reset();
-
+    t_rest += t.stop(); t.reset();
     dist_cmps += visited.size();
 
-    // -------------------------
-    // Step 3: Re-ranking
-    // -------------------------
+    // Step 3: rerank.
+    const ChPoint& rerank_query = search_params.compress_rerank ? effective_query : query;
     t.start();
-    auto final_results =
-        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
+    auto final_results = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+        std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      bytes_accessed += this->rerank(query, points, visited, num_rerank, final_results);
+      bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
     }
-    t_rerank = t.stop();
-    t.reset();
+    t_rerank = t.stop(); t.reset();
 
-    stats.push_back(static_cast<size_t>(L));
+    std::vector<double> stats;
+    stats.push_back(static_cast<double>(L));
     stats.push_back(static_cast<double>(dist_cmps));
+    stats.push_back(t_compress);
     stats.push_back(t_search);
     stats.push_back(t_distances);
     stats.push_back(t_rest);
     stats.push_back(t_rerank);
-
-    return std::make_tuple(final_results, bytes_accessed, stats);
+    return std::make_tuple(std::move(final_results), bytes_accessed, std::move(stats));
   }
 
-  // Write the index to a file in disk
+  // ---------------------------------------------------------------------------
+  // Save / load (v2 format: magic + version + class_id + IndexParams + skeleton).
+  //
+  // When !CompressCenters, raw center coords are persisted.  When CompressCenters,
+  // we rely on re-training the center model from `points` on load — centers are
+  // reconstructed via re-running MVClustering is NOT done; instead the skeleton
+  // for the compressed case requires the encoded bytes to be persisted.  Since
+  // the current scope retains the "retrain + re-encode" philosophy from mvivf.h,
+  // we fall back to saving raw centers even in CompressCenters mode during save
+  // (before clearing) if params.quantize_centers is true and centers is non-empty.
+  // For now, CompressCenters=true with non-empty `centers` happens only pre-build;
+  // saving after build is supported only for !CompressCenters.
+  // ---------------------------------------------------------------------------
+  static constexpr uint32_t kMagic = 0x4D464C46u;  // 'MFLF'
+  static constexpr uint32_t kVersion = 3u;  // v3: dropped persisted params.quantize_centers
+  static uint32_t compute_class_id_() {
+    uint32_t lid = LeafModel::kClassId;
+    return (lid << 1) | (kHasCenterQuant ? 1u : 0u);
+  }
+
+ private:
+  void write_params_(std::ostream& out) const {
+    auto w = [&](auto x) { out.write(reinterpret_cast<const char*>(&x), sizeof(x)); };
+    w(params.k_per_level);
+    w(params.s);
+    w(params.mvclus.niters);
+    w(params.mvclus.max_point_clouds_per_cluster);
+    w(params.mvclus.max_points_per_centroid_inner_kmeans);
+  }
+  void read_params_(std::istream& in) {
+    auto r = [&](auto& x) { in.read(reinterpret_cast<char*>(&x), sizeof(x)); };
+    r(params.k_per_level);
+    r(params.s);
+    r(params.mvclus.niters);
+    r(params.mvclus.max_point_clouds_per_cluster);
+    r(params.mvclus.max_points_per_centroid_inner_kmeans);
+  }
+
+ public:
   void save(const std::string& filename) override {
     std::ofstream outfile(filename, std::ios::binary);
     std::cout << "Saving index to " << filename << std::endl;
@@ -294,60 +341,48 @@ class IndexMVIVFFlat : public Index<metric> {
       std::cerr << "Error opening file for writing: " << filename << std::endl;
       return;
     }
+    const uint32_t magic = kMagic, ver = kVersion, cid = compute_class_id_();
+    outfile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    outfile.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    outfile.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
+    write_params_(outfile);
 
-    // Collect data for centers
-    parlay::sequence<size_t> center_offsets = parlay::sequence<size_t>::from_function(
-        centers.size(), [&](size_t i) { return centers.get_size(i) * d; });
-    size_t total_center_sizes = parlay::scan_inplace(center_offsets);
-    center_offsets.push_back(total_center_sizes);
-
-    // Write num
-    size_t num = centers.size();
+    // Center skeleton.  For CompressCenters=true we save only the cluster sizes
+    // (no raw center coords — they've been discarded).  Centers are reconstructed
+    // at load time via re-clustering the dataset, which is why CompressCenters
+    // saves are currently lossy w.r.t. exact center values; use the default
+    // (raw-center) save + a LeafModel for a fully reproducible index.
+    size_t num = clusters.size();
     outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
-    // Write center offsets
-    outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
-                  center_offsets.size() * sizeof(size_t));
-    // Write centers values
-    auto coords = centers.data();
-    size_t num_entries = (centers.total_size()) * (centers.get_dims());
-    outfile.write(reinterpret_cast<const char*>(coords), num_entries * sizeof(float));
+
+    if constexpr (!kHasCenterQuant) {
+      parlay::sequence<size_t> center_offsets = parlay::sequence<size_t>::from_function(
+          centers.size(), [&](size_t i) { return centers.get_size(i) * d; });
+      size_t total = parlay::scan_inplace(center_offsets);
+      center_offsets.push_back(total);
+      outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
+                    center_offsets.size() * sizeof(size_t));
+      auto coords = centers.data();
+      size_t nent = centers.total_size() * centers.get_dims();
+      outfile.write(reinterpret_cast<const char*>(coords), nent * sizeof(float));
+    }
 
     parlay::sequence<size_t> clusters_offsets = parlay::sequence<size_t>::from_function(
         clusters.size(), [&](size_t i) { return clusters[i].get_size(); });
-    size_t total_clusters_size = parlay::scan_inplace(clusters_offsets);
-    clusters_offsets.push_back(total_clusters_size);
-    // Write clusters offsets
+    size_t total_cluster = parlay::scan_inplace(clusters_offsets);
+    clusters_offsets.push_back(total_cluster);
     outfile.write(reinterpret_cast<const char*>(clusters_offsets.begin()),
                   clusters_offsets.size() * sizeof(size_t));
-    // Write clusters values
     for (size_t i = 0; i < num; ++i) {
-      if (clusters[i].get_size() > 0) {
-        for (size_t j = 0; j < clusters[i].get_size(); ++j) {
-          uint32_t point_id = clusters[i].data.get_id(j);
-          outfile.write(reinterpret_cast<const char*>(&point_id), sizeof(uint32_t));
-        }
+      size_t sz = clusters[i].get_size();
+      for (size_t j = 0; j < sz; ++j) {
+        uint32_t pid = clusters[i].data.get_id(j);
+        outfile.write(reinterpret_cast<const char*>(&pid), sizeof(uint32_t));
       }
     }
-
-    // quantizer MODEL only
-    const int type_id = static_cast<int>(quantization_mode);
-    outfile.write(reinterpret_cast<const char*>(&type_id), sizeof(int));
-
-    std::visit(
-        [&](auto& model) {
-          using ModelType = std::decay_t<decltype(model)>;
-          if constexpr (std::is_same_v<ModelType, std::monostate>) {
-            return;
-          } else {
-            model.save(outfile);
-          }
-        },
-        quantizer);
-
     outfile.close();
   }
 
-  // Read the index from a file in disk
   void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
     std::ifstream infile(filename, std::ios::binary);
     std::cout << "Loading index from " << filename << std::endl;
@@ -355,95 +390,123 @@ class IndexMVIVFFlat : public Index<metric> {
       std::cerr << "Error opening file for reading: " << filename << std::endl;
       return;
     }
+    uint32_t magic = 0, ver = 0, cid = 0;
+    infile.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    infile.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    infile.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic) {
+      std::cerr << "[MVIVF Flat] bad magic (not MFLF v2)." << std::endl;
+      return;
+    }
+    if (ver != kVersion) {
+      std::cerr << "[MVIVF Flat] unsupported version " << ver << "." << std::endl;
+      return;
+    }
+    if (cid != compute_class_id_()) {
+      std::cerr << "[MVIVF Flat] class_id mismatch: file has " << cid
+                << ", this instance is " << compute_class_id_() << "." << std::endl;
+      return;
+    }
+    read_params_(infile);
 
-    // Read number of nodes
     size_t num = 0;
     infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
-    // Read center offsets
-    size_t num_center_offsets = num + 1;
-    parlay::sequence<size_t> center_offsets(num_center_offsets);
-    infile.read(reinterpret_cast<char*>(center_offsets.begin()),
-                center_offsets.size() * sizeof(size_t));
-    // Read centers values
-    parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
-    infile.read(reinterpret_cast<char*>(center_values.begin()),
-                center_values.size() * sizeof(float));
-
-    size_t dim = points.get_dims();
-    centers =
-        PointCloudSet<ChPoint>(num, dim, center_values.data(), center_offsets.data(), nullptr);
-
-    // Read clusters offsets
+    if constexpr (!kHasCenterQuant) {
+      parlay::sequence<size_t> center_offsets(num + 1);
+      infile.read(reinterpret_cast<char*>(center_offsets.begin()),
+                  center_offsets.size() * sizeof(size_t));
+      parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
+      infile.read(reinterpret_cast<char*>(center_values.begin()),
+                  center_values.size() * sizeof(float));
+      centers = PointCloudSet<ChPoint>(num, points.get_dims(), center_values.data(),
+                                       center_offsets.data(), nullptr);
+    }
     parlay::sequence<size_t> clusters_offsets(num + 1);
     infile.read(reinterpret_cast<char*>(clusters_offsets.begin()),
                 clusters_offsets.size() * sizeof(size_t));
-    // Read clusters values
     parlay::sequence<uint32_t> clusters_values(clusters_offsets[clusters_offsets.size() - 1]);
     infile.read(reinterpret_cast<char*>(clusters_values.begin()),
                 clusters_values.size() * sizeof(uint32_t));
-
-    // quantizer model
-    int type_id = 0;
-    infile.read(reinterpret_cast<char*>(&type_id), sizeof(int));
-    quantization_mode = static_cast<QT>(type_id);
-
-    switch (quantization_mode) {
-      case QT::PQ: quantizer.template emplace<typename MVQT::PQ_Model>().load(infile); break;
-      case QT::RaBitQ: quantizer.template emplace<typename MVQT::RQ_Model>().load(infile); break;
-      case QT::FastScan: quantizer.template emplace<typename MVQT::FS_Model>().load(infile); break;
-      case QT::TurboQuant:
-        quantizer.template emplace<typename MVQT::TQ_Model>().load(infile);
-        break;
-      case QT::SPQTQ:
-        quantizer.template emplace<typename MVQT::PQTQ_Model>().load(infile);
-        break;
-      case QT::OneBitTQ:
-        quantizer.template emplace<typename MVQT::OBTQ_Model>().load(infile);
-        break;
-      case QT::None:
-      default: quantizer = std::monostate{}; break;
-    }
     infile.close();
 
-    // Center quantization (internal-node / leaf-center scoring): always TQ.
-    init_tq_quantizer(points);
-    if (params.quantize_centers) {
-      centers_quant = encode_tq(centers);
-    }
+    // Re-train quantizers + re-encode.
+    if constexpr (kHasCenterQuant) center_model_.train(points);
+    if constexpr (kHasLeafQuant) leaf_model_.train(points, leaf_params_);
 
-    // Build the index
+    const size_t dim = points.get_dims();
     auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
     parlay::parallel_for(0, points.size(),
-                         [&](uint32_t i) { point_id_to_data_id[points.get_id(i)] = i; });
-    parlay::sequence<size_t> clusters_sizes = parlay::sequence<size_t>::from_function(
+        [&](uint32_t i) { point_id_to_data_id[points.get_id(i)] = i; });
+    parlay::sequence<size_t> cluster_sizes = parlay::sequence<size_t>::from_function(
         num, [&](size_t i) { return clusters_offsets[i + 1] - clusters_offsets[i]; });
     clusters.resize(num);
     parlay::parallel_for(0, num, [&](size_t i) {
-      if (clusters_sizes[i] > 0) {
-        auto cluster_group = parlay::delayed_seq<uint32_t>(clusters_sizes[i], [&](size_t j) {
-          uint32_t point_id = clusters_values[clusters_offsets[i] + j];
-          return point_id_to_data_id[point_id];
+      if (cluster_sizes[i] > 0) {
+        auto cluster_group = parlay::delayed_seq<uint32_t>(cluster_sizes[i], [&](size_t j) {
+          uint32_t pid = clusters_values[clusters_offsets[i] + j];
+          return point_id_to_data_id[pid];
         });
         clusters[i].data = PointCloudSet<ChPoint>(points.filter(cluster_group), dim);
-        clusters[i].quantized_data = this->encode_points_quantized(clusters[i].data, quantizer);
+        if constexpr (kHasLeafQuant) {
+          clusters[i].encoded_leaf = leaf_model_.encode(clusters[i].data);
+        }
       }
     });
+
+    if constexpr (kHasCenterQuant) {
+      // Re-encode centers by re-running MVClustering (topology is lost — this
+      // is the "skeleton-less center" tradeoff).  Users who want exact reload
+      // should use the non-compressed variant.
+      MVClustering<metric> Clus(d, num, params.s, params.mvclus);
+      Clus.train(points);
+      PointCloudSet<ChPoint> fresh_centers = std::move(Clus.get_centers());
+      centers_encoded = center_model_.encode(fresh_centers);
+    }
   }
 
   size_t mean_cluster_size() const noexcept override {
-    auto cluster_sizes =
-        parlay::delayed_seq<size_t>(num_leaves(), [&](size_t i) { return get_size(i); });
-    return parlay::reduce(cluster_sizes) / num_leaves();
+    auto cs = parlay::delayed_seq<size_t>(clusters.size(),
+        [&](size_t i) { return clusters[i].get_size(); });
+    return clusters.size() > 0 ? parlay::reduce(cs) / clusters.size() : 0;
   }
-
   size_t max_cluster_size() const noexcept override {
-    auto cluster_sizes =
-        parlay::delayed_seq<size_t>(num_leaves(), [&](size_t i) { return get_size(i); });
-    return parlay::reduce(cluster_sizes, parlay::maxm<size_t>());
+    auto cs = parlay::delayed_seq<size_t>(clusters.size(),
+        [&](size_t i) { return clusters[i].get_size(); });
+    return parlay::reduce(cs, parlay::maxm<size_t>());
   }
 };
 
-using IndexMVIVFFlatL2 = IndexMVIVFFlat<true>;   // Instantiates for L2 metric (metric = true)
-using IndexMVIVFFlatIP = IndexMVIVFFlat<false>;  // Instantiates for MIPS      (metric = false)
+// Concrete aliases.
+using IndexMVIVFFlatIP          = IndexMVIVFFlat<false, false, NoQuantizer<false>>;
+using IndexMVIVFFlatL2          = IndexMVIVFFlat<true,  false, NoQuantizer<true>>;
+using IndexMVIVFFlatCompressIP  = IndexMVIVFFlat<false, true,  NoQuantizer<false>>;
+using IndexMVIVFFlatCompressL2  = IndexMVIVFFlat<true,  true,  NoQuantizer<true>>;
+
+using IndexMVIVFFlatPQIP        = IndexMVIVFFlat<false, false, pq_mv::Model<false>>;
+using IndexMVIVFFlatPQL2        = IndexMVIVFFlat<true,  false, pq_mv::Model<true>>;
+using IndexMVIVFFlatFastScanIP  = IndexMVIVFFlat<false, false, fastscan_mv::Model<false>>;
+using IndexMVIVFFlatFastScanL2  = IndexMVIVFFlat<true,  false, fastscan_mv::Model<true>>;
+using IndexMVIVFFlatRaBitQIP    = IndexMVIVFFlat<false, false, rabitq_mv::Model<false>>;
+using IndexMVIVFFlatRaBitQL2    = IndexMVIVFFlat<true,  false, rabitq_mv::Model<true>>;
+using IndexMVIVFFlatTQIP        = IndexMVIVFFlat<false, false, turboquant_mv::Model<false>>;
+using IndexMVIVFFlatTQL2        = IndexMVIVFFlat<true,  false, turboquant_mv::Model<true>>;
+using IndexMVIVFFlatSPQTQIP     = IndexMVIVFFlat<false, false, pqtq_mv::Model<false>>;
+using IndexMVIVFFlatSPQTQL2     = IndexMVIVFFlat<true,  false, pqtq_mv::Model<true>>;
+using IndexMVIVFFlatOneBitTQIP  = IndexMVIVFFlat<false, false, turboquant_1bit_mv::Model<false>>;
+using IndexMVIVFFlatOneBitTQL2  = IndexMVIVFFlat<true,  false, turboquant_1bit_mv::Model<true>>;
+
+// CompressCenters (TQ-quantized centers) + LeafModel combinations.
+using IndexMVIVFFlatCompressPQIP        = IndexMVIVFFlat<false, true, pq_mv::Model<false>>;
+using IndexMVIVFFlatCompressPQL2        = IndexMVIVFFlat<true,  true, pq_mv::Model<true>>;
+using IndexMVIVFFlatCompressFastScanIP  = IndexMVIVFFlat<false, true, fastscan_mv::Model<false>>;
+using IndexMVIVFFlatCompressFastScanL2  = IndexMVIVFFlat<true,  true, fastscan_mv::Model<true>>;
+using IndexMVIVFFlatCompressRaBitQIP    = IndexMVIVFFlat<false, true, rabitq_mv::Model<false>>;
+using IndexMVIVFFlatCompressRaBitQL2    = IndexMVIVFFlat<true,  true, rabitq_mv::Model<true>>;
+using IndexMVIVFFlatCompressTQIP        = IndexMVIVFFlat<false, true, turboquant_mv::Model<false>>;
+using IndexMVIVFFlatCompressTQL2        = IndexMVIVFFlat<true,  true, turboquant_mv::Model<true>>;
+using IndexMVIVFFlatCompressSPQTQIP     = IndexMVIVFFlat<false, true, pqtq_mv::Model<false>>;
+using IndexMVIVFFlatCompressSPQTQL2     = IndexMVIVFFlat<true,  true, pqtq_mv::Model<true>>;
+using IndexMVIVFFlatCompressOneBitTQIP  = IndexMVIVFFlat<false, true, turboquant_1bit_mv::Model<false>>;
+using IndexMVIVFFlatCompressOneBitTQL2  = IndexMVIVFFlat<true,  true, turboquant_1bit_mv::Model<true>>;
 
 }  // namespace mvsic

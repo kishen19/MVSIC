@@ -46,7 +46,8 @@ void run(commandLine& P) {
     uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
     uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 500);
     uint32_t max_ppc = P.getOptionIntValue("-max_points_per_centroid", 100);
-    bool quantize_centers = P.getOption("-qc");
+    // Factory default for quantize_centers = true; use -qc 0 to disable.
+    bool quantize_centers = P.getOptionIntValue("-qc", 1) != 0;
     IndexParams ip = IndexParams::svh_ivf(k_per_level, max_leaf_size, io.compress_input,
         io.verbose, max_ppc, qa.pq_method, qa.block_size, qa.num_clusters_per_block,
         qa.num_points_per_cluster, qa.rabitq_bits, quantize_centers);
@@ -55,4 +56,29 @@ void run(commandLine& P) {
   }
 }
 
-PARSE_DIST_FUNC_AND_RUN(run, "-d <dataset> -o <save_path> [-graph] ...")
+PARSE_DIST_FUNC_AND_RUN(run,
+    "SVH build-only benchmark. Builds IndexSVHGraph or IndexSVHIVF (via -graph).\n\n"
+    "Dataset / I/O:\n"
+    "  -d <name> | -i <points>\n"
+    "  -o <save_path>                 Where to save the built index\n"
+    "  -mm                            Memory-map the points file\n"
+    "  -v <level>                     Verbosity (0..3)\n"
+    "  -compress_input                Apply point-cloud input compression\n"
+    "  -dist_func IP|L2               Distance metric (default IP)\n\n"
+    "SVH variant:\n"
+    "  -graph                         Build IndexSVHGraph (Vamana-based)\n"
+    "  (no flag)                      Build IndexSVHIVF (IVF-based, default)\n\n"
+    "SVHGraph params (-graph; defaults mirror IndexParams::svh_graph):\n"
+    "  -R <N>                         Graph out-degree (default 200)\n"
+    "  -L_build <N>                   Build beam width (default 600)\n"
+    "  -a <f>                         alpha (default 1.2)\n"
+    "  -np <N>                        Num passes (default 1)\n\n"
+    "SVHIVF params (no -graph; defaults mirror IndexParams::svh_ivf):\n"
+    "  -k_per_level <N>               Branching factor (default 0 = auto)\n"
+    "  -max_leaf_size <N>             Leaf size threshold (default 500)\n"
+    "  -max_points_per_centroid <N>   K-means cap per centroid (default 100)\n"
+    "  -qc 0|1                        Quantize centers (default 1)\n\n"
+    "Leaf quantization (passed through IndexParams):\n"
+    "  -quant_method None|PQ|FS|RQ|TQ    (default None)\n"
+    "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
+    "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n")

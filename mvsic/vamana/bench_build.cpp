@@ -38,4 +38,23 @@ void run(commandLine& P) {
   }
 }
 
-PARSE_DIST_FUNC_AND_RUN(run, "-d <dataset> -o <save_path> [-R N] [-L_build N] ...")
+PARSE_DIST_FUNC_AND_RUN(run,
+    "Vamana build-only benchmark. Builds IndexVamana<metric> and optionally saves it.\n\n"
+    "Dataset / I/O:\n"
+    "  -d <name> | -i <points>\n"
+    "  -o <save_path>                 Where to save the built index\n"
+    "  -mm                            Memory-map the points file\n"
+    "  -v <level>                     Verbosity (0..3)\n"
+    "  -compress_input                Apply point-cloud input compression\n"
+    "  -dist_func IP|L2               Distance metric (default IP)\n\n"
+    "Vamana build parameters (defaults mirror IndexParams::vamana):\n"
+    "  -R <N>                         Graph out-degree (default 200)\n"
+    "  -L_build <N>                   Beam width during build (default 600)\n"
+    "  -a <f>                         alpha / prune threshold (default 1.2)\n"
+    "  -tp                            Two-pass build (default off)\n\n"
+    "Leaf quantization (passed through IndexParams):\n"
+    "  -quant_method None|PQ|FS|RQ|TQ           Quantizer family (default None)\n"
+    "  -m <N>                         Block size (default 8)\n"
+    "  -num_clusters_per_block <N>    Codebook size (default 16)\n"
+    "  -num_points_per_cluster <N>    K-means points per centroid (default 100)\n"
+    "  -rbits <N>                     RaBitQ bit-width (default 4)\n")

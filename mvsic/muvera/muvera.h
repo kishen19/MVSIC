@@ -5,6 +5,7 @@
 #include "mvsic/muvera/fde/fixed_dimensional_encoding.h"
 #include "mvsic/core/index.h"
 #include "mvsic/core/query_compression.h"
+#include "mvsic/core/quantization/variant_io.h"
 #include "mvsic/core/types/io.h"
 
 // ParlayANN (Vamana) includes
@@ -22,7 +23,17 @@ namespace mvsic {
  - Uses graph-based index (Vamana here) for retrieval.
 */
 
-template<bool metric>
+// Template parameters:
+//   metric     true = L2, false = IP.
+//   LeafModel  concrete quantizer Model type for the FDE index; NoQuantizer
+//              means raw FDEs (no quantization).  Used today purely for
+//              type-level class separation (so pybind11 sees distinct bindings
+//              per variant and users can construct `IndexMUVERAPQIP` without
+//              manually setting IndexParams).  The index constructor auto-
+//              derives `params.pq.method` from the LeafModel type.  Full
+//              compile-time `if constexpr` specialization of the beam-search
+//              hot path is a follow-up (see docs/roadmap).
+template<bool metric, class LeafModel = NoQuantizer<metric>>
 class IndexMUVERA : public Index<metric> {
  public:
   using ChPoint = typename Index<metric>::ChPoint;  // Chamfer Point Type
@@ -37,13 +48,15 @@ class IndexMUVERA : public Index<metric> {
   using Index<metric>::params;  // Index Params
   using Index<metric>::quantization_mode;
 
+  static constexpr QT kLeafMethod = quantizer_method_of_v<LeafModel, metric>;
+
   uint32_t d_fde;                                  // FDE dimension
   Range points_fdes;                               // FDEs
   parlayANN::Graph<uint32_t> G;                    // Vamana graph
   parlayANN::BuildParams BP;                       // Vamana build parameters
   parlayANN::knn_index<Range, Range, uint32_t> I;  // Vamana index
 
-  // Quantizer Storage
+  // Quantizer Storage (variant-based; dispatched via kLeafMethod).
   QuantModel quantizer = std::monostate{};
   QuantRange quantized_data = std::monostate{};
 
@@ -52,12 +65,16 @@ class IndexMUVERA : public Index<metric> {
       BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
+    if constexpr (kLeafMethod != QT::None) params.pq.method = kLeafMethod;
   }
-  IndexMUVERA(uint32_t d_, const IndexParams& params) noexcept :
-      Index<metric>(params),
+  IndexMUVERA(uint32_t d_, const IndexParams& params_in) noexcept :
+      Index<metric>(params_in),
       BP(parlayANN::BuildParams(params.ann.R, params.ann.L, params.ann.alpha, params.ann.num_pass)),
       I(parlayANN::knn_index<Range, Range, uint32_t>(BP)) {
     d = d_;
+    // User-provided params take precedence, but if the template was instantiated
+    // for a specific quantizer we override to keep type and method aligned.
+    if constexpr (kLeafMethod != QT::None) params.pq.method = kLeafMethod;
   }
 
   // Builds the index given PointCloudSet object.
@@ -94,8 +111,8 @@ class IndexMUVERA : public Index<metric> {
     I.build_index(G, points_fdes, points_fdes, BuildStats);
     if (params.verbose >= 1) std::cout << "FDE Dimension: " << points_fdes.get_dims() << std::endl;
 
-    // Step3: Quantization
-    quantization_mode = params.pq.method;
+    // Step3: Quantization — resolved from the compile-time `LeafModel`.
+    quantization_mode = kLeafMethod;
     this->train_quantizer(points_fdes, quantizer);
     quantized_data = this->encode_range_quantized(points_fdes, quantizer);
   }
@@ -200,102 +217,158 @@ class IndexMUVERA : public Index<metric> {
     return std::make_tuple(final_results, bytes_accessed, stats);
   }
 
-  // Write the index to a file in disk
+  // ---------------------------------------------------------------------------
+  // Save / load (v2 skeleton format).
+  //
+  // Layout:
+  //   magic       : uint32 = 'MUVE'
+  //   version     : uint32 = 2
+  //   class_id    : uint32 = static_cast<uint32_t>(kLeafMethod)
+  //   d_fde       : uint32
+  //   graph       : parlayANN::io::save_graph payload
+  //   points_fdes : raw FDE single-vector data (via save_point_range)
+  //
+  // The leaf quantizer codebook and encoded single-vector data are NOT
+  // persisted.  `load()` re-trains and re-encodes from `points_fdes`.  The
+  // internal hot path still uses variant-based dispatch.
+  // ---------------------------------------------------------------------------
+  static constexpr uint32_t kMagic = 0x4D555645u;  // 'MUVE'
+  static constexpr uint32_t kVersion = 2u;
+  static uint32_t compute_class_id_() { return static_cast<uint32_t>(kLeafMethod); }
+
   void save(const std::string& filename) override {
     std::ofstream out(filename, std::ios::binary);
     if (!out) throw std::runtime_error("save: cannot open file: " + filename);
-
-    // 1. Save graph
+    const uint32_t magic = kMagic;
+    const uint32_t ver = kVersion;
+    const uint32_t cid = compute_class_id_();
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
+    out.write(reinterpret_cast<const char*>(&d_fde), sizeof(uint32_t));
     parlayANN::io::save_graph(G, out);
-
-    // 2. Save Quantizer Type Header
-    out.write((char*)&d_fde, sizeof(uint32_t));
-    int type_id = static_cast<int>(quantization_mode);
-    out.write((char*)&type_id, sizeof(int));
-
-    // 3. Save Quantizer Model and encodings OR Exact Vectors
-    switch (quantization_mode) {
-      case QT::PQ:
-        std::get<typename SVQT::PQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::PQ_Range>(quantized_data).save(out);
-        break;
-      case QT::RaBitQ:
-        std::get<typename SVQT::RQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::RQ_Range>(quantized_data).save(out);
-        break;
-      case QT::FastScan:
-        std::get<typename SVQT::FS_Model>(quantizer).save(out);
-        std::get<typename SVQT::FS_Range>(quantized_data).save(out);
-        break;
-      case QT::TurboQuant:
-        std::get<typename SVQT::TQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::TQ_Range>(quantized_data).save(out);
-        break;
-      case QT::SPQTQ:
-        std::get<typename SVQT::PQTQ_Model>(quantizer).save(out);
-        std::get<typename SVQT::PQTQ_Range>(quantized_data).save(out);
-        break;
-      case QT::None: parlayANN::io::save_point_range(points_fdes, out); break;
-    }
+    parlayANN::io::save_point_range(points_fdes, out);
+    out.close();
   }
 
-  // Read the index from a file in disk
-  void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+  void load(const std::string& filename, const PointCloudSet<ChPoint>& /*points*/) override {
     std::ifstream in(filename, std::ios::binary);
     if (!in) throw std::runtime_error("load: cannot open file: " + filename);
-
-    // 1. Load Graph
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic) {
+      throw std::runtime_error("[MUVERA] bad magic: file is not a MUVE v2 index.");
+    }
+    if (ver != kVersion) {
+      throw std::runtime_error("[MUVERA] unsupported version " + std::to_string(ver));
+    }
+    if (cid != compute_class_id_()) {
+      throw std::runtime_error("[MUVERA] class_id mismatch: file has " + std::to_string(cid) +
+                               ", this instance is " + std::to_string(compute_class_id_()));
+    }
+    in.read(reinterpret_cast<char*>(&d_fde), sizeof(uint32_t));
     G = parlayANN::io::load_graph<uint32_t>(in);
     I.set_start();
+    auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
+    assert(loaded_d_fde == d_fde);
+    points_fdes = Range(fdes_data, d_fde);
+    in.close();
 
-    // 2. Load Quantizer Type
-    in.read((char*)&d_fde, sizeof(uint32_t));
-    int type_id;
-    in.read((char*)&type_id, sizeof(int));
-    quantization_mode = static_cast<QT>(type_id);
+    // Re-train + re-encode leaf quantizer from the loaded FDE data.
+    quantization_mode = kLeafMethod;
+    this->train_quantizer(points_fdes, quantizer);
+    quantized_data = this->encode_range_quantized(points_fdes, quantizer);
+  }
 
-    // 3. Load Data
-    switch (quantization_mode) {
-      case QT::PQ:
-        quantizer.template emplace<typename SVQT::PQ_Model>();
-        std::get<typename SVQT::PQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::PQ_Range>();
-        std::get<typename SVQT::PQ_Range>(quantized_data).load(in);
-        break;
-      case QT::RaBitQ:
-        quantizer.template emplace<typename SVQT::RQ_Model>();
-        std::get<typename SVQT::RQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::RQ_Range>();
-        std::get<typename SVQT::RQ_Range>(quantized_data).load(in);
-        break;
-      case QT::FastScan:
-        quantizer.template emplace<typename SVQT::FS_Model>();
-        std::get<typename SVQT::FS_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::FS_Range>();
-        std::get<typename SVQT::FS_Range>(quantized_data).load(in);
-        break;
-      case QT::TurboQuant:
-        quantizer.template emplace<typename SVQT::TQ_Model>();
-        std::get<typename SVQT::TQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::TQ_Range>();
-        std::get<typename SVQT::TQ_Range>(quantized_data).load(in);
-        break;
-      case QT::SPQTQ:
-        quantizer.template emplace<typename SVQT::PQTQ_Model>();
-        std::get<typename SVQT::PQTQ_Model>(quantizer).load(in);
-        quantized_data.template emplace<typename SVQT::PQTQ_Range>();
-        std::get<typename SVQT::PQTQ_Range>(quantized_data).load(in);
-        break;
-      case QT::None:
-        auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
-        assert(loaded_d_fde == d_fde);
-        points_fdes = Range(fdes_data, d_fde);
-        break;
+  // ---------------------------------------------------------------------------
+  // Extended save / load: also persists the trained leaf quantizer + encoded
+  // FDE data.  Only loadable by the exact same `IndexMUVERA<metric, LeafModel>`
+  // concrete class (the `class_id` check still applies).
+  // ---------------------------------------------------------------------------
+  void save_with_quantizer(const std::string& filename) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out) throw std::runtime_error("save_with_quantizer: cannot open: " + filename);
+    const uint32_t magic = kMagic, ver = kVersion, cid = compute_class_id_();
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
+    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
+    out.write(reinterpret_cast<const char*>(&d_fde), sizeof(uint32_t));
+    parlayANN::io::save_graph(G, out);
+    parlayANN::io::save_point_range(points_fdes, out);
+    const uint8_t has_q = (kLeafMethod != QT::None) ? 1u : 0u;
+    out.write(reinterpret_cast<const char*>(&has_q), sizeof(has_q));
+    if (has_q) {
+      variant_io::save(quantizer, out);
+      variant_io::save(quantized_data, out);
     }
+    out.close();
+  }
+
+  void load_with_quantizer(const std::string& filename,
+                           const PointCloudSet<ChPoint>& /*points*/) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in) throw std::runtime_error("load_with_quantizer: cannot open: " + filename);
+    uint32_t magic = 0, ver = 0, cid = 0;
+    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
+    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
+    if (magic != kMagic || ver != kVersion || cid != compute_class_id_()) {
+      throw std::runtime_error("[MUVERA] load_with_quantizer: header mismatch.");
+    }
+    in.read(reinterpret_cast<char*>(&d_fde), sizeof(uint32_t));
+    G = parlayANN::io::load_graph<uint32_t>(in);
+    I.set_start();
+    auto [fdes_data, loaded_d_fde] = parlayANN::io::read_point_range<Point>(in);
+    assert(loaded_d_fde == d_fde);
+    points_fdes = Range(fdes_data, d_fde);
+    uint8_t has_q = 0;
+    in.read(reinterpret_cast<char*>(&has_q), sizeof(has_q));
+    quantization_mode = kLeafMethod;
+    if (has_q) {
+      if (kLeafMethod == QT::None) {
+        throw std::runtime_error(
+            "[MUVERA] load_with_quantizer: file has a quantizer payload but "
+            "this concrete class is NoQuantizer.");
+      }
+      variant_io::load_sv<QuantModel,
+                          typename SVQT::PQ_Model, typename SVQT::RQ_Model,
+                          typename SVQT::FS_Model, typename SVQT::TQ_Model,
+                          typename SVQT::PQTQ_Model>(quantizer, in, kLeafMethod);
+      variant_io::load_sv<QuantRange,
+                          typename SVQT::PQ_Range, typename SVQT::RQ_Range,
+                          typename SVQT::FS_Range, typename SVQT::TQ_Range,
+                          typename SVQT::PQTQ_Range>(quantized_data, in, kLeafMethod);
+    } else if (kLeafMethod != QT::None) {
+      this->train_quantizer(points_fdes, quantizer);
+      quantized_data = this->encode_range_quantized(points_fdes, quantizer);
+    }
+    in.close();
   }
 };
 
-using IndexMUVERAL2 = IndexMUVERA<true>;   // L2 metric
-using IndexMUVERAIP = IndexMUVERA<false>;  // MIPS
+// Concrete aliases.  Each alias is a distinct type so pybind11 can register
+// it independently; the corresponding `params.pq.method` is auto-set in the
+// constructor.
+using IndexMUVERAIP          = IndexMUVERA<false, NoQuantizer<false>>;
+using IndexMUVERAL2          = IndexMUVERA<true,  NoQuantizer<true>>;
+using IndexMUVERAPQIP        = IndexMUVERA<false, pq::Model<false>>;
+using IndexMUVERAPQL2        = IndexMUVERA<true,  pq::Model<true>>;
+using IndexMUVERARaBitQIP    = IndexMUVERA<false, rabitq::Model<false>>;
+using IndexMUVERARaBitQL2    = IndexMUVERA<true,  rabitq::Model<true>>;
+using IndexMUVERAFastScanIP  = IndexMUVERA<false, fastscan::Model<false>>;
+using IndexMUVERAFastScanL2  = IndexMUVERA<true,  fastscan::Model<true>>;
+using IndexMUVERATQIP        = IndexMUVERA<false, turboquant::Model<false>>;
+using IndexMUVERATQL2        = IndexMUVERA<true,  turboquant::Model<true>>;
+using IndexMUVERASPQTQIP     = IndexMUVERA<false, pqtq::Model<false>>;
+using IndexMUVERASPQTQL2     = IndexMUVERA<true,  pqtq::Model<true>>;
+
+// 1-bit TurboQuant: requires a non-_mv port of turboquant_1bit which doesn't
+// exist yet (today only `turboquant_1bit_mv` is implemented).  Uncomment the
+// aliases below once a `turboquant_1bit::Model<bool>` SV-variant is ported.
+//
+// using IndexMUVERAOneBitTQIP  = IndexMUVERA<false, turboquant_1bit::Model<false>>;
+// using IndexMUVERAOneBitTQL2  = IndexMUVERA<true,  turboquant_1bit::Model<true>>;
 
 }  // namespace mvsic

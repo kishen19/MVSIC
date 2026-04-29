@@ -4,6 +4,7 @@
 #include <tuple>
 #include <variant>
 #include <cstdint>
+#include <iostream>
 #include <type_traits>
 #include "parlay/primitives.h"
 
@@ -36,6 +37,128 @@
 
 namespace mvsic {
 
+// ---------------------------------------------------------------------------
+// NoQuantizer — identity leaf "Model" for the templated index families.
+//
+// Indices such as `IndexMVIVFT<metric, CompressCenters, LeafModel>` template on
+// a leaf Model. When `LeafModel = NoQuantizer<metric>`, all encode / quantize /
+// distance calls are `if constexpr`-gated out and the code falls through to
+// the raw PointCloudSet ChamferIP/L2 kernels. Concrete aliases such as
+// `IndexMVIVFIP = IndexMVIVFT<false, false, NoQuantizer<false>>` therefore
+// compile identically to a hand-written non-quantized class.
+// ---------------------------------------------------------------------------
+namespace no_quantizer_mv {
+
+template<bool Metric>
+struct EncodedPointCloudSet {};
+
+template<bool Metric>
+struct EncodedQueryPointCloud {};
+
+}  // namespace no_quantizer_mv
+
+template<bool Metric>
+struct NoQuantizer {
+  using ChPoint = std::conditional_t<Metric, ChamferL2_Point, ChamferIP_Point>;
+  using EncodedSet = no_quantizer_mv::EncodedPointCloudSet<Metric>;
+  using EncodedQuery = no_quantizer_mv::EncodedQueryPointCloud<Metric>;
+
+  static constexpr uint32_t kClassId = 0;
+  static constexpr uint32_t kBatchAlignment = 1;
+  static constexpr const char* kName = "none";
+
+  struct Params {};
+
+  template<typename PCSet>
+  void train(const PCSet& /*pcs*/, const Params& /*p*/ = {}) {}
+
+  template<typename PCSet>
+  EncodedSet encode(const PCSet& /*pcs*/) const { return {}; }
+
+  EncodedQuery quantize_query(const ChPoint& /*q*/) const { return {}; }
+
+  void save(std::ostream& /*out*/) const {}
+  void load(std::istream& /*in*/) {}
+};
+
+// ---------------------------------------------------------------------------
+// quantizer_method_of_v<M, Metric>
+//
+// Compile-time mapping from a concrete quantizer Model type (MV or SV) to the
+// corresponding IndexParams::QuantizerType enum value.  Used by the graph-
+// based index families (MUVERA, MPool, Vamana, SVH_Graph, SVH_IVF) during
+// phase-4 staged refactor: the index is templated on a `LeafModel` class for
+// type-level separation (so pybind11 sees distinct classes per variant, and
+// users can construct `IndexFooPQIP` without touching `IndexParams`), while
+// the internal hot path continues to use the battle-tested variant-based
+// dispatch through `Index<metric>::train_quantizer` /
+// `encode_range_quantized` / `quant_beam_search` etc.
+//
+// Conversion to full compile-time `if constexpr` specialization (matching the
+// MVIVF family refactor) is left to a follow-up phase and does not block the
+// binding-level changes this mapping enables.
+// ---------------------------------------------------------------------------
+namespace detail {
+template<class M, bool Metric>
+struct quantizer_method_of {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::None;
+};
+template<bool M>
+struct quantizer_method_of<pq::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::PQ;
+};
+template<bool M>
+struct quantizer_method_of<rabitq::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::RaBitQ;
+};
+template<bool M>
+struct quantizer_method_of<fastscan::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::FastScan;
+};
+template<bool M>
+struct quantizer_method_of<turboquant::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::TurboQuant;
+};
+template<bool M>
+struct quantizer_method_of<pqtq::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::SPQTQ;
+};
+template<bool M>
+struct quantizer_method_of<pq_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::PQ;
+};
+template<bool M>
+struct quantizer_method_of<rabitq_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::RaBitQ;
+};
+template<bool M>
+struct quantizer_method_of<fastscan_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::FastScan;
+};
+template<bool M>
+struct quantizer_method_of<turboquant_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::TurboQuant;
+};
+template<bool M>
+struct quantizer_method_of<pqtq_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::SPQTQ;
+};
+template<bool M>
+struct quantizer_method_of<turboquant_1bit_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::OneBitTQ;
+};
+}  // namespace detail
+
+template<class M, bool Metric>
+inline constexpr IndexParams::QuantizerType quantizer_method_of_v =
+    detail::quantizer_method_of<M, Metric>::value;
+
+// TODO(phase3-6): the legacy QuantTypes / MVQuantTypes structs below, along
+// with `quantization_mode` and the `train_quantizer` / `encode_points_quantized`
+// / `quantize_query_point_cloud` / `quant_distances_all` / `quant_beam_search`
+// helpers in `Index<metric>`, will be removed once every index family has
+// migrated to the templated <CompressCenters, LeafModel> design and no longer
+// calls them.
 // Quantization Traits
 template<bool metric, typename Range>
 struct QuantTypes {

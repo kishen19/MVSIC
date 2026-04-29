@@ -302,10 +302,25 @@ def run(config, methods, experiment_name, tasks, num_threads=None):
     for dataset_config in dataset_configs:
         print(f"\n--- Processing dataset: {dataset_config['name']} ---", flush=True)
 
-        base_results_dir = dataset_config.get('results', os.path.join('results', experiment_name))
+        # Storage paths.  The cleaner schema is a nested `storage:` block with
+        # `results_dir` and `index_dir`; the legacy flat `results` and
+        # `index_dir` keys on `dataset_config` are still accepted for
+        # back-compat (and override the storage block if both are present).
+        storage_cfg = dataset_config.get('storage') or {}
+        default_results_dir = os.path.join('results', experiment_name)
+        base_results_dir = (
+            dataset_config.get('results')
+            or storage_cfg.get('results_dir')
+            or default_results_dir
+        )
         # Index .bin files can go to a separate directory (not synced from cloud).
-        # If 'index_dir' is not specified, indices are stored alongside results.
-        base_index_dir = dataset_config.get('index_dir', base_results_dir)
+        # Default is alongside results if neither 'index_dir' nor 'storage.index_dir'
+        # is specified.
+        base_index_dir = (
+            dataset_config.get('index_dir')
+            or storage_cfg.get('index_dir')
+            or base_results_dir
+        )
 
         for index_details in config['indices']:
             index_name = index_details['name']

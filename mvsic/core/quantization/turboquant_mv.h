@@ -701,9 +701,21 @@ float turboquant_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& 
 template<bool Metric>
 class Model {
  public:
+  static constexpr uint32_t kClassId = 4;  // QuantizerTag::kTurboQuant
+  static constexpr uint32_t kBatchAlignment = 6;  // kVnniMq
+  static constexpr const char* kName = "tq";
+  using EncodedSet = ::mvsic::turboquant_mv::Quantized_Point_Cloud_Set<Metric>;
+  using EncodedQuery = ::mvsic::turboquant_mv::Quantized_Query_Point_Cloud<Metric>;
+  struct Params {};
+
   turboquant::BaseEncoder encoder;
 
   Model() = default;
+
+  template<typename PCSet>
+  void train(const PCSet& pcs, const Params& /*p*/) {
+    train(pcs);
+  }
 
   template<typename PCSet>
   void train(const PCSet& pcs) {
