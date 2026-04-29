@@ -17,13 +17,14 @@ neighbors:
 
 Usage:
     scripts/tree_quality.py \\
-        --index results/nq500k/mvivf/indexes/mvivf_winner.bin \\
+        --index experiments/mvivf_ablation/indices/nq500k/mvivf/mvivf_k16_l500/index.bin \\
         --db    data/beir/nq500k/nq500k_points.pcs \\
         --queries data/beir/nq500k/nq500k_queries.pcs \\
         --gt    data/beir/nq500k/nq500k_chamfer_neighbors.gt \\
         --k 10 \\
         --metric ip \\
-        --out   results/nq500k/mvivf/tree_quality_winner.json
+        --family mvivf \\
+        --out   experiments/mvivf_ablation/results/nq500k/mvivf/tree_quality_k16.json
 """
 
 from __future__ import annotations
@@ -114,6 +115,8 @@ def main() -> int:
                    help="ground-truth file")
     p.add_argument("--k", type=int, default=10)
     p.add_argument("--metric", choices=("ip", "l2"), default="ip")
+    p.add_argument("--family", choices=("mvivf", "mvivf_flat", "mvivf_spill"), default="mvivf",
+                   help="Index family for loader dispatch in leaf-diversity benchmark.")
     p.add_argument("--binary", default=DEFAULT_BINARY,
                    help="path to bench_mvivf_leaf_diversity")
     p.add_argument("--out", type=pathlib.Path, default=None,
@@ -145,6 +148,10 @@ def main() -> int:
         "-k", str(args.k),
         "-dist_func", dist_func,
     ]
+    if args.family == "mvivf_flat":
+        cmd.append("-flat")
+    elif args.family == "mvivf_spill":
+        cmd.append("-spill")
     print(f"$ {' '.join(cmd)}", file=sys.stderr)
     res = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if res.returncode != 0:
@@ -154,6 +161,7 @@ def main() -> int:
 
     record = parse_output(res.stdout)
     record["metric"] = args.metric
+    record["family"] = args.family
     record["k"] = args.k
     record["index"] = str(args.index)
 

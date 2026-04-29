@@ -1,0 +1,32 @@
+name: "MVIVF Ablation (build, stage 2: max_leaf_size)"
+
+datasets:
+  # - name: nq500k
+  #   path: data/beir/nq500k
+  #   index_dir: results/mvivf_ablations/indices/nq500k
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/mvivf_ablations/indices/fiqa
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      # Stage-1 winner fixed: k_per_level = 0.
+      - name: mvivf_k0_l10_d0
+        params: &stage2_defaults
+          k_per_level: 0
+          max_leaf_size: 10
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+      - name: mvivf_k0_l50_d0
+        params: { <<: *stage2_defaults, max_leaf_size: 50 }
+      - name: mvivf_k0_l100_d0
+        params: { <<: *stage2_defaults, max_leaf_size: 100 }
+      - name: mvivf_k0_l500_d0
+        params: { <<: *stage2_defaults, max_leaf_size: 500 }
+      - name: mvivf_k0_l1000_d0
+        params: { <<: *stage2_defaults, max_leaf_size: 1000 }
+
