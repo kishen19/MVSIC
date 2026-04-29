@@ -52,15 +52,6 @@ cc_binary(
 )
 
 cc_binary(
-    name = "quick_bench",
-    srcs = ["quick_bench.cpp"],
-    deps = [
-        ":vamana",
-        "//mvsic/core:bench_utils",
-    ],
-)
-
-cc_binary(
     name = "bench_build",
     srcs = ["bench_build.cpp"],
     deps = [
