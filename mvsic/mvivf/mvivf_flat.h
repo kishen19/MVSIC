@@ -296,24 +296,22 @@ class IndexMVIVFFlat : public Index<metric> {
   }
 
   // ---------------------------------------------------------------------------
-  // Save / load (v2 format: magic + version + class_id + IndexParams + skeleton).
+  // Save / load (v3 skeleton format).
   //
-  // When !CompressCenters, raw center coords are persisted.  When CompressCenters,
-  // we rely on re-training the center model from `points` on load — centers are
-  // reconstructed via re-running MVClustering is NOT done; instead the skeleton
-  // for the compressed case requires the encoded bytes to be persisted.  Since
-  // the current scope retains the "retrain + re-encode" philosophy from mvivf.h,
-  // we fall back to saving raw centers even in CompressCenters mode during save
-  // (before clearing) if params.quantize_centers is true and centers is non-empty.
-  // For now, CompressCenters=true with non-empty `centers` happens only pre-build;
-  // saving after build is supported only for !CompressCenters.
+  // Quantization-agnostic skeleton: writes magic + version + class_id +
+  // IndexParams subset + cluster count + raw center floats + cluster point
+  // ids.  Codebooks and encoded leaves are never persisted; any templated
+  // variant can load any skeleton from this family and re-train / re-encode
+  // on load using the supplied raw points.  class_id is therefore fixed.
+  //
+  // save() requires raw centers in `centers`, i.e. it is only valid on the
+  // skeleton variant IndexMVIVFFlat<metric, /*CompressCenters=*/false,
+  // NoQuantizer<metric>>.  Use the raw skeleton variant to build+save, then
+  // load() into the desired templated variant.
   // ---------------------------------------------------------------------------
   static constexpr uint32_t kMagic = 0x4D464C46u;  // 'MFLF'
-  static constexpr uint32_t kVersion = 3u;  // v3: dropped persisted params.quantize_centers
-  static uint32_t compute_class_id_() {
-    uint32_t lid = LeafModel::kClassId;
-    return (lid << 1) | (kHasCenterQuant ? 1u : 0u);
-  }
+  static constexpr uint32_t kVersion = 3u;  // v3: uniform skeleton format (no quant on disk)
+  static constexpr uint32_t kClassId = 0u;
 
  private:
   void write_params_(std::ostream& out) const {
@@ -335,37 +333,38 @@ class IndexMVIVFFlat : public Index<metric> {
 
  public:
   void save(const std::string& filename) override {
+    if constexpr (kHasCenterQuant || kHasLeafQuant) {
+      std::cerr << "[MVIVF Flat] save() is only supported on the raw skeleton variant "
+                   "(CompressCenters=false, LeafModel=NoQuantizer). Build the raw "
+                   "skeleton, save it, then load() into the desired templated variant."
+                << std::endl;
+      std::abort();
+    }
+
     std::ofstream outfile(filename, std::ios::binary);
     std::cout << "Saving index to " << filename << std::endl;
     if (!outfile.is_open()) {
       std::cerr << "Error opening file for writing: " << filename << std::endl;
       return;
     }
-    const uint32_t magic = kMagic, ver = kVersion, cid = compute_class_id_();
+    const uint32_t magic = kMagic, ver = kVersion, cid = kClassId;
     outfile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     outfile.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
     outfile.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
     write_params_(outfile);
 
-    // Center skeleton.  For CompressCenters=true we save only the cluster sizes
-    // (no raw center coords — they've been discarded).  Centers are reconstructed
-    // at load time via re-clustering the dataset, which is why CompressCenters
-    // saves are currently lossy w.r.t. exact center values; use the default
-    // (raw-center) save + a LeafModel for a fully reproducible index.
     size_t num = clusters.size();
     outfile.write(reinterpret_cast<const char*>(&num), sizeof(size_t));
 
-    if constexpr (!kHasCenterQuant) {
-      parlay::sequence<size_t> center_offsets = parlay::sequence<size_t>::from_function(
-          centers.size(), [&](size_t i) { return centers.get_size(i) * d; });
-      size_t total = parlay::scan_inplace(center_offsets);
-      center_offsets.push_back(total);
-      outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
-                    center_offsets.size() * sizeof(size_t));
-      auto coords = centers.data();
-      size_t nent = centers.total_size() * centers.get_dims();
-      outfile.write(reinterpret_cast<const char*>(coords), nent * sizeof(float));
-    }
+    parlay::sequence<size_t> center_offsets = parlay::sequence<size_t>::from_function(
+        centers.size(), [&](size_t i) { return centers.get_size(i) * d; });
+    size_t total = parlay::scan_inplace(center_offsets);
+    center_offsets.push_back(total);
+    outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
+                  center_offsets.size() * sizeof(size_t));
+    auto coords = centers.data();
+    size_t nent = centers.total_size() * centers.get_dims();
+    outfile.write(reinterpret_cast<const char*>(coords), nent * sizeof(float));
 
     parlay::sequence<size_t> clusters_offsets = parlay::sequence<size_t>::from_function(
         clusters.size(), [&](size_t i) { return clusters[i].get_size(); });
@@ -384,6 +383,8 @@ class IndexMVIVFFlat : public Index<metric> {
   }
 
   void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+    parlay::internal::timer t_io;
+    t_io.start();
     std::ifstream infile(filename, std::ios::binary);
     std::cout << "Loading index from " << filename << std::endl;
     if (!infile.is_open()) {
@@ -395,32 +396,31 @@ class IndexMVIVFFlat : public Index<metric> {
     infile.read(reinterpret_cast<char*>(&ver), sizeof(ver));
     infile.read(reinterpret_cast<char*>(&cid), sizeof(cid));
     if (magic != kMagic) {
-      std::cerr << "[MVIVF Flat] bad magic (not MFLF v2)." << std::endl;
+      std::cerr << "[MVIVF Flat] bad magic: file is not an MFLF skeleton index." << std::endl;
       return;
     }
     if (ver != kVersion) {
-      std::cerr << "[MVIVF Flat] unsupported version " << ver << "." << std::endl;
+      std::cerr << "[MVIVF Flat] MVIVF Flat index file format changed in v" << kVersion
+                << "; got v" << ver << ". Rebuild with current code." << std::endl;
       return;
     }
-    if (cid != compute_class_id_()) {
-      std::cerr << "[MVIVF Flat] class_id mismatch: file has " << cid
-                << ", this instance is " << compute_class_id_() << "." << std::endl;
+    if (cid != kClassId) {
+      std::cerr << "[MVIVF Flat] unexpected class_id " << cid << " (expected " << kClassId
+                << " for the v" << kVersion << " skeleton)." << std::endl;
       return;
     }
     read_params_(infile);
 
     size_t num = 0;
     infile.read(reinterpret_cast<char*>(&num), sizeof(size_t));
-    if constexpr (!kHasCenterQuant) {
-      parlay::sequence<size_t> center_offsets(num + 1);
-      infile.read(reinterpret_cast<char*>(center_offsets.begin()),
-                  center_offsets.size() * sizeof(size_t));
-      parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
-      infile.read(reinterpret_cast<char*>(center_values.begin()),
-                  center_values.size() * sizeof(float));
-      centers = PointCloudSet<ChPoint>(num, points.get_dims(), center_values.data(),
+    parlay::sequence<size_t> center_offsets(num + 1);
+    infile.read(reinterpret_cast<char*>(center_offsets.begin()),
+                center_offsets.size() * sizeof(size_t));
+    parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(center_values.begin()),
+                center_values.size() * sizeof(float));
+    PointCloudSet<ChPoint> raw_centers(num, points.get_dims(), center_values.data(),
                                        center_offsets.data(), nullptr);
-    }
     parlay::sequence<size_t> clusters_offsets(num + 1);
     infile.read(reinterpret_cast<char*>(clusters_offsets.begin()),
                 clusters_offsets.size() * sizeof(size_t));
@@ -428,10 +428,21 @@ class IndexMVIVFFlat : public Index<metric> {
     infile.read(reinterpret_cast<char*>(clusters_values.begin()),
                 clusters_values.size() * sizeof(uint32_t));
     infile.close();
+    double t_io_ms = t_io.stop() * 1000.0;
 
-    // Re-train quantizers + re-encode.
+    parlay::internal::timer t_retrain;
+    t_retrain.start();
     if constexpr (kHasCenterQuant) center_model_.train(points);
     if constexpr (kHasLeafQuant) leaf_model_.train(points, leaf_params_);
+
+    if constexpr (kHasCenterQuant) {
+      // Encode the persisted raw centers directly (no re-clustering): this
+      // mirrors the on-build flow in mvivf.h::compress_internal_centers_.
+      centers_encoded = center_model_.encode(raw_centers);
+      centers = PointCloudSet<ChPoint>{};  // reclaim
+    } else {
+      centers = std::move(raw_centers);
+    }
 
     const size_t dim = points.get_dims();
     auto point_id_to_data_id = parlay::sequence<uint32_t>::uninitialized(points.size());
@@ -452,16 +463,10 @@ class IndexMVIVFFlat : public Index<metric> {
         }
       }
     });
-
-    if constexpr (kHasCenterQuant) {
-      // Re-encode centers by re-running MVClustering (topology is lost — this
-      // is the "skeleton-less center" tradeoff).  Users who want exact reload
-      // should use the non-compressed variant.
-      MVClustering<metric> Clus(d, num, params.s, params.mvclus);
-      Clus.train(points);
-      PointCloudSet<ChPoint> fresh_centers = std::move(Clus.get_centers());
-      centers_encoded = center_model_.encode(fresh_centers);
-    }
+    double t_retrain_ms = t_retrain.stop() * 1000.0;
+    std::cerr << "[MVIVF Flat] load: tree_io=" << t_io_ms << "ms retrain=" << t_retrain_ms
+              << "ms (compress_centers=" << (kHasCenterQuant ? 1 : 0)
+              << ", leaf_quant=" << (kHasLeafQuant ? 1 : 0) << ")" << std::endl;
   }
 
   size_t mean_cluster_size() const noexcept override {

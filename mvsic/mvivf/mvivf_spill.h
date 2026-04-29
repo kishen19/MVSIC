@@ -723,15 +723,9 @@ class IndexMVIVFSpill : public Index<metric> {
       point_offsets.push_back(node->data.size());
     } else {
       point_offsets.push_back(0);
-      // For CompressCenters, raw center data is gone — we emit zeros and rely on
-      // re-encoding at load time (skeleton-only persistence).
       size_t dims = node->data.get_dims();
       for (size_t i = 0; i < node->children.size(); ++i) {
-        if constexpr (kHasCenterQuant) {
-          (void)dims; center_offsets.push_back(0);
-        } else {
-          center_offsets.push_back(node->data.get_size(i) * dims);
-        }
+        center_offsets.push_back(node->data.get_size(i) * dims);
       }
     }
     children_offsets.push_back(node->children.size());
@@ -744,7 +738,13 @@ class IndexMVIVFSpill : public Index<metric> {
   }
 
   // ---------------------------------------------------------------------------
-  // Save / load (v2 format, skeleton-only).
+  // Save / load (v4 skeleton format).
+  //
+  // Quantization-agnostic skeleton: writes magic + version + class_id +
+  // IndexParams subset + tree topology + raw float centers + leaf point ids.
+  // Codebooks and encoded leaves are never persisted; any templated variant
+  // can load any skeleton from this family and re-train / re-encode on load
+  // using the supplied raw points.  class_id is therefore fixed.
   //
   // Layout:
   //   u32 magic ('MSPL'), u32 version, u32 class_id
@@ -752,18 +752,20 @@ class IndexMVIVFSpill : public Index<metric> {
   //   size_t num_nodes
   //   size_t num_center_offsets
   //   size_t[num_center_offsets] center_offsets
-  //   float[sum] center_values (only when !kHasCenterQuant)
+  //   float[sum] center_values
   //   size_t[num+1] children_offsets
   //   size_t[sum] children_values (flattened child indices)
   //   size_t[num+1] point_offsets
   //   uint32_t[sum] point_ids
+  //
+  // save() requires raw centers to be present, i.e. it is only valid on the
+  // skeleton variant IndexMVIVFSpill<metric, /*CompressCenters=*/false,
+  // NoQuantizer<metric>>.  Use the raw skeleton variant to build+save, then
+  // load() into the desired templated variant.
   // ---------------------------------------------------------------------------
   static constexpr uint32_t kMagic = 0x4D53504Cu;  // 'MSPL'
-  static constexpr uint32_t kVersion = 3u;  // v3: dropped persisted params.quantize_centers
-  static uint32_t compute_class_id_() {
-    uint32_t lid = LeafModel::kClassId;
-    return (lid << 1) | (kHasCenterQuant ? 1u : 0u);
-  }
+  static constexpr uint32_t kVersion = 4u;  // v4: uniform skeleton format (no quant on disk)
+  static constexpr uint32_t kClassId = 0u;
 
  private:
   void write_params_(std::ostream& out) const {
@@ -793,6 +795,14 @@ class IndexMVIVFSpill : public Index<metric> {
 
  public:
   void save(const std::string& filename) override {
+    if constexpr (kHasCenterQuant || kHasLeafQuant) {
+      std::cerr << "[MVIVF Spill] save() is only supported on the raw skeleton variant "
+                   "(CompressCenters=false, LeafModel=NoQuantizer). Build the raw "
+                   "skeleton, save it, then load() into the desired templated variant."
+                << std::endl;
+      std::abort();
+    }
+
     if (root == nullptr) {
       std::cerr << "IndexMVIVFSpill::save: root is null." << std::endl;
       return;
@@ -803,7 +813,7 @@ class IndexMVIVFSpill : public Index<metric> {
       std::cerr << "Error opening file for writing: " << filename << std::endl;
       return;
     }
-    const uint32_t magic = kMagic, ver = kVersion, cid = compute_class_id_();
+    const uint32_t magic = kMagic, ver = kVersion, cid = kClassId;
     outfile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     outfile.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
     outfile.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
@@ -832,14 +842,12 @@ class IndexMVIVFSpill : public Index<metric> {
     outfile.write(reinterpret_cast<const char*>(center_offsets.begin()),
                   center_offsets.size() * sizeof(size_t));
 
-    if constexpr (!kHasCenterQuant) {
-      for (size_t i = 0; i < num; ++i) {
-        node_t* node = ind_to_node[i];
-        if (node->children.size() > 0) {
-          auto coords = node->data.data();
-          size_t nent = node->data.total_size() * node->data.get_dims();
-          outfile.write(reinterpret_cast<const char*>(coords), nent * sizeof(float));
-        }
+    for (size_t i = 0; i < num; ++i) {
+      node_t* node = ind_to_node[i];
+      if (node->children.size() > 0) {
+        auto coords = node->data.data();
+        size_t nent = node->data.total_size() * node->data.get_dims();
+        outfile.write(reinterpret_cast<const char*>(coords), nent * sizeof(float));
       }
     }
 
@@ -868,6 +876,8 @@ class IndexMVIVFSpill : public Index<metric> {
   }
 
   void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+    parlay::internal::timer t_io;
+    t_io.start();
     std::ifstream infile(filename, std::ios::binary);
     std::cout << "Loading index from " << filename << std::endl;
     if (!infile.is_open()) {
@@ -879,16 +889,17 @@ class IndexMVIVFSpill : public Index<metric> {
     infile.read(reinterpret_cast<char*>(&ver), sizeof(ver));
     infile.read(reinterpret_cast<char*>(&cid), sizeof(cid));
     if (magic != kMagic) {
-      std::cerr << "[MVIVF Spill] bad magic (not MSPL v2)." << std::endl;
+      std::cerr << "[MVIVF Spill] bad magic: file is not an MSPL skeleton index." << std::endl;
       return;
     }
     if (ver != kVersion) {
-      std::cerr << "[MVIVF Spill] unsupported version " << ver << "." << std::endl;
+      std::cerr << "[MVIVF Spill] MVIVF Spill index file format changed in v" << kVersion
+                << "; got v" << ver << ". Rebuild with current code." << std::endl;
       return;
     }
-    if (cid != compute_class_id_()) {
-      std::cerr << "[MVIVF Spill] class_id mismatch: file has " << cid
-                << ", this instance is " << compute_class_id_() << "." << std::endl;
+    if (cid != kClassId) {
+      std::cerr << "[MVIVF Spill] unexpected class_id " << cid << " (expected " << kClassId
+                << " for the v" << kVersion << " skeleton)." << std::endl;
       return;
     }
     read_params_(infile);
@@ -900,12 +911,9 @@ class IndexMVIVFSpill : public Index<metric> {
     parlay::sequence<size_t> center_offsets(num_center_offsets);
     infile.read(reinterpret_cast<char*>(center_offsets.begin()),
                 center_offsets.size() * sizeof(size_t));
-    parlay::sequence<float> center_values;
-    if constexpr (!kHasCenterQuant) {
-      center_values = parlay::sequence<float>(center_offsets[center_offsets.size() - 1]);
-      infile.read(reinterpret_cast<char*>(center_values.begin()),
-                  center_values.size() * sizeof(float));
-    }
+    parlay::sequence<float> center_values(center_offsets[center_offsets.size() - 1]);
+    infile.read(reinterpret_cast<char*>(center_values.begin()),
+                center_values.size() * sizeof(float));
     parlay::sequence<size_t> children_offsets(num + 1);
     infile.read(reinterpret_cast<char*>(children_offsets.begin()),
                 children_offsets.size() * sizeof(size_t));
@@ -919,8 +927,10 @@ class IndexMVIVFSpill : public Index<metric> {
     infile.read(reinterpret_cast<char*>(point_values.begin()),
                 point_values.size() * sizeof(uint32_t));
     infile.close();
+    double t_io_ms = t_io.stop() * 1000.0;
 
-    // Re-train quantizers.
+    parlay::internal::timer t_retrain;
+    t_retrain.start();
     if constexpr (kHasCenterQuant) center_model_.train(points);
     if constexpr (kHasLeafQuant) leaf_model_.train(points, leaf_params_);
 
@@ -939,17 +949,15 @@ class IndexMVIVFSpill : public Index<metric> {
     parlay::sequence<node_t*> ind_to_node =
         parlay::sequence<node_t*>::from_function(num, [&](size_t i) {
           node_t* node = new node_t();
-          if constexpr (!kHasCenterQuant) {
-            if (children_sizes[i] > 0) {
-              size_t start_offset = children_sizes_scan[i];
-              parlay::sequence<size_t> node_center_offsets =
-                  parlay::sequence<size_t>::from_function(children_sizes[i] + 1, [&](size_t j) {
-                    return center_offsets[start_offset + j] - center_offsets[start_offset];
-                  });
-              node->data = PointCloudSet<ChPoint>(children_sizes[i], dim,
-                                                  center_values.data() + center_offsets[start_offset],
-                                                  node_center_offsets.data(), nullptr);
-            }
+          if (children_sizes[i] > 0) {
+            size_t start_offset = children_sizes_scan[i];
+            parlay::sequence<size_t> node_center_offsets =
+                parlay::sequence<size_t>::from_function(children_sizes[i] + 1, [&](size_t j) {
+                  return center_offsets[start_offset + j] - center_offsets[start_offset];
+                });
+            node->data = PointCloudSet<ChPoint>(children_sizes[i], dim,
+                                                center_values.data() + center_offsets[start_offset],
+                                                node_center_offsets.data(), nullptr);
           }
           node->children.resize(children_sizes[i]);
           if (point_sizes[i] > 0) {
@@ -971,9 +979,16 @@ class IndexMVIVFSpill : public Index<metric> {
         children[j] = ind_to_node[child_id];
       });
     });
+    if (root != nullptr) {
+      // Defensive cleanup.  In practice load() is called on a fresh instance.
+    }
     root = ind_to_node[0];
 
-    // Re-encode leaves.
+    // compute_leaf_flat_() needs raw centers in internal nodes; run it before
+    // compress_internal_centers_() clears them.
+    compute_leaf_flat_();
+    compress_internal_centers_();
+
     if constexpr (kHasLeafQuant) {
       parlay::parallel_for(0, num, [&](size_t i) {
         node_t* node = ind_to_node[i];
@@ -982,20 +997,10 @@ class IndexMVIVFSpill : public Index<metric> {
         }
       }, 1);
     }
-
-    // Rebuild flat-leaf index and (when CompressCenters) re-encode centers.
-    if constexpr (kHasCenterQuant) {
-      // For the skeleton-only compressed save, internal-node centers were not
-      // persisted.  Re-running MVClustering to regenerate them exactly is not
-      // trivial; we treat this case as lossy and instead rebuild from the
-      // original points.  (In practice, users who need exact reload should use
-      // the non-compressed save.)
-      std::cerr << "[MVIVF Spill] Warning: CompressCenters+load currently "
-                   "requires re-training / re-encoding which loses the exact "
-                   "original centers."
-                << std::endl;
-    }
-    compute_leaf_flat_();
+    double t_retrain_ms = t_retrain.stop() * 1000.0;
+    std::cerr << "[MVIVF Spill] load: tree_io=" << t_io_ms << "ms retrain=" << t_retrain_ms
+              << "ms (compress_centers=" << (kHasCenterQuant ? 1 : 0)
+              << ", leaf_quant=" << (kHasLeafQuant ? 1 : 0) << ")" << std::endl;
   }
 
   void traverse_and_delete(node_t* node) {
