@@ -7,7 +7,6 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/query_compression.h"
-#include "mvsic/core/quantization/variant_io.h"
 #include "mvsic/core/types/io.h"
 #include "mvsic/core/utils/util.h"
 
@@ -256,31 +255,43 @@ class IndexSVHGraph : public Index<metric> {
   }
 
   // ---------------------------------------------------------------------------
-  // Save / load (v2 skeleton format).
+  // Save / load (v3 uniform skeleton format).
+  //
+  // The on-disk file is variant-agnostic: any templated SVHGraph variant can
+  // load the same skeleton and re-train its leaf quantizer on load from the
+  // persisted flattened single-vectors.  class_id is therefore a fixed
+  // constant.
   //
   // Layout:
   //   magic           : uint32 = 'SVHG'
-  //   version         : uint32 = 2
-  //   class_id        : uint32 = static_cast<uint32_t>(kLeafMethod)
+  //   version         : uint32 = 3
+  //   class_id        : uint32 = 0 (reserved)
   //   d               : unsigned
   //   vector_to_id[]  : flattened (cloud_id, vec_offset) mapping
   //   graph           : parlayANN::io::save_graph payload
   //   flattened_points: raw flattened single-vector data
   //
-  // The leaf quantizer codebook + encoded data are NOT persisted; `load()`
-  // re-trains and re-encodes from `flattened_points`.  Internal hot path
-  // continues to use variant-based dispatch.
+  // save() is only valid on the raw skeleton variant
+  // IndexSVHGraph<metric, NoQuantizer<metric>>; runtime guard below.
   // ---------------------------------------------------------------------------
   static constexpr uint32_t kMagic = 0x53564847u;  // 'SVHG'
-  static constexpr uint32_t kVersion = 2u;
-  static uint32_t compute_class_id_() { return static_cast<uint32_t>(kLeafMethod); }
+  static constexpr uint32_t kVersion = 3u;         // v3: uniform skeleton format
+  static constexpr uint32_t kClassId = 0u;
 
   void save(const std::string& filename) override {
+    if constexpr (kLeafMethod != QT::None) {
+      std::cerr << "[SVHGraph] save() is only supported on the raw skeleton variant "
+                   "(LeafModel=NoQuantizer). Build the raw skeleton, save it, then "
+                   "load() into the desired templated variant."
+                << std::endl;
+      std::abort();
+    }
+
     std::ofstream out(filename, std::ios::binary);
     if (!out) throw std::runtime_error("save: cannot open file: " + filename);
     const uint32_t magic = kMagic;
     const uint32_t ver = kVersion;
-    const uint32_t cid = compute_class_id_();
+    const uint32_t cid = kClassId;
     out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
     out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
@@ -295,6 +306,8 @@ class IndexSVHGraph : public Index<metric> {
   }
 
   void load(const std::string& filename, const PointCloudSet<ChPoint>& /*points*/) override {
+    parlay::internal::timer t_io;
+    t_io.start();
     std::ifstream in(filename, std::ios::binary);
     if (!in) throw std::runtime_error("load: cannot open file: " + filename);
     uint32_t magic = 0, ver = 0, cid = 0;
@@ -302,14 +315,17 @@ class IndexSVHGraph : public Index<metric> {
     in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
     in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
     if (magic != kMagic) {
-      throw std::runtime_error("[SVHGraph] bad magic: file is not a SVHG v2 index.");
+      throw std::runtime_error("[SVHGraph] bad magic: file is not a SVHG skeleton index.");
     }
     if (ver != kVersion) {
-      throw std::runtime_error("[SVHGraph] unsupported version " + std::to_string(ver));
+      throw std::runtime_error(
+          "[SVHGraph] SVHGraph index file format changed in v" + std::to_string(kVersion) +
+          "; got v" + std::to_string(ver) + ". Rebuild with current code.");
     }
-    if (cid != compute_class_id_()) {
-      throw std::runtime_error("[SVHGraph] class_id mismatch: file has " + std::to_string(cid) +
-                               ", this instance is " + std::to_string(compute_class_id_()));
+    if (cid != kClassId) {
+      throw std::runtime_error(
+          "[SVHGraph] unexpected class_id " + std::to_string(cid) + " (expected " +
+          std::to_string(kClassId) + " for the v" + std::to_string(kVersion) + " skeleton).");
     }
     in.read(reinterpret_cast<char*>(&d), sizeof(unsigned));
     size_t map_sz = 0;
@@ -326,86 +342,18 @@ class IndexSVHGraph : public Index<metric> {
     auto [f_data, f_d] = parlayANN::io::read_point_range<Point>(in);
     flattened_points = Range(f_data, f_d);
     in.close();
+    double t_io_ms = t_io.stop() * 1000.0;
 
-    // Re-train + re-encode leaf quantizer from the loaded flattened vectors.
+    parlay::internal::timer t_retrain;
+    t_retrain.start();
     quantization_mode = kLeafMethod;
     if (quantization_mode != QT::None) {
       this->template train_quantizer<SVQT>(flattened_points, quantizer);
       quantized_data = this->template encode_range_quantized<SVQT>(flattened_points, quantizer);
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Extended save / load: also persists the trained leaf quantizer + encoded
-  // data.  Only loadable by the exact same concrete class.
-  // ---------------------------------------------------------------------------
-  void save_with_quantizer(const std::string& filename) {
-    std::ofstream out(filename, std::ios::binary);
-    if (!out) throw std::runtime_error("save_with_quantizer: cannot open: " + filename);
-    const uint32_t magic = kMagic, ver = kVersion, cid = compute_class_id_();
-    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-    out.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
-    out.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
-    out.write(reinterpret_cast<const char*>(&d), sizeof(unsigned));
-    size_t map_sz = vector_to_id.size();
-    out.write(reinterpret_cast<const char*>(&map_sz), sizeof(size_t));
-    out.write(reinterpret_cast<const char*>(vector_to_id.data()),
-              map_sz * sizeof(std::pair<uint32_t, uint32_t>));
-    parlayANN::io::save_graph(G, out);
-    parlayANN::io::save_point_range(flattened_points, out);
-    const uint8_t has_q = (kLeafMethod != QT::None) ? 1u : 0u;
-    out.write(reinterpret_cast<const char*>(&has_q), sizeof(has_q));
-    if (has_q) {
-      variant_io::save(quantizer, out);
-      variant_io::save(quantized_data, out);
-    }
-    out.close();
-  }
-
-  void load_with_quantizer(const std::string& filename,
-                           const PointCloudSet<ChPoint>& /*points*/) {
-    std::ifstream in(filename, std::ios::binary);
-    if (!in) throw std::runtime_error("load_with_quantizer: cannot open: " + filename);
-    uint32_t magic = 0, ver = 0, cid = 0;
-    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
-    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
-    if (magic != kMagic || ver != kVersion || cid != compute_class_id_()) {
-      throw std::runtime_error("[SVHGraph] load_with_quantizer: header mismatch.");
-    }
-    in.read(reinterpret_cast<char*>(&d), sizeof(unsigned));
-    size_t map_sz = 0;
-    in.read(reinterpret_cast<char*>(&map_sz), sizeof(size_t));
-    vector_to_id.resize(map_sz);
-    in.read(reinterpret_cast<char*>(vector_to_id.data()),
-            map_sz * sizeof(std::pair<uint32_t, uint32_t>));
-    G = parlayANN::io::load_graph<uint32_t>(in);
-    I.set_start();
-    start_point = I.get_start();
-    auto [f_data, f_d] = parlayANN::io::read_point_range<Point>(in);
-    flattened_points = Range(f_data, f_d);
-    uint8_t has_q = 0;
-    in.read(reinterpret_cast<char*>(&has_q), sizeof(has_q));
-    quantization_mode = kLeafMethod;
-    if (has_q) {
-      if (kLeafMethod == QT::None) {
-        throw std::runtime_error(
-            "[SVHGraph] load_with_quantizer: file has a quantizer payload but "
-            "this concrete class is NoQuantizer.");
-      }
-      variant_io::load_sv<QuantModel,
-                          typename SVQT::PQ_Model, typename SVQT::RQ_Model,
-                          typename SVQT::FS_Model, typename SVQT::TQ_Model,
-                          typename SVQT::PQTQ_Model>(quantizer, in, kLeafMethod);
-      variant_io::load_sv<QuantRange,
-                          typename SVQT::PQ_Range, typename SVQT::RQ_Range,
-                          typename SVQT::FS_Range, typename SVQT::TQ_Range,
-                          typename SVQT::PQTQ_Range>(quantized_data, in, kLeafMethod);
-    } else if (kLeafMethod != QT::None) {
-      this->template train_quantizer<SVQT>(flattened_points, quantizer);
-      quantized_data = this->template encode_range_quantized<SVQT>(flattened_points, quantizer);
-    }
-    in.close();
+    double t_retrain_ms = t_retrain.stop() * 1000.0;
+    std::cerr << "[SVHGraph] load: tree_io=" << t_io_ms << "ms retrain=" << t_retrain_ms
+              << "ms (leaf_quant=" << ((kLeafMethod != QT::None) ? 1 : 0) << ")" << std::endl;
   }
 };
 

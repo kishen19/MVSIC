@@ -8,7 +8,6 @@ cc_library(
     deps = [
         "//mvsic/core:index",
         "//mvsic/core:query_compression",
-        "//mvsic/core/quantization:variant_io",
         "//mvsic/core/types:ip_point",
         "//mvsic/core/types:l2_point",
         "//mvsic/core/types:point_range",
@@ -23,7 +22,6 @@ cc_library(
     deps = [
         "//mvsic/core:index",
         "//mvsic/core:query_compression",
-        "//mvsic/core/quantization:variant_io",
         "//mvsic/core/types:io",
         "//mvsic/core/utils:util",
         "@parlayann//algorithms/utils:graph",

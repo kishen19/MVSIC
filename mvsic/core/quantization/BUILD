@@ -141,11 +141,3 @@ cc_library(
         "@rabitq//:rabitqlib",
     ],
 )
-
-cc_library(
-    name = "variant_io",
-    hdrs = ["variant_io.h"],
-    deps = [
-        "//mvsic/core:index_params",
-    ],
-)

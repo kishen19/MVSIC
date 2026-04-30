@@ -8,7 +8,6 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/query_compression.h"
-#include "mvsic/core/quantization/variant_io.h"
 #include "mvsic/core/utils/util.h"
 #include "mvsic/core/utils/kmeans_util.h"
 #include "mvsic/core/types/point_range.h"
@@ -548,28 +547,38 @@ class IndexSVHIVF : public Index<metric> {
   }
 
   // ---------------------------------------------------------------------------
-  // Save / load (v2 skeleton format).
+  // Save / load (v3 uniform skeleton format).
+  //
+  // The on-disk file is variant-agnostic: any templated SVHIVF variant
+  // (any LeafModel, any CompressCenters) can load the same skeleton and
+  // re-train its leaf quantizer / center TQ quantizer on load from the
+  // supplied base points.  class_id is therefore a fixed constant and no
+  // longer encodes the leaf method or CompressCenters bit.
   //
   // Layout:
   //   magic     : uint32 = 'SVHI'
-  //   version   : uint32 = 2
-  //   class_id  : uint32 = (static_cast<uint32_t>(kLeafMethod) << 1)
-  //                        | (kHasCenterQuant ? 1 : 0)
+  //   version   : uint32 = 3
+  //   class_id  : uint32 = 0 (reserved)
   //   d, num_nodes, center_offsets[num_nodes], raw center data,
   //   children_offsets[num_nodes], children_indices[],
   //   point_id_offsets[num_nodes], point_ids[]
   //
-  // Neither the leaf quantizer codebook nor the center TurboQuant codebook is
-  // persisted.  `load()` retrains both from the supplied base points and then
-  // re-encodes the tree.  Internal hot path remains variant-based.
+  // save() is only valid on the raw skeleton variant
+  // IndexSVHIVF<metric, false, NoQuantizer<metric>>; runtime guard below.
   // ---------------------------------------------------------------------------
   static constexpr uint32_t kMagic = 0x53564849u;  // 'SVHI'
-  static constexpr uint32_t kVersion = 2u;
-  static uint32_t compute_class_id_() {
-    return (static_cast<uint32_t>(kLeafMethod) << 1) | (kHasCenterQuant ? 1u : 0u);
-  }
+  static constexpr uint32_t kVersion = 3u;         // v3: uniform skeleton format
+  static constexpr uint32_t kClassId = 0u;
 
   void save(const std::string& filename) override {
+    if constexpr (kLeafMethod != QT::None || kHasCenterQuant) {
+      std::cerr << "[SVHIVF] save() is only supported on the raw skeleton variant "
+                   "(CompressCenters=false, LeafModel=NoQuantizer). Build the raw "
+                   "skeleton, save it, then load() into the desired templated variant."
+                << std::endl;
+      std::abort();
+    }
+
     if (root == nullptr) {
       std::cerr << "IndexSVHIVF::save: root is null (index not built).\n";
       return;
@@ -581,7 +590,7 @@ class IndexSVHIVF : public Index<metric> {
     }
     const uint32_t magic = kMagic;
     const uint32_t ver = kVersion;
-    const uint32_t cid = compute_class_id_();
+    const uint32_t cid = kClassId;
     outfile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     outfile.write(reinterpret_cast<const char*>(&ver), sizeof(ver));
     outfile.write(reinterpret_cast<const char*>(&cid), sizeof(cid));
@@ -654,6 +663,8 @@ class IndexSVHIVF : public Index<metric> {
   }
 
   void load(const std::string& filename, const PointCloudSet<ChPoint>& points) override {
+    parlay::internal::timer t_io;
+    t_io.start();
     std::ifstream infile(filename, std::ios::binary);
     if (!infile.is_open()) {
       std::cerr << "Error opening file for reading: " << filename << std::endl;
@@ -664,17 +675,17 @@ class IndexSVHIVF : public Index<metric> {
     infile.read(reinterpret_cast<char*>(&ver), sizeof(ver));
     infile.read(reinterpret_cast<char*>(&cid), sizeof(cid));
     if (magic != kMagic) {
-      std::cerr << "[SVHIVF] bad magic: file is not an SVHI v2 index." << std::endl;
+      std::cerr << "[SVHIVF] bad magic: file is not an SVHI skeleton index." << std::endl;
       return;
     }
     if (ver != kVersion) {
-      std::cerr << "[SVHIVF] unsupported version " << ver << " (expected " << kVersion << ")."
-                << std::endl;
+      std::cerr << "[SVHIVF] SVHIVF index file format changed in v" << kVersion << "; got v"
+                << ver << ". Rebuild with current code." << std::endl;
       return;
     }
-    if (cid != compute_class_id_()) {
-      std::cerr << "[SVHIVF] class_id mismatch: file has " << cid << ", this instance is "
-                << compute_class_id_() << "." << std::endl;
+    if (cid != kClassId) {
+      std::cerr << "[SVHIVF] unexpected class_id " << cid << " (expected " << kClassId
+                << " for the v" << kVersion << " skeleton)." << std::endl;
       return;
     }
 
@@ -701,9 +712,13 @@ class IndexSVHIVF : public Index<metric> {
     infile.read(reinterpret_cast<char*>(point_ids.data()),
                 total_ids * sizeof(std::pair<size_t, size_t>));
     infile.close();
+    double t_io_ms = t_io.stop() * 1000.0;
 
-    // Leaf-level and center-level codebooks are not persisted in v2.  We retrain
-    // them from the supplied base points using the compile-time-selected model.
+    parlay::internal::timer t_retrain;
+    t_retrain.start();
+    // Leaf-level and center-level codebooks are not persisted in the skeleton.
+    // Retrain them from the supplied base points using the compile-time
+    // selected model.
     quantization_mode = kLeafMethod;
     {
       FlatRange flat_points(points);
@@ -772,109 +787,10 @@ class IndexSVHIVF : public Index<metric> {
           }
         },
         1);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Extended save / load: writes the full v2 skeleton *and* the trained leaf
-  // / center quantizer codebooks, so a subsequent `load_with_quantizer()` can
-  // skip retraining (it still re-encodes tree nodes on the fly, which is fast
-  // compared to codebook training).
-  //
-  // Layout: v2 skeleton as in save() + suffix:
-  //   has_q       : uint8   1 if a quantizer payload follows
-  //   leaf_model  : quantizer.save(...)         (when has_q && kLeafMethod != None)
-  //   leaf_range  : quantized_data.save(...)    (per-leaf encoded sets, serialised in DFS)
-  //   center_tq   : center_quantizer.save(...)  (when kHasCenterQuant)
-  // ---------------------------------------------------------------------------
-  void save_with_quantizer(const std::string& filename) {
-    if (root == nullptr) {
-      std::cerr << "IndexSVHIVF::save_with_quantizer: root is null.\n";
-      return;
-    }
-    save(filename);  // writes the v2 skeleton header + body.
-    std::ofstream out(filename, std::ios::binary | std::ios::app);
-    if (!out) {
-      throw std::runtime_error("save_with_quantizer: cannot open for append: " + filename);
-    }
-    const uint8_t has_q = (kLeafMethod != QT::None || kHasCenterQuant) ? 1u : 0u;
-    out.write(reinterpret_cast<const char*>(&has_q), sizeof(has_q));
-    if (!has_q) return;
-
-    if constexpr (kLeafMethod != QT::None) {
-      variant_io::save(quantizer, out);
-      // Persist per-leaf encoded sets in DFS order.  Matches the traversal
-      // used by save()/load() for centers / children / point_ids.
-      parlay::sequence<node_t*> ind_to_node;
-      std::unordered_map<node_t*, size_t> node_to_ind;
-      parlay::sequence<size_t> co, ch, po;
-      traverse_tree(root, ind_to_node, node_to_ind, co, ch, po);
-      for (node_t* node : ind_to_node) {
-        if (node->children.empty() && !node->ids.empty()) {
-          variant_io::save(node->quantized_data, out);
-        }
-      }
-    }
-    if constexpr (kHasCenterQuant) {
-      center_quantizer.save(out);
-    }
-    out.close();
-  }
-
-  void load_with_quantizer(const std::string& filename,
-                           const PointCloudSet<ChPoint>& points) {
-    load(filename, points);  // rebuilds tree + already retrains leaf/center quantizers.
-
-    std::ifstream in(filename, std::ios::binary);
-    if (!in) throw std::runtime_error("load_with_quantizer: cannot open: " + filename);
-    // Skip to the suffix: we replay the skeleton-read logic to advance the stream.
-    uint32_t magic = 0, ver = 0, cid = 0;
-    in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-    in.read(reinterpret_cast<char*>(&ver), sizeof(ver));
-    in.read(reinterpret_cast<char*>(&cid), sizeof(cid));
-    unsigned d_tmp;
-    size_t num_nodes;
-    in.read(reinterpret_cast<char*>(&d_tmp), sizeof(unsigned));
-    in.read(reinterpret_cast<char*>(&num_nodes), sizeof(size_t));
-    auto skip_offsets = [&](size_t elem_size) {
-      parlay::sequence<size_t> offs(num_nodes);
-      in.read(reinterpret_cast<char*>(offs.data()), num_nodes * sizeof(size_t));
-      size_t total = parlay::reduce(offs);
-      in.seekg(total * elem_size, std::ios::cur);
-    };
-    skip_offsets(4 * d_tmp);     // centers
-    skip_offsets(sizeof(size_t)); // children
-    skip_offsets(16);             // point_ids (pair<size_t,size_t>)
-
-    uint8_t has_q = 0;
-    in.read(reinterpret_cast<char*>(&has_q), sizeof(has_q));
-    if (!has_q || !in) {
-      in.close();
-      return;  // no quantizer payload -> fall back to the retrained state from load().
-    }
-
-    if constexpr (kLeafMethod != QT::None) {
-      variant_io::load_sv<QuantModel,
-                          typename SVQT::PQ_Model, typename SVQT::RQ_Model,
-                          typename SVQT::FS_Model, typename SVQT::TQ_Model,
-                          typename SVQT::PQTQ_Model>(quantizer, in, kLeafMethod);
-
-      parlay::sequence<node_t*> ind_to_node;
-      std::unordered_map<node_t*, size_t> node_to_ind;
-      parlay::sequence<size_t> co, ch, po;
-      traverse_tree(root, ind_to_node, node_to_ind, co, ch, po);
-      for (node_t* node : ind_to_node) {
-        if (node->children.empty() && !node->ids.empty()) {
-          variant_io::load_sv<QuantRange,
-                              typename SVQT::PQ_Range, typename SVQT::RQ_Range,
-                              typename SVQT::FS_Range, typename SVQT::TQ_Range,
-                              typename SVQT::PQTQ_Range>(node->quantized_data, in, kLeafMethod);
-        }
-      }
-    }
-    if constexpr (kHasCenterQuant) {
-      center_quantizer.load(in);
-    }
-    in.close();
+    double t_retrain_ms = t_retrain.stop() * 1000.0;
+    std::cerr << "[SVHIVF] load: tree_io=" << t_io_ms << "ms retrain=" << t_retrain_ms
+              << "ms (compress_centers=" << (kHasCenterQuant ? 1 : 0)
+              << ", leaf_quant=" << ((kLeafMethod != QT::None) ? 1 : 0) << ")" << std::endl;
   }
 
   void traverse_tree(node_t* node, parlay::sequence<node_t*>& ind_to_node,

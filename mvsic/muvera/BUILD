@@ -11,7 +11,6 @@ cc_library(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:variant_io",
         "//mvsic/core/types:io",
         "//mvsic/muvera/fde:fixed_dimensional_encoding",
         "@parlayann//algorithms/utils:beamSearch",

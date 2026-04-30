@@ -12,7 +12,6 @@ void run(commandLine& P) {
   if (ds.points.empty()) { std::cerr << "Error: specify -d <dataset>" << std::endl; std::exit(1); }
 
   auto io = bench::parse_io_args(P);
-  auto qa = bench::parse_quant_args(P, "None");
 
   // Defaults mirror IndexParams::muvera_custom in mvsic/core/index_params.h.
   int32_t num_reps = P.getOptionIntValue("-num_reps", 20);
@@ -27,31 +26,36 @@ void run(commandLine& P) {
   int num_pass = P.getOptionIntValue("-np", 1);
 
   auto points = PC(ds.points.c_str(), io.is_mmap);
+  // Build the raw skeleton (no leaf quantization); save() is only valid on
+  // this variant.  Quantized variants are instantiated on load by the search
+  // benches; the on-disk skeleton is variant-agnostic.
   IndexParams ip = IndexParams::muvera_custom(
       num_reps, num_simhash, 1, projd, fill_empty, final_projd, !no_norm,
       R, L_build, alpha, num_pass, io.compress_input, io.verbose,
-      qa.pq_method, qa.block_size, qa.num_clusters_per_block,
-      qa.num_points_per_cluster, qa.rabitq_bits);
-  IndexMUVERA<metric> index(points.get_dims(), ip);
+      /*pq_method=*/0, /*block_size=*/8, /*num_clusters_per_block=*/16,
+      /*num_points_per_cluster=*/100, /*rabitq_bits=*/4);
+  IndexMUVERA<metric, NoQuantizer<metric>> index(points.get_dims(), ip);
 
-  std::cout << "Building index..." << std::endl;
+  std::cout << "Building MUVERA skeleton (raw FDEs, no leaf quantization)..." << std::endl;
   parlay::internal::timer t;
   t.start();
   index.build(points);
   t.stop();
   std::cout << "Index built in " << t.total_time() << " seconds." << std::endl;
   if (!io.save_path.empty()) {
-    std::cout << "Saving index to " << io.save_path << " ..." << std::endl;
+    std::cout << "Saving skeleton to " << io.save_path << " ..." << std::endl;
     index.save(io.save_path);
-    std::cout << "Index saved." << std::endl;
+    std::cout << "Skeleton saved." << std::endl;
   }
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
-    "MUVERA build-only benchmark. Builds IndexMUVERA<metric> (MUVERA over Vamana).\n\n"
+    "MUVERA skeleton build benchmark. Builds the raw skeleton (no quantization)\n"
+    "for IndexMUVERA<metric>.  Quantized variants are instantiated on load by\n"
+    "the search benches; the on-disk file is variant-agnostic.\n\n"
     "Dataset / I/O:\n"
     "  -d <name> | -i <points>\n"
-    "  -o <save_path>                 Where to save the built index\n"
+    "  -o <save_path>                 Where to save the built skeleton\n"
     "  -mm                            Memory-map the points file\n"
     "  -v <level>                     Verbosity (0..3)\n"
     "  -compress_input                Apply point-cloud input compression\n"
@@ -64,8 +68,4 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "  -final_projd <N>               Final projection dim (default 0 = off)\n"
     "  -no_norm                       Disable FDE normalization (default: normalized)\n\n"
     "Underlying Vamana params:\n"
-    "  -R <N> (200)   -L_build <N> (600)   -a <f> (1.1)   -np <N> (1)\n\n"
-    "Leaf quantization (passed via IndexParams):\n"
-    "  -quant_method None|PQ|FS|RQ|TQ    (default None)\n"
-    "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
-    "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n")
+    "  -R <N> (200)   -L_build <N> (600)   -a <f> (1.1)   -np <N> (1)\n")

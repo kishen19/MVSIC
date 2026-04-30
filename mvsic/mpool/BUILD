@@ -11,7 +11,6 @@ cc_library(
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:pq",
         "//mvsic/core/quantization:rabitq",
-        "//mvsic/core/quantization:variant_io",
         "//mvsic/core/types:io",
         "@parlayann//algorithms/utils:beamSearch",
         "@parlayann//algorithms/utils:euclidian_point",
