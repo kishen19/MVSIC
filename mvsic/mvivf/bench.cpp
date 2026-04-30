@@ -1,19 +1,26 @@
 #include <Eigen/Dense>
 #include <iostream>
+#include <string>
+
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/core/stats.h"
-#include "mvivf.h"
-#include "mvivf_flat.h"
-#include "mvivf_spill.h"
+#include "mvsic/mvivf/bench_inst.h"
 
 using namespace mvsic;
+using mvsic::bench_main::BenchRunOneCtx;
+using mvsic::bench_main::MVIVFVariant;
+using mvsic::bench_main::bench_run_one;
 
 // ----- CLI -> compile-time IndexMVIVF<metric, CompressCenters, LeafModel> dispatch. -----
+//
+// All heavy template specializations of bench_run_one are instantiated in
+// separate translation units under bench_inst/ — one .cc per (metric, variant,
+// quantizer) cell, each instantiating both compress=false and compress=true.
+// Bazel compiles those TUs in parallel; this dispatch TU only sees
+// `extern template` declarations and stays cheap.
 namespace {
-enum class MVIVFVariant { Regular, Flat, Spill };
 
 inline MVIVFVariant parse_mvivf_variant(bool is_flat, bool is_spill) {
   if (is_flat && is_spill) {
@@ -23,12 +30,6 @@ inline MVIVFVariant parse_mvivf_variant(bool is_flat, bool is_spill) {
   return is_flat ? MVIVFVariant::Flat
        : is_spill ? MVIVFVariant::Spill
                   : MVIVFVariant::Regular;
-}
-
-inline const char* variant_name(MVIVFVariant v) {
-  return v == MVIVFVariant::Flat  ? "MVIVF_Flat"
-       : v == MVIVFVariant::Spill ? "MVIVF_Spill"
-                                  : "MVIVF";
 }
 
 #define MVIVF_DISPATCH_LM(Fam, metric, C, qm, fn)                                                 \
@@ -161,6 +162,9 @@ void run_bench(mvsic::commandLine& P) {
         max_depth);
     search_params = SearchParams::mvivf(k, nprobes, num_rerank);
   }
+  // Mirror bench_build/bench_search_all: lets us drive the int8 panel kernel
+  // for k-means assignment from the full build+search bench. Default off.
+  index_params.build_with_8btq = (P.getOptionIntValue("-build_8btq", 0) != 0);
   apply_query_compression_opts(search_params, P);
   if (search_params.query_compression != SearchParams::QueryCompression::None) {
     const char* mname = (search_params.query_compression == SearchParams::QueryCompression::Carve)
@@ -171,57 +175,22 @@ void run_bench(mvsic::commandLine& P) {
               << " compress_rerank=" << (search_params.compress_rerank ? "1" : "0") << std::endl;
   }
 
-  dispatch_mvivf<metric>(variant, compress_centers, quant_method,
-      [&]<class IndexT>() {
-        IndexT index(points.get_dims(), index_params);
-        if (!indexFile.empty()) {
-          std::cout << "Loading index from " << indexFile << std::endl;
-          index.load(indexFile, points);
-          std::cout << "Index loaded" << std::endl;
-        } else {
-          std::cout << "Building index (" << variant_name(variant)
-                    << ", compress_centers=" << (compress_centers ? 1 : 0)
-                    << ", leaf=" << quant_method << ")..." << std::endl;
-          parlay::internal::timer it;
-          it.start();
-          index.build(points);
-          it.stop();
-          std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
-        }
-        if (!outFile.empty()) {
-          std::cout << "Saving index to " << outFile << std::endl;
-          index.save(outFile);
-          std::cout << "Index saved." << std::endl;
-        }
+  BenchRunOneCtx<ChPoint> ctx{
+      .points = &points,
+      .index_params = index_params,
+      .search_params = search_params,
+      .out_file = outFile,
+      .index_file = indexFile,
+      .q_file = QFile,
+      .gt_file = gtFile,
+      .variant = variant,
+      .compress_centers = compress_centers,
+      .quant_method = quant_method,
+      .k = k,
+  };
 
-        if (QFile.empty()) return;
-        auto queries = PC(qFile);
-        if (search_params.query_compression != SearchParams::QueryCompression::None) {
-          uint32_t ba = qc_internal::batch_alignment(index.quantization_mode);
-          double sum_orig = 0.0;
-          double sum_comp = 0.0;
-          for (size_t j = 0; j < queries.size(); ++j) {
-            sum_orig += static_cast<double>(queries[j].size());
-            auto c = compress_query<ChPoint>(queries[j], search_params.query_compression,
-                                             search_params.query_compression_threshold, ba);
-            sum_comp += static_cast<double>(c.n);
-          }
-          const double nq = static_cast<double>(queries.size());
-          std::cout << "Avg query points (raw):        " << (sum_orig / nq) << std::endl
-                    << "Avg query points (compressed): " << (sum_comp / nq) << std::endl
-                    << "Compression ratio (raw/compr): "
-                    << (sum_comp > 0 ? sum_orig / sum_comp : 0.0) << std::endl;
-        }
-        auto gt = ReadGT(gtFile, queries.size());
-        std::cout << "Computing stats..." << std::endl;
-        Stats result = compute_stats(index, points, queries, gt, search_params);
-        std::cout << "Number of Queries: " << queries.size() << std::endl
-                  << "QPS_seq: " << result.QPS_seq << std::endl
-                  << "QPS_par: " << result.QPS_par << std::endl
-                  << "Average cmps: " << result.avg_cmps << std::endl
-                  << "Average recall 1 @ " << k << ": " << result.recall_1_k << std::endl
-                  << "Average recall " << k << " @ " << k << ": " << result.recall_k_k << std::endl;
-      });
+  dispatch_mvivf<metric>(variant, compress_centers, quant_method,
+      [&]<class IndexT>() { bench_run_one<ChPoint, metric, IndexT>(ctx); });
 }
 
 int main(int argc, char* argv[]) {
@@ -269,3 +238,7 @@ int main(int argc, char* argv[]) {
   }
   return 0;
 }
+// rebuild trigger 1777581638379903798
+// touch 1777581733516618790 /home/laxmand_google_com/current/mvsic-paper/MVSIC/mvsic/mvivf/bench.cpp
+// touch 1777582138094954561
+// rebuild trigger 1777583209135919504

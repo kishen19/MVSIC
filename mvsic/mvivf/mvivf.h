@@ -32,14 +32,18 @@
 // =============================================================================
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -122,6 +126,120 @@ class IndexMVIVF : public Index<metric> {
   std::vector<uint32_t> leaf_to_root_child_;
 
   // ---------------------------------------------------------------------------
+  // Build-time 8BTQ cache. When `params.build_with_8btq` is set, we train the
+  // 8BTQ rotator and pre-encode every input point cloud as a query *once* at
+  // the top of `build()`. Each MVClustering8BTQ call in `recursive_build_`
+  // then reads encoded queries directly out of `build_8btq_q_clouds_` via the
+  // per-subtree `orig_indices` mapping, instead of re-training a rotator and
+  // re-encoding its training points.
+  //
+  // The rotator is data-independent (depends only on dim + a fixed seed) so
+  // sharing it across calls is correctness-equivalent. The encoded queries are
+  // a per-PC byproduct of `model.quantize_query(points[i])`.
+  //
+  // Both members are populated only for the lifetime of `build()`; cleared
+  // afterwards to avoid retaining ~6 N×padded_dim bytes for the lifetime of
+  // the index.
+  // ---------------------------------------------------------------------------
+  using BTQModel = ::mvsic::turboquant_8bit_mv::Model<metric>;
+  using BTQEncQuery = typename BTQModel::EncodedQuery;
+  std::unique_ptr<BTQModel> build_8btq_model_;
+  std::vector<BTQEncQuery> build_8btq_q_clouds_;
+
+  // ---------------------------------------------------------------------------
+  // Per-level build timing instrumentation. Compile-time gated by
+  // MVIVF_BUILD_STATS (define to 1 to enable). Off by default so build()
+  // pays no atomic-add or chrono cost on the hot path.
+  //
+  // Build with -DMVIVF_BUILD_STATS=1 to re-enable the per-depth `sum_cpu`
+  // counters and the per-level wall window printed at -v >= 2.
+  // ---------------------------------------------------------------------------
+#ifndef MVIVF_BUILD_STATS
+#define MVIVF_BUILD_STATS 0
+#endif
+
+#if MVIVF_BUILD_STATS
+  static constexpr size_t kMaxBuildLevels = 16;
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_us_clustering_{};
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_us_split_{};
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_us_leaf_encode_{};
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_n_internal_{};
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_n_leaves_{};
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_total_points_{};
+  // Wall-clock window covered by all recursive_build_ calls at a given depth:
+  // first entry timestamp = min(t_in), last exit timestamp = max(t_out). The
+  // wall time at level d is therefore (last - first), regardless of how many
+  // parallel workers contributed. Stored as us-since-build-start.
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_first_in_us_{};
+  mutable std::array<std::atomic<uint64_t>, kMaxBuildLevels> level_last_out_us_{};
+  uint64_t build_t0_us_ = 0;
+
+  static inline uint64_t now_us_() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+  }
+
+  void reset_level_timings_() {
+    build_t0_us_ = now_us_();
+    for (size_t d = 0; d < kMaxBuildLevels; ++d) {
+      level_us_clustering_[d].store(0, std::memory_order_relaxed);
+      level_us_split_[d].store(0, std::memory_order_relaxed);
+      level_us_leaf_encode_[d].store(0, std::memory_order_relaxed);
+      level_n_internal_[d].store(0, std::memory_order_relaxed);
+      level_n_leaves_[d].store(0, std::memory_order_relaxed);
+      level_total_points_[d].store(0, std::memory_order_relaxed);
+      level_first_in_us_[d].store(UINT64_MAX, std::memory_order_relaxed);
+      level_last_out_us_[d].store(0, std::memory_order_relaxed);
+    }
+  }
+
+  static inline void atomic_min_(std::atomic<uint64_t>& dst, uint64_t v) {
+    uint64_t cur = dst.load(std::memory_order_relaxed);
+    while (v < cur && !dst.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+  }
+  static inline void atomic_max_(std::atomic<uint64_t>& dst, uint64_t v) {
+    uint64_t cur = dst.load(std::memory_order_relaxed);
+    while (v > cur && !dst.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+  }
+
+  void print_level_timings_() const {
+    auto fmt_s = [](uint64_t us) {
+      std::ostringstream os;
+      os << std::fixed << std::setprecision(3) << (static_cast<double>(us) * 1e-6);
+      return os.str();
+    };
+    std::cout << "[MVIVF] Per-level build breakdown:\n";
+    std::cout << "[MVIVF]   sum_cpu = sum across all workers; wall = (last_exit - first_entry) at level\n";
+    std::cout << "[MVIVF]   "
+              << "  d   internal     leaves     n_pts"
+              << "  cpu_clus(s)  cpu_split(s)  cpu_leafenc(s)   wall(s)\n";
+    for (size_t d = 0; d < kMaxBuildLevels; ++d) {
+      uint64_t ni = level_n_internal_[d].load(std::memory_order_relaxed);
+      uint64_t nl = level_n_leaves_[d].load(std::memory_order_relaxed);
+      uint64_t np = level_total_points_[d].load(std::memory_order_relaxed);
+      uint64_t uc = level_us_clustering_[d].load(std::memory_order_relaxed);
+      uint64_t us = level_us_split_[d].load(std::memory_order_relaxed);
+      uint64_t ue = level_us_leaf_encode_[d].load(std::memory_order_relaxed);
+      uint64_t fi = level_first_in_us_[d].load(std::memory_order_relaxed);
+      uint64_t lo = level_last_out_us_[d].load(std::memory_order_relaxed);
+      uint64_t wall = (fi == UINT64_MAX || lo <= fi) ? 0 : (lo - fi);
+      if (ni == 0 && nl == 0 && uc == 0 && us == 0 && ue == 0) continue;
+      std::cout << "[MVIVF]   " << std::setw(3) << d
+                << std::setw(11) << ni
+                << std::setw(11) << nl
+                << std::setw(10) << np
+                << std::setw(13) << fmt_s(uc)
+                << std::setw(14) << fmt_s(us)
+                << std::setw(16) << fmt_s(ue)
+                << std::setw(10) << fmt_s(wall) << "\n";
+    }
+    std::cout.flush();
+  }
+#endif  // MVIVF_BUILD_STATS
+
+  // ---------------------------------------------------------------------------
   // Construction.
   // ---------------------------------------------------------------------------
   IndexMVIVF(size_t d_) noexcept {
@@ -191,6 +309,9 @@ class IndexMVIVF : public Index<metric> {
       root = nullptr;
     }
     root = new node_t();
+#if MVIVF_BUILD_STATS
+    reset_level_timings_();
+#endif
 
     t.start();
     if constexpr (kHasCenterQuant) center_model_.train(points);
@@ -200,8 +321,30 @@ class IndexMVIVF : public Index<metric> {
     }
     t.reset();
 
+    // Pre-encode every input PC as an 8BTQ query for reuse across recursion.
+    // The rotator (dim-only) and the encoded queries are then handed to every
+    // MVClustering8BTQ call in `recursive_build_` via points_to_root mappings.
+    if (params.build_with_8btq) {
+      t.start();
+      build_8btq_model_ = std::make_unique<BTQModel>();
+      build_8btq_model_->train(points);
+      const size_t n = points.size();
+      build_8btq_q_clouds_.assign(n, BTQEncQuery{});
+      parlay::parallel_for(0, n, [&](size_t i) {
+        build_8btq_q_clouds_[i] = build_8btq_model_->quantize_query(points[i]);
+      });
+      if (params.verbose >= 1) {
+        std::cout << "[MVIVF] 8BTQ pre-encode (" << n << " PCs): " << t.stop() << " sec"
+                  << std::endl;
+      }
+      t.reset();
+    }
+
     t.start();
-    recursive_build_(root, points, 0);
+    parlay::sequence<uint32_t> root_orig_indices(points.size());
+    parlay::parallel_for(0, points.size(),
+                         [&](size_t i) { root_orig_indices[i] = static_cast<uint32_t>(i); });
+    recursive_build_(root, points, 0, root_orig_indices);
     if (params.verbose >= 1) {
       std::cout << "[MVIVF] MV-Kmeans-Tree Built: " << t.stop() << " sec" << std::endl;
     }
@@ -209,10 +352,28 @@ class IndexMVIVF : public Index<metric> {
 
     t.start();
     compute_leaf_flat_();
+    double t_compute_leaf_flat = t.stop();
+    t.reset();
+    t.start();
     compress_internal_centers_();
+    double t_compress_centers = t.stop();
     if (params.verbose >= 1) {
-      std::cout << "[MVIVF] Leaf-data computed: " << t.stop() << " sec" << std::endl;
+      std::cout << "[MVIVF] Leaf-data computed: "
+                << (t_compute_leaf_flat + t_compress_centers) << " sec ("
+                << "compute_leaf_flat=" << t_compute_leaf_flat << "s, "
+                << "compress_internal_centers=" << t_compress_centers << "s)" << std::endl;
     }
+#if MVIVF_BUILD_STATS
+    if (params.verbose >= 2) {
+      print_level_timings_();
+    }
+#endif
+
+    // Cache exists only for the lifetime of build(); release it now so the
+    // index doesn't carry the per-PC encoded queries (~ N * padded_dim bytes).
+    build_8btq_model_.reset();
+    build_8btq_q_clouds_.clear();
+    build_8btq_q_clouds_.shrink_to_fit();
   }
 
  private:
@@ -222,7 +383,8 @@ class IndexMVIVF : public Index<metric> {
   // are encoded eagerly so we don't have to walk the tree a second time just
   // for leaf encoding.
   // ---------------------------------------------------------------------------
-  void recursive_build_(node_t* node, const PointCloudSet<ChPoint>& points, uint32_t depth) {
+  void recursive_build_(node_t* node, const PointCloudSet<ChPoint>& points, uint32_t depth,
+                        const parlay::sequence<uint32_t>& orig_indices) {
     const size_t n = points.size();
     const size_t auto_nc = (params.k_per_level > 0)
                                ? params.k_per_level
@@ -234,6 +396,14 @@ class IndexMVIVF : public Index<metric> {
       std::cout << "[MVIVF] Building with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
+#if MVIVF_BUILD_STATS
+    const size_t bucket = std::min<size_t>(depth, kMaxBuildLevels - 1);
+    const uint64_t t_entry = now_us_();
+    atomic_min_(level_first_in_us_[bucket], t_entry - build_t0_us_);
+    level_n_internal_[bucket].fetch_add(1, std::memory_order_relaxed);
+    level_total_points_[bucket].fetch_add(n, std::memory_order_relaxed);
+#endif
+
     PointCloudSet<ChPoint> centers;
     parlay::sequence<uint32_t> cluster_ids;
     auto run_clus = [&](auto& Clus) {
@@ -241,13 +411,26 @@ class IndexMVIVF : public Index<metric> {
       cluster_ids = Clus.get_clustering(points);
       centers = std::move(Clus.get_centers());
     };
+#if MVIVF_BUILD_STATS
+    const uint64_t t_clus_start = now_us_();
+#endif
     if (params.build_with_8btq) {
       MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      // Reuse the build-top-level rotator and pre-encoded queries instead of
+      // training/encoding per call. orig_indices is the local-to-root mapping
+      // for this subtree's points.
+      if (build_8btq_model_ && !build_8btq_q_clouds_.empty()) {
+        Clus.set_shared_cache(*build_8btq_model_, build_8btq_q_clouds_, orig_indices);
+      }
       run_clus(Clus);
     } else {
       MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
       run_clus(Clus);
     }
+#if MVIVF_BUILD_STATS
+    level_us_clustering_[bucket].fetch_add(now_us_() - t_clus_start, std::memory_order_relaxed);
+    const uint64_t t_split_start = now_us_();
+#endif
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
     node->children.resize(grouped.size());
@@ -258,25 +441,64 @@ class IndexMVIVF : public Index<metric> {
     } else {
       node->data = std::move(centers);
     }
+#if MVIVF_BUILD_STATS
+    level_us_split_[bucket].fetch_add(now_us_() - t_split_start, std::memory_order_relaxed);
+    const size_t child_bucket = std::min<size_t>(depth + 1, kMaxBuildLevels - 1);
+#endif
+
     parlay::parallel_for(
         0, grouped.size(),
         [&](size_t i) {
+#if MVIVF_BUILD_STATS
+          const uint64_t t_child_split_start = now_us_();
+#endif
           auto group = parlay::delayed_seq<uint32_t>(
               grouped[i].size(), [&](size_t j) { return grouped[i][j].second; });
           PointCloudSet<ChPoint> child_points(points.filter(group), d);
+          // Map this child's local indices back to root indices so that any
+          // recursive MVClustering8BTQ call can pull encoded queries out of
+          // the build-top-level cache.
+          parlay::sequence<uint32_t> child_orig_indices(grouped[i].size());
+          for (size_t j = 0; j < grouped[i].size(); ++j) {
+            child_orig_indices[j] = orig_indices[grouped[i][j].second];
+          }
           node_t* child = new node_t();
           node->children[i] = child;
           const bool depth_exhausted = (params.max_depth > 0) && (depth + 1 >= params.max_depth);
-          if (!depth_exhausted && child_points.size() > params.max_leaf_size) {
-            recursive_build_(child, child_points, depth + 1);
+          const bool will_be_leaf =
+              depth_exhausted || child_points.size() <= params.max_leaf_size;
+#if MVIVF_BUILD_STATS
+          level_us_split_[bucket].fetch_add(now_us_() - t_child_split_start,
+                                            std::memory_order_relaxed);
+#endif
+          if (!will_be_leaf) {
+            recursive_build_(child, child_points, depth + 1, child_orig_indices);
           } else {
+#if MVIVF_BUILD_STATS
+            const uint64_t t_leaf_in = now_us_();
+            atomic_min_(level_first_in_us_[child_bucket], t_leaf_in - build_t0_us_);
+            level_n_leaves_[child_bucket].fetch_add(1, std::memory_order_relaxed);
+#endif
             child->data = std::move(child_points);
             if constexpr (kHasLeafQuant) {
+#if MVIVF_BUILD_STATS
+              const uint64_t t_enc_start = now_us_();
+#endif
               child->encoded_leaf = leaf_model_.encode(child->data);
+#if MVIVF_BUILD_STATS
+              level_us_leaf_encode_[child_bucket].fetch_add(now_us_() - t_enc_start,
+                                                            std::memory_order_relaxed);
+#endif
             }
+#if MVIVF_BUILD_STATS
+            atomic_max_(level_last_out_us_[child_bucket], now_us_() - build_t0_us_);
+#endif
           }
         },
         1);
+#if MVIVF_BUILD_STATS
+    atomic_max_(level_last_out_us_[bucket], now_us_() - build_t0_us_);
+#endif
   }
 
   // Extract a flat list of leaves plus one representative raw center per leaf.

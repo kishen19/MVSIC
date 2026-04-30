@@ -35,14 +35,38 @@ cc_library(
     ],
 )
 
-cc_binary(
-    name = "bench",
-    srcs = ["bench.cpp"],
+# bench is split across 48 per-cell translation units under bench_inst/ (one
+# .cc per metric × variant × quantizer; each TU instantiates compress=true and
+# compress=false). Bazel compiles them in parallel; the dispatch TU only sees
+# `extern template` declarations.
+cc_library(
+    name = "bench_inst",
+    srcs = glob(["bench_inst/*.cc"]),
+    hdrs = [
+        "bench_impl.h",
+        "bench_inst.h",
+        "bench_run_one_decl.h",
+    ],
     deps = [
         ":mvivf",
         ":mvivf_flat",
         ":mvivf_spill",
+        "//mvsic/core:query_compression",
         "//mvsic/core:stats",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+    ],
+)
+
+cc_binary(
+    name = "bench",
+    srcs = ["bench.cpp"],
+    deps = [
+        ":bench_inst",
+        ":mvivf",
+        ":mvivf_flat",
+        ":mvivf_spill",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
