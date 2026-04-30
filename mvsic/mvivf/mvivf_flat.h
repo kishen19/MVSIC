@@ -171,7 +171,8 @@ class IndexMVIVFFlat : public Index<metric> {
     if constexpr (kHasCenterQuant) {
       t.start();
       centers_encoded = center_model_.encode(centers);
-      centers = PointCloudSet<ChPoint>{};  // reclaim raw centers
+      // Keep the raw `centers` populated alongside `centers_encoded` so that
+      // save() can persist the exact float centers used during build.
       std::cout << "[MVIVF Flat] Encoding Centers: " << t.stop() << " sec" << std::endl;
     }
   }
@@ -343,14 +344,11 @@ class IndexMVIVFFlat : public Index<metric> {
 
  public:
   void save(const std::string& filename) override {
-    if constexpr (kHasCenterQuant || kHasLeafQuant) {
-      std::cerr << "[MVIVF Flat] save() is only supported on the raw skeleton variant "
-                   "(CompressCenters=false, LeafModel=NoQuantizer). Build the raw "
-                   "skeleton, save it, then load() into the desired templated variant."
-                << std::endl;
-      std::abort();
-    }
-
+    // Skeleton save persists raw centers + cluster point ids only.  Codebooks
+    // and encoded leaves are never written; any templated variant can load
+    // this file and re-derive its quantization on load using the supplied raw
+    // points.  Quantized variants now keep `centers` populated alongside
+    // `centers_encoded` (see build()), so save() is valid for all variants.
     std::ofstream outfile(filename, std::ios::binary);
     std::cout << "Saving index to " << filename << std::endl;
     if (!outfile.is_open()) {
@@ -448,8 +446,10 @@ class IndexMVIVFFlat : public Index<metric> {
     if constexpr (kHasCenterQuant) {
       // Encode the persisted raw centers directly (no re-clustering): this
       // mirrors the on-build flow in mvivf.h::compress_internal_centers_.
+      // Keep `centers` populated alongside `centers_encoded` so that a
+      // subsequent save() round-trip preserves the exact float centers.
       centers_encoded = center_model_.encode(raw_centers);
-      centers = PointCloudSet<ChPoint>{};  // reclaim
+      centers = std::move(raw_centers);
     } else {
       centers = std::move(raw_centers);
     }

@@ -86,6 +86,14 @@ void run(commandLine& P) {
                             mpcc, mpcik, "Random", 0, wgh_kmeans, s, max_depth);
   }
 
+  // CLI flag `-build_8btq 0|1` selects the int8 VPDPBUSD panel kernel for
+  // k-means assignment at runtime (default off).  Mirrors bench_search_all.
+  ip.build_with_8btq = (P.getOptionIntValue("-build_8btq", 0) != 0);
+  if (io.verbose >= 1) {
+    std::cout << "[bench_build] build_with_8btq = "
+              << (ip.build_with_8btq ? "true" : "false") << std::endl;
+  }
+
   dispatch_skeleton<metric>(variant,
       [&]<class IndexT>() {
         IndexT index(points.get_dims(), ip);
@@ -130,4 +138,5 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "  -mpcc <N>                      max_point_clouds_per_cluster (default 100)\n"
     "  -mpcik <N>                     max_points_per_centroid_inner_kmeans (default 20)\n"
     "  -wgh_kmeans 0|1                Use weighted inner k-means (default 1)\n"
-    "  -s <N>                         Seeding strategy index (default 0 = Random)\n")
+    "  -s <N>                         Seeding strategy index (default 0 = Random)\n"
+    "  -build_8btq 0|1                Use 8BTQ panel kernel for k-means assignment (default 0)\n")

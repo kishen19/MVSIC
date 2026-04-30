@@ -336,8 +336,10 @@ class IndexMVIVFSpill : public Index<metric> {
     }
   }
 
-  // Encode internal-node centers when CompressCenters is true.  Also re-encodes
-  // the leaf-center shortcut.  Does nothing when CompressCenters is false.
+  // Encode internal-node centers when CompressCenters is true.  Keeps the raw
+  // `node->data` floats alongside the encoded form so that save() has the
+  // exact float centers used during build.  Does nothing when CompressCenters
+  // is false.
   void compress_internal_centers_() {
     if constexpr (kHasCenterQuant) {
       parlay::internal::timer t; t.start();
@@ -346,7 +348,6 @@ class IndexMVIVFSpill : public Index<metric> {
         if (!node->children.empty()) {
           if (node->data.size() > 0) {
             node->compressed_centers = center_model_.encode(node->data);
-            node->data = PointCloudSet<ChPoint>{};
           }
           for (node_t* c : node->children) visit(c);
         }
@@ -815,14 +816,12 @@ class IndexMVIVFSpill : public Index<metric> {
 
  public:
   void save(const std::string& filename) override {
-    if constexpr (kHasCenterQuant || kHasLeafQuant) {
-      std::cerr << "[MVIVF Spill] save() is only supported on the raw skeleton variant "
-                   "(CompressCenters=false, LeafModel=NoQuantizer). Build the raw "
-                   "skeleton, save it, then load() into the desired templated variant."
-                << std::endl;
-      std::abort();
-    }
-
+    // Skeleton save persists raw internal-node centers + leaf point ids only.
+    // Codebooks and encoded leaves are never written; any templated variant
+    // can load this file and re-derive its quantization on load using the
+    // supplied raw points.  Quantized variants now keep `node->data`
+    // populated alongside `compressed_centers` (see compress_internal_centers_),
+    // so save() is valid for all variants.
     if (root == nullptr) {
       std::cerr << "IndexMVIVFSpill::save: root is null." << std::endl;
       return;

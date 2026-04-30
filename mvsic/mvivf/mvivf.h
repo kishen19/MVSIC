@@ -313,8 +313,9 @@ class IndexMVIVF : public Index<metric> {
     }
   }
 
-  // Encode all internal-node centers with the center model, then drop the raw
-  // `node->data` to save memory.  No-op when !CompressCenters.
+  // Encode all internal-node centers with the center model.  Keeps the raw
+  // `node->data` floats alongside the encoded form so that save() has the
+  // exact float centers used during build.  No-op when !CompressCenters.
   void compress_internal_centers_() {
     if constexpr (kHasCenterQuant) {
       if (!root) return;
@@ -323,7 +324,6 @@ class IndexMVIVF : public Index<metric> {
         if (n->children.empty()) return;  // leaves keep raw data
         if (n->data.size() > 0) {
           n->compressed_centers = center_model_.encode(n->data);
-          n->data = PointCloudSet<ChPoint>{};  // reclaim
         }
         for (node_t* c : n->children)
           visit(c);
@@ -1109,21 +1109,12 @@ class IndexMVIVF : public Index<metric> {
 
  public:
   void save(const std::string& filename) override {
-    // Skeleton save requires raw internal-node centers.  When CompressCenters
-    // is set, internal `node->data` is cleared post-build, so saving from such
-    // a variant is unsafe.  Likewise, leaf encodings are intentionally never
-    // persisted; only the raw leaf point ids are written.  This is enforced
-    // at runtime to keep the virtual hierarchy free of template guards: build
-    // the raw skeleton variant, save it, then load() into the desired
-    // templated variant which retrains on load.
-    if constexpr (kHasCenterQuant || kHasLeafQuant) {
-      std::cerr << "[MVIVF] save() is only supported on the raw skeleton variant "
-                   "(CompressCenters=false, LeafModel=NoQuantizer). Build the raw "
-                   "skeleton, save it, then load() into the desired templated variant."
-                << std::endl;
-      std::abort();
-    }
-
+    // Skeleton save persists raw internal-node centers + leaf point ids only.
+    // Leaf encodings and compressed centers are never written; any templated
+    // variant can load this file and re-derive its quantization on load using
+    // the supplied raw points.  Quantized variants now keep `node->data`
+    // populated alongside `compressed_centers` (see compress_internal_centers_),
+    // so save() is valid for all variants.
     std::ofstream outfile(filename, std::ios::binary);
     std::cout << "Saving index to " << filename << std::endl;
     if (!outfile.is_open()) {
