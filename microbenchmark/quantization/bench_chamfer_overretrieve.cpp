@@ -1,7 +1,7 @@
 // bench_chamfer_overretrieve.cpp
 //
 // Quality microbenchmark: Exact vs (optional) PQ(K=16) vs FastScan(K=16) vs (optional) RaBitQ vs
-// TurboQuant-4bit vs TurboQuantPQ-4bit (various block sizes).
+// TurboQuant-4bit vs TurboQuant-8bit vs TurboQuantPQ-4bit (various block sizes).
 // Reports recall@k as a function of the candidate budget k' (multiples of k).
 //
 // For each query cloud:
@@ -58,6 +58,7 @@
 #include "mvsic/core/quantization/pq_mv.h"
 #include "mvsic/core/quantization/rabitq_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
+#include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
 #include "mvsic/core/quantization/other_methods/wrapper.h"
 
@@ -231,6 +232,10 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   tq_model.train(db);
   auto tq_db = tq_model.encode(db);
 
+  turboquant_8bit_mv::Model<Metric> tq8_model;
+  tq8_model.train(db);
+  auto tq8_db = tq8_model.encode(db);
+
   // TurboQuant PQ 4-bit (B=1/2/4/8)
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 1>, Metric> tqpq1_model;
   MultiVecQuantizer<turboquant_pq_4bit::Model<Metric, 2>, Metric> tqpq2_model;
@@ -259,17 +264,19 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     FASTSCAN = 1,
     RABITQ = 2,
     TURBOQUANT_MV = 3,
-    TQPQ_B1 = 4,
-    TQPQ_B2 = 5,
-    TQPQ_B4 = 6,
-    TQPQ_B8 = 7,
-    NUM_METHODS = 8
+    TURBOQUANT_8BIT_MV = 4,
+    TQPQ_B1 = 5,
+    TQPQ_B2 = 6,
+    TQPQ_B4 = 7,
+    TQPQ_B8 = 8,
+    NUM_METHODS = 9
   };
   const char* method_names[NUM_METHODS] = {
       "PQ (K=16)",
       "FastScan (K=16)",
       "RaBitQ",
-      "TurboQuant_mv",
+      "TurboQuant_mv (4bit)",
+      "TurboQuant_mv (8bit)",
       "TQ-PQ (K=16,B=1)",
       "TQ-PQ (K=16,B=2)",
       "TQ-PQ (K=16,B=4)",
@@ -345,6 +352,12 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
       auto qq = tq_model.quantize_query(queries[qi]);
       tq_db.distances_all(qq, approx_scores.data());
       eval_method(TURBOQUANT_MV);
+    }
+
+    {
+      auto qq = tq8_model.quantize_query(queries[qi]);
+      tq8_db.distances_all(qq, approx_scores.data());
+      eval_method(TURBOQUANT_8BIT_MV);
     }
 
     // TQ-Scalar: same encoding as TQ4 but using per-point scalar distance
