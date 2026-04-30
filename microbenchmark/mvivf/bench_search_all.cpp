@@ -75,26 +75,41 @@ void run_benchmark(mvsic::commandLine& P) {
   bool is_mmap = P.getOption("-mm");
   // -mode: "both" (default), "old", "new" — lets you isolate each for perf stat
   std::string mode = P.getOptionValue("-mode", "both");
-  // This microbenchmark always exercises the best center-compressed variant
-  // for the load path.  The on-disk skeleton itself is variant-agnostic.
-  constexpr bool compress_centers = true;
+  // -qc 0|1 selects the CompressCenters template variant (TQ-quantized
+  // centers).  Defaults to 1 to preserve previous behavior of this bench.
+  bool compress_centers = P.getOptionIntValue("-qc", 1) != 0;
   std::string quant_method = P.getOptionValue("-quant_method", "None");
 
   size_t k = P.getOptionLongValue("-k", 10);
   size_t nprobes = P.getOptionLongValue("-nprobes", 100);
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
+  // Build-side knobs (only used when the skeleton has to be built; if the
+  // skeleton file already exists, load() restores the serialized fields from
+  // disk and these CLI values are overwritten).  Defaults mirror
+  // IndexParams::mvivf() in mvsic/core/index_params.h.
+  uint32_t k_per_level = static_cast<uint32_t>(P.getOptionIntValue("-k_per_level", 0));
+  uint32_t max_leaf_size = static_cast<uint32_t>(P.getOptionIntValue("-max_leaf_size", 500));
+  uint32_t max_depth = static_cast<uint32_t>(P.getOptionIntValue("-max_depth", 0));
+  uint32_t niters = static_cast<uint32_t>(P.getOptionIntValue("-niters", 5));
+  uint32_t mpcc = static_cast<uint32_t>(P.getOptionIntValue("-mpcc", 100));
+  uint32_t mpcik = static_cast<uint32_t>(P.getOptionIntValue("-mpcik", 20));
+  bool wgh_kmeans = P.getOptionIntValue("-wgh_kmeans", 1) != 0;
+  uint32_t s_param = static_cast<uint32_t>(P.getOptionIntValue("-s", 0));
+  uint32_t verbose = static_cast<uint32_t>(P.getOptionIntValue("-v", 0));
+
   if (inFile.empty() || qFile.empty() || indexFile.empty()) {
     std::cerr <<
         "MVIVF microbenchmark: compares search_all (original) vs search_all_new\n"
-        "on a templated IndexMVIVF<metric, /*CompressCenters=*/true, LeafModel>.\n"
+        "on a templated IndexMVIVF<metric, /*CompressCenters=*/-qc, LeafModel>.\n"
         "If -index is missing, builds and saves a raw skeleton (CompressCenters=0,\n"
-        "LeafModel=NoQuantizer) once, then loads it under the requested template.\n\n"
+        "LeafModel=NoQuantizer) using the build-side flags below, then loads it\n"
+        "under the requested template.\n\n"
         "Required:\n"
         "  -i <points.pcs>                Database point clouds\n"
         "  -q <queries.pcs>               Query point clouds\n"
         "  -index <path>                  Skeleton path (auto-built if missing)\n\n"
-        "Optional:\n"
+        "Search:\n"
         "  -gt <gt>                       Ground-truth file for recall reporting\n"
         "  -mm                            Memory-map points\n"
         "  -dist_func IP|L2               Distance metric (default IP)\n"
@@ -102,10 +117,22 @@ void run_benchmark(mvsic::commandLine& P) {
         "  -nprobes <N>                   Number of probes (default 100)\n"
         "  -num_rerank <N>                Rerank budget (default = k)\n"
         "  -mode old|new|both             Which kernel to run (default both)\n"
+        "  -qc 0|1                        CompressCenters template (default 1)\n"
         "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ   Leaf quantizer (default None)\n"
         "  -query_compress none|ball|wards  Query-side compression\n"
         "  -query_compress_threshold <t>  Threshold for ball/wards (default 0.7)\n"
-        "  -compress_rerank               Use compressed query for rerank too\n";
+        "  -compress_rerank               Use compressed query for rerank too\n\n"
+        "Build (only used when the skeleton has to be built; defaults mirror\n"
+        "IndexParams::mvivf()):\n"
+        "  -k_per_level <N> (0)           Branching factor per level (0 = 4*sqrt(n))\n"
+        "  -max_leaf_size <N> (500)       Stop splitting when cluster <= this\n"
+        "  -max_depth <N> (0)             Cap recursion depth (0 = unlimited)\n"
+        "  -niters <N> (5)                K-means iterations\n"
+        "  -mpcc <N> (100)                max_point_clouds_per_cluster\n"
+        "  -mpcik <N> (20)                max_points_per_centroid_inner_kmeans\n"
+        "  -wgh_kmeans 0|1 (1)            Use weighted inner k-means\n"
+        "  -s <N> (0)                     Centroid point-cloud size (0 = avg)\n"
+        "  -v <level> (0)                 Build verbosity\n";
     exit(1);
   }
 
@@ -124,7 +151,9 @@ void run_benchmark(mvsic::commandLine& P) {
               << " neighbors each" << std::endl;
   }
 
-  IndexParams index_params = IndexParams::mvivf();
+  IndexParams index_params =
+      IndexParams::mvivf(k_per_level, max_leaf_size, /*compress_input=*/false, verbose, niters,
+                         mpcc, mpcik, "Random", /*seed=*/0, wgh_kmeans, s_param, max_depth);
   const std::filesystem::path idx_path(indexFile);
   if (!std::filesystem::exists(idx_path)) {
     // Build and save a raw skeleton.  save() is only valid on the
@@ -229,10 +258,13 @@ int main(int argc, char* argv[]) {
                        "-i <points> -q <queries> -index <skeleton> "
                        "[-gt <gt>] [-mm] [-dist_func IP|L2] "
                        "[-k <K>] [-nprobes <N>] [-num_rerank <N>] "
-                       "[-mode old|new|both] "
+                       "[-mode old|new|both] [-qc 0|1] "
                        "[-quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ] "
                        "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
-                       "[-compress_rerank]");
+                       "[-compress_rerank] "
+                       "[-k_per_level <N>] [-max_leaf_size <N>] [-max_depth <N>] "
+                       "[-niters <N>] [-mpcc <N>] [-mpcik <N>] [-wgh_kmeans 0|1] "
+                       "[-s <N>] [-v <level>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {

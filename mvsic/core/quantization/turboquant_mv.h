@@ -271,14 +271,14 @@ inline float chamfer_panels(const int8_t* q_flat_data, const float* q_norms, con
       __m512i a0[kVnniMq], a1[kVnniMq], a2[kVnniMq], a3[kVnniMq];
       vnni_micro_kernel_4panel<kVnniMq>(
           q_batch, panel_data + p * panel_bytes, panel_data + (p + 1) * panel_bytes,
-          panel_data + (p + 2) * panel_bytes, panel_data + (p + 3) * panel_bytes,
-          total_tiles, a0, a1, a2, a3);
+          panel_data + (p + 2) * panel_bytes, panel_data + (p + 3) * panel_bytes, total_tiles, a0,
+          a1, a2, a3);
 
       for (size_t q = 0; q < kVnniMq; ++q) {
         const size_t qg = qi + q;
         vnni_chamfer_epilogue<Metric>(a0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
-                                      padded_norms + p * kVnniPoints,
-                                      padded_sqn + p * kVnniPoints, mins[q]);
+                                      padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                      mins[q]);
         vnni_chamfer_epilogue<Metric>(a1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
                                       padded_norms + (p + 1) * kVnniPoints,
                                       padded_sqn + (p + 1) * kVnniPoints, mins[q]);
@@ -297,8 +297,8 @@ inline float chamfer_panels(const int8_t* q_flat_data, const float* q_norms, con
       for (size_t q = 0; q < kVnniMq; ++q) {
         const size_t qg = qi + q;
         vnni_chamfer_epilogue<Metric>(ac0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
-                                      padded_norms + p * kVnniPoints,
-                                      padded_sqn + p * kVnniPoints, mins[q]);
+                                      padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                      mins[q]);
         vnni_chamfer_epilogue<Metric>(ac1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
                                       padded_norms + (p + 1) * kVnniPoints,
                                       padded_sqn + (p + 1) * kVnniPoints, mins[q]);
@@ -310,8 +310,8 @@ inline float chamfer_panels(const int8_t* q_flat_data, const float* q_norms, con
       for (size_t q = 0; q < kVnniMq; ++q) {
         const size_t qg = qi + q;
         vnni_chamfer_epilogue<Metric>(acc[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
-                                      padded_norms + p * kVnniPoints,
-                                      padded_sqn + p * kVnniPoints, mins[q]);
+                                      padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                      mins[q]);
       }
     }
 
@@ -362,13 +362,13 @@ inline void chamfer_panels_multi(const int8_t* q_flat_data, const float* q_norms
       __m512i a0[kVnniMq], a1[kVnniMq], a2[kVnniMq], a3[kVnniMq];
       vnni_micro_kernel_4panel<kVnniMq>(
           q_batch, panel_data + p * panel_bytes, panel_data + (p + 1) * panel_bytes,
-          panel_data + (p + 2) * panel_bytes, panel_data + (p + 3) * panel_bytes,
-          total_tiles, a0, a1, a2, a3);
+          panel_data + (p + 2) * panel_bytes, panel_data + (p + 3) * panel_bytes, total_tiles, a0,
+          a1, a2, a3);
       for (size_t q = 0; q < kVnniMq; ++q) {
         const size_t qg = qi + q;
         vnni_chamfer_epilogue<Metric>(a0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
-                                      padded_norms + p * kVnniPoints,
-                                      padded_sqn + p * kVnniPoints, mins[q]);
+                                      padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                      mins[q]);
         vnni_chamfer_epilogue<Metric>(a1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
                                       padded_norms + (p + 1) * kVnniPoints,
                                       padded_sqn + (p + 1) * kVnniPoints, mins[q]);
@@ -387,8 +387,8 @@ inline void chamfer_panels_multi(const int8_t* q_flat_data, const float* q_norms
       for (size_t q = 0; q < kVnniMq; ++q) {
         const size_t qg = qi + q;
         vnni_chamfer_epilogue<Metric>(ac0[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
-                                      padded_norms + p * kVnniPoints,
-                                      padded_sqn + p * kVnniPoints, mins[q]);
+                                      padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                      mins[q]);
         vnni_chamfer_epilogue<Metric>(ac1[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
                                       padded_norms + (p + 1) * kVnniPoints,
                                       padded_sqn + (p + 1) * kVnniPoints, mins[q]);
@@ -400,8 +400,8 @@ inline void chamfer_panels_multi(const int8_t* q_flat_data, const float* q_norms
       for (size_t q = 0; q < kVnniMq; ++q) {
         const size_t qg = qi + q;
         vnni_chamfer_epilogue<Metric>(acc[q], q_bsums[qg], q_norms[qg], q_sqns[qg],
-                                      padded_norms + p * kVnniPoints,
-                                      padded_sqn + p * kVnniPoints, mins[q]);
+                                      padded_norms + p * kVnniPoints, padded_sqn + p * kVnniPoints,
+                                      mins[q]);
       }
     }
 
@@ -532,8 +532,8 @@ class Quantized_Query_Point_Cloud {
 
   template<typename CloudHandle>
   std::pair<float, size_t> distance_w_cmps(const CloudHandle& cloud) const {
-    const size_t bytes_per_vec = cloud.db->num_bytes_per_datapoint + sizeof(float) +
-                                 (Metric ? sizeof(float) : 0);
+    const size_t bytes_per_vec =
+        cloud.db->num_bytes_per_datapoint + sizeof(float) + (Metric ? sizeof(float) : 0);
     return {this->distance(cloud), cloud.size() * bytes_per_vec};
   }
 
@@ -594,8 +594,7 @@ class Quantized_Point_Cloud_Set {
     return (ids.size() > 0) ? ids[i] : static_cast<uint32_t>(i);
   }
   inline size_t num_bytes() const noexcept {
-    return panel_data.size() * sizeof(uint8_t) +
-           norm_scaling_factors.size() * sizeof(float) +
+    return panel_data.size() * sizeof(uint8_t) + norm_scaling_factors.size() * sizeof(float) +
            unquantized_squared_norms.size() * sizeof(float);
   }
 
@@ -605,14 +604,23 @@ class Quantized_Point_Cloud_Set {
     const size_t nc = num_clouds();
     if (num_q == 0 || nc == 0) return;
 
-    parlay::parallel_for(0, nc, [&](size_t c) {
+    auto score_one = [&](size_t c) {
       if (cloud_sizes[c] == 0) {
         results[c] = {get_id(c), std::numeric_limits<float>::max()};
         return;
       }
       const float d = turboquant_mv_chamfer_distance(q, *this, c);
       results[c] = {get_id(c), d};
-    });
+    };
+    // For small nc (greedy beam-search nodes typically have ~16 children),
+    // the parlay::parallel_for scheduling overhead dwarfs the inner work and
+    // the call already runs inside an outer parallel_for over queries.
+    if (nc <= 64) {
+      for (size_t c = 0; c < nc; ++c)
+        score_one(c);
+    } else {
+      parlay::parallel_for(0, nc, score_one);
+    }
   }
 
   void save(std::ofstream& out) const {
@@ -689,8 +697,8 @@ float turboquant_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& 
 #else
   dist_sum = internal::chamfer_panels_scalar<Metric>(
       q.flat_query_data.data(), q.norm_scaling_factors.data(), q.unquantized_squared_norms.data(),
-      q.byte_sums.data(), q.q_stride, num_q, panel_ptr, ns, sqn, db.total_tiles, db.panel_bytes,
-      np, cs);
+      q.byte_sums.data(), q.q_stride, num_q, panel_ptr, ns, sqn, db.total_tiles, db.panel_bytes, np,
+      cs);
 #endif
   return dist_sum / static_cast<float>(num_q);
 }
@@ -701,7 +709,7 @@ float turboquant_mv_chamfer_distance(const Quantized_Query_Point_Cloud<Metric>& 
 template<bool Metric>
 class Model {
  public:
-  static constexpr uint32_t kClassId = 4;  // QuantizerTag::kTurboQuant
+  static constexpr uint32_t kClassId = 4;         // QuantizerTag::kTurboQuant
   static constexpr uint32_t kBatchAlignment = 6;  // kVnniMq
   static constexpr const char* kName = "tq";
   using EncodedSet = ::mvsic::turboquant_mv::Quantized_Point_Cloud_Set<Metric>;
@@ -784,8 +792,7 @@ class Model {
       const size_t pt_off = enc.point_offsets[c];
 
       for (size_t i = 0; i < n_vecs; ++i) {
-        const float* p =
-            reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
+        const float* p = reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
         auto [sqn, nsf] = encoder.encode_single(p, p_codes.data(), ws);
 
         enc.norm_scaling_factors[pt_off + i] = nsf;
@@ -969,7 +976,8 @@ inline void chamfer_score_all_fused(const FusedQueryBatch<Metric>& fq,
     const uint32_t id = db.get_id(c);
     if (cs == 0) {
       const float bad = std::numeric_limits<float>::max();
-      for (size_t i = 0; i < num_src; ++i) out[i * num_db + c] = {id, bad};
+      for (size_t i = 0; i < num_src; ++i)
+        out[i * num_db + c] = {id, bad};
       return;
     }
 
@@ -992,9 +1000,8 @@ inline void chamfer_score_all_fused(const FusedQueryBatch<Metric>& fq,
 #ifdef __AVX512F__
     internal::chamfer_panels_multi<Metric>(
         fq.flat_query_data.data(), fq.norm_scaling_factors.data(),
-        fq.unquantized_squared_norms.data(), fq.byte_sums.data(), fq.q_stride,
-        fq.total_embeddings, db.panel_data.data() + panel_byte_off,
-        db.norm_scaling_factors.data() + pt_off,
+        fq.unquantized_squared_norms.data(), fq.byte_sums.data(), fq.q_stride, fq.total_embeddings,
+        db.panel_data.data() + panel_byte_off, db.norm_scaling_factors.data() + pt_off,
         db.unquantized_squared_norms.data() + pt_off, db.total_tiles, db.panel_bytes, np, emb_min);
 #else
     for (size_t qi = 0; qi < fq.total_embeddings; ++qi) {
@@ -1015,7 +1022,8 @@ inline void chamfer_score_all_fused(const FusedQueryBatch<Metric>& fq,
         continue;
       }
       float dist_sum = 0.0f;
-      for (size_t e = e_start; e < e_end; ++e) dist_sum += emb_min[e];
+      for (size_t e = e_start; e < e_end; ++e)
+        dist_sum += emb_min[e];
       out[i * num_db + c] = {id, dist_sum / static_cast<float>(e_end - e_start)};
     }
   };
@@ -1025,7 +1033,8 @@ inline void chamfer_score_all_fused(const FusedQueryBatch<Metric>& fq,
     // fixed block size on the dense (32 leaves × ~120 db clouds) workload.
     parlay::parallel_for(0, num_db, process_one_db);
   } else {
-    for (size_t c = 0; c < num_db; ++c) process_one_db(c);
+    for (size_t c = 0; c < num_db; ++c)
+      process_one_db(c);
   }
 }
 
@@ -1110,7 +1119,8 @@ class ManyToMany {
           float dist_sum = 0.0f;
           const size_t e_start = emb_offsets[i];
           const size_t e_count = emb_offsets[i + 1] - e_start;
-          for (size_t e = 0; e < e_count; ++e) dist_sum += emb_min_dists[e_start + e];
+          for (size_t e = 0; e < e_count; ++e)
+            dist_sum += emb_min_dists[e_start + e];
           const float chamfer_dist = dist_sum / static_cast<float>(e_count);
 
           if (heaps[i].size() < k) {

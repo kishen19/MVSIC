@@ -668,6 +668,7 @@ class IndexMVIVF : public Index<metric> {
       t.reset();
     }
     const auto& eff_queries = *eff_ptr;
+    const auto& rerank_queries = search_params.compress_rerank ? eff_queries : query_points;
 
     // Step 0: pre-quantize queries.
     t.start();
@@ -705,6 +706,182 @@ class IndexMVIVF : public Index<metric> {
     t.reset();
     bytes_accessed += parlay::reduce(bytes_gs);
     dist_cmps += parlay::reduce(dist_cmps_gs);
+
+    // ---------------------------------------------------------------------
+    // Sub-batching path (OBTQ-only). Reorganizes Step 2 + Step 3 around
+    // query-major sub-batches: at any moment, each core only touches queries
+    // from a single sub-batch of size B, so the broadcasted query working
+    // set per core stays bounded by B * qbuf_size.
+    // ---------------------------------------------------------------------
+    if constexpr (std::is_same_v<LeafModel, turboquant_1bit_mv::Model<metric>>) {
+      const char* sb_env = std::getenv("MVIVF_SUBBATCH");
+      const size_t kSubbatchB = sb_env ? static_cast<size_t>(std::atoi(sb_env)) : 0;
+      if (kSubbatchB > 0 && kSubbatchB <= 64) {
+        using SetType = LeafSet;
+        using QueryType = LeafQuery;
+        using M2MType = typename has_many_to_many_<LeafModel>::type;
+
+        // ----- Step 2': build per-sub-batch leaf-want lists -----
+        t.start();
+        const size_t B = kSubbatchB;
+        const size_t num_subbatches = (num_q + B - 1) / B;
+        const size_t num_rerank_sb = std::max(search_params.num_rerank, k);
+        const size_t max_cands_per_query_sb = nprobes * num_rerank_sb;
+
+        // Build leaf_ptr -> leaf_idx map once.
+        std::unordered_map<node_t*, uint32_t> leaf_to_idx;
+        leaf_to_idx.reserve(num_leaves * 2);
+        for (uint32_t l = 0; l < num_leaves; ++l)
+          leaf_to_idx[leaves_flat[l]] = l;
+
+        struct LeafWant {
+          uint32_t leaf_idx;
+          uint64_t mask;
+        };
+        auto subbatch_lists = parlay::sequence<parlay::sequence<LeafWant>>(num_subbatches);
+
+        parlay::parallel_for(0, num_subbatches, [&](size_t sb) {
+          const size_t q_start = sb * B;
+          const size_t q_end = std::min(q_start + B, num_q);
+          const size_t b_size = q_end - q_start;
+          // Accumulate (leaf_idx, q_off) entries, then sort+dedupe with mask OR.
+          std::vector<uint64_t> entries;  // pack: (leaf_idx << 8) | q_off, since b_size <= 64
+          entries.reserve(b_size * nprobes);
+          for (size_t q = q_start; q < q_end; ++q) {
+            const uint8_t q_off = static_cast<uint8_t>(q - q_start);
+            for (size_t j = 0; j < nprobes; ++j) {
+              auto* leaf_ptr = leaf_query_pairs[q * nprobes + j].first;
+              if (!leaf_ptr) continue;
+              auto it = leaf_to_idx.find(leaf_ptr);
+              if (it == leaf_to_idx.end()) continue;
+              entries.push_back((static_cast<uint64_t>(it->second) << 8) | q_off);
+            }
+          }
+          std::sort(entries.begin(), entries.end());
+          std::vector<LeafWant> result;
+          result.reserve(entries.size());
+          for (size_t i = 0; i < entries.size();) {
+            const uint32_t lidx = static_cast<uint32_t>(entries[i] >> 8);
+            uint64_t mask = 0;
+            while (i < entries.size() && static_cast<uint32_t>(entries[i] >> 8) == lidx) {
+              mask |= (1ULL << (entries[i] & 0xff));
+              ++i;
+            }
+            result.push_back({lidx, mask});
+          }
+          subbatch_lists[sb] = parlay::sequence<LeafWant>(result.begin(), result.end());
+        });
+        t.stop();
+        std::cout << "[MVIVF] SB Group: " << t.total_time() << " sec" << std::endl;
+        t.reset();
+
+        // ----- Step 3': process leaves in (sub-batch, leaf) parallel pairs -----
+        t.start();
+        auto all_candidates_sb = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+            num_q * max_cands_per_query_sb);
+        auto cand_counts_sb =
+            std::unique_ptr<std::atomic<size_t>[]>(new std::atomic<size_t>[num_q] {});
+
+        auto safe_scatter_sb = [&](uint32_t q_id, const std::pair<uint32_t, float>* src,
+                                   size_t count) {
+          size_t slot = cand_counts_sb[q_id].fetch_add(count, std::memory_order_relaxed);
+          if (slot + count > max_cands_per_query_sb) return;
+          size_t base_idx = q_id * max_cands_per_query_sb + slot;
+          for (size_t c = 0; c < count; ++c)
+            all_candidates_sb[base_idx + c] = src[c];
+        };
+
+        parlay::parallel_for(0, num_subbatches, [&](size_t sb) {
+          const size_t q_start = sb * B;
+          const size_t q_end = std::min(q_start + B, num_q);
+          const size_t b_size = q_end - q_start;
+          std::vector<const QueryType*> sb_queries(b_size);
+          for (size_t qi = 0; qi < b_size; ++qi) {
+            sb_queries[qi] = &q_leaves[q_start + qi];
+          }
+          auto& leaves_for_sb = subbatch_lists[sb];
+
+          parlay::parallel_for(0, leaves_for_sb.size(), [&](size_t li) {
+            const uint32_t leaf_idx = leaves_for_sb[li].leaf_idx;
+            const uint64_t mask = leaves_for_sb[li].mask;
+            node_t* leaf = leaves_flat[leaf_idx];
+            const SetType& leaf_data = leaf->encoded_leaf;
+            const size_t C = std::min<size_t>(num_rerank_sb, leaf->get_size());
+
+            // Gather wanted queries from sub-batch.
+            std::vector<const QueryType*> wanted;
+            wanted.reserve(b_size);
+            std::vector<uint32_t> wanted_global;
+            wanted_global.reserve(b_size);
+            for (size_t qi = 0; qi < b_size; ++qi) {
+              if (mask & (1ULL << qi)) {
+                wanted.push_back(sb_queries[qi]);
+                wanted_global.push_back(static_cast<uint32_t>(q_start + qi));
+              }
+            }
+            if (wanted.empty()) return;
+
+            std::vector<std::pair<uint32_t, float>> results(wanted.size() * num_rerank_sb);
+            M2MType::TopKIntoUninitialized(wanted, leaf_data, num_rerank_sb, results.data(),
+                                           /*q_block=*/4,
+                                           /*parallel_query_blocks=*/false);
+            for (size_t wi = 0; wi < wanted.size(); ++wi) {
+              safe_scatter_sb(wanted_global[wi], results.data() + wi * num_rerank_sb, C);
+            }
+          });
+        });
+        t.stop();
+        std::cout << "[MVIVF] SB Probing & Scattering: " << t.total_time() << " sec" << std::endl;
+        t.reset();
+
+        // ----- Aggregation + Rerank -----
+        t.start();
+        auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
+        auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
+        parlay::parallel_for(0, num_q, [&](size_t q_id) {
+          size_t base_idx = q_id * max_cands_per_query_sb;
+          size_t num_scattered = std::min(cand_counts_sb[q_id].load(std::memory_order_relaxed),
+                                          max_cands_per_query_sb);
+          auto* cands = all_candidates_sb.begin() + base_idx;
+          size_t num_valid = 0;
+          for (size_t c = 0; c < num_scattered; ++c) {
+            if (cands[c].first != UINT32_MAX) {
+              if (num_valid != c) cands[num_valid] = cands[c];
+              ++num_valid;
+            }
+          }
+          size_t take = std::min(num_rerank_sb, num_valid);
+          if (take > 0 && take < num_valid) {
+            std::nth_element(cands, cands + take, cands + num_valid,
+                             [](const auto& a, const auto& b) { return a.second < b.second; });
+          }
+          parlay::sequence<std::pair<uint32_t, float>> top_cands;
+          top_cands.reserve(take);
+          for (size_t c = 0; c < take; ++c)
+            top_cands.push_back(cands[c]);
+          auto q_final = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+              std::min(k, top_cands.size()));
+          bytes_accessed_rerank[q_id] = 0;
+          if (search_params.num_rerank > 0) {
+            size_t actual_rerank = std::min(num_rerank_sb, top_cands.size());
+            bytes_accessed_rerank[q_id] =
+                this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+          } else {
+            for (size_t c = 0; c < q_final.size(); ++c)
+              q_final[c] = top_cands[c];
+          }
+          final_results[q_id] = std::move(q_final);
+        });
+        t.stop();
+        std::cout << "[MVIVF] SB Aggregation and Re-ranking: " << t.total_time() << " sec"
+                  << std::endl;
+        t.reset();
+        bytes_accessed += parlay::reduce(bytes_accessed_rerank);
+        std::cout << "[MVIVF] Bytes Accessed: " << bytes_accessed << std::endl;
+        std::cout << "[MVIVF] Dist Cmps: " << dist_cmps << std::endl;
+        return std::make_pair(std::move(final_results), bytes_accessed);
+      }
+    }
 
     // Step 2: group by leaf.
     t.start();
@@ -780,33 +957,59 @@ class IndexMVIVF : public Index<metric> {
     dist_cmps += parlay::reduce(leaf_cmps);
 
     // Step 4: aggregate + rerank.
-    const auto& rerank_queries = search_params.compress_rerank ? eff_queries : query_points;
     t.start();
     auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
-    parlay::parallel_for(0, num_q, [&](size_t i) {
-      size_t cnt = std::min<size_t>(cand_counts[i].load(std::memory_order_relaxed), max_cands);
-      auto cands = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(cnt);
-      for (size_t j = 0; j < cnt; ++j)
-        cands[j] = all_candidates[i * max_cands + j];
-      mvsic::sort_inplace_kv(cands);
-      size_t nu = std::unique(cands.begin(), cands.end(),
-                              [](const auto& a, const auto& b) { return a.first == b.first; }) -
-                  cands.begin();
-      cands.resize(nu);
-      auto out =
-          parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, cands.size()));
-      if (search_params.num_rerank > 0) {
-        size_t nr = std::min(search_params.num_rerank, cands.size());
-        this->rerank(rerank_queries[i], points, cands, nr, out);
-      } else {
-        for (size_t j = 0; j < out.size(); ++j)
-          out[j] = cands[j];
+    auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
+    parlay::parallel_for(0, num_q, [&](size_t q_id) {
+      size_t base_idx = q_id * max_cands;
+      size_t num_scattered =
+          std::min(cand_counts[q_id].load(std::memory_order_relaxed), max_cands);
+      auto* cands = all_candidates.begin() + base_idx;
+
+      // Compact: remove sentinel entries (UINT32_MAX) from TopKIntoUninitialized padding
+      size_t num_valid = 0;
+      for (size_t c = 0; c < num_scattered; ++c) {
+        if (cands[c].first != UINT32_MAX) {
+          if (num_valid != c) cands[num_valid] = cands[c];
+          ++num_valid;
+        }
       }
-      final_results[i] = std::move(out);
+
+      size_t take = std::min(num_rerank, num_valid);
+      if (take > 0 && take < num_valid) {
+        std::nth_element(cands, cands + take, cands + num_valid,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+      }
+
+      parlay::sequence<std::pair<uint32_t, float>> top_cands;
+      top_cands.reserve(take);
+      for (size_t c = 0; c < take; ++c) {
+        top_cands.push_back(cands[c]);
+      }
+      auto q_final = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+          std::min(k, top_cands.size()));
+      bytes_accessed_rerank[q_id] = 0;
+
+      if (search_params.num_rerank > 0) {
+        size_t actual_rerank = std::min(num_rerank, top_cands.size());
+        bytes_accessed_rerank[q_id] =
+            this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+      } else {
+        for (size_t c = 0; c < q_final.size(); ++c) {
+          q_final[c] = top_cands[c];
+        }
+      }
+
+      final_results[q_id] = std::move(q_final);
     });
     t.stop();
-    std::cout << "[MVIVF] Rerank: " << t.total_time() << " sec" << std::endl;
+    std::cout << "[MVIVF] Aggregation and Re-ranking: " << t.total_time() << " sec" << std::endl;
     t.reset();
+    bytes_accessed += parlay::reduce(bytes_accessed_rerank);
+
+    std::cout << "[MVIVF] Bytes Accessed: " << bytes_accessed << std::endl;
+    std::cout << "[MVIVF] Dist Cmps: " << dist_cmps << std::endl;
+
     return std::make_pair(std::move(final_results), bytes_accessed);
   }
 
@@ -996,8 +1199,8 @@ class IndexMVIVF : public Index<metric> {
       return;
     }
     if (ver != kVersion) {
-      std::cerr << "[MVIVF] MVIVF index file format changed in v" << kVersion
-                << "; got v" << ver << ". Rebuild with current code." << std::endl;
+      std::cerr << "[MVIVF] MVIVF index file format changed in v" << kVersion << "; got v" << ver
+                << ". Rebuild with current code." << std::endl;
       return;
     }
     if (cid != kClassId) {
