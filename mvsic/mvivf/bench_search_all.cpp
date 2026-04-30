@@ -1,13 +1,16 @@
 #include "mvsic/core/bench_utils.h"
-#include "mvivf.h"
-#include "mvivf_flat.h"
-#include "mvivf_spill.h"
+#include "mvsic/mvivf/bench_search_all_inst.h"
 
 using namespace mvsic;
 
 // ----- CLI -> compile-time IndexMVIVF<metric, CompressCenters, LeafModel> dispatch. -----
+//
+// All heavy template specializations of run_one are instantiated in separate
+// translation units under bench_search_all_inst/ — one .cc per
+// (metric, variant, quantizer) cell, each instantiating both compress=false
+// and compress=true. Bazel compiles those TUs in parallel; this dispatch TU
+// only sees `extern template` declarations and stays cheap.
 namespace {
-enum class MVIVFVariant { Regular, Flat, Spill };
 
 inline MVIVFVariant parse_mvivf_variant(bool is_flat, bool is_spill) {
   if (is_flat && is_spill) {
@@ -17,12 +20,6 @@ inline MVIVFVariant parse_mvivf_variant(bool is_flat, bool is_spill) {
   return is_flat ? MVIVFVariant::Flat
        : is_spill ? MVIVFVariant::Spill
                   : MVIVFVariant::Regular;
-}
-
-inline const char* variant_name(MVIVFVariant v) {
-  return v == MVIVFVariant::Flat  ? "MVIVF_Flat"
-       : v == MVIVFVariant::Spill ? "MVIVF_Spill"
-                                  : "MVIVF";
 }
 
 #define MVIVF_DISPATCH_LM(Fam, metric, C, qm, fn)                                                 \
@@ -122,38 +119,28 @@ void run(commandLine& P) {
                             mpcc, mpcik, "Random", 0, wgh_kmeans, s, max_depth);
   }
 
+  // CLI flag `-build_8btq 0|1` selects the int8 VPDPBUSD panel kernel for
+  // k-means assignment at runtime (default off).
+  ip.build_with_8btq = (P.getOptionIntValue("-build_8btq", 0) != 0);
+  if (io.verbose >= 1) {
+    std::cout << "[bench_search_all] build_with_8btq = "
+              << (ip.build_with_8btq ? "true" : "false") << std::endl;
+  }
+
+  RunOneCtx<ChPoint> ctx{
+      .points = &points,
+      .ip = ip,
+      .sp_base = sp_base,
+      .ds = ds,
+      .io = io,
+      .variant = variant,
+      .k = k,
+      .num_rerank = num_rerank,
+      .nprobes_list = nprobes_list,
+  };
+
   dispatch_mvivf<metric>(variant, compress_centers, quant_method,
-      [&]<class IndexT>() {
-        IndexT index(points.get_dims(), ip);
-        bench::build_or_load(index, points, io.index_path);
-
-        if (ds.queries.empty() || ds.gt.empty()) {
-          std::cout << "No queries/GT specified. Done." << std::endl;
-          return;
-        }
-        auto queries = PC(ds.queries.c_str());
-        auto gt = ReadGT(ds.gt, queries.size());
-        bench::print_header(std::string(variant_name(variant)) + " (search_all)",
-                            ds.name, points.size(), queries.size());
-        bench::print_compression_stats<ChPoint>(queries, sp_base, index.quantization_mode);
-
-        auto make_sp = [&](size_t np) {
-          SearchParams sp;
-          if (variant == MVIVFVariant::Flat)
-            sp = SearchParams::mvivf_flat(k, np, num_rerank);
-          else if (variant == MVIVFVariant::Spill)
-            sp = SearchParams::mvivf_spill(k, np, num_rerank);
-          else
-            sp = SearchParams::mvivf(k, np, num_rerank);
-          sp.query_compression = sp_base.query_compression;
-          sp.query_compression_threshold = sp_base.query_compression_threshold;
-          sp.compress_rerank = sp_base.compress_rerank;
-          return sp;
-        };
-
-        bench::run_search_all_sweep(index, points, queries, gt, "nprobes", nprobes_list, make_sp,
-                                    io.csv_path);
-      });
+      [&]<class IndexT>() { run_one<ChPoint, metric, IndexT>(ctx); });
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
@@ -171,7 +158,8 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "Clustering structure (only used if building; defaults mirror IndexParams::mvivf*):\n"
     "  -k_per_level <N> (0)   -max_leaf_size <N> (500)   -max_depth <N> (0)\n"
     "  -niters <N> (5)   -mpcc <N> (100)   -mpcik <N> (20)\n"
-    "  -wgh_kmeans 0|1 (1)   -s <N> (0)\n\n"
+    "  -wgh_kmeans 0|1 (1)   -s <N> (0)\n"
+    "  -build_8btq 0|1                Use 8BTQ panel kernel for k-means assignment (default 0)\n\n"
     "Quantization:\n"
     "  -qc 0|1                        CompressCenters; default 0\n"
     "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|8BTQ    (default None)\n"

@@ -69,6 +69,13 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 git_repository(
     name = "parlayann",
     branch = "main",
+    # Add `inline` to header-defined free functions so they can be included
+    # from multiple translation units without violating ODR. Required when
+    # bench_search_all instantiations are split across many TUs.
+    patch_cmds = [
+        "sed -i 's|^float euclidian_distance|inline float euclidian_distance|g' algorithms/utils/euclidian_point.h",
+        "sed -i 's|^float mips_distance|inline float mips_distance|g' algorithms/utils/mips_point.h",
+    ],
     # remote = "https://github.com/cmuparlay/parlayann.git",
     remote = "https://github.com/kishen19/ParlayANN.git",
 )
@@ -76,6 +83,12 @@ git_repository(
 git_repository(
     name = "kmeans",
     branch = "mvsic",
+    # Add `inline` to header-defined free functions for ODR compliance under
+    # multi-TU includes. The symmetrize() return type spans two lines, so we
+    # insert `inline` on the line above the std::pair<...> declaration.
+    patch_cmds = [
+        "sed -i 's|^std::pair<parlay::sequence<size_t>,$|inline std::pair<parlay::sequence<size_t>,|' seeding/ksetcover.h",
+    ],
     remote = "git@github.com:ParAlg/Parallel-KMeans.git",
 )
 

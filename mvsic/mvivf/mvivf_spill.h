@@ -36,6 +36,7 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
+#include "mvsic/core/mvclustering/mvclustering_8bit.h"
 #include "mvsic/core/query_compression.h"
 #include "mvsic/core/utils/util.h"
 
@@ -155,29 +156,37 @@ class IndexMVIVFSpill : public Index<metric> {
       std::cout << "[MVIVF-Spill] Building index with " << n
                 << " points, num_clusters: " << num_clusters << std::endl;
     }
-    MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
-    Clus.train(points);
-    PointCloudSet<ChPoint>& centers = Clus.get_centers();
-
     // Level-1 may spill to top-b; deeper levels always use top-1.
     const uint32_t spill_this_level =
         (depth == 1) ? std::max<uint32_t>(params.num_spill_l2, 1u) : 1u;
     const uint32_t k_spill = std::min(spill_this_level, static_cast<uint32_t>(num_clusters));
 
+    PointCloudSet<ChPoint> centers;
     parlay::sequence<std::pair<uint32_t, uint32_t>> id_pt;
-    if (k_spill <= 1) {
-      parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
-      id_pt = parlay::tabulate(n, [&](uint32_t i) {
-        return std::make_pair(cluster_ids[i], i);
-      });
+    auto run_clus = [&](auto& Clus) {
+      Clus.train(points);
+      if (k_spill <= 1) {
+        parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
+        id_pt = parlay::tabulate(n, [&](uint32_t i) {
+          return std::make_pair(cluster_ids[i], i);
+        });
+      } else {
+        parlay::sequence<uint32_t> assignment = Clus.get_topC(points, k_spill);
+        id_pt = parlay::sequence<std::pair<uint32_t, uint32_t>>::uninitialized(n * k_spill);
+        parlay::parallel_for(0, n, [&](uint32_t i) {
+          for (uint32_t r = 0; r < k_spill; ++r) {
+            id_pt[i * k_spill + r] = {assignment[i * k_spill + r], i};
+          }
+        });
+      }
+      centers = std::move(Clus.get_centers());
+    };
+    if (params.build_with_8btq) {
+      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      run_clus(Clus);
     } else {
-      parlay::sequence<uint32_t> assignment = Clus.get_topC(points, k_spill);
-      id_pt = parlay::sequence<std::pair<uint32_t, uint32_t>>::uninitialized(n * k_spill);
-      parlay::parallel_for(0, n, [&](uint32_t i) {
-        for (uint32_t r = 0; r < k_spill; ++r) {
-          id_pt[i * k_spill + r] = {assignment[i * k_spill + r], i};
-        }
-      });
+      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      run_clus(Clus);
     }
 
     auto grouped = group_by_key_inplace(id_pt);
@@ -234,14 +243,24 @@ class IndexMVIVFSpill : public Index<metric> {
                 << " points, num_clusters: " << num_clusters << std::endl;
     }
 
-    MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
-    Clus.train(points);
-    PointCloudSet<ChPoint>& centers = Clus.get_centers();
-    parlay::sequence<uint32_t> assignment = Clus.get_topC(points, params.num_spill);
     const uint32_t k_spill = std::min(params.num_spill, static_cast<uint32_t>(num_clusters));
     if (k_spill == 0) {
       std::cerr << "[MVIVF Spill]: num_spill is 0; need at least 1.\n";
       std::abort();
+    }
+    PointCloudSet<ChPoint> centers;
+    parlay::sequence<uint32_t> assignment;
+    auto run_clus = [&](auto& Clus) {
+      Clus.train(points);
+      assignment = Clus.get_topC(points, params.num_spill);
+      centers = std::move(Clus.get_centers());
+    };
+    if (params.build_with_8btq) {
+      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      run_clus(Clus);
+    } else {
+      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      run_clus(Clus);
     }
     auto id_pt = parlay::sequence<std::pair<uint32_t, uint32_t>>::uninitialized(n * k_spill);
     parlay::parallel_for(0, n, [&](uint32_t i) {

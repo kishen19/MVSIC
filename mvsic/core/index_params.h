@@ -37,6 +37,12 @@ struct IndexParams {
   MVClusteringConfig mvclus = MVClusteringConfig();
   uint32_t s = 0;  // Size of each centroid point cloud (0 = avg input point cloud size)
 
+  // When true, MVIVF*'s `recursive_build_` runs k-means assignment through
+  // the 8-bit TurboQuant VPDPBUSD panel kernel (see MVClustering8BTQ).
+  // Centroid update still runs on float points, so the resulting index has
+  // float centers + (optionally float-trained) leaf models. Default off.
+  bool build_with_8btq = false;
+
   // muvera: FDE params
   struct fde_config {
     int32_t num_repetitions = 20;            // Number of independent repetitions for FDE generation

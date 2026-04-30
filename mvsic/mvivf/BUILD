@@ -99,10 +99,30 @@ cc_binary(
     ],
 )
 
+# bench_search_all is split across 48 per-cell translation units under
+# bench_search_all_inst/ (one .cc per metric × variant × quantizer; each TU
+# instantiates compress=true and compress=false). Bazel compiles them in
+# parallel; the dispatch TU only sees `extern template` declarations.
+cc_library(
+    name = "bench_search_all_inst",
+    srcs = glob(["bench_search_all_inst/*.cc"]),
+    hdrs = [
+        "bench_search_all_impl.h",
+        "bench_search_all_inst.h",
+    ],
+    deps = [
+        ":mvivf",
+        ":mvivf_flat",
+        ":mvivf_spill",
+        "//mvsic/core:bench_utils",
+    ],
+)
+
 cc_binary(
     name = "bench_search_all",
     srcs = ["bench_search_all.cpp"],
     deps = [
+        ":bench_search_all_inst",
         ":mvivf",
         ":mvivf_flat",
         ":mvivf_spill",

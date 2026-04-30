@@ -48,6 +48,7 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
+#include "mvsic/core/mvclustering/mvclustering_8bit.h"
 #include "mvsic/core/query_compression.h"
 #include "mvsic/core/utils/util.h"
 
@@ -233,10 +234,20 @@ class IndexMVIVF : public Index<metric> {
       std::cout << "[MVIVF] Building with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
-    MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
-    Clus.train(points);
-    PointCloudSet<ChPoint>& centers = Clus.get_centers();
-    parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
+    PointCloudSet<ChPoint> centers;
+    parlay::sequence<uint32_t> cluster_ids;
+    auto run_clus = [&](auto& Clus) {
+      Clus.train(points);
+      cluster_ids = Clus.get_clustering(points);
+      centers = std::move(Clus.get_centers());
+    };
+    if (params.build_with_8btq) {
+      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      run_clus(Clus);
+    } else {
+      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      run_clus(Clus);
+    }
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
     node->children.resize(grouped.size());

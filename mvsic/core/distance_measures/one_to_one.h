@@ -20,14 +20,14 @@ float ip_distance_integer(const T* p, const T* q, unsigned d) {
   }
   return -((float)result);
 }
-float ip_distance(const uint8_t* p, const uint8_t* q, unsigned d) {
+inline float ip_distance(const uint8_t* p, const uint8_t* q, unsigned d) {
   return ip_distance_integer(p, q, d);
 }
-float ip_distance(const int8_t* p, const int8_t* q, unsigned d) {
+inline float ip_distance(const int8_t* p, const int8_t* q, unsigned d) {
   return ip_distance_integer(p, q, d);
 }
 
-float ip_distance(const float* p, const float* q, unsigned d) {
+inline float ip_distance(const float* p, const float* q, unsigned d) {
   efanna2e::DistanceInnerProduct distfunc;
   return -distfunc.compare(p, q, d);
 }
@@ -41,21 +41,21 @@ float l2_distance_integer(const T* p, const T* q, unsigned d) {
   }
   return (float)result;
 }
-float l2_distance(const uint8_t* p, const uint8_t* q, unsigned d) {
+inline float l2_distance(const uint8_t* p, const uint8_t* q, unsigned d) {
   return l2_distance_integer(p, q, d);
 }
-float l2_distance(const int8_t* p, const int8_t* q, unsigned d) {
+inline float l2_distance(const int8_t* p, const int8_t* q, unsigned d) {
   return l2_distance_integer(p, q, d);
 }
 
-float l2_distance(const float* p, const float* q, unsigned d) {
+inline float l2_distance(const float* p, const float* q, unsigned d) {
   efanna2e::DistanceL2 distfunc;
   return distfunc.compare(p, q, d);
 }
 
 // Computes the Chamfer IP distance, given two point clouds
-float chamfer_ip_distance(const float* a, uint32_t n_a, const float* b, uint32_t n_b,
-                          uint32_t dim) {
+inline float chamfer_ip_distance(const float* a, uint32_t n_a, const float* b, uint32_t n_b,
+                                 uint32_t dim) {
   if (n_a == 0 || n_b == 0) {
     std::cout << "Invalid input to Chamfer IP distance, na = " << n_a << ", nb = " << n_b
               << std::endl;
@@ -74,8 +74,8 @@ float chamfer_ip_distance(const float* a, uint32_t n_a, const float* b, uint32_t
 }
 
 // Computes the Chamfer L2 distance, given two point clouds
-float chamfer_l2_distance(const float* a, uint32_t n_a, const float* b, uint32_t n_b,
-                          uint32_t dim) {
+inline float chamfer_l2_distance(const float* a, uint32_t n_a, const float* b, uint32_t n_b,
+                                 uint32_t dim) {
   if (n_a == 0 || n_b == 0) {
     std::cout << "Invalid input to Chamfer L2 distance, na = " << n_a << ", nb = " << n_b
               << std::endl;
@@ -119,8 +119,8 @@ inline float hsum256_ps_avx(__m256 v) {
 }
 
 // Computes the Chamfer IP distance, given two point clouds
-float chamfer_ip_distance_opt(const float* a, uint32_t n_a, const float* b, uint32_t n_b,
-                              uint32_t dim) {
+inline float chamfer_ip_distance_opt(const float* a, uint32_t n_a, const float* b, uint32_t n_b,
+                                     uint32_t dim) {
   if (n_a == 0 || n_b == 0) {
     std::cout << "Invalid input to Chamfer IP distance, na = " << n_a << ", nb = " << n_b << "\n";
     abort();

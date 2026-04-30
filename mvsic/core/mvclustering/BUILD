@@ -25,11 +25,15 @@ cc_library(
 
 cc_library(
     name = "mvclustering",
-    hdrs = ["mvclustering.h"],
+    hdrs = [
+        "mvclustering.h",
+        "mvclustering_8bit.h",
+    ],
     deps = [
         ":mvclustering_config",
         "//mvsic/core/distance_measures:many_to_many",
         "//mvsic/core/mvclustering/seeding:uniformlyrandom",
+        "//mvsic/core/quantization:turboquant_8bit_mv",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",

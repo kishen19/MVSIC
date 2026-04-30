@@ -19,6 +19,7 @@
 
 #include "mvsic/core/index.h"
 #include "mvsic/core/mvclustering/mvclustering.h"
+#include "mvsic/core/mvclustering/mvclustering_8bit.h"
 #include "mvsic/core/query_compression.h"
 #include "mvsic/core/utils/util.h"
 
@@ -133,10 +134,18 @@ class IndexMVIVFFlat : public Index<metric> {
     t.reset();
 
     t.start();
-    MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
-    Clus.train(points);
-    parlay::sequence<uint32_t> cluster_ids = Clus.get_clustering(points);
-    centers = std::move(Clus.get_centers());
+    parlay::sequence<uint32_t> cluster_ids;
+    if (params.build_with_8btq) {
+      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      Clus.train(points);
+      cluster_ids = Clus.get_clustering(points);
+      centers = std::move(Clus.get_centers());
+    } else {
+      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      Clus.train(points);
+      cluster_ids = Clus.get_clustering(points);
+      centers = std::move(Clus.get_centers());
+    }
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) {
       return std::make_pair(cluster_ids[i], i);
     });
