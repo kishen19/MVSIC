@@ -25,5 +25,5 @@ bazel-*
 # Stats files
 *.csv
 
-data
-results
+/data/
+/results/
