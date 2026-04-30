@@ -4,7 +4,7 @@
 //
 // Usage:
 //   ./measure_stretch_tq -i <base_file> -q <query_file> [-gt <gt_file>]
-//     [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|TurboQuant|RabitQ|TQPQ|All]
+//     [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
 //     [-rabitq_bits <bits>] [-output_gt_path <path>]
 
@@ -32,6 +32,7 @@
 #include "mvsic/core/utils/parse_command_line.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
 #include "mvsic/core/stats.h"
 
@@ -208,7 +209,7 @@ void run_benchmark(commandLine& P) {
   if (!inFile || (!qFile && !dataset_as_query)) {
     std::cerr << "Usage: measure_stretch_tq -i <base> [-q <queries> | -dataset_as_query]\n"
               << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP] "
-              << "[-pq_method TQ4|TurboQuant|RabitQ|TQPQ|All]\n"
+              << "[-pq_method TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All]\n"
               << "  [-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-num_query <N>]\n";
     return;
   }
@@ -319,6 +320,103 @@ void run_benchmark(commandLine& P) {
         "TurboQuant");
   }
 
+  // ==== TurboQuant 8-bit (per-point adaptive max-abs scaling) ====
+  // The new 8-bit TQ only ships a multi-vector chamfer kernel
+  // (turboquant_8bit_mv). For single-vector quality evaluation we reuse the
+  // public per-point encoder (Model::encode_single) on each base point and
+  // inline the per-query int8 encoding (the MV quantize_query wraps it inside
+  // a multi-vector ChPoint loop). The recall a quantization method achieves
+  // is fully determined by encode_single + how the dot is reconstructed; the
+  // panel/VPDPBUSD layout is irrelevant to quality.
+  if (method == "TQ8" || method == "All") {
+    std::cout << "\n--- TurboQuant-8bit ---" << std::endl;
+    parlay::internal::timer t;
+    t.start();
+
+    turboquant_8bit_mv::Model<Metric> model;
+    model.train(base);
+    const size_t pdim = model.encoder.padded_dim;
+
+    // Base: int8 codes (raw int8 stored in uint8 slot by encode_single) + nsf + sqn.
+    std::vector<int8_t> b_codes(n_b * pdim, 0);
+    std::vector<float> b_nsf(n_b, 0.0f);
+    std::vector<float> b_sqn(n_b, 0.0f);
+    parlay::parallel_for(0, n_b, [&](size_t i) {
+      std::vector<float> ws(pdim);
+      auto [sqn, nsf] = model.encode_single(
+          reinterpret_cast<const float*>(base.location(i)),
+          reinterpret_cast<uint8_t*>(b_codes.data() + i * pdim), ws);
+      b_nsf[i] = nsf;
+      b_sqn[i] = sqn;
+    });
+
+    // Queries: same per-point encoding (rotate -> max-abs scale to int8).
+    std::vector<int8_t> q_codes(n_q * pdim, 0);
+    std::vector<float> q_nsf(n_q, 0.0f);
+    std::vector<float> q_sqn(n_q, 0.0f);
+    parlay::parallel_for(0, n_q, [&](size_t qi) {
+      std::vector<float> q_rot(pdim);
+      model.encoder.rotator->rotate(reinterpret_cast<const float*>(queries.location(qi)),
+                                    q_rot.data());
+
+      float sqr_norm = 0.0f, max_value = 0.0f;
+      for (size_t i = 0; i < pdim; ++i) {
+        sqr_norm += q_rot[i] * q_rot[i];
+        max_value = std::max(max_value, std::abs(q_rot[i]));
+      }
+      if (sqr_norm == 0.0f || !std::isfinite(sqr_norm) || max_value == 0.0f) return;
+
+      const float norm = std::sqrt(sqr_norm);
+      const float sf = 127.0f / max_value;
+      int64_t quant_norm = 0;
+      int8_t* q_out = q_codes.data() + qi * pdim;
+      for (size_t i = 0; i < pdim; ++i) {
+        const int snapped = static_cast<int>(std::lround(q_rot[i] * sf));
+        const int8_t iv =
+            static_cast<int8_t>(snapped < -127 ? -127 : (snapped > 127 ? 127 : snapped));
+        q_out[i] = iv;
+        quant_norm += static_cast<int64_t>(iv) * static_cast<int64_t>(iv);
+      }
+      q_nsf[qi] = quant_norm > 0 ? norm / std::sqrt(static_cast<float>(quant_norm)) : 0.0f;
+      q_sqn[qi] = sqr_norm;
+    });
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    recall_curve(
+        [&](size_t qi, size_t j) {
+          const int8_t* qp = q_codes.data() + qi * pdim;
+          const int8_t* bp = b_codes.data() + j * pdim;
+          int32_t dot = 0;
+          size_t kk = 0;
+#if defined(__AVX2__) || defined(__AVX512F__)
+          // signed int8 * signed int8 via i8->i16 sign-extend + madd_epi16.
+          __m256i acc = _mm256_setzero_si256();
+          for (; kk + 32 <= pdim; kk += 32) {
+            const __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qp + kk));
+            const __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(bp + kk));
+            const __m256i a_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(a));
+            const __m256i a_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(a, 1));
+            const __m256i b_lo = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(b));
+            const __m256i b_hi = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(b, 1));
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a_lo, b_lo));
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(a_hi, b_hi));
+          }
+          alignas(32) int32_t lanes[8];
+          _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), acc);
+          for (int x = 0; x < 8; ++x) dot += lanes[x];
+#endif
+          for (; kk < pdim; ++kk)
+            dot += static_cast<int32_t>(qp[kk]) * static_cast<int32_t>(bp[kk]);
+
+          const float neg_dot = -static_cast<float>(dot) * b_nsf[j] * q_nsf[qi];
+          if constexpr (Metric)
+            return b_sqn[j] + 2.0f * neg_dot + q_sqn[qi];
+          else
+            return neg_dot;
+        },
+        n_q, n_b, gt, k, kps, "TurboQuant-8bit");
+  }
+
   // ==== TQ-PQ-4bit (B = 1,2,4,8) ====
   if (method == "TQPQ" || method == "All") {
     auto run_tqpq = [&](auto block_tag, const std::string& label) {
@@ -376,15 +474,16 @@ void run_benchmark(commandLine& P) {
         n_q, n_b, gt, k, kps, "RaBitQ-" + std::to_string(rbits) + "bit");
   }
 
-  if (method != "TQ4" && method != "TurboQuant" && method != "RabitQ" && method != "TQPQ" &&
-      method != "All") {
-    std::cerr << "Unknown method: " << method << " (TQ4|TurboQuant|RabitQ|TQPQ|All)" << std::endl;
+  if (method != "TQ4" && method != "TurboQuant" && method != "TQ8" && method != "RabitQ" &&
+      method != "TQPQ" && method != "All") {
+    std::cerr << "Unknown method: " << method << " (TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All)"
+              << std::endl;
   }
 }
 int main(int argc, char* argv[]) {
   commandLine P(argc, argv,
                 "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
-                "[-dist_func L2|IP] [-pq_method TQ4|TurboQuant|RabitQ|TQPQ|All] "
+                "[-dist_func L2|IP] [-pq_method TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All] "
                 "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 

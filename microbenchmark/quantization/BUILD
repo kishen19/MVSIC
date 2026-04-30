@@ -121,6 +121,7 @@ cc_binary(
         "//mvsic/core:stats",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:turboquant",
+        "//mvsic/core/quantization:turboquant_8bit_mv",
         "//mvsic/core/quantization/other_methods:turboquant_pq_4bit",
         "//mvsic/core/types:ip_point",
         "//mvsic/core/types:l2_point",
