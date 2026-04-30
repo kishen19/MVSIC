@@ -514,5 +514,7 @@ using IndexVamanaSPQTQIP     = IndexVamana<false, pqtq_mv::Model<false>>;
 using IndexVamanaSPQTQL2     = IndexVamana<true,  pqtq_mv::Model<true>>;
 using IndexVamanaOneBitTQIP  = IndexVamana<false, turboquant_1bit_mv::Model<false>>;
 using IndexVamanaOneBitTQL2  = IndexVamana<true,  turboquant_1bit_mv::Model<true>>;
+using IndexVamanaEightBitTQIP = IndexVamana<false, turboquant_8bit_mv::Model<false>>;
+using IndexVamanaEightBitTQL2 = IndexVamana<true,  turboquant_8bit_mv::Model<true>>;
 
 }  // namespace mvsic

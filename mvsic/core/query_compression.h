@@ -38,6 +38,7 @@ inline uint32_t batch_alignment(QT qt) {
   switch (qt) {
     case QT::TurboQuant: return 6;  // kVnniMq
     case QT::OneBitTQ: return 4;    // kMq1bit
+    case QT::EightBitTQ: return 6;  // kVnniMq (same as 4-bit TQ)
     case QT::SPQTQ: return 3;       // kMvBatch
     case QT::FastScan: return 6;    // SCAN_Q_BATCH
     default: return 1;

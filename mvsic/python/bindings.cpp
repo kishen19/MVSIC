@@ -44,6 +44,8 @@ PYBIND11_MODULE(mvsic, m) {
       .value("FastScan", mvsic::IndexParams::QuantizerType::FastScan)
       .value("TurboQuant", mvsic::IndexParams::QuantizerType::TurboQuant)
       .value("SPQTQ", mvsic::IndexParams::QuantizerType::SPQTQ)
+      .value("OneBitTQ", mvsic::IndexParams::QuantizerType::OneBitTQ)
+      .value("EightBitTQ", mvsic::IndexParams::QuantizerType::EightBitTQ)
       .export_values();
 
   py::class_<mvsic::IndexParams::fde_config>(m, "fde_config")
@@ -359,6 +361,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFSPQTQIP,     ChamferIP_Point, "IndexMVIVFSPQTQIP")
   BIND_INDEX(IndexMVIVFOneBitTQL2,  ChamferL2_Point, "IndexMVIVFOneBitTQL2")
   BIND_INDEX(IndexMVIVFOneBitTQIP,  ChamferIP_Point, "IndexMVIVFOneBitTQIP")
+  BIND_INDEX(IndexMVIVFEightBitTQL2,  ChamferL2_Point, "IndexMVIVFEightBitTQL2")
+  BIND_INDEX(IndexMVIVFEightBitTQIP,  ChamferIP_Point, "IndexMVIVFEightBitTQIP")
   // Compress + Foo leaves (TQ centers + Foo leaves).
   BIND_INDEX(IndexMVIVFCompressPQL2,        ChamferL2_Point, "IndexMVIVFCompressPQL2")
   BIND_INDEX(IndexMVIVFCompressPQIP,        ChamferIP_Point, "IndexMVIVFCompressPQIP")
@@ -372,6 +376,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFCompressSPQTQIP")
   BIND_INDEX(IndexMVIVFCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFCompressOneBitTQL2")
   BIND_INDEX(IndexMVIVFCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFCompressOneBitTQIP")
+  BIND_INDEX(IndexMVIVFCompressEightBitTQL2,  ChamferL2_Point, "IndexMVIVFCompressEightBitTQL2")
+  BIND_INDEX(IndexMVIVFCompressEightBitTQIP,  ChamferIP_Point, "IndexMVIVFCompressEightBitTQIP")
 
   // ---- MVIVF Flat family ----
   BIND_INDEX(IndexMVIVFFlatL2, ChamferL2_Point, "IndexMVIVFFlatL2")
@@ -390,6 +396,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFFlatSPQTQIP,     ChamferIP_Point, "IndexMVIVFFlatSPQTQIP")
   BIND_INDEX(IndexMVIVFFlatOneBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatOneBitTQL2")
   BIND_INDEX(IndexMVIVFFlatOneBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatOneBitTQIP")
+  BIND_INDEX(IndexMVIVFFlatEightBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatEightBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatEightBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatEightBitTQIP")
 
   BIND_INDEX(IndexMVIVFFlatCompressPQL2,        ChamferL2_Point, "IndexMVIVFFlatCompressPQL2")
   BIND_INDEX(IndexMVIVFFlatCompressPQIP,        ChamferIP_Point, "IndexMVIVFFlatCompressPQIP")
@@ -403,6 +411,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFFlatCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFFlatCompressSPQTQIP")
   BIND_INDEX(IndexMVIVFFlatCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatCompressOneBitTQL2")
   BIND_INDEX(IndexMVIVFFlatCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatCompressOneBitTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressEightBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatCompressEightBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressEightBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatCompressEightBitTQIP")
 
   // ---- MVIVF Spill family ----
   BIND_INDEX(IndexMVIVFSpillL2, ChamferL2_Point, "IndexMVIVFSpillL2")
@@ -421,6 +431,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFSpillSPQTQIP,     ChamferIP_Point, "IndexMVIVFSpillSPQTQIP")
   BIND_INDEX(IndexMVIVFSpillOneBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillOneBitTQL2")
   BIND_INDEX(IndexMVIVFSpillOneBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillOneBitTQIP")
+  BIND_INDEX(IndexMVIVFSpillEightBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillEightBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillEightBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillEightBitTQIP")
 
   BIND_INDEX(IndexMVIVFSpillCompressPQL2,        ChamferL2_Point, "IndexMVIVFSpillCompressPQL2")
   BIND_INDEX(IndexMVIVFSpillCompressPQIP,        ChamferIP_Point, "IndexMVIVFSpillCompressPQIP")
@@ -434,6 +446,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFSpillCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFSpillCompressSPQTQIP")
   BIND_INDEX(IndexMVIVFSpillCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillCompressOneBitTQL2")
   BIND_INDEX(IndexMVIVFSpillCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillCompressOneBitTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressEightBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillCompressEightBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressEightBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillCompressEightBitTQIP")
 
   // ---- MUVERA family ----
   BIND_INDEX(IndexMUVERAL2, ChamferL2_Point, "IndexMUVERAL2")
@@ -464,6 +478,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexVamanaSPQTQIP,     ChamferIP_Point, "IndexVamanaSPQTQIP")
   BIND_INDEX(IndexVamanaOneBitTQL2,  ChamferL2_Point, "IndexVamanaOneBitTQL2")
   BIND_INDEX(IndexVamanaOneBitTQIP,  ChamferIP_Point, "IndexVamanaOneBitTQIP")
+  BIND_INDEX(IndexVamanaEightBitTQL2,  ChamferL2_Point, "IndexVamanaEightBitTQL2")
+  BIND_INDEX(IndexVamanaEightBitTQIP,  ChamferIP_Point, "IndexVamanaEightBitTQIP")
 
   // ---- MPool family ----
   BIND_INDEX(IndexMPoolL2, ChamferL2_Point, "IndexMPoolL2")

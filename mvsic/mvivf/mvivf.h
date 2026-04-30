@@ -172,6 +172,8 @@ class IndexMVIVF : public Index<metric> {
         quantization_mode = QT::SPQTQ;
       else if constexpr (std::is_same_v<L, turboquant_1bit_mv::Model<metric>>)
         quantization_mode = QT::OneBitTQ;
+      else if constexpr (std::is_same_v<L, turboquant_8bit_mv::Model<metric>>)
+        quantization_mode = QT::EightBitTQ;
       else
         quantization_mode = QT::None;
     }
@@ -1528,5 +1530,10 @@ using IndexMVIVFOneBitTQIP = IndexMVIVF<false, false, turboquant_1bit_mv::Model<
 using IndexMVIVFOneBitTQL2 = IndexMVIVF<true, false, turboquant_1bit_mv::Model<true>>;
 using IndexMVIVFCompressOneBitTQIP = IndexMVIVF<false, true, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFCompressOneBitTQL2 = IndexMVIVF<true, true, turboquant_1bit_mv::Model<true>>;
+
+using IndexMVIVFEightBitTQIP = IndexMVIVF<false, false, turboquant_8bit_mv::Model<false>>;
+using IndexMVIVFEightBitTQL2 = IndexMVIVF<true, false, turboquant_8bit_mv::Model<true>>;
+using IndexMVIVFCompressEightBitTQIP = IndexMVIVF<false, true, turboquant_8bit_mv::Model<false>>;
+using IndexMVIVFCompressEightBitTQL2 = IndexMVIVF<true, true, turboquant_8bit_mv::Model<true>>;
 
 }  // namespace mvsic

@@ -12,7 +12,7 @@
 //
 // The QT enum layout is assumed to match the one in `IndexParams::QuantizerType`:
 //   None = 0, PQ = 1, RaBitQ = 2, FastScan = 3, TurboQuant = 4, SPQTQ = 5,
-//   OneBitTQ = 6.
+//   OneBitTQ = 6, EightBitTQ = 7.
 //
 // Neither helper writes the `QT` tag itself — the concrete family already
 // encodes that information in its `class_id` header (via `kLeafMethod`), and
@@ -56,6 +56,7 @@ inline void load_sv(Variant& v, std::istream& in,
     case QT::SPQTQ:      { v.template emplace<PQTQ>(); std::get<PQTQ>(v).load(in); break; }
     case QT::None:
     case QT::OneBitTQ:
+    case QT::EightBitTQ:
     default: v = std::monostate{}; break;
   }
 }

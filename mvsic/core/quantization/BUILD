@@ -130,6 +130,19 @@ cc_library(
 )
 
 cc_library(
+    name = "turboquant_8bit_mv",
+    hdrs = [
+        "turboquant_8bit_mv.h",
+        "turboquant_utils.h",
+    ],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
+
+cc_library(
     name = "variant_io",
     hdrs = ["variant_io.h"],
     deps = [

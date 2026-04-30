@@ -47,9 +47,11 @@ inline const char* variant_name(MVIVFVariant v) {
       fn.template operator()<Fam<metric, C, pqtq_mv::Model<metric>>>();                           \
     else if (qm == "1BTQ"  || qm == "1btq")                                                       \
       fn.template operator()<Fam<metric, C, turboquant_1bit_mv::Model<metric>>>();                \
+    else if (qm == "8BTQ"  || qm == "8btq")                                                       \
+      fn.template operator()<Fam<metric, C, turboquant_8bit_mv::Model<metric>>>();                \
     else {                                                                                        \
       std::cerr << "Unknown -quant_method: " << qm                                                \
-                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ)" << std::endl;                       \
+                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ, 8BTQ)" << std::endl;                 \
       std::exit(1);                                                                               \
     }                                                                                             \
   } while (0)
@@ -248,7 +250,7 @@ int main(int argc, char* argv[]) {
       "  -s <N>                         Seeding strategy index\n\n"
       "Quantization (selects compile-time class):\n"
       "  -qc                            CompressCenters = true (TQ centers)\n"
-      "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ    Leaf quantizer\n"
+      "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|8BTQ    Leaf quantizer\n"
       "  -m <N>  -num_clusters_per_block <N>  -num_points_per_cluster <N>  -rbits <N>\n\n"
       "Search:\n"
       "  -k <N>                         Top-k (default 10)\n"

@@ -132,6 +132,7 @@ class IndexMVIVFSpill : public Index<metric> {
       else if constexpr (std::is_same_v<L, turboquant_mv::Model<metric>>) quantization_mode = QT::TurboQuant;
       else if constexpr (std::is_same_v<L, pqtq_mv::Model<metric>>) quantization_mode = QT::SPQTQ;
       else if constexpr (std::is_same_v<L, turboquant_1bit_mv::Model<metric>>) quantization_mode = QT::OneBitTQ;
+      else if constexpr (std::is_same_v<L, turboquant_8bit_mv::Model<metric>>) quantization_mode = QT::EightBitTQ;
       else quantization_mode = QT::None;
     }
   }
@@ -1039,6 +1040,8 @@ using IndexMVIVFSpillSPQTQIP     = IndexMVIVFSpill<false, false, pqtq_mv::Model<
 using IndexMVIVFSpillSPQTQL2     = IndexMVIVFSpill<true,  false, pqtq_mv::Model<true>>;
 using IndexMVIVFSpillOneBitTQIP  = IndexMVIVFSpill<false, false, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFSpillOneBitTQL2  = IndexMVIVFSpill<true,  false, turboquant_1bit_mv::Model<true>>;
+using IndexMVIVFSpillEightBitTQIP = IndexMVIVFSpill<false, false, turboquant_8bit_mv::Model<false>>;
+using IndexMVIVFSpillEightBitTQL2 = IndexMVIVFSpill<true,  false, turboquant_8bit_mv::Model<true>>;
 
 // CompressCenters (TQ-quantized centers) + LeafModel combinations.
 using IndexMVIVFSpillCompressPQIP        = IndexMVIVFSpill<false, true, pq_mv::Model<false>>;
@@ -1053,5 +1056,7 @@ using IndexMVIVFSpillCompressSPQTQIP     = IndexMVIVFSpill<false, true, pqtq_mv:
 using IndexMVIVFSpillCompressSPQTQL2     = IndexMVIVFSpill<true,  true, pqtq_mv::Model<true>>;
 using IndexMVIVFSpillCompressOneBitTQIP  = IndexMVIVFSpill<false, true, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFSpillCompressOneBitTQL2  = IndexMVIVFSpill<true,  true, turboquant_1bit_mv::Model<true>>;
+using IndexMVIVFSpillCompressEightBitTQIP = IndexMVIVFSpill<false, true, turboquant_8bit_mv::Model<false>>;
+using IndexMVIVFSpillCompressEightBitTQL2 = IndexMVIVFSpill<true,  true, turboquant_8bit_mv::Model<true>>;
 
 }  // namespace mvsic
