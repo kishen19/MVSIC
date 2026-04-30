@@ -605,14 +605,22 @@ class Quantized_Point_Cloud_Set {
     const size_t nc = num_clouds();
     if (num_q == 0 || nc == 0) return;
 
-    parlay::parallel_for(0, nc, [&](size_t c) {
+    auto score_one = [&](size_t c) {
       if (cloud_sizes[c] == 0) {
         results[c] = {get_id(c), std::numeric_limits<float>::max()};
         return;
       }
       const float d = turboquant_mv_chamfer_distance(q, *this, c);
       results[c] = {get_id(c), d};
-    });
+    };
+    // For small nc (greedy beam-search nodes typically have ~16 children),
+    // the parlay::parallel_for scheduling overhead dwarfs the inner work and
+    // the call already runs inside an outer parallel_for over queries.
+    if (nc <= 64) {
+      for (size_t c = 0; c < nc; ++c) score_one(c);
+    } else {
+      parlay::parallel_for(0, nc, score_one);
+    }
   }
 
   void save(std::ofstream& out) const {

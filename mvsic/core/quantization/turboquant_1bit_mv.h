@@ -1097,9 +1097,10 @@ struct FusedQueryBatch {
     total_embeddings = emb_offsets[num_source_clouds];
     if (total_embeddings == 0) return;
 
-    flat_qbuf.assign(total_embeddings * qbuf_tile_stride, 0);
+    // Uninitialized: pre_broadcast_query writes every output byte.
+    flat_qbuf.resize(total_embeddings * qbuf_tile_stride);
 
-    parlay::parallel_for(0, num_source_clouds, [&](size_t i) {
+    auto build_one = [&](size_t i) {
       const auto* qc = A[i];
       const size_t off = emb_offsets[i];
       const size_t cnt = qc->num_queries;
@@ -1125,7 +1126,13 @@ struct FusedQueryBatch {
         }
 #endif
       }
-    });
+    };
+
+    // Always serial: the broadcast work per query is tiny (~16 SIMD ops per
+    // embedding), and Build is normally called from a per-leaf scope inside an
+    // outer parallel_for over leaves — nested parlay tasks here cost more than
+    // the work they parallelize.
+    for (size_t i = 0; i < num_source_clouds; ++i) build_one(i);
   }
 };
 
@@ -1323,17 +1330,22 @@ class ManyToMany {
       const size_t q_count = q_end - q_start;
       if (q_count == 0) return;
 
-      // Stack-allocated bucket array: k <= kMaxBucketK and q_block is
-      // typically tiny (4 on the fiqa call site). Heap-free hot path.
-      std::vector<internal::BoundedTopKBucket> buckets(q_count);
+      // Thread-local scratch: one set of vectors per worker, grown on first
+      // use and reused across leaves. Eliminates ~84K small allocations per
+      // search and the cross-NUMA cost of fresh per-task heap chunks.
+      thread_local std::vector<internal::BoundedTopKBucket> buckets;
+      thread_local std::vector<const Quantized_Query_Point_Cloud<Metric>*> slice;
+      thread_local FusedQueryBatch<Metric> fq;
+      thread_local std::vector<float> emb_min_dists;
+
+      buckets.resize(q_count);
       for (size_t i = 0; i < q_count; ++i) buckets[i].init(k);
 
-      std::vector<const Quantized_Query_Point_Cloud<Metric>*> slice(q_count);
+      slice.resize(q_count);
       for (size_t i = 0; i < q_count; ++i) slice[i] = A[q_start + i];
-      FusedQueryBatch<Metric> fq;
       fq.Build(slice);
 
-      std::vector<float> emb_min_dists(fq.total_embeddings);
+      if (emb_min_dists.size() < fq.total_embeddings) emb_min_dists.resize(fq.total_embeddings);
 
       for (size_t c = 0; c < num_db_clouds; ++c) {
         const size_t cs = B.cloud_sizes[c];

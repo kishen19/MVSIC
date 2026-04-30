@@ -40,6 +40,7 @@ cc_binary(
     name = "bench_search_all",
     srcs = ["bench_search_all.cpp"],
     deps = [
+        "//mvsic/core:stats",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
