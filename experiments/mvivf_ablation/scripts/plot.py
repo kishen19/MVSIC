@@ -42,6 +42,50 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Stage knobs that can appear in canonical build_config names.  Keys are the
+# long names used as the `--group-by` argument; values are regexes matched
+# against `build_config` (or fallback path strings) with a single capture
+# group for the integer value.
+#
+# Build-config naming convention (mvivf):
+#     mvivf_k<K>_l<L>_d<D>_n<N>_s<S>_mpcc<M>_mpcik<MK>
+# Only the suffixes relevant to the current stage need to be present; missing
+# suffixes leave the corresponding derived column NaN.
+#
+# For mvivf_spill we also support `_s<N>` -> num_spill (same regex as `s`;
+# choose whichever column is meaningful for the family being plotted).
+_KNOB_PATTERNS: dict[str, str] = {
+    "k_per_level": r"_k(\d+)(?:_|$)",
+    "max_leaf_size": r"_l(\d+)(?:_|$)",
+    # "max_depth": r"_d(\d+)(?:_|$)",
+    "max_depth": r"l500_d(\d+)(?:_|$)",
+    "niters": r"_n(\d+)(?:_|$)",
+    "s": r"_s(\d+)(?:_|$)",
+    "max_point_clouds_per_cluster": r"_mpcc(\d+)(?:_|$)",
+    "max_points_per_centroid_inner_kmeans": r"_mpcik(\d+)(?:_|$)",
+    # mvivf_spill aliases (same regex as `s`, exposed under a different name).
+    "num_spill": r"_s(\d+)(?:_|$)",
+    "num_spill_l2": r"_l2s(\d+)(?:_|$)",
+}
+
+
+def _derive_knob_column(series: pd.Series, pattern: str) -> pd.Series:
+    extracted = series.astype(str).str.extract(pattern)[0]
+    return extracted.apply(
+        lambda x: int(x) if isinstance(x, str) and x.isdigit() else x
+    )
+
+
+def _populate_knobs(df: pd.DataFrame, source_col: str = "build_config") -> pd.DataFrame:
+    if source_col not in df.columns:
+        return df
+    for col, pat in _KNOB_PATTERNS.items():
+        if col in df.columns:
+            continue
+        df[col] = _derive_knob_column(df[source_col], pat)
+    return df
+
+
 def _annotate_from_path(base: pathlib.Path, csv_file: pathlib.Path) -> dict:
     """
     Infer metadata from the benchmark_search.py output tree:
@@ -105,49 +149,33 @@ def load_csvs(path: pathlib.Path) -> pd.DataFrame:
                 df["build_config"] = m.group(1)
         chunks.append(df)
     out = pd.concat(chunks, ignore_index=True)
-    # Convenience: derive stage knobs from canonical build names such as
-    # mvivf_k16_l500, mvivf_k0_l500, ...
-    if "k_per_level" not in out.columns and "build_config" in out.columns:
-        out["k_per_level"] = (
-            out["build_config"]
-            .astype(str)
-            .str.extract(r"_k(\d+)(?:_|$)")[0]
-            .apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else x)
-        )
+    # Derive every known stage knob column from canonical build names such as
+    # mvivf_k0_l500_d3_n5_s2_mpcc100_mpcik20.  Only suffixes present in the
+    # name will yield non-NaN values; missing suffixes are NaN and the user
+    # must group by a knob that *is* swept in this stage's configs.
+    out = _populate_knobs(out, "build_config")
     return out
 
 
 def _ensure_group_col(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     df = df.copy()
-    if group_col in df.columns:
+    if group_col in df.columns and df[group_col].notna().any():
         return df
-    # Convenience fallback for stage-1 runs grouped by k_per_level.
-    if group_col == "k_per_level":
-        if "build_config" in df.columns:
-            df["k_per_level"] = (
-                df["build_config"]
-                .astype(str)
-                .str.extract(r"_k(\d+)(?:_|$)")[0]
-                .apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else x)
-            )
-        if "k_per_level" not in df.columns and "source_relpath" in df.columns:
-            df["k_per_level"] = (
-                df["source_relpath"]
-                .astype(str)
-                .str.extract(r"_k(\d+)(?:_|/|$)")[0]
-                .apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else x)
-            )
-        if "k_per_level" not in df.columns and "source_abspath" in df.columns:
-            df["k_per_level"] = (
-                df["source_abspath"]
-                .astype(str)
-                .str.extract(r"_k(\d+)(?:_|/|$)")[0]
-                .apply(lambda x: int(x) if isinstance(x, str) and x.isdigit() else x)
-            )
-    if group_col not in df.columns:
+    # Try to derive from build_config / source paths using the canonical
+    # short-name convention (see _KNOB_PATTERNS above).
+    pattern = _KNOB_PATTERNS.get(group_col)
+    if pattern is not None:
+        for src_col in ("build_config", "source_relpath", "source_abspath"):
+            if src_col not in df.columns:
+                continue
+            derived = _derive_knob_column(df[src_col], pattern)
+            if derived.notna().any():
+                df[group_col] = derived
+                break
+    if group_col not in df.columns or not df[group_col].notna().any():
         raise SystemExit(
-            f"group column '{group_col}' not found. "
-            f"Available columns: {sorted(df.columns)}"
+            f"group column '{group_col}' not found and could not be derived "
+            f"from build_config. Available columns: {sorted(df.columns)}"
         )
     return df
 

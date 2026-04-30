@@ -1,4 +1,4 @@
-name: "MVIVF Ablation (build, stage 2: max_leaf_size)"
+name: "MVIVF Ablation (build, stage 3: max_depth)"
 
 datasets:
   - name: nq
@@ -19,18 +19,23 @@ indices:
     metric: ip
     build_configs:
       # Stage-1 winner fixed: k_per_level = 0.
-      - name: mvivf_k0_l50_d0
-        params: &stage2_defaults
+      # Stage-2 winner fixed: max_leaf_size = 100.
+      - name: mvivf_k0_l100_d0
+        params: &stage3_defaults
           k_per_level: 0
-          max_leaf_size: 50
+          max_leaf_size: 100
           max_depth: 0
           niters: 5
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
-      - name: mvivf_k0_l100_d0
-        params: { <<: *stage2_defaults, max_leaf_size: 100 }
-      - name: mvivf_k0_l500_d0
-        params: { <<: *stage2_defaults, max_leaf_size: 500 }
-      - name: mvivf_k0_l1000_d0
-        params: { <<: *stage2_defaults, max_leaf_size: 1000 }
+      - name: mvivf_k0_l100_d1
+        params: { <<: *stage3_defaults, max_depth: 1 }
+      - name: mvivf_k0_l100_d2
+        params: { <<: *stage3_defaults, max_depth: 2 }
+      - name: mvivf_k0_l100_d3
+        params: { <<: *stage3_defaults, max_depth: 3 }
+      - name: mvivf_k0_l100_d4
+        params: { <<: *stage3_defaults, max_depth: 4 }
+      - name: mvivf_k0_l100_d5
+        params: { <<: *stage3_defaults, max_depth: 5 }
 
