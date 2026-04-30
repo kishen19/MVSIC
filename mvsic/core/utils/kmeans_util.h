@@ -6,49 +6,36 @@
 #include "algorithms/utils/point_range.h"
 #include "lloyds/kmeans.h"
 #include "lloyds_weighted/kmeans_weighted.h"
+#include "mvsic/core/utils/lloyds_kmeans.h"
 
 namespace mvsic {
 
-// Runs kmeans on a subsample of size max_points_per_centroid*k
+// Runs kmeans on a subsample of size max_points_per_centroid*k.
+//
+// The Lloyd's loop is now driven by ::mvsic::lloyds::lloyds_kmeans against a
+// FloatLloydsBackend; the backend wraps a parlayANN PointRange<float> so the
+// seeding, blocked-Eigen assignment, and per-cluster mean math match the
+// previous parlayANN call path exactly.  Swapping the backend is the only
+// thing needed to change the underlying point representation.
 template<bool metric>
-auto kmeans_subsample(const parlay::sequence<parlay::sequence<float>>& data, uint32_t k,
-                      uint32_t max_points_per_centroid, bool verbose = false) {
-  using PointTy =
-      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
-  using Range = parlayANN::PointRange<PointTy>;
-
-  const char* seed_algo;
-  if constexpr (metric) {
-    seed_algo = "PrefixDoubling";
-  } else {
-    seed_algo = "UniformlyRandom";
-  }
+::mvsic::lloyds::CenterSet kmeans_subsample(
+    const parlay::sequence<parlay::sequence<float>>& data, uint32_t k,
+    uint32_t max_points_per_centroid, bool verbose = false) {
+  const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
 
   size_t n = data.size();
-  size_t dims = data[0].size();
-  Range centers;
-  if (max_points_per_centroid * k >= n) {
-    Range data_range(data, dims);
-    centers = kmeans<float, PointTy>(data_range, k, seed_algo, "Pairwise", 10, verbose);
-  } else {
-    auto sampled_points = parlay::delayed_tabulate(max_points_per_centroid * k, [&](size_t i) {
-      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
-      return data[id];
-    });
-    Range sampled_data_range(sampled_points, dims);
-    centers = kmeans<float, PointTy>(sampled_data_range, k, seed_algo, "Pairwise", 10, verbose);
+  uint32_t dims = static_cast<uint32_t>(data[0].size());
+  if (static_cast<size_t>(max_points_per_centroid) * k >= n) {
+    ::mvsic::lloyds::FloatLloydsBackend<metric> B(data, dims);
+    return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
   }
-  // // Convert centers_range to sequence of floats
-  // parlay::sequence<parlay::sequence<float>> final_centers(k);
-  // parlay::parallel_for(0, k, [&](size_t i) {
-  //   parlay::sequence<float> center(dims);
-  //   for (size_t j = 0; j < dims; j++) {
-  //     center[j] = centers[i][j];
-  //   }
-  //   final_centers[i] = std::move(center);
-  // });
-  // return final_centers;
-  return centers;
+  const size_t m = static_cast<size_t>(max_points_per_centroid) * k;
+  auto sampled_points = parlay::delayed_tabulate(m, [&](size_t i) {
+    size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+    return data[id];
+  });
+  ::mvsic::lloyds::FloatLloydsBackend<metric> B(sampled_points, dims);
+  return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
 }
 
 // Runs weighted kmeans on a subsample of size max_points_per_centroid*k.
@@ -56,47 +43,36 @@ auto kmeans_subsample(const parlay::sequence<parlay::sequence<float>>& data, uin
 // When max_points_per_centroid * k < n, both data and weights are subsampled
 // using the same random indices.
 template<bool metric>
-auto kmeans_weighted_subsample(const parlay::sequence<parlay::sequence<float>>& data,
-                               const parlay::sequence<float>& weights, uint32_t k,
-                               uint32_t max_points_per_centroid, bool verbose = false) {
-  using PointTy =
-      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
-  using Range = parlayANN::PointRange<PointTy>;
+::mvsic::lloyds::CenterSet kmeans_weighted_subsample(
+    const parlay::sequence<parlay::sequence<float>>& data,
+    const parlay::sequence<float>& weights, uint32_t k, uint32_t max_points_per_centroid,
+    bool verbose = false) {
   size_t n = data.size();
-  size_t dims = data[0].size();
+  uint32_t dims = static_cast<uint32_t>(data[0].size());
   if (weights.size() != n) {
     std::cerr << "[kmeans_weighted_subsample] Error: weights.size() != data.size()." << std::endl;
     abort();
   }
 
-  const char* seed_algo;
-  if constexpr (metric) {
-    seed_algo = "PrefixDoubling";
-  } else {
-    seed_algo = "UniformlyRandom";
-  }
+  const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
 
-  Range centers;
-  if (max_points_per_centroid * k >= n) {
-    Range data_range(data, dims);
-    centers =
-        kmeans_weighted<float, PointTy>(data_range, weights, k, seed_algo, "Pairwise", 10, verbose);
-  } else {
-    const size_t m = static_cast<size_t>(max_points_per_centroid) * static_cast<size_t>(k);
-    auto sampled_points = parlay::delayed_tabulate(m, [&](size_t i) {
-      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
-      return data[id];
-    });
-    parlay::sequence<float> sampled_weights(m);
-    parlay::parallel_for(0, m, [&](size_t i) {
-      size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
-      sampled_weights[i] = weights[id];
-    });
-    Range sampled_data_range(sampled_points, dims);
-    centers = kmeans_weighted<float, PointTy>(sampled_data_range, sampled_weights, k, seed_algo,
-                                              "Pairwise", 10, verbose);
+  if (static_cast<size_t>(max_points_per_centroid) * k >= n) {
+    ::mvsic::lloyds::FloatLloydsBackend<metric> B(data, dims);
+    return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose, &weights);
   }
-  return centers;
+  const size_t m = static_cast<size_t>(max_points_per_centroid) * k;
+  auto sampled_points = parlay::delayed_tabulate(m, [&](size_t i) {
+    size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+    return data[id];
+  });
+  parlay::sequence<float> sampled_weights(m);
+  parlay::parallel_for(0, m, [&](size_t i) {
+    size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+    sampled_weights[i] = weights[id];
+  });
+  ::mvsic::lloyds::FloatLloydsBackend<metric> B(sampled_points, dims);
+  return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose,
+                                        &sampled_weights);
 }
 
 // Runs kmeans on a subsample of size max_points_per_centroid*k

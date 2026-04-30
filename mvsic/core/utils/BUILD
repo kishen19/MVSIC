@@ -17,9 +17,26 @@ cc_library(
 # )
 
 cc_library(
+    name = "lloyds_kmeans",
+    hdrs = ["lloyds_kmeans.h"],
+    deps = [
+        "@eigen",
+        "@kmeans//lloyds:kmeans",
+        "@parlayann//algorithms/utils:euclidian_point",
+        "@parlayann//algorithms/utils:mips_point",
+        "@parlayann//algorithms/utils:point_range",
+        "@parlaylib//parlay:delayed_sequence",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
+        "@parlaylib//parlay:sequence",
+    ],
+)
+
+cc_library(
     name = "kmeans_util",
     hdrs = ["kmeans_util.h"],
     deps = [
+        ":lloyds_kmeans",
         "@kmeans//lloyds:kmeans",
         "@kmeans//lloyds_weighted:kmeans_weighted",
         "@parlayann//algorithms/utils:euclidian_point",
