@@ -124,6 +124,9 @@ class IndexMVIVFFlat : public Index<metric> {
       std::cout << "Building index with " << n << " points, num_clusters: " << num_clusters
                 << std::endl;
     }
+    // Propagate the build-time 8BTQ flag into MVClusteringConfig so the inner
+    // Lloyd's k-means picks the TQ8 backend in kmeans_subsample/weighted.
+    params.mvclus.build_with_8btq = params.build_with_8btq;
 
     t.start();
     if constexpr (kHasCenterQuant) center_model_.train(points);

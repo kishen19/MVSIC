@@ -20,6 +20,7 @@ cc_library(
     name = "lloyds_kmeans",
     hdrs = ["lloyds_kmeans.h"],
     deps = [
+        "//mvsic/core/quantization:turboquant_8bit_mv",
         "@eigen",
         "@kmeans//lloyds:kmeans",
         "@parlayann//algorithms/utils:euclidian_point",

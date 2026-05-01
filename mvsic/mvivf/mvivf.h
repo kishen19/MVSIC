@@ -309,6 +309,9 @@ class IndexMVIVF : public Index<metric> {
       root = nullptr;
     }
     root = new node_t();
+    // Propagate the build-time 8BTQ flag into MVClusteringConfig so the inner
+    // Lloyd's k-means picks the TQ8 backend in kmeans_subsample/weighted.
+    params.mvclus.build_with_8btq = params.build_with_8btq;
 #if MVIVF_BUILD_STATS
     reset_level_timings_();
 #endif

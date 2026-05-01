@@ -253,11 +253,13 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
             abort();
           }
           auto new_centers = kmeans_weighted_subsample<metric>(
-              data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+              data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
+              params.build_with_8btq);
           centers.set_point_cloud(i, new_centers);
         } else {
           auto new_centers = kmeans_subsample<metric>(
-              data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+              data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
+              params.build_with_8btq);
           centers.set_point_cloud(i, new_centers);
         }
       }
@@ -289,11 +291,13 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
               abort();
             }
             auto new_centers = kmeans_weighted_subsample<metric>(
-                data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+                data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
+                params.build_with_8btq);
             centers.set_point_cloud(i, new_centers);
           } else {
             auto new_centers = kmeans_subsample<metric>(
-                data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3);
+                data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
+                params.build_with_8btq);
             centers.set_point_cloud(i, new_centers);
           }
         }

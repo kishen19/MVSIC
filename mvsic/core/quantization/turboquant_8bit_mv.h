@@ -854,9 +854,13 @@ class Model {
     res.byte_sums.resize(res.num_queries, 0);
 
     const float* base_ptr = query_cloud.data();
+    // Hoisted scratch: rotate writes into the same buffer for every qi instead
+    // of heap-allocating a fresh `q_rot` vector per query.  For the build-top
+    // 8BTQ cache (500k clouds × ~22 vecs each on nq500k) this removes ~11M
+    // small heap allocs across the parallel encode.
+    std::vector<float> q_rot(encoder.padded_dim);
 
     for (size_t qi = 0; qi < res.num_queries; ++qi) {
-      std::vector<float> q_rot(encoder.padded_dim);
       encoder.rotator->rotate(base_ptr + qi * encoder.dim, q_rot.data());
 
       float sqr_norm = 0.0f;
@@ -1141,6 +1145,299 @@ class ManyToMany {
       }
     }
   }
+};
+
+// =========================================================================
+// SingleCloudArgmin: per-query argmin lane against ONE multi-vector DB cloud.
+//
+// Use case: inner Lloyd's k-means assignment.  Each query is a single rotated
+// vector (Quantized_Query_Point_Cloud with num_queries=1); the DB is k
+// centers packed into one Quantized_Point_Cloud_Set cloud of size k.  Unlike
+// ManyToMany (which iterates over n_clouds 1-vec DB "clouds" and wastes 15/16
+// of each panel), this kernel keeps every panel full: the n_panels = ceil(k/16)
+// panels of the single DB cloud are each 16 lanes of real centers (with the
+// last panel possibly partial), so VPDPBUSD throughput is fully utilized.
+//
+// The kernel returns, per query, the *lane index* in [0, k) of the closest
+// center.  This requires extending the standard chamfer epilogue to track an
+// argmin lane: alongside running_min we keep running_argmin_panel, the panel
+// index that produced each lane's current best.  Final reduction picks the
+// lane with the global min and combines (winner_lane, winner_panel) into the
+// flat center index.
+//
+// Mq=6 query-batched for panel reuse (load each panel once, dot it against 6
+// queries).  Padded lanes in the last partial panel are masked to +inf so they
+// can't beat real centers under IP (where their natural distance is 0).
+// =========================================================================
+template <bool Metric>
+class SingleCloudArgmin {
+ public:
+  // queries: N pointers to single-vector encoded queries (num_queries==1 each,
+  //          all sharing the same q_stride coming from the same Model).
+  // centers_db: a Quantized_Point_Cloud_Set with exactly one cloud of size k.
+  // out_argmin: array of N uint32_t; filled with the argmin lane in [0, k)
+  //             for each query.
+  static void Run(const std::vector<const Quantized_Query_Point_Cloud<Metric>*>& queries,
+                  const Quantized_Point_Cloud_Set<Metric>& centers_db,
+                  uint32_t* out_argmin) {
+    const size_t N = queries.size();
+    if (N == 0) return;
+    // Flatten the query-pointer array into the same layout RunFlat expects.
+    // This wrapper keeps the original Run callable while the flat path is
+    // faster (no per-query EncodedQuery struct churn).
+    const size_t q_stride = queries[0]->q_stride;
+    std::vector<int8_t> flat_data(N * q_stride);
+    std::vector<float> flat_nsf(N), flat_sqn(N);
+    std::vector<int32_t> flat_bsum(N);
+    for (size_t i = 0; i < N; ++i) {
+      const auto* q = queries[i];
+      std::memcpy(flat_data.data() + i * q_stride, q->flat_query_data.data(), q_stride);
+      flat_nsf[i] = q->norm_scaling_factors[0];
+      flat_sqn[i] = q->unquantized_squared_norms[0];
+      flat_bsum[i] = q->byte_sums[0];
+    }
+    RunFlat(flat_data.data(), flat_nsf.data(), flat_sqn.data(), flat_bsum.data(), q_stride, N,
+            centers_db, out_argmin);
+  }
+
+  // Faster entry: queries provided as flat parallel arrays (no per-query
+  // struct).  This is what TQ8LloydsBackend uses in the inner-kmeans hot path.
+  static void RunFlat(const int8_t* q_flat_data, const float* q_nsf, const float* q_sqn,
+                      const int32_t* q_bsum, size_t q_stride, size_t N,
+                      const Quantized_Point_Cloud_Set<Metric>& centers_db,
+                      uint32_t* out_argmin) {
+    if (N == 0) return;
+    if (centers_db.num_clouds() != 1) {
+      std::cerr << "[SingleCloudArgmin] expected exactly 1 DB cloud, got "
+                << centers_db.num_clouds() << std::endl;
+      std::abort();
+    }
+    const size_t k = centers_db.cloud_sizes[0];
+    if (k == 0) {
+      std::memset(out_argmin, 0, N * sizeof(uint32_t));
+      return;
+    }
+
+    const size_t panel_byte_off = centers_db.panel_offsets[0];
+    const size_t pt_off = centers_db.point_offsets[0];
+    const size_t n_panels =
+        (centers_db.panel_offsets[1] - panel_byte_off) / centers_db.panel_bytes;
+    const uint8_t* panel_data = centers_db.panel_data.data() + panel_byte_off;
+    const float* db_norms = centers_db.norm_scaling_factors.data() + pt_off;
+    const float* db_sqn = centers_db.unquantized_squared_norms.data() + pt_off;
+    const size_t total_tiles = centers_db.total_tiles;
+    const size_t panel_bytes = centers_db.panel_bytes;
+
+    const size_t valid_in_last = k - (n_panels - 1) * internal::kVnniPoints;
+    const uint16_t last_panel_valid_mask =
+        (valid_in_last == internal::kVnniPoints)
+            ? static_cast<uint16_t>(0xFFFFu)
+            : static_cast<uint16_t>((1u << valid_in_last) - 1u);
+
+    constexpr size_t QBlock = 64;
+    const size_t num_blocks = (N + QBlock - 1) / QBlock;
+    parlay::parallel_for(0, num_blocks, [&](size_t bi) {
+      const size_t q_start = bi * QBlock;
+      const size_t q_end = std::min(q_start + QBlock, N);
+      ProcessRangeFlat_(q_flat_data, q_nsf, q_sqn, q_bsum, q_stride, panel_data, db_norms,
+                        db_sqn, total_tiles, panel_bytes, n_panels, last_panel_valid_mask,
+                        valid_in_last, q_start, q_end, out_argmin);
+    });
+  }
+
+ private:
+  static void ProcessRangeFlat_(const int8_t* q_flat_data, const float* q_nsf,
+                                const float* q_sqn, const int32_t* q_bsum, size_t q_stride,
+                                const uint8_t* panel_data, const float* db_norms,
+                                const float* db_sqn, size_t total_tiles, size_t panel_bytes,
+                                size_t n_panels, uint16_t last_panel_valid_mask,
+                                size_t valid_in_last, size_t q_start, size_t q_end,
+                                uint32_t* out_argmin) {
+#ifdef __AVX512F__
+    constexpr size_t Mq = internal::kVnniMq;  // = 6
+
+    size_t qi = q_start;
+    for (; qi + Mq <= q_end; qi += Mq) {
+      const int8_t* q_ptrs[Mq];
+      float q_nsfs[Mq];
+      float q_sqns[Mq];
+      int32_t q_bsums[Mq];
+      for (size_t q = 0; q < Mq; ++q) {
+        q_ptrs[q] = q_flat_data + (qi + q) * q_stride;
+        q_nsfs[q] = q_nsf[qi + q];
+        q_sqns[q] = q_sqn[qi + q];
+        q_bsums[q] = q_bsum[qi + q];
+      }
+
+      __m512 mins[Mq];
+      __m512i argmin_panels[Mq];
+      for (size_t q = 0; q < Mq; ++q) {
+        mins[q] = _mm512_set1_ps(std::numeric_limits<float>::max());
+        argmin_panels[q] = _mm512_setzero_si512();
+      }
+
+      for (size_t p = 0; p < n_panels; ++p) {
+        // 16-lane VPDPBUSD accumulator per query.
+        __m512i accs[Mq];
+        for (size_t q = 0; q < Mq; ++q) accs[q] = _mm512_setzero_si512();
+        for (size_t t = 0; t < total_tiles; ++t) {
+          const __m512i b = _mm512_loadu_si512(
+              reinterpret_cast<const __m512i*>(panel_data + p * panel_bytes + t * (internal::kVnniPoints * 4)));
+          for (size_t q = 0; q < Mq; ++q) {
+            const __m512i qv =
+                _mm512_set1_epi32(reinterpret_cast<const int32_t*>(q_ptrs[q])[t]);
+            accs[q] = internal::tq8_dpbusd(accs[q], b, qv);
+          }
+        }
+
+        const __m512 db_norm_v = _mm512_loadu_ps(db_norms + p * internal::kVnniPoints);
+        __m512 db_sqn_v;
+        if constexpr (Metric) {
+          db_sqn_v = _mm512_loadu_ps(db_sqn + p * internal::kVnniPoints);
+        }
+
+        const bool need_mask = (p == n_panels - 1) && (valid_in_last < internal::kVnniPoints);
+        const __m512i p_vec = _mm512_set1_epi32(static_cast<int>(p));
+
+        for (size_t q = 0; q < Mq; ++q) {
+          // Bias correction: panel bytes are stored as uint8 = int8 ^ 0x80, so each
+          // tile dot product picks up a 128 * sum_of_query_bytes offset to undo.
+          const __m512i correction = _mm512_set1_epi32(128 * q_bsums[q]);
+          const __m512i acc_corr = _mm512_sub_epi32(accs[q], correction);
+
+          const __m512 fdot = _mm512_cvtepi32_ps(acc_corr);
+          __m512 neg_dot = _mm512_mul_ps(fdot, db_norm_v);
+          neg_dot = _mm512_mul_ps(neg_dot, _mm512_set1_ps(q_nsfs[q]));
+          neg_dot = _mm512_sub_ps(_mm512_setzero_ps(), neg_dot);
+
+          __m512 dist;
+          if constexpr (Metric) {
+            dist = _mm512_add_ps(
+                db_sqn_v,
+                _mm512_add_ps(_mm512_add_ps(neg_dot, neg_dot), _mm512_set1_ps(q_sqns[q])));
+          } else {
+            // IP: padded lanes have db_norm=0 so neg_dot is 0, which can falsely tie
+            // the argmin against centers with positive distance. Mask handles this.
+            dist = neg_dot;
+          }
+
+          if (need_mask) {
+            dist = _mm512_mask_blend_ps(last_panel_valid_mask,
+                                        _mm512_set1_ps(std::numeric_limits<float>::max()), dist);
+          }
+
+          // Keep both the running per-lane min and the panel index that produced it.
+          const __mmask16 better = _mm512_cmp_ps_mask(dist, mins[q], _CMP_LT_OQ);
+          mins[q] = _mm512_mask_blend_ps(better, mins[q], dist);
+          argmin_panels[q] = _mm512_mask_blend_epi32(better, argmin_panels[q], p_vec);
+        }
+      }
+
+      for (size_t q = 0; q < Mq; ++q) {
+        out_argmin[qi + q] = ExtractArgmin_(mins[q], argmin_panels[q]);
+      }
+    }
+
+    // Tail: < Mq queries left in this block.
+    for (; qi < q_end; ++qi) {
+      const int8_t* qp = q_flat_data + qi * q_stride;
+      const float q_nsf_v = q_nsf[qi];
+      const float q_sqn_v = q_sqn[qi];
+      const int32_t q_bsum_v = q_bsum[qi];
+
+      __m512 running_min = _mm512_set1_ps(std::numeric_limits<float>::max());
+      __m512i running_argmin_panel = _mm512_setzero_si512();
+
+      for (size_t p = 0; p < n_panels; ++p) {
+        __m512i acc = _mm512_setzero_si512();
+        for (size_t t = 0; t < total_tiles; ++t) {
+          const __m512i b = _mm512_loadu_si512(
+              reinterpret_cast<const __m512i*>(panel_data + p * panel_bytes + t * (internal::kVnniPoints * 4)));
+          const __m512i qv = _mm512_set1_epi32(reinterpret_cast<const int32_t*>(qp)[t]);
+          acc = internal::tq8_dpbusd(acc, b, qv);
+        }
+        const __m512i correction = _mm512_set1_epi32(128 * q_bsum_v);
+        acc = _mm512_sub_epi32(acc, correction);
+
+        const __m512 fdot = _mm512_cvtepi32_ps(acc);
+        const __m512 db_norm_v = _mm512_loadu_ps(db_norms + p * internal::kVnniPoints);
+        __m512 neg_dot = _mm512_mul_ps(fdot, db_norm_v);
+        neg_dot = _mm512_mul_ps(neg_dot, _mm512_set1_ps(q_nsf_v));
+        neg_dot = _mm512_sub_ps(_mm512_setzero_ps(), neg_dot);
+
+        __m512 dist;
+        if constexpr (Metric) {
+          const __m512 db_sqn_v = _mm512_loadu_ps(db_sqn + p * internal::kVnniPoints);
+          dist = _mm512_add_ps(
+              db_sqn_v, _mm512_add_ps(_mm512_add_ps(neg_dot, neg_dot), _mm512_set1_ps(q_sqn_v)));
+        } else {
+          dist = neg_dot;
+        }
+        if (p == n_panels - 1 && valid_in_last < internal::kVnniPoints) {
+          dist = _mm512_mask_blend_ps(last_panel_valid_mask,
+                                      _mm512_set1_ps(std::numeric_limits<float>::max()), dist);
+        }
+        const __mmask16 better = _mm512_cmp_ps_mask(dist, running_min, _CMP_LT_OQ);
+        running_min = _mm512_mask_blend_ps(better, running_min, dist);
+        running_argmin_panel = _mm512_mask_blend_epi32(better, running_argmin_panel,
+                                                       _mm512_set1_epi32(static_cast<int>(p)));
+      }
+      out_argmin[qi] = ExtractArgmin_(running_min, running_argmin_panel);
+    }
+#else
+    // Scalar fallback.
+    for (size_t qi = q_start; qi < q_end; ++qi) {
+      const int8_t* qp = q_flat_data + qi * q_stride;
+      const float q_nsf_v = q_nsf[qi];
+      const float q_sqn_v = q_sqn[qi];
+      const int32_t q_bsum_v = q_bsum[qi];
+
+      uint32_t best_lane = 0;
+      float best_dist = std::numeric_limits<float>::max();
+      const size_t k_total = (n_panels - 1) * internal::kVnniPoints + valid_in_last;
+      for (size_t i = 0; i < k_total; ++i) {
+        const size_t panel = i / internal::kVnniPoints;
+        const size_t lane = i % internal::kVnniPoints;
+        const uint8_t* base = panel_data + panel * panel_bytes;
+        constexpr size_t TileN = internal::kVnniPoints * 4;
+        int32_t dot = 0;
+        for (size_t t = 0; t < total_tiles; ++t) {
+          const uint8_t* tile = base + t * TileN + lane * 4;
+          for (size_t b = 0; b < 4; ++b) {
+            dot += static_cast<int32_t>(tile[b]) * static_cast<int32_t>(qp[t * 4 + b]);
+          }
+        }
+        dot -= 128 * q_bsum_v;
+        const float neg_dot =
+            -static_cast<float>(dot) * db_norms[panel * internal::kVnniPoints + lane] * q_nsf_v;
+        float d;
+        if constexpr (Metric) {
+          d = db_sqn[panel * internal::kVnniPoints + lane] + 2.0f * neg_dot + q_sqn_v;
+        } else {
+          d = neg_dot;
+        }
+        if (d < best_dist) {
+          best_dist = d;
+          best_lane = static_cast<uint32_t>(i);
+        }
+      }
+      out_argmin[qi] = best_lane;
+    }
+#endif
+  }
+
+#ifdef __AVX512F__
+  // Combine running_min[16] + running_argmin_panel[16] into a flat lane index
+  // in [0, k).  Picks the lowest set bit on ties (deterministic).
+  static inline uint32_t ExtractArgmin_(__m512 mins, __m512i argmin_panels) {
+    const float gmin = _mm512_reduce_min_ps(mins);
+    const __mmask16 winner = _mm512_cmp_ps_mask(mins, _mm512_set1_ps(gmin), _CMP_EQ_OQ);
+    const uint32_t winner_lane = static_cast<uint32_t>(__builtin_ctz(static_cast<uint32_t>(winner)));
+    alignas(64) uint32_t panels[internal::kVnniPoints];
+    _mm512_store_si512(reinterpret_cast<__m512i*>(panels), argmin_panels);
+    return panels[winner_lane] * static_cast<uint32_t>(internal::kVnniPoints) + winner_lane;
+  }
+#endif
 };
 
 }  // namespace turboquant_8bit_mv

@@ -20,12 +20,16 @@ namespace mvsic {
 template<bool metric>
 ::mvsic::lloyds::CenterSet kmeans_subsample(
     const parlay::sequence<parlay::sequence<float>>& data, uint32_t k,
-    uint32_t max_points_per_centroid, bool verbose = false) {
+    uint32_t max_points_per_centroid, bool verbose = false, bool use_tq8 = false) {
   const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
 
   size_t n = data.size();
   uint32_t dims = static_cast<uint32_t>(data[0].size());
   if (static_cast<size_t>(max_points_per_centroid) * k >= n) {
+    if (use_tq8) {
+      ::mvsic::lloyds::TQ8LloydsBackend<metric> B(data, dims);
+      return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
+    }
     ::mvsic::lloyds::FloatLloydsBackend<metric> B(data, dims);
     return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
   }
@@ -34,6 +38,10 @@ template<bool metric>
     size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
     return data[id];
   });
+  if (use_tq8) {
+    ::mvsic::lloyds::TQ8LloydsBackend<metric> B(sampled_points, dims);
+    return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
+  }
   ::mvsic::lloyds::FloatLloydsBackend<metric> B(sampled_points, dims);
   return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
 }
@@ -46,7 +54,7 @@ template<bool metric>
 ::mvsic::lloyds::CenterSet kmeans_weighted_subsample(
     const parlay::sequence<parlay::sequence<float>>& data,
     const parlay::sequence<float>& weights, uint32_t k, uint32_t max_points_per_centroid,
-    bool verbose = false) {
+    bool verbose = false, bool use_tq8 = false) {
   size_t n = data.size();
   uint32_t dims = static_cast<uint32_t>(data[0].size());
   if (weights.size() != n) {
@@ -57,6 +65,10 @@ template<bool metric>
   const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
 
   if (static_cast<size_t>(max_points_per_centroid) * k >= n) {
+    if (use_tq8) {
+      ::mvsic::lloyds::TQ8LloydsBackend<metric> B(data, dims);
+      return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose, &weights);
+    }
     ::mvsic::lloyds::FloatLloydsBackend<metric> B(data, dims);
     return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose, &weights);
   }
@@ -70,6 +82,11 @@ template<bool metric>
     size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
     sampled_weights[i] = weights[id];
   });
+  if (use_tq8) {
+    ::mvsic::lloyds::TQ8LloydsBackend<metric> B(sampled_points, dims);
+    return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose,
+                                          &sampled_weights);
+  }
   ::mvsic::lloyds::FloatLloydsBackend<metric> B(sampled_points, dims);
   return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose,
                                         &sampled_weights);

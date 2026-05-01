@@ -223,6 +223,9 @@ class IndexMVIVFSpill : public Index<metric> {
   void build(const PointCloudSet<ChPoint>& points) override {
     parlay::internal::timer t;
     root = new node_t();
+    // Propagate the build-time 8BTQ flag into MVClusteringConfig so the inner
+    // Lloyd's k-means picks the TQ8 backend in kmeans_subsample/weighted.
+    params.mvclus.build_with_8btq = params.build_with_8btq;
 
     t.start();
     if constexpr (kHasCenterQuant) center_model_.train(points);

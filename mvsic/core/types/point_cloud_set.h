@@ -306,13 +306,15 @@ PointCloudSet<ChPoint>::PointCloudSet(const seq<ChPoint, x...>& point_clouds, ui
       static_cast<float*>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
   // values = std::shared_ptr<float[]>(
   //     static_cast<float *>(std::aligned_alloc(64, total_coords * sizeof(float))), std::free);
+  // One memcpy per cloud.  Replaces a nested parallel_for whose inner range
+  // (point_clouds[i].size() ~= 22 for typical multi-vec datasets) was too
+  // small to amortize parlay's per-task overhead — the build's d=0 split
+  // step (which constructs hundreds of child PointCloudSets) ate huge
+  // amounts of CPU shuffling these tiny tasks instead of just copying.
   parlay::parallel_for(0, n, [&](size_t i) {
-    size_t offset = offsets[i];
-    parlay::parallel_for(0, point_clouds[i].size(), [&](size_t j) {
-      for (size_t t = 0; t < dims; ++t) {
-        values[offset + j * dims + t] = point_clouds[i][j][t];
-      }
-    });
+    auto pc = point_clouds[i];
+    std::memcpy(values.get() + offsets[i], pc.data(),
+                static_cast<size_t>(pc.size()) * dims * sizeof(float));
   });
   ids = parlay::sequence<uint32_t>::from_function(
       n, [&](size_t i) { return point_clouds[i].get_id(); });
@@ -331,15 +333,19 @@ PointCloudSet<ChPoint>::PointCloudSet(const seqA<seqB<seqC<float>>>& point_cloud
   size_t total_coords = offsets[n];
   values = std::shared_ptr<float[]>(
       static_cast<float*>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
-  // values = std::shared_ptr<float[]>(
-  //     static_cast<float *>(std::aligned_alloc(64, total_coords * sizeof(float))), std::free);
+  // The seqA<seqB<seqC<float>>> overload doesn't expose a .data() on the
+  // outer point clouds (each is itself a sequence of float-sequences), so we
+  // keep the explicit per-coordinate copy here.  This path is used for
+  // sampled_points-style delayed views; the multi-PC seq<ChPoint> overload
+  // above is the hot one during recursive_build_.
   parlay::parallel_for(0, n, [&](size_t i) {
     size_t offset = offsets[i];
-    parlay::parallel_for(0, point_clouds[i].size(), [&](size_t j) {
+    const size_t cloud_size = point_clouds[i].size();
+    for (size_t j = 0; j < cloud_size; ++j) {
       for (size_t t = 0; t < dims; ++t) {
         values[offset + j * dims + t] = point_clouds[i][j][t];
       }
-    });
+    }
   });
 }
 

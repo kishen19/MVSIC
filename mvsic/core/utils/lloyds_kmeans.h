@@ -19,12 +19,17 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "algorithms/utils/euclidian_point.h"
 #include "algorithms/utils/mips_point.h"
 #include "algorithms/utils/point_range.h"
+#include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "parlay/delayed_sequence.h"
 #include "parlay/parallel.h"
 #include "parlay/primitives.h"
@@ -313,6 +318,369 @@ class FloatLloydsBackend {
   }
 
   Range range_;
+};
+
+// ---------------------------------------------------------------------------
+// TQ8LloydsBackend: same surface as FloatLloydsBackend, but the inner
+// assignment runs through the int8 TurboQuant VPDPBUSD panel kernel from
+// `turboquant_8bit_mv.h`.  Centers stay float; only the n×k pairwise
+// distance step uses int8.
+//
+// At construction we:
+//   * keep a `parlayANN::PointRange<float>` for seeding, copy_centers_by_ids,
+//     compute_means, and cost (all of which want float random access);
+//   * train the 8BTQ Hadamard rotator (`Model<metric>::train`) on the
+//     point dimension;
+//   * pre-encode every input row as a 1-vector EncodedQuery
+//     (Quantized_Query_Point_Cloud<metric>) — this happens once and is
+//     reused across every Lloyd iteration.
+//
+// At each `assign` we encode the float CenterSet as a
+// Quantized_Point_Cloud_Set (k 1-vector clouds) and call
+// `ManyToMany::TopKIntoUninitialized` with k=1, exactly mirroring
+// `MVClustering8BTQ::train`'s outer assignment step.
+// ---------------------------------------------------------------------------
+template <bool metric>
+class TQ8LloydsBackend {
+ public:
+  using PointTy =
+      std::conditional_t<metric, parlayANN::Euclidian_Point<float>, parlayANN::Mips_Point<float>>;
+  using Range = parlayANN::PointRange<PointTy>;
+  using QModel = ::mvsic::turboquant_8bit_mv::Model<metric>;
+  using EncSet = typename QModel::EncodedSet;
+  using EncQuery = typename QModel::EncodedQuery;
+
+  TQ8LloydsBackend(const parlay::sequence<parlay::sequence<float>>& data, uint32_t d)
+      : d_(d), model_(&GetSharedModel_(d)) {
+    n_ = data.size();
+    data_.resize(static_cast<size_t>(n_) * d_);
+    parlay::parallel_for(0, n_, [&](size_t i) {
+      float* dst = data_.data() + i * d_;
+      for (uint32_t t = 0; t < d_; ++t) dst[t] = data[i][t];
+    });
+    build_encoded_();
+  }
+
+  template <typename Seq>
+  TQ8LloydsBackend(const Seq& data, uint32_t d) : d_(d), model_(&GetSharedModel_(d)) {
+    n_ = data.size();
+    data_.resize(static_cast<size_t>(n_) * d_);
+    parlay::parallel_for(0, n_, [&](size_t i) {
+      auto src = data[i];
+      float* dst = data_.data() + i * d_;
+      for (uint32_t t = 0; t < d_; ++t) dst[t] = src[t];
+    });
+    build_encoded_();
+  }
+
+  size_t size() const { return n_; }
+  uint32_t dims() const { return d_; }
+  static constexpr bool is_metric() { return metric; }
+
+  parlay::sequence<uint32_t> seed_uniform_random(uint32_t k) {
+    // Inline UniformlyRandom: the parlayANN function only reads points.size().
+    parlay::sequence<uint32_t> centers(k);
+    parlay::parallel_for(0, k, [&](size_t i) {
+      centers[i] = parlay::hash32(static_cast<uint32_t>(i)) % n_;
+    });
+    return centers;
+  }
+  parlay::sequence<uint32_t> seed_prefix_doubling(uint32_t k) {
+    // PrefixDoubling computes distances between points, so we need a
+    // PointRange.  Lazily build one only when L2 builds need it.
+    auto pr_view = MakeRangeView_();
+    Range range(pr_view, d_);
+    return PrefixDoubling<float>(range, k);
+  }
+
+  CenterSet copy_centers_by_ids(const parlay::sequence<uint32_t>& ids) const {
+    CenterSet out(static_cast<uint32_t>(ids.size()), d_);
+    parlay::parallel_for(0, ids.size(), [&](size_t i) {
+      const float* src = data_.data() + static_cast<size_t>(ids[i]) * d_;
+      float* dst = out[i];
+      std::memcpy(dst, src, d_ * sizeof(float));
+    });
+    return out;
+  }
+
+  // Encode `centers` as a single multi-vector DB cloud of size k and run the
+  // SingleCloudArgmin kernel: one VPDPBUSD panel processes 16 real centers,
+  // so SIMD throughput is fully utilized (vs the 1/16-fill we'd get by making
+  // each center its own 1-vec cloud).  The kernel returns argmin lane in
+  // [0, k) per query, which we write directly into cluster_ids.
+  void assign(const CenterSet& centers, parlay::sequence<uint32_t>& cluster_ids) {
+    cluster_ids.resize(n_);
+    if (n_ == 0 || centers.size() == 0) return;
+
+    SingleCloudCenterSetView center_view(centers);
+    EncSet center_db = model_->encode(center_view);
+
+    ::mvsic::turboquant_8bit_mv::SingleCloudArgmin<metric>::RunFlat(
+        enc_flat_data_.data(), enc_flat_nsf_.data(), enc_flat_sqn_.data(),
+        enc_flat_bsum_.data(), enc_q_stride_, n_, center_db, cluster_ids.data());
+  }
+
+  CenterSet compute_means(parlay::sequence<uint32_t>& cluster_ids, uint32_t k) {
+    return compute_means_impl_(cluster_ids, k, /*weights=*/nullptr);
+  }
+
+  CenterSet compute_means_weighted(parlay::sequence<uint32_t>& cluster_ids,
+                                   const parlay::sequence<float>& weights, uint32_t k) {
+    return compute_means_impl_(cluster_ids, k, &weights);
+  }
+
+  // Cost in float against the float view -- we want exact distances here so
+  // the printed cost is comparable to FloatLloydsBackend's.
+  float cost(const CenterSet& centers,
+             const parlay::sequence<uint32_t>& cluster_ids) const {
+    auto distances = parlay::delayed_seq<float>(n_, [&](size_t i) {
+      const float* p = data_.data() + i * d_;
+      const float* c = centers[cluster_ids[i]];
+      float s = 0.0f;
+      if constexpr (metric) {
+        for (uint32_t t = 0; t < d_; ++t) {
+          const float v = p[t] - c[t];
+          s += v * v;
+        }
+      } else {
+        for (uint32_t t = 0; t < d_; ++t) s += p[t] * c[t];
+        s = -s;
+      }
+      return s;
+    });
+    return parlay::reduce(distances);
+  }
+
+ private:
+  // PCSet-shaped view of a CenterSet as exactly ONE multi-vector cloud of
+  // size k (not k 1-vec clouds).  This packing is what lets SingleCloudArgmin
+  // fill every panel with 16 real centers; the previous "k 1-vec clouds"
+  // layout left 15/16 of each panel as neutral padding and starved the
+  // VPDPBUSD throughput.
+  class SingleCloudCenterSetView {
+   public:
+    explicit SingleCloudCenterSetView(const CenterSet& c)
+        : values_(c.data()),
+          k_(static_cast<uint32_t>(c.size())),
+          d_(c.get_dims()) {
+      // get_offsets() advertises a single cloud spanning all k*d floats, so
+      // Model::encode walks it as one cloud of n_vecs = k.
+      offsets_ = parlay::sequence<size_t>{0, static_cast<size_t>(k_) * static_cast<size_t>(d_)};
+    }
+
+    uint32_t get_dims() const noexcept { return d_; }
+    auto get_offsets() const noexcept {
+      return parlay::make_slice(offsets_.begin(), offsets_.end());
+    }
+    auto get_ids() const noexcept {
+      return parlay::make_slice(empty_ids_.begin(), empty_ids_.end());
+    }
+    const float* data() const noexcept { return values_; }
+
+   private:
+    const float* values_;
+    uint32_t k_;
+    uint32_t d_;
+    parlay::sequence<size_t> offsets_;
+    parlay::sequence<uint32_t> empty_ids_;
+  };
+
+  // Trivial shim used to feed `Model::train` -- it only consumes get_dims().
+  struct TrainShim {
+    uint32_t d;
+    uint32_t get_dims() const noexcept { return d; }
+  };
+
+  // Process-wide cached model per (metric, dim).  The Hadamard rotator's
+  // weights only need to be self-consistent within a single TQ8LloydsBackend
+  // instance (so the cached per-row queries match the per-iteration center
+  // encoding); they don't need to differ across calls.  Sharing replaces tens
+  // of thousands of `choose_rotator` calls (each doing a `random_device`
+  // syscall + mt19937 seed + `4*padded_dim/8` random bytes) with one.
+  static const QModel& GetSharedModel_(uint32_t d) {
+    static std::mutex mu;
+    static std::map<uint32_t, std::unique_ptr<QModel>> cache;
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = cache.find(d);
+    if (it == cache.end()) {
+      auto m = std::make_unique<QModel>();
+      TrainShim shim{d};
+      m->train(shim);
+      it = cache.emplace(d, std::move(m)).first;
+    }
+    return *it->second;
+  }
+
+  // Encode every input row inline into flat parallel arrays (one int8 stripe
+  // per row + one float/int32 per row), with a per-worker scratch q_rot
+  // buffer.  Avoids the n separate Quantized_Query_Point_Cloud structs that
+  // `Model::quantize_query` would allocate (each with 4 internal vectors)
+  // and the per-row q_rot heap alloc inside that function.
+  void build_encoded_() {
+    const size_t n = n_;
+    const size_t padded_dim = model_->encoder.padded_dim;
+    enc_q_stride_ = (padded_dim + 3) & ~3;
+
+    enc_flat_data_.assign(n * enc_q_stride_, 0);
+    enc_flat_nsf_.assign(n, 0.0f);
+    enc_flat_sqn_.assign(n, 0.0f);
+    enc_flat_bsum_.assign(n, 0);
+
+    if (n == 0) return;
+
+    const auto* rotator = model_->encoder.rotator.get();
+    const size_t num_workers = parlay::num_workers();
+    // Per-worker scratch row for the rotated values.  parlay::parallel_for
+    // may schedule any task on any worker, but only one task at a time per
+    // worker, so workspaces[parlay::worker_id()] is always exclusively held.
+    std::vector<std::vector<float>> workspaces(num_workers,
+                                               std::vector<float>(padded_dim));
+
+    parlay::parallel_for(0, n, [&](size_t i) {
+      const float* p = data_.data() + i * d_;
+      auto& ws = workspaces[parlay::worker_id()];
+      rotator->rotate(p, ws.data());
+
+      float sqr_norm = 0.0f;
+      float max_value = 0.0f;
+      for (size_t t = 0; t < padded_dim; ++t) {
+        const float v = ws[t];
+        sqr_norm += v * v;
+        const float a = std::abs(v);
+        if (a > max_value) max_value = a;
+      }
+      if (sqr_norm == 0.0f || !std::isfinite(sqr_norm) || max_value == 0.0f) {
+        // enc_flat_* already zero-initialized; nsf/sqn/bsum stay at 0.
+        return;
+      }
+
+      const float norm = std::sqrt(sqr_norm);
+      const float sf = 127.0f / max_value;
+      int64_t quant_norm = 0;
+      int32_t byte_sum = 0;
+      int8_t* q_out = enc_flat_data_.data() + i * enc_q_stride_;
+      for (size_t t = 0; t < padded_dim; ++t) {
+        const int snapped = static_cast<int>(std::lround(ws[t] * sf));
+        const int8_t iv =
+            static_cast<int8_t>(snapped < -127 ? -127 : (snapped > 127 ? 127 : snapped));
+        q_out[t] = iv;
+        quant_norm += static_cast<int64_t>(iv) * static_cast<int64_t>(iv);
+        byte_sum += iv;
+      }
+      enc_flat_nsf_[i] =
+          quant_norm > 0 ? norm / std::sqrt(static_cast<float>(quant_norm)) : 0.0f;
+      enc_flat_sqn_[i] = sqr_norm;
+      enc_flat_bsum_[i] = byte_sum;
+    });
+  }
+
+  // Same per-cluster reduction as FloatLloydsBackend::compute_means_impl_.
+  // We keep two separate statics for the empty-cluster PRNG so the TQ8
+  // backend's sequence is independent of the float backend's (per
+  // next_steps.md).
+  CenterSet compute_means_impl_(parlay::sequence<uint32_t>& cluster_ids, uint32_t k,
+                                const parlay::sequence<float>* weights) {
+    const size_t n = n_;
+
+    auto pairs = parlay::sequence<std::pair<uint32_t, uint32_t>>::from_function(
+        n, [&](size_t i) { return std::make_pair(cluster_ids[i], static_cast<uint32_t>(i)); });
+    auto grouped = parlay::group_by_index(pairs, k);
+
+    CenterSet out(k, d_);
+    static uint32_t empty_seed_unweighted = 0;
+    static uint32_t empty_seed_weighted = 0;
+    uint32_t empty_seed_base =
+        (weights == nullptr) ? empty_seed_unweighted : empty_seed_weighted;
+
+    parlay::parallel_for(0, k, [&](size_t cid) {
+      const auto& g = grouped[cid];
+      float* out_row = out[cid];
+      if (g.size() > 0) {
+        // Cache-friendly accumulation: one streaming pass through each
+        // assigned point's d floats, instead of d separate strided reductions.
+        std::memset(out_row, 0, d_ * sizeof(float));
+        if (weights != nullptr) {
+          float total_w = 0.0f;
+          for (size_t j = 0; j < g.size(); ++j) {
+            const uint32_t pi = g[j];
+            const float w = (*weights)[pi];
+            total_w += w;
+            const float* p = data_.data() + static_cast<size_t>(pi) * d_;
+            for (uint32_t t = 0; t < d_; ++t) {
+              out_row[t] += w * p[t];
+            }
+          }
+          if (total_w == 0.0f) total_w = 1.0f;
+          const float inv_w = 1.0f / total_w;
+          for (uint32_t t = 0; t < d_; ++t) out_row[t] *= inv_w;
+        } else {
+          for (size_t j = 0; j < g.size(); ++j) {
+            const float* p = data_.data() + static_cast<size_t>(g[j]) * d_;
+            for (uint32_t t = 0; t < d_; ++t) {
+              out_row[t] += p[t];
+            }
+          }
+          if constexpr (metric) {
+            const float inv_n = 1.0f / static_cast<float>(g.size());
+            for (uint32_t t = 0; t < d_; ++t) out_row[t] *= inv_n;
+          }
+        }
+        if constexpr (!metric) {
+          double sum_sqrs = 0.0;
+          for (uint32_t t = 0; t < d_; ++t) {
+            double v = out_row[t];
+            sum_sqrs += v * v;
+          }
+          if (sum_sqrs != 0.0) {
+            float inv = 1.0f / static_cast<float>(std::sqrt(sum_sqrs));
+            for (uint32_t t = 0; t < d_; ++t) out_row[t] *= inv;
+          }
+        }
+      } else {
+        uint32_t id = parlay::hash32(empty_seed_base + static_cast<uint32_t>(cid)) % n;
+        const float* p = data_.data() + static_cast<size_t>(id) * d_;
+        std::memcpy(out_row, p, d_ * sizeof(float));
+        cluster_ids[id] = static_cast<uint32_t>(cid);
+      }
+    });
+    if (weights == nullptr) {
+      empty_seed_unweighted += k;
+    } else {
+      empty_seed_weighted += k;
+    }
+    return out;
+  }
+
+  // Adapter that lets parlayANN::PointRange<...> consume our flat float buffer
+  // when seed_prefix_doubling needs it (L2 only).  Avoids paying the
+  // PointRange aligned_alloc + madvise on the unweighted IP path.
+  struct RangeView {
+    const float* base;
+    size_t n;
+    uint32_t d;
+    size_t size() const { return n; }
+    parlay::slice<const float*, const float*> operator[](size_t i) const {
+      return parlay::make_slice(base + i * d, base + (i + 1) * d);
+    }
+  };
+  RangeView MakeRangeView_() const { return RangeView{data_.data(), n_, d_}; }
+
+  // Flat row-major float buffer (n * d).  Replaces parlayANN::PointRange<float>
+  // (which aligned_alloc'd 2MB and madvise'd huge pages per backend
+  // construction — costly when we make tens of thousands of inner-kmeans
+  // backends per build).
+  parlay::sequence<float> data_;
+  size_t n_ = 0;
+  uint32_t d_ = 0;
+  // Non-owning pointer into the static (metric, dim) -> Model cache.
+  const QModel* model_ = nullptr;
+  // Flat per-row encoded query state.  Replaces n separate
+  // Quantized_Query_Point_Cloud structs.
+  size_t enc_q_stride_ = 0;
+  parlay::sequence<int8_t> enc_flat_data_;
+  parlay::sequence<float> enc_flat_nsf_;
+  parlay::sequence<float> enc_flat_sqn_;
+  parlay::sequence<int32_t> enc_flat_bsum_;
 };
 
 }  // namespace mvsic::lloyds
