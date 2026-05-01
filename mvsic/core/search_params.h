@@ -140,6 +140,17 @@ struct SearchParams {
     return params;
   }
 
+  // flat (brute-force) search params
+  static SearchParams flat(size_t k, size_t num_rerank = 0) {
+    SearchParams params;
+    params.method = "flat";
+    params.k = k;
+    assert(k > 0);
+    params.num_rerank = num_rerank;
+    assert(num_rerank == 0 || num_rerank >= k);
+    return params;
+  }
+
   SearchParams() = default;
 };
 

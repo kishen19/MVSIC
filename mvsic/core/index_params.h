@@ -298,6 +298,18 @@ struct IndexParams {
     return params;
   }
 
+  static IndexParams flat(bool compress_input = false, uint32_t verbose = 0, uint32_t pq_method = 0,
+                          uint32_t block_size = 8, uint32_t num_clusters_per_block = 16,
+                          uint32_t num_points_per_cluster = 100, uint32_t rabitq_bits = 4) {
+    IndexParams params;
+    params.method = "flat";
+    params.compress_input = compress_input;
+    params.verbose = verbose;
+    params.pq = {static_cast<QuantizerType>(pq_method), block_size, num_clusters_per_block,
+                 num_points_per_cluster, rabitq_bits};
+    return params;
+  }
+
   //  private:
   IndexParams() = default;
 };

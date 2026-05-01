@@ -229,7 +229,8 @@ CompressedPointCloud<ChPoint> ball_carving(const ChPoint& query, float threshold
 // Agglomerative clustering using Ward linkage.
 //   Ward distance: d_W(i,j) = n_i*n_j/(n_i+n_j) * ||c_i - c_j||^2
 //   Merge the closest pair while d_W <= threshold, then align to batch_align.
-//   Centroids are always the weighted mean.
+//   Internal centroids are weighted means for correct Lance–Williams updates.
+//   Output representatives are (mean * cluster_size) = vector sum over the cluster (MUVERA-style).
 // Uses the Lance-Williams recurrence for O(n^2) total update cost.
 template<typename ChPoint>
 CompressedPointCloud<ChPoint> wards_compress(const ChPoint& query, float threshold,
@@ -350,13 +351,16 @@ CompressedPointCloud<ChPoint> wards_compress(const ChPoint& query, float thresho
     }
   }
 
-  // --- Collect active centroids ---
+  // --- Collect representatives: sum of vectors per cluster = mean * size ---
   uint32_t k = num_active;
   auto buf = qc_internal::alloc_floats(size_t(k) * d);
   uint32_t out = 0;
   for (uint32_t i = 0; i < n; ++i) {
     if (!active[i]) continue;
-    std::memcpy(buf.get() + size_t(out) * d, centroids.data() + size_t(i) * d, d * sizeof(float));
+    float* dst = buf.get() + size_t(out) * d;
+    const float* src = centroids.data() + size_t(i) * d;
+    const float scale = static_cast<float>(sizes[i]);
+    for (uint32_t t = 0; t < d; ++t) dst[t] = src[t] * scale;
     ++out;
   }
 

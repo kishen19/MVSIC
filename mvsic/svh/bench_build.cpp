@@ -4,6 +4,33 @@
 
 using namespace mvsic;
 
+// ----- Skeleton-only dispatch.  Build always uses the raw skeleton variant -----
+// For SVHIVF that means CompressCenters=false and LeafModel=NoQuantizer; for
+// SVHGraph just LeafModel=NoQuantizer.  Any quantized variant (including
+// CompressCenters=true) can load that skeleton later and retrain its
+// quantizer(s) on load.  We therefore do not expose -qc / -quant_method here,
+// since the on-disk skeleton is variant agnostic.
+namespace {
+enum class SVHVariant { Graph, IVF };
+
+inline SVHVariant parse_svh_variant(bool is_graph) {
+  return is_graph ? SVHVariant::Graph : SVHVariant::IVF;
+}
+
+inline const char* variant_name(SVHVariant v) {
+  return v == SVHVariant::Graph ? "SVH_Graph" : "SVH_IVF";
+}
+
+template <bool metric, class Fn>
+void dispatch_skeleton(SVHVariant v, Fn&& fn) {
+  if (v == SVHVariant::Graph) {
+    fn.template operator()<IndexSVHGraph<metric, NoQuantizer<metric>>>();
+  } else {
+    fn.template operator()<IndexSVHIVF<metric, false, NoQuantizer<metric>>>();
+  }
+}
+}  // namespace
+
 template <typename ChPoint, bool metric>
 void run(commandLine& P) {
   Eigen::setNbThreads(1);
@@ -14,44 +41,50 @@ void run(commandLine& P) {
 
   auto io = bench::parse_io_args(P);
   bool is_graph = P.getOption("-graph");
+  auto variant = parse_svh_variant(is_graph);
+
+  // Graph-side knobs (only used when -graph is set).
+  uint32_t R = P.getOptionIntValue("-R", 200);
+  uint32_t L_build = P.getOptionIntValue("-L_build", 600);
+  double alpha = P.getOptionDoubleValue("-a", 1.2);
+  int num_pass = P.getOptionIntValue("-np", 1);
+
+  // IVF-side knobs (only used when -graph is absent).
+  uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
+  uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 500);
+  uint32_t max_ppc = P.getOptionIntValue("-max_points_per_centroid", 100);
 
   auto points = PC(ds.points.c_str(), io.is_mmap);
 
-  auto do_build = [&](auto& index) {
-    std::cout << "Building skeleton (no quantization)..." << std::endl;
-    parlay::internal::timer t;
-    t.start();
-    index.build(points);
-    t.stop();
-    std::cout << "Index built in " << t.total_time() << " seconds." << std::endl;
-    if (!io.save_path.empty()) {
-      std::cout << "Saving skeleton to " << io.save_path << " ..." << std::endl;
-      index.save(io.save_path);
-      std::cout << "Skeleton saved." << std::endl;
-    }
-  };
-
-  if (is_graph) {
-    uint32_t R = P.getOptionIntValue("-R", 200);
-    uint32_t L_build = P.getOptionIntValue("-L_build", 600);
-    double alpha = P.getOptionDoubleValue("-a", 1.2);
-    int num_pass = P.getOptionIntValue("-np", 1);
-    IndexParams ip = IndexParams::svh_graph(R, L_build, alpha, num_pass, io.compress_input,
-        io.verbose, /*pq_method=*/0, /*block_size=*/8, /*num_clusters_per_block=*/16,
-        /*num_points_per_cluster=*/100, /*rabitq_bits=*/4);
-    IndexSVHGraph<metric, NoQuantizer<metric>> index(points.get_dims(), ip);
-    do_build(index);
+  IndexParams ip;
+  if (variant == SVHVariant::Graph) {
+    ip = IndexParams::svh_graph(R, L_build, alpha, num_pass, io.compress_input, io.verbose,
+                                /*pq_method=*/0, /*block_size=*/8, /*num_clusters_per_block=*/16,
+                                /*num_points_per_cluster=*/100, /*rabitq_bits=*/4);
   } else {
-    uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
-    uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 500);
-    uint32_t max_ppc = P.getOptionIntValue("-max_points_per_centroid", 100);
     // The on-disk skeleton is variant-agnostic; -qc is honored on load only.
-    IndexParams ip = IndexParams::svh_ivf(k_per_level, max_leaf_size, io.compress_input,
-        io.verbose, max_ppc, /*pq_method=*/0, /*block_size=*/8, /*num_clusters_per_block=*/16,
-        /*num_points_per_cluster=*/100, /*rabitq_bits=*/4, /*quantize_centers=*/false);
-    IndexSVHIVF<metric, false, NoQuantizer<metric>> index(points.get_dims(), ip);
-    do_build(index);
+    ip = IndexParams::svh_ivf(k_per_level, max_leaf_size, io.compress_input, io.verbose, max_ppc,
+                              /*pq_method=*/0, /*block_size=*/8, /*num_clusters_per_block=*/16,
+                              /*num_points_per_cluster=*/100, /*rabitq_bits=*/4,
+                              /*quantize_centers=*/false);
   }
+
+  dispatch_skeleton<metric>(variant,
+      [&]<class IndexT>() {
+        IndexT index(points.get_dims(), ip);
+        std::cout << "Building skeleton (" << variant_name(variant)
+                  << ", raw centers, raw leaves) ..." << std::endl;
+        parlay::internal::timer t;
+        t.start();
+        index.build(points);
+        t.stop();
+        std::cout << "Index built in " << t.total_time() << " seconds." << std::endl;
+        if (!io.save_path.empty()) {
+          std::cout << "Saving skeleton to " << io.save_path << " ..." << std::endl;
+          index.save(io.save_path);
+          std::cout << "Skeleton saved." << std::endl;
+        }
+      });
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,

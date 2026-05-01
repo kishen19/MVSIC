@@ -9,6 +9,37 @@
 
 using namespace mvsic;
 
+namespace {
+// CLI -> compile-time IndexMPool<metric, LeafModel> dispatch.  1BTQ is
+// omitted because the SV-variant of turboquant_1bit hasn't been ported yet.
+#define MPOOL_DISPATCH(metric, qm, fn)                                                        \
+  do {                                                                                         \
+    if      (qm == "None"  || qm == "none")                                                    \
+      fn.template operator()<IndexMPool<metric, NoQuantizer<metric>>>();                       \
+    else if (qm == "PQ"    || qm == "pq")                                                      \
+      fn.template operator()<IndexMPool<metric, pq::Model<metric>>>();                         \
+    else if (qm == "FS"    || qm == "fs")                                                      \
+      fn.template operator()<IndexMPool<metric, fastscan::Model<metric>>>();                   \
+    else if (qm == "RQ"    || qm == "rq")                                                      \
+      fn.template operator()<IndexMPool<metric, rabitq::Model<metric>>>();                     \
+    else if (qm == "TQ"    || qm == "tq")                                                      \
+      fn.template operator()<IndexMPool<metric, turboquant::Model<metric>>>();                 \
+    else if (qm == "SPQTQ" || qm == "spqtq")                                                   \
+      fn.template operator()<IndexMPool<metric, pqtq::Model<metric>>>();                       \
+    else {                                                                                     \
+      std::cerr << "Unknown -quant_method: " << qm                                             \
+                << " (use None, PQ, FS, RQ, TQ, SPQTQ)" << std::endl;                          \
+      std::exit(1);                                                                            \
+    }                                                                                          \
+  } while (0)
+
+template <bool metric, class Fn>
+void dispatch_mpool(const std::string& qm, Fn&& fn) {
+  MPOOL_DISPATCH(metric, qm, fn);
+}
+#undef MPOOL_DISPATCH
+}  // namespace
+
 template<typename ChPoint, bool metric>
 void bench(mvsic::commandLine& P) {
   Eigen::setNbThreads(1);
@@ -37,21 +68,20 @@ void bench(mvsic::commandLine& P) {
   double alpha = P.getOptionDoubleValue("-a", 1.2);
   int num_pass = P.getOptionIntValue("-np", 1);
 
-  // PQ params
+  // Quantization params (determines which IndexMPool template variant to
+  // instantiate; the legacy uint32_t method id is also passed into IndexParams
+  // so the runtime variant-based fallback path keeps working).
   std::string quant_method = P.getOptionValue("-quant_method", "None");
   uint32_t quant_method_t = 0;
-  if (quant_method == "None") {
-    quant_method_t = 0;
-  } else if (quant_method == "PQ") {
-    quant_method_t = 1;
-  } else if (quant_method == "RQ") {
-    quant_method_t = 2;
-  } else if (quant_method == "FS") {
-    quant_method_t = 3;
-  } else if (quant_method == "TQ") {
-    quant_method_t = 4;
-  } else {
-    std::cerr << "Unknown PQ method: " << quant_method << std::endl;
+  if      (quant_method == "None"  || quant_method == "none")  quant_method_t = 0;
+  else if (quant_method == "PQ"    || quant_method == "pq")    quant_method_t = 1;
+  else if (quant_method == "RQ"    || quant_method == "rq")    quant_method_t = 2;
+  else if (quant_method == "FS"    || quant_method == "fs")    quant_method_t = 3;
+  else if (quant_method == "TQ"    || quant_method == "tq")    quant_method_t = 4;
+  else if (quant_method == "SPQTQ" || quant_method == "spqtq") quant_method_t = 6;
+  else {
+    std::cerr << "Unknown -quant_method: " << quant_method
+              << " (use None, PQ, FS, RQ, TQ, SPQTQ)" << std::endl;
     exit(1);
   }
   uint32_t block_size = P.getOptionIntValue("-m", 8);
@@ -71,45 +101,40 @@ void bench(mvsic::commandLine& P) {
       R, L_build, alpha, num_pass, !not_normalized, compress_input, verbose, quant_method_t,
       block_size, num_clusters_per_block, num_points_per_cluster, rabitq_bits);
   SearchParams search_params = SearchParams::mpool(k, L, num_rerank, cut, norerank);
-  IndexMPool<metric> index(points.get_dims(), index_params);
-  if (indexFile != "") {
-    std::cout << "Loading index from " << indexFile << std::endl;
-    index.load(indexFile, points);
-    std::cout << "Index loaded" << std::endl;
-  } else {
-    std::cout << "Building index..." << std::endl;
-    parlay::internal::timer it;
-    it.start();
-    index.build(points);
-    it.stop();
-    std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
-  }
-  if (outFile != "") {
-    std::cout << "Saving index to " << outFile << std::endl;
-    index.save(P.getOptionValue("-o"));
-    std::cout << "Index saved." << std::endl;
-  }
 
-  if (QFile != "") {
-    auto queries = PC(qFile);
-    auto gt = ReadGT(gtFile, queries.size());
-    double QPS_seq, QPS_par, avg_cmps, recall_1_k, recall_k_k;
+  dispatch_mpool<metric>(quant_method, [&]<class IndexT>() {
+    IndexT index(points.get_dims(), index_params);
+    if (indexFile != "") {
+      std::cout << "Loading index from " << indexFile << std::endl;
+      index.load(indexFile, points);
+      std::cout << "Index loaded" << std::endl;
+    } else {
+      std::cout << "Building index..." << std::endl;
+      parlay::internal::timer it;
+      it.start();
+      index.build(points);
+      it.stop();
+      std::cout << "Index built in " << it.total_time() << " seconds." << std::endl;
+    }
+    if (outFile != "") {
+      std::cout << "Saving index to " << outFile << std::endl;
+      index.save(P.getOptionValue("-o"));
+      std::cout << "Index saved." << std::endl;
+    }
 
-    // Compute Stats:
-    std::cout << "Computing stats..." << std::endl;
-    Stats result = compute_stats(index, points, queries, gt, search_params);
-    QPS_seq = result.QPS_seq;
-    QPS_par = result.QPS_par;
-    avg_cmps = result.avg_cmps;
-    recall_1_k = result.recall_1_k;
-    recall_k_k = result.recall_k_k;
-    std::cout << "Number of Queries: " << queries.size() << std::endl
-              << "QPS_seq: " << QPS_seq << std::endl
-              << "QPS_par: " << QPS_par << std::endl
-              << "Average cmps: " << avg_cmps << std::endl
-              << "Average recall 1 @ " << k << ": " << recall_1_k << std::endl
-              << "Average recall " << k << " @ " << k << ": " << recall_k_k << std::endl;
-  }
+    if (QFile != "") {
+      auto queries = PC(qFile);
+      auto gt = ReadGT(gtFile, queries.size());
+      std::cout << "Computing stats..." << std::endl;
+      Stats result = compute_stats(index, points, queries, gt, search_params);
+      std::cout << "Number of Queries: " << queries.size() << std::endl
+                << "QPS_seq: " << result.QPS_seq << std::endl
+                << "QPS_par: " << result.QPS_par << std::endl
+                << "Average cmps: " << result.avg_cmps << std::endl
+                << "Average recall 1 @ " << k << ": " << result.recall_1_k << std::endl
+                << "Average recall " << k << " @ " << k << ": " << result.recall_k_k << std::endl;
+    }
+  });
 }
 
 int main(int argc, char* argv[]) {
@@ -125,8 +150,8 @@ int main(int argc, char* argv[]) {
       "  -a <f>                         alpha (default 1.2)\n"
       "  -np <N>                        Num passes (default 1)\n"
       "  -no_norm                       Disable normalization\n\n"
-      "Leaf quantization:\n"
-      "  -quant_method None|PQ|FS|RQ|TQ\n"
+      "Leaf quantization (selects the templated IndexMPool<metric, LeafModel>):\n"
+      "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ\n"
       "  -m <N>  -num_clusters_per_block <N>  -num_points_per_cluster <N>  -rbits <N>\n\n"
       "Search:\n"
       "  -k <N>                         Top-k (default 10)\n"

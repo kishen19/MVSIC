@@ -5,7 +5,12 @@ import struct
 import random
 
 def read_point_cloud_data(filename):
-    """Reads a point cloud dataset from a file in the specified binary format."""
+    """Reads a .pcs file (see mvsic/core/types/point_cloud_set.h and
+    data-tools/compute_ground_truth.py): uint64 dim, n, num_vectors; then
+    float32[num_vectors * dim]; then uint64 num_offsets; then uint64 offsets
+    where each offset is a cumulative *float* count (same as C++), not a
+    row index into the (num_vectors, dim) view.
+    """
     with open(filename, 'rb') as f:
         # Read header
         dim, num_clouds, num_vectors = struct.unpack('QQQ', f.read(3 * 8))
@@ -23,7 +28,7 @@ def read_point_cloud_data(filename):
     return dim, num_clouds, vectors, offsets
 
 def write_point_cloud_data(filename, dim, vectors, offsets):
-    """Writes a point cloud dataset to a file in the specified binary format."""
+    """Writes a .pcs file; offsets are cumulative float counts (n+1 entries)."""
     num_clouds = len(offsets) - 1
     num_vectors = vectors.shape[0]
     num_offsets = len(offsets)
@@ -43,35 +48,41 @@ def write_point_cloud_data(filename, dim, vectors, offsets):
 
 def main():
     parser = argparse.ArgumentParser(description="Subsample a point cloud dataset.")
-    parser.add_argument("input_file", help="Path to the input point cloud data file.")
-    parser.add_argument("output_file", help="Path to save the subsampled data file.")
-    parser.add_argument("num_samples", type=int, help="Number of point clouds to subsample.")
+    parser.add_argument("-i", "--input", help="Path to the input point cloud data file.")
+    parser.add_argument("-o", "--output", help="Path to save the subsampled data file.")
+    parser.add_argument("-s", "--samples", type=int, help="Number of point clouds to subsample.")
     args = parser.parse_args()
 
-    print(f"Reading data from {args.input_file}...")
-    dim, num_clouds, vectors, offsets = read_point_cloud_data(args.input_file)
+    print(f"Reading data from {args.input}...")
+    dim, num_clouds, vectors, offsets = read_point_cloud_data(args.input)
     print(f"Original dataset contains {num_clouds} point clouds.")
 
-    if args.num_samples > num_clouds:
-        print(f"Warning: Requested number of samples ({args.num_samples}) is larger than the number of point clouds ({num_clouds}). Using all point clouds.")
-        args.num_samples = num_clouds
+    if args.samples > num_clouds:
+        print(f"Warning: Requested number of samples ({args.samples}) is larger than the number of point clouds ({num_clouds}). Using all point clouds.")
+        args.samples = num_clouds
 
-    print(f"Subsampling to {args.num_samples} point clouds...")
-    sampled_indices = sorted(random.sample(range(num_clouds), args.num_samples))
+    print(f"Subsampling to {args.samples} point clouds...")
+    sampled_indices = sorted(random.sample(range(num_clouds), args.samples))
 
     new_vectors_list = []
     new_offsets = [0]
     current_offset = 0
 
     for i in sampled_indices:
-        start_offset = offsets[i]
-        end_offset = offsets[i+1]
-        # The number of vectors in a point cloud is (end_offset - start_offset) / dim
-        # The offsets are already scaled by dim in the C++ code.
-        # The offsets refer to the start of the float values.
-        num_vectors_in_cloud = (end_offset - start_offset)
-        new_vectors_list.append(vectors[start_offset:end_offset])
-        current_offset += num_vectors_in_cloud
+        start_f = int(offsets[i])
+        end_f = int(offsets[i + 1])
+        # Offsets are cumulative float32 counts; row slice is // dim (see
+        # compute_ground_truth._read_offsets_vec).
+        if start_f % dim != 0 or end_f % dim != 0:
+            raise ValueError(
+                f"Offsets not aligned to dim={dim}: "
+                f"offsets[{i}]={start_f}, offsets[{i+1}]={end_f}"
+            )
+        start_row = start_f // dim
+        end_row = end_f // dim
+        float_span = end_f - start_f  # number of float32 values for this cloud
+        new_vectors_list.append(vectors[start_row:end_row])
+        current_offset += float_span
         new_offsets.append(current_offset)
 
     if not new_vectors_list:
@@ -80,8 +91,8 @@ def main():
         new_vectors = np.concatenate(new_vectors_list, axis=0)
     new_offsets = np.array(new_offsets, dtype=np.uint64)
 
-    print(f"Writing subsampled data to {args.output_file}...")
-    write_point_cloud_data(args.output_file, dim, new_vectors, new_offsets)
+    print(f"Writing subsampled data to {args.output}...")
+    write_point_cloud_data(args.output, dim, new_vectors, new_offsets)
     print("Done.")
 
 if __name__ == "__main__":

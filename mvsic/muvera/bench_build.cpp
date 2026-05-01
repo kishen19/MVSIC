@@ -3,6 +3,17 @@
 
 using namespace mvsic;
 
+// ----- Skeleton-only dispatch.  Build always uses the raw skeleton variant -----
+// (LeafModel=NoQuantizer); any quantized variant can load that skeleton later
+// and retrain its quantizer on load.  We therefore do not expose -quant_method
+// here, since the on-disk skeleton is variant agnostic.
+namespace {
+template <bool metric, class Fn>
+void dispatch_skeleton(Fn&& fn) {
+  fn.template operator()<IndexMUVERA<metric, NoQuantizer<metric>>>();
+}
+}  // namespace
+
 template <typename ChPoint, bool metric>
 void run(commandLine& P) {
   Eigen::setNbThreads(1);
@@ -26,27 +37,27 @@ void run(commandLine& P) {
   int num_pass = P.getOptionIntValue("-np", 1);
 
   auto points = PC(ds.points.c_str(), io.is_mmap);
-  // Build the raw skeleton (no leaf quantization); save() is only valid on
-  // this variant.  Quantized variants are instantiated on load by the search
-  // benches; the on-disk skeleton is variant-agnostic.
   IndexParams ip = IndexParams::muvera_custom(
       num_reps, num_simhash, 1, projd, fill_empty, final_projd, !no_norm,
       R, L_build, alpha, num_pass, io.compress_input, io.verbose,
       /*pq_method=*/0, /*block_size=*/8, /*num_clusters_per_block=*/16,
       /*num_points_per_cluster=*/100, /*rabitq_bits=*/4);
-  IndexMUVERA<metric, NoQuantizer<metric>> index(points.get_dims(), ip);
 
-  std::cout << "Building MUVERA skeleton (raw FDEs, no leaf quantization)..." << std::endl;
-  parlay::internal::timer t;
-  t.start();
-  index.build(points);
-  t.stop();
-  std::cout << "Index built in " << t.total_time() << " seconds." << std::endl;
-  if (!io.save_path.empty()) {
-    std::cout << "Saving skeleton to " << io.save_path << " ..." << std::endl;
-    index.save(io.save_path);
-    std::cout << "Skeleton saved." << std::endl;
-  }
+  dispatch_skeleton<metric>(
+      [&]<class IndexT>() {
+        IndexT index(points.get_dims(), ip);
+        std::cout << "Building MUVERA skeleton (raw FDEs, no leaf quantization)..." << std::endl;
+        parlay::internal::timer t;
+        t.start();
+        index.build(points);
+        t.stop();
+        std::cout << "Index built in " << t.total_time() << " seconds." << std::endl;
+        if (!io.save_path.empty()) {
+          std::cout << "Saving skeleton to " << io.save_path << " ..." << std::endl;
+          index.save(io.save_path);
+          std::cout << "Skeleton saved." << std::endl;
+        }
+      });
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
