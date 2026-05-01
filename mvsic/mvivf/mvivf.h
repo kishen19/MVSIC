@@ -146,6 +146,18 @@ class IndexMVIVF : public Index<metric> {
   std::unique_ptr<BTQModel> build_8btq_model_;
   std::vector<BTQEncQuery> build_8btq_q_clouds_;
 
+  // Flat per-individual-vector mirror of `build_8btq_q_clouds_` (all vectors
+  // across all input PCs concatenated). Plumbed through MVClustering8BTQ to
+  // TQ8LloydsBackend so the inner Lloyd's k-means can skip its rotate+
+  // quantize step (gather-from-cache instead).  pc_vec_offsets[i] gives the
+  // starting row of root PC i in the flat buffers.
+  size_t build_8btq_vec_q_stride_ = 0;
+  parlay::sequence<int8_t> build_8btq_vec_data_;
+  parlay::sequence<float> build_8btq_vec_nsf_;
+  parlay::sequence<float> build_8btq_vec_sqn_;
+  parlay::sequence<int32_t> build_8btq_vec_bsum_;
+  parlay::sequence<size_t> build_8btq_pc_vec_offsets_;
+
   // ---------------------------------------------------------------------------
   // Per-level build timing instrumentation. Compile-time gated by
   // MVIVF_BUILD_STATS (define to 1 to enable). Off by default so build()
@@ -327,6 +339,11 @@ class IndexMVIVF : public Index<metric> {
     // Pre-encode every input PC as an 8BTQ query for reuse across recursion.
     // The rotator (dim-only) and the encoded queries are then handed to every
     // MVClustering8BTQ call in `recursive_build_` via points_to_root mappings.
+    //
+    // In the same pass we also concatenate every per-vector encoded state into
+    // a flat (build_8btq_vec_*) buffer so the inner Lloyd's k-means inside
+    // each MVClustering8BTQ centroid update can gather-from-cache instead of
+    // re-rotating + re-quantizing its ~hundreds of vectors per call.
     if (params.build_with_8btq) {
       t.start();
       build_8btq_model_ = std::make_unique<BTQModel>();
@@ -336,9 +353,42 @@ class IndexMVIVF : public Index<metric> {
       parlay::parallel_for(0, n, [&](size_t i) {
         build_8btq_q_clouds_[i] = build_8btq_model_->quantize_query(points[i]);
       });
+
+      // Build the per-vector flat cache from the per-PC EncodedQuery objects.
+      // q_stride is constant across all per-PC EncQueries (a Model property),
+      // so we can grab it from the first non-empty one (or compute from the
+      // model directly).
+      const size_t stride = (build_8btq_model_->encoder.padded_dim + 3) & ~3;
+      build_8btq_vec_q_stride_ = stride;
+      build_8btq_pc_vec_offsets_ = parlay::sequence<size_t>(n + 1, 0);
+      // Sequential prefix sum -- n is small enough (<= a few M) that the
+      // serial scan is dominated by the parallel encode step that follows.
+      for (size_t i = 0; i < n; ++i) {
+        build_8btq_pc_vec_offsets_[i + 1] =
+            build_8btq_pc_vec_offsets_[i] + build_8btq_q_clouds_[i].num_queries;
+      }
+      const size_t total_vecs = build_8btq_pc_vec_offsets_[n];
+      build_8btq_vec_data_.assign(total_vecs * stride, 0);
+      build_8btq_vec_nsf_.assign(total_vecs, 0.0f);
+      build_8btq_vec_sqn_.assign(total_vecs, 0.0f);
+      build_8btq_vec_bsum_.assign(total_vecs, 0);
+      parlay::parallel_for(0, n, [&](size_t i) {
+        const auto& q = build_8btq_q_clouds_[i];
+        if (q.num_queries == 0) return;
+        const size_t off = build_8btq_pc_vec_offsets_[i];
+        std::memcpy(build_8btq_vec_data_.data() + off * stride, q.flat_query_data.data(),
+                    q.num_queries * stride * sizeof(int8_t));
+        std::memcpy(build_8btq_vec_nsf_.data() + off, q.norm_scaling_factors.data(),
+                    q.num_queries * sizeof(float));
+        std::memcpy(build_8btq_vec_sqn_.data() + off, q.unquantized_squared_norms.data(),
+                    q.num_queries * sizeof(float));
+        std::memcpy(build_8btq_vec_bsum_.data() + off, q.byte_sums.data(),
+                    q.num_queries * sizeof(int32_t));
+      });
+
       if (params.verbose >= 1) {
-        std::cout << "[MVIVF] 8BTQ pre-encode (" << n << " PCs): " << t.stop() << " sec"
-                  << std::endl;
+        std::cout << "[MVIVF] 8BTQ pre-encode (" << n << " PCs, " << total_vecs
+                  << " vecs): " << t.stop() << " sec" << std::endl;
       }
       t.reset();
     }
@@ -373,10 +423,17 @@ class IndexMVIVF : public Index<metric> {
 #endif
 
     // Cache exists only for the lifetime of build(); release it now so the
-    // index doesn't carry the per-PC encoded queries (~ N * padded_dim bytes).
+    // index doesn't carry the per-PC encoded queries (~ N * padded_dim bytes)
+    // nor the per-vector flat buffer (~ total_vecs * padded_dim bytes).
     build_8btq_model_.reset();
     build_8btq_q_clouds_.clear();
     build_8btq_q_clouds_.shrink_to_fit();
+    build_8btq_vec_data_ = parlay::sequence<int8_t>{};
+    build_8btq_vec_nsf_ = parlay::sequence<float>{};
+    build_8btq_vec_sqn_ = parlay::sequence<float>{};
+    build_8btq_vec_bsum_ = parlay::sequence<int32_t>{};
+    build_8btq_pc_vec_offsets_ = parlay::sequence<size_t>{};
+    build_8btq_vec_q_stride_ = 0;
   }
 
  private:
@@ -424,6 +481,16 @@ class IndexMVIVF : public Index<metric> {
       // for this subtree's points.
       if (build_8btq_model_ && !build_8btq_q_clouds_.empty()) {
         Clus.set_shared_cache(*build_8btq_model_, build_8btq_q_clouds_, orig_indices);
+        if (build_8btq_vec_q_stride_ > 0 && !build_8btq_vec_data_.empty()) {
+          ::mvsic::lloyds::TQ8VectorCache<metric> vc;
+          vc.model = build_8btq_model_.get();
+          vc.q_stride = build_8btq_vec_q_stride_;
+          vc.q_data = build_8btq_vec_data_.data();
+          vc.q_nsf = build_8btq_vec_nsf_.data();
+          vc.q_sqn = build_8btq_vec_sqn_.data();
+          vc.q_bsum = build_8btq_vec_bsum_.data();
+          Clus.set_shared_vector_cache(vc, build_8btq_pc_vec_offsets_);
+        }
       }
       run_clus(Clus);
     } else {

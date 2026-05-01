@@ -84,6 +84,19 @@ class MVClustering8BTQ {
     points_to_root_ = &points_to_root;
   }
 
+  // Optional second tier of the build-top-level cache: a flat per-vector
+  // encoded-query buffer, sized total_root_vecs × stride, plus a per-PC
+  // offset table (size: num_root_pcs + 1).  When set together with
+  // set_shared_cache, the inner Lloyd's k-means inside the centroid update
+  // skips its own rotate+quantize step too: the TQ8 backend gathers each
+  // row's encoded state directly out of `vec_*` using indices computed from
+  // `pc_vec_offsets[points_to_root_[local_pc]]`.
+  void set_shared_vector_cache(::mvsic::lloyds::TQ8VectorCache<metric> vec_cache,
+                               const parlay::sequence<size_t>& pc_vec_offsets) noexcept {
+    vec_cache_ = vec_cache;
+    pc_vec_offsets_ = &pc_vec_offsets;
+  }
+
   void train(const PointCloudSet<ChPoint>& data);
 
   auto& get_centers() { return centers; }
@@ -128,9 +141,18 @@ class MVClustering8BTQ {
   const std::vector<EncQuery>* shared_q_clouds_ = nullptr;
   const parlay::sequence<uint32_t>* points_to_root_ = nullptr;
 
+  // Optional per-vector cache for the *inner* kmeans. See
+  // set_shared_vector_cache().
+  ::mvsic::lloyds::TQ8VectorCache<metric> vec_cache_{};
+  const parlay::sequence<size_t>* pc_vec_offsets_ = nullptr;
+
   inline bool has_shared_cache_() const noexcept {
     return shared_model_ != nullptr && shared_q_clouds_ != nullptr &&
            points_to_root_ != nullptr;
+  }
+  inline bool has_vector_cache_() const noexcept {
+    return vec_cache_.model != nullptr && vec_cache_.q_data != nullptr &&
+           pc_vec_offsets_ != nullptr;
   }
 
 
@@ -221,6 +243,24 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
   _iteration_stats.resize(params.niters + 1);
   cluster_ids.resize(n);
 
+  // When a vector cache is available, precompute the local-PC -> root-PC map
+  // so the per-cluster centroid-update path can build per-row vec indices in
+  // O(1) lookups instead of re-deriving from the optional subsample.
+  parlay::sequence<uint32_t> local_to_root_pc;
+  const bool use_vec_cache = has_shared_cache_() && has_vector_cache_();
+  if (use_vec_cache) {
+    local_to_root_pc.resize(n);
+    if (sampled_local_ids.has_value()) {
+      parlay::parallel_for(0, n, [&](size_t i) {
+        local_to_root_pc[i] = (*points_to_root_)[(*sampled_local_ids)[i]];
+      });
+    } else {
+      parlay::parallel_for(0, n, [&](size_t i) {
+        local_to_root_pc[i] = (*points_to_root_)[i];
+      });
+    }
+  }
+
   // ----- Train the 8BTQ encoder (Hadamard rotator) and pre-encode the
   // training points as queries -- unless a shared cache is provided, in which
   // case we reuse the build-top-level rotator and queries verbatim.
@@ -310,41 +350,73 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
       auto del_group = parlay::delayed_tabulate(grouped[i].size(),
                                                 [&](size_t j) { return grouped[i][j].second; });
       auto data = points.filter_flattened(del_group);
-      if (s >= data.size()) {
-        centers.set_point_cloud(i, data);
-      } else if (params.use_weighted_inner_kmeans) {
+
+      // Build per-row vec_root_indices into the build-top per-vector cache,
+      // matching `data`'s row order (filter_flattened concatenates each PC's
+      // vectors in order; vec j of root_pc is at pc_vec_offsets_[root_pc]+j).
+      parlay::sequence<uint32_t> vec_root_indices;
+      const bool emit_vec_indices = use_vec_cache && data.size() > 0;
+      if (emit_vec_indices || params.use_weighted_inner_kmeans) {
+        // Both branches need the per-doc offsets into `data`.
+      }
+      parlay::sequence<size_t> pc_offsets_in_data;
+      size_t total_vecs_in_data = 0;
+      const bool need_offsets =
+          emit_vec_indices || params.use_weighted_inner_kmeans;
+      if (need_offsets) {
         const size_t num_docs = grouped[i].size();
         auto sizes = parlay::delayed_seq<size_t>(num_docs, [&](size_t j) {
           return static_cast<size_t>(points.get_size(grouped[i][j].second));
         });
-        parlay::sequence<size_t> offsets;
-        size_t total_vecs;
-        std::tie(offsets, total_vecs) = parlay::scan(sizes);
+        std::tie(pc_offsets_in_data, total_vecs_in_data) = parlay::scan(sizes);
+      }
+      if (emit_vec_indices) {
+        vec_root_indices.resize(data.size());
+        const size_t num_docs = grouped[i].size();
+        parlay::parallel_for(0, num_docs, [&](size_t j) {
+          const uint32_t pc_local = grouped[i][j].second;
+          const uint32_t pc_root = local_to_root_pc[pc_local];
+          const size_t base = (*pc_vec_offsets_)[pc_root];
+          const size_t out_off = pc_offsets_in_data[j];
+          const uint32_t doc_size = points.get_size(pc_local);
+          for (uint32_t t = 0; t < doc_size; ++t) {
+            vec_root_indices[out_off + t] = static_cast<uint32_t>(base + t);
+          }
+        });
+      }
 
-        if (total_vecs != data.size()) {
+      const ::mvsic::lloyds::TQ8VectorCache<metric>* cache_ptr =
+          emit_vec_indices ? &vec_cache_ : nullptr;
+      const parlay::sequence<uint32_t>* idx_ptr =
+          emit_vec_indices ? &vec_root_indices : nullptr;
+
+      if (s >= data.size()) {
+        centers.set_point_cloud(i, data);
+      } else if (params.use_weighted_inner_kmeans) {
+        if (total_vecs_in_data != data.size()) {
           std::cerr << "[MVClustering8BTQ] Error: total_vecs != data.size() in weighted "
                        "inner k-means."
                     << std::endl;
           abort();
         }
-
-        parlay::sequence<float> weights(total_vecs);
+        parlay::sequence<float> weights(total_vecs_in_data);
+        const size_t num_docs = grouped[i].size();
         parlay::parallel_for(0, num_docs, [&](size_t j) {
           uint32_t doc_id = grouped[i][j].second;
           uint32_t doc_size = points.get_size(doc_id);
           if (doc_size == 0) return;
           float w = 1.0f / static_cast<float>(doc_size);
-          size_t start = offsets[j];
+          size_t start = pc_offsets_in_data[j];
           for (uint32_t t = 0; t < doc_size; ++t) weights[start + t] = w;
         });
         auto new_centers = kmeans_weighted_subsample<metric>(
             data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
-            params.build_with_8btq);
+            params.build_with_8btq, cache_ptr, idx_ptr);
         centers.set_point_cloud(i, new_centers);
       } else {
         auto new_centers = kmeans_subsample<metric>(
             data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
-            params.build_with_8btq);
+            params.build_with_8btq, cache_ptr, idx_ptr);
         centers.set_point_cloud(i, new_centers);
       }
     });
@@ -358,6 +430,23 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
       parlay::parallel_for(grouped.size(), k, [&](size_t i) {
         parlay::sequence<size_t> id = {parlay::hash32(params.seed + i - grouped.size()) % n};
         auto data = points.filter_flattened(id);
+
+        parlay::sequence<uint32_t> vec_root_indices;
+        const bool emit_vec_indices = use_vec_cache && data.size() > 0;
+        if (emit_vec_indices) {
+          const uint32_t pc_local = static_cast<uint32_t>(id[0]);
+          const uint32_t pc_root = local_to_root_pc[pc_local];
+          const size_t base = (*pc_vec_offsets_)[pc_root];
+          vec_root_indices.resize(data.size());
+          for (size_t t = 0; t < data.size(); ++t) {
+            vec_root_indices[t] = static_cast<uint32_t>(base + t);
+          }
+        }
+        const ::mvsic::lloyds::TQ8VectorCache<metric>* cache_ptr =
+            emit_vec_indices ? &vec_cache_ : nullptr;
+        const parlay::sequence<uint32_t>* idx_ptr =
+            emit_vec_indices ? &vec_root_indices : nullptr;
+
         if (s >= data.size()) {
           centers.set_point_cloud(i, data);
         } else if (params.use_weighted_inner_kmeans) {
@@ -369,12 +458,12 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
           }
           auto new_centers = kmeans_weighted_subsample<metric>(
               data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
-              params.build_with_8btq);
+              params.build_with_8btq, cache_ptr, idx_ptr);
           centers.set_point_cloud(i, new_centers);
         } else {
           auto new_centers = kmeans_subsample<metric>(
               data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
-              params.build_with_8btq);
+              params.build_with_8btq, cache_ptr, idx_ptr);
           centers.set_point_cloud(i, new_centers);
         }
       });

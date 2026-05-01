@@ -17,16 +17,34 @@ namespace mvsic {
 // seeding, blocked-Eigen assignment, and per-cluster mean math match the
 // previous parlayANN call path exactly.  Swapping the backend is the only
 // thing needed to change the underlying point representation.
+//
+// `tq8_cache` and `tq8_vec_root_indices`, if provided alongside
+// `use_tq8 = true`, let the TQ8 backend skip its rotate+quantize step and
+// instead gather the per-row encoded state out of a shared build-top-level
+// per-vector buffer.  `tq8_vec_root_indices[i]` must index the cache row that
+// was produced by quantizing `data[i]` under `tq8_cache->model`'s rotator.
+// When the inner loop subsamples to m < n rows, the same hash-map is applied
+// to vec_root_indices so the alignment is preserved.
 template<bool metric>
 ::mvsic::lloyds::CenterSet kmeans_subsample(
     const parlay::sequence<parlay::sequence<float>>& data, uint32_t k,
-    uint32_t max_points_per_centroid, bool verbose = false, bool use_tq8 = false) {
+    uint32_t max_points_per_centroid, bool verbose = false, bool use_tq8 = false,
+    const ::mvsic::lloyds::TQ8VectorCache<metric>* tq8_cache = nullptr,
+    const parlay::sequence<uint32_t>* tq8_vec_root_indices = nullptr) {
   const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
 
   size_t n = data.size();
   uint32_t dims = static_cast<uint32_t>(data[0].size());
+  const bool have_cache = use_tq8 && tq8_cache != nullptr && tq8_cache->model != nullptr &&
+                          tq8_vec_root_indices != nullptr &&
+                          tq8_vec_root_indices->size() == n;
   if (static_cast<size_t>(max_points_per_centroid) * k >= n) {
     if (use_tq8) {
+      if (have_cache) {
+        ::mvsic::lloyds::TQ8LloydsBackend<metric> B(data, dims, *tq8_cache,
+                                                    *tq8_vec_root_indices);
+        return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
+      }
       ::mvsic::lloyds::TQ8LloydsBackend<metric> B(data, dims);
       return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
     }
@@ -39,6 +57,16 @@ template<bool metric>
     return data[id];
   });
   if (use_tq8) {
+    if (have_cache) {
+      parlay::sequence<uint32_t> sampled_vec_idx(m);
+      parlay::parallel_for(0, m, [&](size_t i) {
+        size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+        sampled_vec_idx[i] = (*tq8_vec_root_indices)[id];
+      });
+      ::mvsic::lloyds::TQ8LloydsBackend<metric> B(sampled_points, dims, *tq8_cache,
+                                                  sampled_vec_idx);
+      return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
+    }
     ::mvsic::lloyds::TQ8LloydsBackend<metric> B(sampled_points, dims);
     return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose);
   }
@@ -49,12 +77,16 @@ template<bool metric>
 // Runs weighted kmeans on a subsample of size max_points_per_centroid*k.
 // `weights` provides a per-point weight for each row in `data`.
 // When max_points_per_centroid * k < n, both data and weights are subsampled
-// using the same random indices.
+// using the same random indices.  The optional TQ8 cache args mirror the
+// non-weighted version: when supplied, the backend skips per-row
+// rotate+quantize and gathers from `*tq8_cache` via `*tq8_vec_root_indices`.
 template<bool metric>
 ::mvsic::lloyds::CenterSet kmeans_weighted_subsample(
     const parlay::sequence<parlay::sequence<float>>& data,
     const parlay::sequence<float>& weights, uint32_t k, uint32_t max_points_per_centroid,
-    bool verbose = false, bool use_tq8 = false) {
+    bool verbose = false, bool use_tq8 = false,
+    const ::mvsic::lloyds::TQ8VectorCache<metric>* tq8_cache = nullptr,
+    const parlay::sequence<uint32_t>* tq8_vec_root_indices = nullptr) {
   size_t n = data.size();
   uint32_t dims = static_cast<uint32_t>(data[0].size());
   if (weights.size() != n) {
@@ -63,9 +95,17 @@ template<bool metric>
   }
 
   const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
+  const bool have_cache = use_tq8 && tq8_cache != nullptr && tq8_cache->model != nullptr &&
+                          tq8_vec_root_indices != nullptr &&
+                          tq8_vec_root_indices->size() == n;
 
   if (static_cast<size_t>(max_points_per_centroid) * k >= n) {
     if (use_tq8) {
+      if (have_cache) {
+        ::mvsic::lloyds::TQ8LloydsBackend<metric> B(data, dims, *tq8_cache,
+                                                    *tq8_vec_root_indices);
+        return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose, &weights);
+      }
       ::mvsic::lloyds::TQ8LloydsBackend<metric> B(data, dims);
       return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose, &weights);
     }
@@ -83,6 +123,17 @@ template<bool metric>
     sampled_weights[i] = weights[id];
   });
   if (use_tq8) {
+    if (have_cache) {
+      parlay::sequence<uint32_t> sampled_vec_idx(m);
+      parlay::parallel_for(0, m, [&](size_t i) {
+        size_t id = parlay::hash32(static_cast<uint32_t>(i)) % n;
+        sampled_vec_idx[i] = (*tq8_vec_root_indices)[id];
+      });
+      ::mvsic::lloyds::TQ8LloydsBackend<metric> B(sampled_points, dims, *tq8_cache,
+                                                  sampled_vec_idx);
+      return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose,
+                                            &sampled_weights);
+    }
     ::mvsic::lloyds::TQ8LloydsBackend<metric> B(sampled_points, dims);
     return ::mvsic::lloyds::lloyds_kmeans(B, k, seed_algo, /*niters=*/10, verbose,
                                           &sampled_weights);

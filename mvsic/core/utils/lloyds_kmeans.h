@@ -321,6 +321,27 @@ class FloatLloydsBackend {
 };
 
 // ---------------------------------------------------------------------------
+// TQ8VectorCache: read-only view into a build-top-level per-vector encoded
+// query buffer. When TQ8LloydsBackend is constructed with one of these (plus
+// a per-row index into the buffer), the per-row rotate+quantize step is
+// skipped entirely — the encoded query state is gathered out of the shared
+// buffer and the kernel runs against centers encoded under `model`'s rotator.
+//
+// Only consumed by the cache-aware constructors below; the existing data-only
+// constructors keep using GetSharedModel_ and re-encoding from scratch.
+// ---------------------------------------------------------------------------
+template <bool metric>
+struct TQ8VectorCache {
+  using QModel = ::mvsic::turboquant_8bit_mv::Model<metric>;
+  const QModel* model = nullptr;
+  size_t q_stride = 0;
+  const int8_t* q_data = nullptr;
+  const float* q_nsf = nullptr;
+  const float* q_sqn = nullptr;
+  const int32_t* q_bsum = nullptr;
+};
+
+// ---------------------------------------------------------------------------
 // TQ8LloydsBackend: same surface as FloatLloydsBackend, but the inner
 // assignment runs through the int8 TurboQuant VPDPBUSD panel kernel from
 // `turboquant_8bit_mv.h`.  Centers stay float; only the n×k pairwise
@@ -339,6 +360,11 @@ class FloatLloydsBackend {
 // Quantized_Point_Cloud_Set (k 1-vector clouds) and call
 // `ManyToMany::TopKIntoUninitialized` with k=1, exactly mirroring
 // `MVClustering8BTQ::train`'s outer assignment step.
+//
+// Cache-aware overload: when given a TQ8VectorCache + per-row index list,
+// the encoded-query state is gathered from the cache instead of re-rotated/
+// quantized.  Centers are encoded with the *cache's* model (so the rotator
+// matches the one that produced the cached encodings).
 // ---------------------------------------------------------------------------
 template <bool metric>
 class TQ8LloydsBackend {
@@ -371,6 +397,37 @@ class TQ8LloydsBackend {
       for (uint32_t t = 0; t < d_; ++t) dst[t] = src[t];
     });
     build_encoded_();
+  }
+
+  // Cache-aware constructors: float points are still copied (compute_means /
+  // cost / seed_prefix_doubling need float random access), but the encoded
+  // query state is gathered from the supplied `cache` using `vec_root_indices`
+  // -- skipping the rotate+quantize work that build_encoded_ otherwise does.
+  TQ8LloydsBackend(const parlay::sequence<parlay::sequence<float>>& data, uint32_t d,
+                   const TQ8VectorCache<metric>& cache,
+                   const parlay::sequence<uint32_t>& vec_root_indices)
+      : d_(d), model_(cache.model) {
+    n_ = data.size();
+    data_.resize(static_cast<size_t>(n_) * d_);
+    parlay::parallel_for(0, n_, [&](size_t i) {
+      float* dst = data_.data() + i * d_;
+      for (uint32_t t = 0; t < d_; ++t) dst[t] = data[i][t];
+    });
+    gather_encoded_(cache, vec_root_indices);
+  }
+
+  template <typename Seq>
+  TQ8LloydsBackend(const Seq& data, uint32_t d, const TQ8VectorCache<metric>& cache,
+                   const parlay::sequence<uint32_t>& vec_root_indices)
+      : d_(d), model_(cache.model) {
+    n_ = data.size();
+    data_.resize(static_cast<size_t>(n_) * d_);
+    parlay::parallel_for(0, n_, [&](size_t i) {
+      auto src = data[i];
+      float* dst = data_.data() + i * d_;
+      for (uint32_t t = 0; t < d_; ++t) dst[t] = src[t];
+    });
+    gather_encoded_(cache, vec_root_indices);
   }
 
   size_t size() const { return n_; }
@@ -509,6 +566,30 @@ class TQ8LloydsBackend {
       it = cache.emplace(d, std::move(m)).first;
     }
     return *it->second;
+  }
+
+  // Cache path: copy per-row encoded state out of a shared per-vector buffer.
+  // The cache must have been produced with `cache.model`'s rotator, and the
+  // n entries of `vec_root_indices` must each index into the cache's per-row
+  // arrays.  q_stride is taken from the cache (matches the model's padded
+  // dim, exactly as build_encoded_ would compute it).
+  void gather_encoded_(const TQ8VectorCache<metric>& cache,
+                       const parlay::sequence<uint32_t>& vec_root_indices) {
+    enc_q_stride_ = cache.q_stride;
+    enc_flat_data_.assign(static_cast<size_t>(n_) * enc_q_stride_, 0);
+    enc_flat_nsf_.assign(n_, 0.0f);
+    enc_flat_sqn_.assign(n_, 0.0f);
+    enc_flat_bsum_.assign(n_, 0);
+    if (n_ == 0) return;
+    parlay::parallel_for(0, n_, [&](size_t i) {
+      const size_t src = static_cast<size_t>(vec_root_indices[i]);
+      std::memcpy(enc_flat_data_.data() + i * enc_q_stride_,
+                  cache.q_data + src * enc_q_stride_,
+                  enc_q_stride_ * sizeof(int8_t));
+      enc_flat_nsf_[i] = cache.q_nsf[src];
+      enc_flat_sqn_[i] = cache.q_sqn[src];
+      enc_flat_bsum_[i] = cache.q_bsum[src];
+    });
   }
 
   // Encode every input row inline into flat parallel arrays (one int8 stripe
