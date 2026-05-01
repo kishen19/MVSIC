@@ -31,7 +31,7 @@ indices:
           s: 0
         variants:                 # which class variants to evaluate
           - name: ""              # default (omit for a single raw run)
-            compress: false       # (mvivf/mvivf_flat/mvivf_spill/svh_ivf only)
+            compress: false       # (mvivf/mvivf_flat/mvivf_spill/svh_ivf only; svh_graph has no compress variant)
             quantizer: None       # None|PQ|FastScan|RaBitQ|TQ|SPQTQ|OneBitTQ
         search_configs:
           - name: k=10
@@ -70,6 +70,19 @@ from framework_utils import StatsExtended, load_dataset
 
 import mvsic
 
+# FastPlaid is an optional baseline; only imported when the config asks for it.
+_FastPlaidWrapper = None
+_load_point_clouds = None
+
+
+def _ensure_fastplaid_imports():
+    global _FastPlaidWrapper, _load_point_clouds
+    if _FastPlaidWrapper is None:
+        from framework_utils import FastPlaidWrapper as _FPW  # type: ignore
+        from utils import load_point_clouds as _lpc  # type: ignore
+        _FastPlaidWrapper = _FPW
+        _load_point_clouds = _lpc
+
 
 def _signal_handler(sig, frame):
     print('\nCtrl+C detected. Exiting gracefully.')
@@ -89,10 +102,15 @@ _QUANTIZER_SUFFIX = {
     "FASTSCAN": "FastScan",
     "RABITQ": "RaBitQ",
     "TQ": "TQ",
+    "TQ4BIT": "TQ",
     "TURBOQUANT": "TQ",
     "SPQTQ": "SPQTQ",
     "ONEBITTQ": "OneBitTQ",
+    "TQ1BIT": "OneBitTQ",
     "ONEBIT": "OneBitTQ",
+    "EIGHTBITTQ": "EightBitTQ",
+    "TQ8BIT": "EightBitTQ",
+    "EIGHTBIT": "EightBitTQ",
 }
 
 
@@ -203,11 +221,13 @@ def _expand_timings(df: pd.DataFrame, labels):
 
     def row_expand(row):
         t = row.get("avg_timings", None)
-        if not isinstance(t, (list, tuple)):
+        # Some modes (e.g. batch/search_all) intentionally do not populate
+        # per-stage timings yet; keep those rows and leave timing columns empty.
+        if t is None or (isinstance(t, float) and pd.isna(t)):
+            t = []
+        elif not isinstance(t, (list, tuple)):
             raise ValueError(f"Expected list for avg_timings, got {type(t)}")
-        if len(t) < len(labels):
-            raise ValueError(f"{len(t)} timings but {len(labels)} labels: {labels}")
-        out = {lab: t[i] for i, lab in enumerate(labels)}
+        out = {lab: (t[i] if i < len(t) else pd.NA) for i, lab in enumerate(labels)}
         rest = list(t[len(labels):])
         if rest:
             out["timings"] = rest
@@ -294,7 +314,137 @@ def _build_search_params(method_name: str, p: dict):
     return sp
 
 
-def run_search(config: dict, methods: dict, num_threads=None):
+def _run_fastplaid(ds, index_details, method_info, mode):
+    """Run search-only sweeps for the FastPlaid baseline (BEIR5 only).
+
+    Supports `--mode latency` and `--mode batch`. The `multi_latency` mode is
+    not supported (FastPlaid has no per-query multi-thread path); we skip it
+    with a warning.
+    """
+    if mode == "multi_latency":
+        print("  [fastplaid] multi-latency unsupported; skipping.", flush=True)
+        return
+
+    _ensure_fastplaid_imports()
+
+    ds_name = ds['name']
+    ds_path = ds['path']
+    index_dir = ds['index_dir']
+    results_dir = ds['results_dir']
+
+    variable_param = method_info.get('variable_param')
+
+    points_path = os.path.join(ds_path, f"{ds_name}_points.pcs")
+    queries_path = os.path.join(ds_path, f"{ds_name}_queries.pcs")
+    gt_path = os.path.join(ds_path, f"{ds_name}_chamfer_neighbors.gt")
+
+    points = None
+    queries = None
+    gt = None
+
+    for build in index_details['builds']:
+        build_name = build['build_name']
+        build_params = build.get('build_params') or {}
+
+        index_root = os.path.join(index_dir, "fastplaid", build_name)
+        # FastPlaid persists a directory of artifacts; treat any non-empty dir
+        # as a "loaded" index.
+        if not (os.path.isdir(index_root) and os.listdir(index_root)):
+            print(
+                f"  [fastplaid/{build_name}] MISSING {index_root} -- "
+                "run benchmark_build.py first (or copy your prebuilt index here).",
+                flush=True,
+            )
+            continue
+
+        if queries is None:
+            queries = _load_point_clouds(queries_path)
+            gt = mvsic.ReadGT(gt_path, len(queries))
+        # Points only matter if compute_scores needs them; FastPlaidWrapper
+        # doesn't, but we still load them lazily in case the wrapper API
+        # changes upstream.
+        # (Skipping points to save memory.)
+
+        dim = queries[0].shape[1]
+        index = _FastPlaidWrapper(dim, build_params, index_path=index_root)
+
+        variant_results_dir = os.path.join(
+            results_dir, "fastplaid", build_name
+        )
+        os.makedirs(variant_results_dir, exist_ok=True)
+
+        for search_config in build.get('search_configs', []):
+            search_name = search_config['name']
+            search_out_dir = os.path.join(variant_results_dir, search_name)
+            os.makedirs(search_out_dir, exist_ok=True)
+
+            combos = _expand_search_params(search_config, variable_param)
+            sv_buckets = {}
+            for p in combos:
+                vn = p.pop('_variant_name')
+                sv_buckets.setdefault(vn, []).append(p)
+
+            for sv_name, params_list in sv_buckets.items():
+                prefix = _csv_prefix_for(mode) if mode else ""
+                suffix = f"_{sv_name}" if sv_name else ""
+                results_path = os.path.join(
+                    search_out_dir, f"{prefix}results{suffix}.csv"
+                )
+
+                append = search_config.get('append', True)
+                if os.path.exists(results_path) and not append:
+                    os.remove(results_path)
+
+                if variable_param:
+                    params_list.sort(key=lambda p: p.get(variable_param, 0))
+
+                rows = []
+                for params in params_list:
+                    if mode == "latency":
+                        res = index.compute_stats_latency(queries, gt, params)
+                    else:
+                        res = index.compute_stats_batch(queries, gt, params)
+                    print(
+                        f"      {params} | "
+                        f"R@{params['k']}={res.recall_k_k:.3f} "
+                        f"QPS_seq={res.QPS_seq if res.QPS_seq is not None else 0:.1f} "
+                        f"QPS_par={res.QPS_par if res.QPS_par is not None else 0:.1f}",
+                        flush=True,
+                    )
+                    row = {
+                        "k": res.k,
+                        "recall_1_k": res.recall_1_k,
+                        "recall_k_k": res.recall_k_k,
+                        "QPS_seq": res.QPS_seq if res.QPS_seq is not None else 0.0,
+                        "QPS_par": res.QPS_par if res.QPS_par is not None else 0.0,
+                        "avg_cmps": res.avg_cmps,
+                    }
+                    row.update(params)
+                    rows.append(row)
+
+                df = pd.DataFrame(rows)
+                if os.path.exists(results_path):
+                    try:
+                        prev = pd.read_csv(results_path)
+                        df = pd.concat([prev, df], ignore_index=True)
+                    except pd.errors.EmptyDataError:
+                        pass
+                if variable_param and variable_param in df.columns:
+                    df = df.sort_values(by=variable_param)
+                df.to_csv(results_path, index=False)
+
+
+def _csv_prefix_for(mode):
+    # Pick a per-mode CSV prefix so latency/multi_latency/batch coexist in the same dir.
+    return {
+        'latency':       'latency_',
+        'multi_latency': 'multi_latency_',
+        'batch':         'batch_',
+        None:            '',
+    }.get(mode, '')
+
+
+def run_search(config: dict, methods: dict, num_threads=None, mode=None):
     for ds in config['datasets']:
         ds_name = ds['name']
         ds_path = ds['path']
@@ -311,6 +461,10 @@ def run_search(config: dict, methods: dict, num_threads=None):
             family = method_info['class']
             variable_param = method_info.get('variable_param')
             labels = method_info.get('labels') or []
+
+            if index_name == 'fastplaid':
+                _run_fastplaid(ds, index_details, method_info, mode)
+                continue
 
             factory = _resolve_factory(index_name)
 
@@ -373,7 +527,11 @@ def run_search(config: dict, methods: dict, num_threads=None):
                             variants_map.setdefault(vn, []).append(p)
 
                         for sv_name, params_list in variants_map.items():
-                            prefix = "latency_" if num_threads else ""
+                            if mode:
+                                prefix = _csv_prefix_for(mode)
+                            else:
+                                # Backward compat: legacy --latency / --num_threads=1 path.
+                                prefix = "latency_" if num_threads else ""
                             suffix = f"_{sv_name}" if sv_name else ""
                             results_path = os.path.join(
                                 search_out_dir, f"{prefix}results{suffix}.csv"
@@ -418,7 +576,20 @@ def run_search(config: dict, methods: dict, num_threads=None):
                                 else:
                                     sp = _build_search_params(index_name, params)
                                     with suppress_stdout_stderr():
-                                        if num_threads:
+                                        if mode == 'latency':
+                                            res = mvsic.compute_stats_latency(
+                                                index, points, queries, gt, [sp]
+                                            )
+                                        elif mode == 'multi_latency':
+                                            res = mvsic.compute_stats_multi_latency(
+                                                index, points, queries, gt, [sp]
+                                            )
+                                        elif mode == 'batch':
+                                            res = mvsic.compute_stats_batch(
+                                                index, points, queries, gt, [sp]
+                                            )
+                                        elif num_threads:
+                                            # Back-compat path for older callers.
                                             res = mvsic.compute_stats_extended_p_threaded(
                                                 index, points, queries, gt,
                                                 [sp], num_threads,
@@ -492,19 +663,30 @@ def main():
         "--methods", default="benchmarks/methods.yaml", help="Path to methods.yaml"
     )
     ap.add_argument(
+        "--mode",
+        choices=["latency", "multi_latency", "batch"],
+        default=None,
+        help=(
+            "Pick the C++ measurement entry point: "
+            "`latency` -> compute_stats_latency (single-thread per-query), "
+            "`multi_latency` -> compute_stats_multi_latency (per-query loop with "
+            "the ambient parlay pool), `batch` -> compute_stats_batch (search_all only). "
+            "If unset, falls back to the legacy compute_stats_extended[_p_threaded] flow."
+        ),
+    )
+    ap.add_argument(
         "--num_threads",
         type=int,
         default=None,
         help=(
-            "If set, use compute_stats_extended_p_threaded with this many threads "
-            "(1 for latency, >=2 for QPS_par). If unset, run the QPS_seq / QPS_par "
-            "per-query-threaded flow."
+            "Back-compat: if set (and --mode is not), use "
+            "compute_stats_extended_p_threaded with this many threads."
         ),
     )
     ap.add_argument(
         "--latency",
         action="store_true",
-        help="Alias for --num_threads=1 (single-threaded per-query timing).",
+        help="Back-compat alias for --mode latency.",
     )
     args = ap.parse_args()
 
@@ -513,11 +695,12 @@ def main():
     with open(args.methods) as f:
         methods = yaml.safe_load(f)
 
+    mode = args.mode
     num_threads = args.num_threads
-    if args.latency and num_threads is None:
-        num_threads = 1
+    if args.latency and mode is None and num_threads is None:
+        mode = 'latency'
 
-    run_search(config, methods, num_threads=num_threads)
+    run_search(config, methods, num_threads=num_threads, mode=mode)
 
 
 if __name__ == "__main__":

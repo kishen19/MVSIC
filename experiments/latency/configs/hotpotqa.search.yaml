@@ -1,0 +1,91 @@
+name: "Main experiments latency (HotpotQA)"
+
+datasets:
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir:   results/indexes/hotpotqa
+    results_dir: experiments/latency/results/hotpotqa
+
+indices:
+  - name: mvivf
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        build_params:
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+        variants:
+          - { name: tq4_search,  compress: false, quantizer: TQ }
+          - { name: tq1_probing, compress: false, quantizer: OneBitTQ }
+        search_configs:
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+              k: [10]
+              config:
+                - { name: nr0,    num_rerank: 0 }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr500,  num_rerank: 500 }
+                - { name: nr5000, num_rerank: 5000 }
+
+  - name: muvera
+    metric: ip
+    builds:
+      - build_name: muvera_2560_R200_L600
+        build_params:
+          d_fde: 2560
+          R: 200
+          L: 600
+        variants:
+          - { name: tq4_search, compress: false, quantizer: TQ }
+        search_configs:
+          - name: k=10
+            params:
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - { name: nr10,   num_rerank: 10, norerank: True }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr500,  num_rerank: 500 }
+                - { name: nr5000, num_rerank: 5000 }
+
+  - name: vamana
+    metric: ip
+    builds:
+      - build_name: vamana_R200
+        build_params:
+          R: 200
+        variants:
+          - { name: tq4_search, compress: false, quantizer: TQ }
+        search_configs:
+          - name: k=10
+            params:
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - { name: nr0,    num_rerank: 0 }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr500,  num_rerank: 500 }
+
+  - name: svh_graph
+    metric: ip
+    builds:
+      - build_name: svh_graph_R200
+        build_params:
+          R: 200
+          L: 600
+        variants:
+          - { name: tq4_search, compress: false, quantizer: TQ }
+        search_configs:
+          - name: k=10
+            params:
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048]
+              k: [10]
+              config:
+                - { name: nr0,    num_rerank: 0 }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr500,  num_rerank: 500 }

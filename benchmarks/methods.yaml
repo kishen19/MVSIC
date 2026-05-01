@@ -13,9 +13,10 @@
 #                      `variants[].quantizer`.  "None" is always supported.
 #
 # Quantizer names (shared vocabulary, case-insensitive):
-#   None, PQ, FastScan, RaBitQ, TQ (aka TurboQuant), SPQTQ, OneBitTQ.
-#   OneBitTQ currently requires the multi-vector (_mv) quantizer family,
-#   so it is only listed for MVIVF / Vamana at the moment.
+#   None, PQ, FastScan, RaBitQ, TQ (aka TurboQuant, 4-bit), SPQTQ,
+#   OneBitTQ (1-bit TQ), EightBitTQ (8-bit TQ).
+#   OneBitTQ / EightBitTQ currently require the multi-vector (_mv) quantizer
+#   family, so they are only listed for MVIVF / Vamana at the moment.
 #
 # The actual compile-time class resolution lives in benchmark_search.py
 # (`_resolve_class`).  This file is the single source of truth for which
@@ -25,7 +26,7 @@ mvivf:
   variable_param: nprobes
   class: "MVIVF"
   supports_compress: true
-  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
   labels:
     [
       "search_cmps",
@@ -43,14 +44,14 @@ mvivf_flat:
   variable_param: nprobes
   class: "MVIVFFlat"
   supports_compress: true
-  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
   labels: ["search_L", "search_cmps", "t_search", "t_leaf_dists", "t_leaf_rest", "t_rerank"]
 
 mvivf_spill:
   variable_param: nprobes
   class: "MVIVFSpill"
   supports_compress: true
-  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
   labels:
     [
       "search_cmps",
@@ -85,7 +86,7 @@ vamana:
   variable_param: L
   class: "Vamana"
   supports_compress: false
-  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
   labels: ["search_cmps", "t_quant", "t_search", "t_rerank"]
 
 svh_ivf:

@@ -1,0 +1,53 @@
+name: "Main experiments build (NQ)"
+
+datasets:
+  - { name: nq, path: data/beir/nq, index_dir: results/indexes/nq }
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100_d0_n5_s0_mpcc100
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          pq_method: 7
+          quantize_centers: true
+
+  - name: muvera
+    metric: ip
+    build_configs:
+      - name: muvera_2560_R200_L600
+        params:
+          verbose: 1
+          d_fde: 2560
+          R: 200
+          L: 600
+          pq_method: 0
+          quantize_centers: false
+
+  - name: vamana
+    metric: ip
+    build_configs:
+      - name: vamana_R200
+        params:
+          verbose: 1
+          R: 200
+          pq_method: 0
+          quantize_centers: false
+
+  - name: svh_graph
+    metric: ip
+    build_configs:
+      - name: svh_graph_R200
+        params:
+          verbose: 1
+          R: 200
+          L: 600
+
+  # FastPlaid intentionally omitted: only run on BEIR5.

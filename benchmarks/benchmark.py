@@ -77,7 +77,7 @@ def _format_scalar_for_csv(x):
 def _expand_method_timings(df, method_info):
     """
     If methods.yaml provides 'labels', expand avg_timings (list) into separate columns.
-    - Error if avg_timings has fewer entries than labels.
+    - If avg_timings has fewer entries than labels, missing labels are left empty.
     - If avg_timings has extra entries, store the remainder as a list in a 'timings' column.
     """
     labels = method_info.get("labels") or []
@@ -86,15 +86,13 @@ def _expand_method_timings(df, method_info):
 
     def _row_expand(row):
         t = row.get("avg_timings", None)
-        if not isinstance(t, (list, tuple)):
+        if t is None or (isinstance(t, float) and pd.isna(t)):
+            t = []
+        elif not isinstance(t, (list, tuple)):
             raise ValueError(
                 f"Expected avg_timings to be a list/tuple for labeled method; got {type(t)}"
             )
-        if len(t) < len(labels):
-            raise ValueError(
-                f"avg_timings has {len(t)} entries but methods.yaml defines {len(labels)} labels: {labels}"
-            )
-        out = {lab: t[i] for i, lab in enumerate(labels)}
+        out = {lab: (t[i] if i < len(t) else pd.NA) for i, lab in enumerate(labels)}
         rest = list(t[len(labels):])
         if rest:
             out["timings"] = rest

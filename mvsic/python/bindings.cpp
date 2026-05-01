@@ -175,34 +175,36 @@ PYBIND11_MODULE(mvsic, m) {
                   py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
                   py::arg("rabitq_bits") = 4);
 
-  auto sp = py::class_<mvsic::SearchParams>(m, "SearchParams")
-      .def(py::init([]() { return mvsic::SearchParams(); }))
-      .def_readwrite("method", &mvsic::SearchParams::method)
-      .def_readwrite("k", &mvsic::SearchParams::k)
-      .def_readwrite("num_rerank", &mvsic::SearchParams::num_rerank)
-      .def_readwrite("nprobes", &mvsic::SearchParams::nprobes)
-      .def_readwrite("L", &mvsic::SearchParams::L)
-      .def_readwrite("cut", &mvsic::SearchParams::cut)
-      .def_readwrite("norerank", &mvsic::SearchParams::norerank)
-      .def_readwrite("query_compression", &mvsic::SearchParams::query_compression)
-      .def_readwrite("query_compression_threshold", &mvsic::SearchParams::query_compression_threshold)
-      .def_readwrite("compress_rerank", &mvsic::SearchParams::compress_rerank)
-      .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
-                  py::arg("num_rerank") = 0)
-      .def_static("mvivf_spill", &mvsic::SearchParams::mvivf_spill, py::arg("k"),
-                  py::arg("nprobes"), py::arg("num_rerank") = 0)
-      .def_static("mvivf_flat", &mvsic::SearchParams::mvivf_flat, py::arg("k"), py::arg("nprobes"),
-                  py::arg("num_rerank") = 0)
-      .def_static("vamana", &mvsic::SearchParams::vamana, py::arg("k"), py::arg("L"),
-                  py::arg("cut") = 1.35, py::arg("num_rerank") = 0)
-      .def_static("muvera", &mvsic::SearchParams::muvera, py::arg("k"), py::arg("L"),
-                  py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
-      .def_static("mpool", &mvsic::SearchParams::mpool, py::arg("k"), py::arg("L"),
-                  py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
-      .def_static("svh_ivf", &mvsic::SearchParams::svh_ivf, py::arg("k"), py::arg("nprobes"),
-                  py::arg("num_rerank"), py::arg("norerank") = false)
-      .def_static("svh_graph", &mvsic::SearchParams::svh_graph, py::arg("k"), py::arg("L"),
-                  py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false);
+  auto sp =
+      py::class_<mvsic::SearchParams>(m, "SearchParams")
+          .def(py::init([]() { return mvsic::SearchParams(); }))
+          .def_readwrite("method", &mvsic::SearchParams::method)
+          .def_readwrite("k", &mvsic::SearchParams::k)
+          .def_readwrite("num_rerank", &mvsic::SearchParams::num_rerank)
+          .def_readwrite("nprobes", &mvsic::SearchParams::nprobes)
+          .def_readwrite("L", &mvsic::SearchParams::L)
+          .def_readwrite("cut", &mvsic::SearchParams::cut)
+          .def_readwrite("norerank", &mvsic::SearchParams::norerank)
+          .def_readwrite("query_compression", &mvsic::SearchParams::query_compression)
+          .def_readwrite("query_compression_threshold",
+                         &mvsic::SearchParams::query_compression_threshold)
+          .def_readwrite("compress_rerank", &mvsic::SearchParams::compress_rerank)
+          .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
+                      py::arg("num_rerank") = 0)
+          .def_static("mvivf_spill", &mvsic::SearchParams::mvivf_spill, py::arg("k"),
+                      py::arg("nprobes"), py::arg("num_rerank") = 0)
+          .def_static("mvivf_flat", &mvsic::SearchParams::mvivf_flat, py::arg("k"),
+                      py::arg("nprobes"), py::arg("num_rerank") = 0)
+          .def_static("vamana", &mvsic::SearchParams::vamana, py::arg("k"), py::arg("L"),
+                      py::arg("cut") = 1.35, py::arg("num_rerank") = 0)
+          .def_static("muvera", &mvsic::SearchParams::muvera, py::arg("k"), py::arg("L"),
+                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
+          .def_static("mpool", &mvsic::SearchParams::mpool, py::arg("k"), py::arg("L"),
+                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
+          .def_static("svh_ivf", &mvsic::SearchParams::svh_ivf, py::arg("k"), py::arg("nprobes"),
+                      py::arg("num_rerank"), py::arg("norerank") = false)
+          .def_static("svh_graph", &mvsic::SearchParams::svh_graph, py::arg("k"), py::arg("L"),
+                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false);
 
   py::enum_<mvsic::SearchParams::QueryCompression>(sp, "QueryCompression")
       .value("NONE", mvsic::SearchParams::QueryCompression::None)
@@ -349,191 +351,199 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMVIVFCompressL2, ChamferL2_Point, "IndexMVIVFCompressL2")
   BIND_INDEX(IndexMVIVFCompressIP, ChamferIP_Point, "IndexMVIVFCompressIP")
   // Leaf-quantized (raw centers + Foo leaves).
-  BIND_INDEX(IndexMVIVFPQL2,        ChamferL2_Point, "IndexMVIVFPQL2")
-  BIND_INDEX(IndexMVIVFPQIP,        ChamferIP_Point, "IndexMVIVFPQIP")
-  BIND_INDEX(IndexMVIVFFastScanL2,  ChamferL2_Point, "IndexMVIVFFastScanL2")
-  BIND_INDEX(IndexMVIVFFastScanIP,  ChamferIP_Point, "IndexMVIVFFastScanIP")
-  BIND_INDEX(IndexMVIVFRaBitQL2,    ChamferL2_Point, "IndexMVIVFRaBitQL2")
-  BIND_INDEX(IndexMVIVFRaBitQIP,    ChamferIP_Point, "IndexMVIVFRaBitQIP")
-  BIND_INDEX(IndexMVIVFTQL2,        ChamferL2_Point, "IndexMVIVFTQL2")
-  BIND_INDEX(IndexMVIVFTQIP,        ChamferIP_Point, "IndexMVIVFTQIP")
-  BIND_INDEX(IndexMVIVFSPQTQL2,     ChamferL2_Point, "IndexMVIVFSPQTQL2")
-  BIND_INDEX(IndexMVIVFSPQTQIP,     ChamferIP_Point, "IndexMVIVFSPQTQIP")
-  BIND_INDEX(IndexMVIVFOneBitTQL2,  ChamferL2_Point, "IndexMVIVFOneBitTQL2")
-  BIND_INDEX(IndexMVIVFOneBitTQIP,  ChamferIP_Point, "IndexMVIVFOneBitTQIP")
-  BIND_INDEX(IndexMVIVFEightBitTQL2,  ChamferL2_Point, "IndexMVIVFEightBitTQL2")
-  BIND_INDEX(IndexMVIVFEightBitTQIP,  ChamferIP_Point, "IndexMVIVFEightBitTQIP")
+  BIND_INDEX(IndexMVIVFPQL2, ChamferL2_Point, "IndexMVIVFPQL2")
+  BIND_INDEX(IndexMVIVFPQIP, ChamferIP_Point, "IndexMVIVFPQIP")
+  BIND_INDEX(IndexMVIVFFastScanL2, ChamferL2_Point, "IndexMVIVFFastScanL2")
+  BIND_INDEX(IndexMVIVFFastScanIP, ChamferIP_Point, "IndexMVIVFFastScanIP")
+  BIND_INDEX(IndexMVIVFRaBitQL2, ChamferL2_Point, "IndexMVIVFRaBitQL2")
+  BIND_INDEX(IndexMVIVFRaBitQIP, ChamferIP_Point, "IndexMVIVFRaBitQIP")
+  BIND_INDEX(IndexMVIVFTQL2, ChamferL2_Point, "IndexMVIVFTQL2")
+  BIND_INDEX(IndexMVIVFTQIP, ChamferIP_Point, "IndexMVIVFTQIP")
+  BIND_INDEX(IndexMVIVFSPQTQL2, ChamferL2_Point, "IndexMVIVFSPQTQL2")
+  BIND_INDEX(IndexMVIVFSPQTQIP, ChamferIP_Point, "IndexMVIVFSPQTQIP")
+  BIND_INDEX(IndexMVIVFOneBitTQL2, ChamferL2_Point, "IndexMVIVFOneBitTQL2")
+  BIND_INDEX(IndexMVIVFOneBitTQIP, ChamferIP_Point, "IndexMVIVFOneBitTQIP")
+  BIND_INDEX(IndexMVIVFEightBitTQL2, ChamferL2_Point, "IndexMVIVFEightBitTQL2")
+  BIND_INDEX(IndexMVIVFEightBitTQIP, ChamferIP_Point, "IndexMVIVFEightBitTQIP")
   // Compress + Foo leaves (TQ centers + Foo leaves).
-  BIND_INDEX(IndexMVIVFCompressPQL2,        ChamferL2_Point, "IndexMVIVFCompressPQL2")
-  BIND_INDEX(IndexMVIVFCompressPQIP,        ChamferIP_Point, "IndexMVIVFCompressPQIP")
-  BIND_INDEX(IndexMVIVFCompressFastScanL2,  ChamferL2_Point, "IndexMVIVFCompressFastScanL2")
-  BIND_INDEX(IndexMVIVFCompressFastScanIP,  ChamferIP_Point, "IndexMVIVFCompressFastScanIP")
-  BIND_INDEX(IndexMVIVFCompressRaBitQL2,    ChamferL2_Point, "IndexMVIVFCompressRaBitQL2")
-  BIND_INDEX(IndexMVIVFCompressRaBitQIP,    ChamferIP_Point, "IndexMVIVFCompressRaBitQIP")
-  BIND_INDEX(IndexMVIVFCompressTQL2,        ChamferL2_Point, "IndexMVIVFCompressTQL2")
-  BIND_INDEX(IndexMVIVFCompressTQIP,        ChamferIP_Point, "IndexMVIVFCompressTQIP")
-  BIND_INDEX(IndexMVIVFCompressSPQTQL2,     ChamferL2_Point, "IndexMVIVFCompressSPQTQL2")
-  BIND_INDEX(IndexMVIVFCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFCompressSPQTQIP")
-  BIND_INDEX(IndexMVIVFCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFCompressOneBitTQL2")
-  BIND_INDEX(IndexMVIVFCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFCompressOneBitTQIP")
-  BIND_INDEX(IndexMVIVFCompressEightBitTQL2,  ChamferL2_Point, "IndexMVIVFCompressEightBitTQL2")
-  BIND_INDEX(IndexMVIVFCompressEightBitTQIP,  ChamferIP_Point, "IndexMVIVFCompressEightBitTQIP")
+  BIND_INDEX(IndexMVIVFCompressPQL2, ChamferL2_Point, "IndexMVIVFCompressPQL2")
+  BIND_INDEX(IndexMVIVFCompressPQIP, ChamferIP_Point, "IndexMVIVFCompressPQIP")
+  BIND_INDEX(IndexMVIVFCompressFastScanL2, ChamferL2_Point, "IndexMVIVFCompressFastScanL2")
+  BIND_INDEX(IndexMVIVFCompressFastScanIP, ChamferIP_Point, "IndexMVIVFCompressFastScanIP")
+  BIND_INDEX(IndexMVIVFCompressRaBitQL2, ChamferL2_Point, "IndexMVIVFCompressRaBitQL2")
+  BIND_INDEX(IndexMVIVFCompressRaBitQIP, ChamferIP_Point, "IndexMVIVFCompressRaBitQIP")
+  BIND_INDEX(IndexMVIVFCompressTQL2, ChamferL2_Point, "IndexMVIVFCompressTQL2")
+  BIND_INDEX(IndexMVIVFCompressTQIP, ChamferIP_Point, "IndexMVIVFCompressTQIP")
+  BIND_INDEX(IndexMVIVFCompressSPQTQL2, ChamferL2_Point, "IndexMVIVFCompressSPQTQL2")
+  BIND_INDEX(IndexMVIVFCompressSPQTQIP, ChamferIP_Point, "IndexMVIVFCompressSPQTQIP")
+  BIND_INDEX(IndexMVIVFCompressOneBitTQL2, ChamferL2_Point, "IndexMVIVFCompressOneBitTQL2")
+  BIND_INDEX(IndexMVIVFCompressOneBitTQIP, ChamferIP_Point, "IndexMVIVFCompressOneBitTQIP")
+  BIND_INDEX(IndexMVIVFCompressEightBitTQL2, ChamferL2_Point, "IndexMVIVFCompressEightBitTQL2")
+  BIND_INDEX(IndexMVIVFCompressEightBitTQIP, ChamferIP_Point, "IndexMVIVFCompressEightBitTQIP")
 
   // ---- MVIVF Flat family ----
   BIND_INDEX(IndexMVIVFFlatL2, ChamferL2_Point, "IndexMVIVFFlatL2")
   BIND_INDEX(IndexMVIVFFlatIP, ChamferIP_Point, "IndexMVIVFFlatIP")
   BIND_INDEX(IndexMVIVFFlatCompressL2, ChamferL2_Point, "IndexMVIVFFlatCompressL2")
   BIND_INDEX(IndexMVIVFFlatCompressIP, ChamferIP_Point, "IndexMVIVFFlatCompressIP")
-  BIND_INDEX(IndexMVIVFFlatPQL2,        ChamferL2_Point, "IndexMVIVFFlatPQL2")
-  BIND_INDEX(IndexMVIVFFlatPQIP,        ChamferIP_Point, "IndexMVIVFFlatPQIP")
-  BIND_INDEX(IndexMVIVFFlatFastScanL2,  ChamferL2_Point, "IndexMVIVFFlatFastScanL2")
-  BIND_INDEX(IndexMVIVFFlatFastScanIP,  ChamferIP_Point, "IndexMVIVFFlatFastScanIP")
-  BIND_INDEX(IndexMVIVFFlatRaBitQL2,    ChamferL2_Point, "IndexMVIVFFlatRaBitQL2")
-  BIND_INDEX(IndexMVIVFFlatRaBitQIP,    ChamferIP_Point, "IndexMVIVFFlatRaBitQIP")
-  BIND_INDEX(IndexMVIVFFlatTQL2,        ChamferL2_Point, "IndexMVIVFFlatTQL2")
-  BIND_INDEX(IndexMVIVFFlatTQIP,        ChamferIP_Point, "IndexMVIVFFlatTQIP")
-  BIND_INDEX(IndexMVIVFFlatSPQTQL2,     ChamferL2_Point, "IndexMVIVFFlatSPQTQL2")
-  BIND_INDEX(IndexMVIVFFlatSPQTQIP,     ChamferIP_Point, "IndexMVIVFFlatSPQTQIP")
-  BIND_INDEX(IndexMVIVFFlatOneBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatOneBitTQL2")
-  BIND_INDEX(IndexMVIVFFlatOneBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatOneBitTQIP")
-  BIND_INDEX(IndexMVIVFFlatEightBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatEightBitTQL2")
-  BIND_INDEX(IndexMVIVFFlatEightBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatEightBitTQIP")
+  BIND_INDEX(IndexMVIVFFlatPQL2, ChamferL2_Point, "IndexMVIVFFlatPQL2")
+  BIND_INDEX(IndexMVIVFFlatPQIP, ChamferIP_Point, "IndexMVIVFFlatPQIP")
+  BIND_INDEX(IndexMVIVFFlatFastScanL2, ChamferL2_Point, "IndexMVIVFFlatFastScanL2")
+  BIND_INDEX(IndexMVIVFFlatFastScanIP, ChamferIP_Point, "IndexMVIVFFlatFastScanIP")
+  BIND_INDEX(IndexMVIVFFlatRaBitQL2, ChamferL2_Point, "IndexMVIVFFlatRaBitQL2")
+  BIND_INDEX(IndexMVIVFFlatRaBitQIP, ChamferIP_Point, "IndexMVIVFFlatRaBitQIP")
+  BIND_INDEX(IndexMVIVFFlatTQL2, ChamferL2_Point, "IndexMVIVFFlatTQL2")
+  BIND_INDEX(IndexMVIVFFlatTQIP, ChamferIP_Point, "IndexMVIVFFlatTQIP")
+  BIND_INDEX(IndexMVIVFFlatSPQTQL2, ChamferL2_Point, "IndexMVIVFFlatSPQTQL2")
+  BIND_INDEX(IndexMVIVFFlatSPQTQIP, ChamferIP_Point, "IndexMVIVFFlatSPQTQIP")
+  BIND_INDEX(IndexMVIVFFlatOneBitTQL2, ChamferL2_Point, "IndexMVIVFFlatOneBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatOneBitTQIP, ChamferIP_Point, "IndexMVIVFFlatOneBitTQIP")
+  BIND_INDEX(IndexMVIVFFlatEightBitTQL2, ChamferL2_Point, "IndexMVIVFFlatEightBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatEightBitTQIP, ChamferIP_Point, "IndexMVIVFFlatEightBitTQIP")
 
-  BIND_INDEX(IndexMVIVFFlatCompressPQL2,        ChamferL2_Point, "IndexMVIVFFlatCompressPQL2")
-  BIND_INDEX(IndexMVIVFFlatCompressPQIP,        ChamferIP_Point, "IndexMVIVFFlatCompressPQIP")
-  BIND_INDEX(IndexMVIVFFlatCompressFastScanL2,  ChamferL2_Point, "IndexMVIVFFlatCompressFastScanL2")
-  BIND_INDEX(IndexMVIVFFlatCompressFastScanIP,  ChamferIP_Point, "IndexMVIVFFlatCompressFastScanIP")
-  BIND_INDEX(IndexMVIVFFlatCompressRaBitQL2,    ChamferL2_Point, "IndexMVIVFFlatCompressRaBitQL2")
-  BIND_INDEX(IndexMVIVFFlatCompressRaBitQIP,    ChamferIP_Point, "IndexMVIVFFlatCompressRaBitQIP")
-  BIND_INDEX(IndexMVIVFFlatCompressTQL2,        ChamferL2_Point, "IndexMVIVFFlatCompressTQL2")
-  BIND_INDEX(IndexMVIVFFlatCompressTQIP,        ChamferIP_Point, "IndexMVIVFFlatCompressTQIP")
-  BIND_INDEX(IndexMVIVFFlatCompressSPQTQL2,     ChamferL2_Point, "IndexMVIVFFlatCompressSPQTQL2")
-  BIND_INDEX(IndexMVIVFFlatCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFFlatCompressSPQTQIP")
-  BIND_INDEX(IndexMVIVFFlatCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatCompressOneBitTQL2")
-  BIND_INDEX(IndexMVIVFFlatCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatCompressOneBitTQIP")
-  BIND_INDEX(IndexMVIVFFlatCompressEightBitTQL2,  ChamferL2_Point, "IndexMVIVFFlatCompressEightBitTQL2")
-  BIND_INDEX(IndexMVIVFFlatCompressEightBitTQIP,  ChamferIP_Point, "IndexMVIVFFlatCompressEightBitTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressPQL2, ChamferL2_Point, "IndexMVIVFFlatCompressPQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressPQIP, ChamferIP_Point, "IndexMVIVFFlatCompressPQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressFastScanL2, ChamferL2_Point, "IndexMVIVFFlatCompressFastScanL2")
+  BIND_INDEX(IndexMVIVFFlatCompressFastScanIP, ChamferIP_Point, "IndexMVIVFFlatCompressFastScanIP")
+  BIND_INDEX(IndexMVIVFFlatCompressRaBitQL2, ChamferL2_Point, "IndexMVIVFFlatCompressRaBitQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressRaBitQIP, ChamferIP_Point, "IndexMVIVFFlatCompressRaBitQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressTQL2, ChamferL2_Point, "IndexMVIVFFlatCompressTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressTQIP, ChamferIP_Point, "IndexMVIVFFlatCompressTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressSPQTQL2, ChamferL2_Point, "IndexMVIVFFlatCompressSPQTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressSPQTQIP, ChamferIP_Point, "IndexMVIVFFlatCompressSPQTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressOneBitTQL2, ChamferL2_Point, "IndexMVIVFFlatCompressOneBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressOneBitTQIP, ChamferIP_Point, "IndexMVIVFFlatCompressOneBitTQIP")
+  BIND_INDEX(IndexMVIVFFlatCompressEightBitTQL2, ChamferL2_Point,
+             "IndexMVIVFFlatCompressEightBitTQL2")
+  BIND_INDEX(IndexMVIVFFlatCompressEightBitTQIP, ChamferIP_Point,
+             "IndexMVIVFFlatCompressEightBitTQIP")
 
   // ---- MVIVF Spill family ----
   BIND_INDEX(IndexMVIVFSpillL2, ChamferL2_Point, "IndexMVIVFSpillL2")
   BIND_INDEX(IndexMVIVFSpillIP, ChamferIP_Point, "IndexMVIVFSpillIP")
   BIND_INDEX(IndexMVIVFSpillCompressL2, ChamferL2_Point, "IndexMVIVFSpillCompressL2")
   BIND_INDEX(IndexMVIVFSpillCompressIP, ChamferIP_Point, "IndexMVIVFSpillCompressIP")
-  BIND_INDEX(IndexMVIVFSpillPQL2,        ChamferL2_Point, "IndexMVIVFSpillPQL2")
-  BIND_INDEX(IndexMVIVFSpillPQIP,        ChamferIP_Point, "IndexMVIVFSpillPQIP")
-  BIND_INDEX(IndexMVIVFSpillFastScanL2,  ChamferL2_Point, "IndexMVIVFSpillFastScanL2")
-  BIND_INDEX(IndexMVIVFSpillFastScanIP,  ChamferIP_Point, "IndexMVIVFSpillFastScanIP")
-  BIND_INDEX(IndexMVIVFSpillRaBitQL2,    ChamferL2_Point, "IndexMVIVFSpillRaBitQL2")
-  BIND_INDEX(IndexMVIVFSpillRaBitQIP,    ChamferIP_Point, "IndexMVIVFSpillRaBitQIP")
-  BIND_INDEX(IndexMVIVFSpillTQL2,        ChamferL2_Point, "IndexMVIVFSpillTQL2")
-  BIND_INDEX(IndexMVIVFSpillTQIP,        ChamferIP_Point, "IndexMVIVFSpillTQIP")
-  BIND_INDEX(IndexMVIVFSpillSPQTQL2,     ChamferL2_Point, "IndexMVIVFSpillSPQTQL2")
-  BIND_INDEX(IndexMVIVFSpillSPQTQIP,     ChamferIP_Point, "IndexMVIVFSpillSPQTQIP")
-  BIND_INDEX(IndexMVIVFSpillOneBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillOneBitTQL2")
-  BIND_INDEX(IndexMVIVFSpillOneBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillOneBitTQIP")
-  BIND_INDEX(IndexMVIVFSpillEightBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillEightBitTQL2")
-  BIND_INDEX(IndexMVIVFSpillEightBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillEightBitTQIP")
+  BIND_INDEX(IndexMVIVFSpillPQL2, ChamferL2_Point, "IndexMVIVFSpillPQL2")
+  BIND_INDEX(IndexMVIVFSpillPQIP, ChamferIP_Point, "IndexMVIVFSpillPQIP")
+  BIND_INDEX(IndexMVIVFSpillFastScanL2, ChamferL2_Point, "IndexMVIVFSpillFastScanL2")
+  BIND_INDEX(IndexMVIVFSpillFastScanIP, ChamferIP_Point, "IndexMVIVFSpillFastScanIP")
+  BIND_INDEX(IndexMVIVFSpillRaBitQL2, ChamferL2_Point, "IndexMVIVFSpillRaBitQL2")
+  BIND_INDEX(IndexMVIVFSpillRaBitQIP, ChamferIP_Point, "IndexMVIVFSpillRaBitQIP")
+  BIND_INDEX(IndexMVIVFSpillTQL2, ChamferL2_Point, "IndexMVIVFSpillTQL2")
+  BIND_INDEX(IndexMVIVFSpillTQIP, ChamferIP_Point, "IndexMVIVFSpillTQIP")
+  BIND_INDEX(IndexMVIVFSpillSPQTQL2, ChamferL2_Point, "IndexMVIVFSpillSPQTQL2")
+  BIND_INDEX(IndexMVIVFSpillSPQTQIP, ChamferIP_Point, "IndexMVIVFSpillSPQTQIP")
+  BIND_INDEX(IndexMVIVFSpillOneBitTQL2, ChamferL2_Point, "IndexMVIVFSpillOneBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillOneBitTQIP, ChamferIP_Point, "IndexMVIVFSpillOneBitTQIP")
+  BIND_INDEX(IndexMVIVFSpillEightBitTQL2, ChamferL2_Point, "IndexMVIVFSpillEightBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillEightBitTQIP, ChamferIP_Point, "IndexMVIVFSpillEightBitTQIP")
 
-  BIND_INDEX(IndexMVIVFSpillCompressPQL2,        ChamferL2_Point, "IndexMVIVFSpillCompressPQL2")
-  BIND_INDEX(IndexMVIVFSpillCompressPQIP,        ChamferIP_Point, "IndexMVIVFSpillCompressPQIP")
-  BIND_INDEX(IndexMVIVFSpillCompressFastScanL2,  ChamferL2_Point, "IndexMVIVFSpillCompressFastScanL2")
-  BIND_INDEX(IndexMVIVFSpillCompressFastScanIP,  ChamferIP_Point, "IndexMVIVFSpillCompressFastScanIP")
-  BIND_INDEX(IndexMVIVFSpillCompressRaBitQL2,    ChamferL2_Point, "IndexMVIVFSpillCompressRaBitQL2")
-  BIND_INDEX(IndexMVIVFSpillCompressRaBitQIP,    ChamferIP_Point, "IndexMVIVFSpillCompressRaBitQIP")
-  BIND_INDEX(IndexMVIVFSpillCompressTQL2,        ChamferL2_Point, "IndexMVIVFSpillCompressTQL2")
-  BIND_INDEX(IndexMVIVFSpillCompressTQIP,        ChamferIP_Point, "IndexMVIVFSpillCompressTQIP")
-  BIND_INDEX(IndexMVIVFSpillCompressSPQTQL2,     ChamferL2_Point, "IndexMVIVFSpillCompressSPQTQL2")
-  BIND_INDEX(IndexMVIVFSpillCompressSPQTQIP,     ChamferIP_Point, "IndexMVIVFSpillCompressSPQTQIP")
-  BIND_INDEX(IndexMVIVFSpillCompressOneBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillCompressOneBitTQL2")
-  BIND_INDEX(IndexMVIVFSpillCompressOneBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillCompressOneBitTQIP")
-  BIND_INDEX(IndexMVIVFSpillCompressEightBitTQL2,  ChamferL2_Point, "IndexMVIVFSpillCompressEightBitTQL2")
-  BIND_INDEX(IndexMVIVFSpillCompressEightBitTQIP,  ChamferIP_Point, "IndexMVIVFSpillCompressEightBitTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressPQL2, ChamferL2_Point, "IndexMVIVFSpillCompressPQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressPQIP, ChamferIP_Point, "IndexMVIVFSpillCompressPQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressFastScanL2, ChamferL2_Point,
+             "IndexMVIVFSpillCompressFastScanL2")
+  BIND_INDEX(IndexMVIVFSpillCompressFastScanIP, ChamferIP_Point,
+             "IndexMVIVFSpillCompressFastScanIP")
+  BIND_INDEX(IndexMVIVFSpillCompressRaBitQL2, ChamferL2_Point, "IndexMVIVFSpillCompressRaBitQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressRaBitQIP, ChamferIP_Point, "IndexMVIVFSpillCompressRaBitQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressTQL2, ChamferL2_Point, "IndexMVIVFSpillCompressTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressTQIP, ChamferIP_Point, "IndexMVIVFSpillCompressTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressSPQTQL2, ChamferL2_Point, "IndexMVIVFSpillCompressSPQTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressSPQTQIP, ChamferIP_Point, "IndexMVIVFSpillCompressSPQTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressOneBitTQL2, ChamferL2_Point,
+             "IndexMVIVFSpillCompressOneBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressOneBitTQIP, ChamferIP_Point,
+             "IndexMVIVFSpillCompressOneBitTQIP")
+  BIND_INDEX(IndexMVIVFSpillCompressEightBitTQL2, ChamferL2_Point,
+             "IndexMVIVFSpillCompressEightBitTQL2")
+  BIND_INDEX(IndexMVIVFSpillCompressEightBitTQIP, ChamferIP_Point,
+             "IndexMVIVFSpillCompressEightBitTQIP")
 
   // ---- MUVERA family ----
   BIND_INDEX(IndexMUVERAL2, ChamferL2_Point, "IndexMUVERAL2")
   BIND_INDEX(IndexMUVERAIP, ChamferIP_Point, "IndexMUVERAIP")
-  BIND_INDEX(IndexMUVERAPQL2,        ChamferL2_Point, "IndexMUVERAPQL2")
-  BIND_INDEX(IndexMUVERAPQIP,        ChamferIP_Point, "IndexMUVERAPQIP")
-  BIND_INDEX(IndexMUVERAFastScanL2,  ChamferL2_Point, "IndexMUVERAFastScanL2")
-  BIND_INDEX(IndexMUVERAFastScanIP,  ChamferIP_Point, "IndexMUVERAFastScanIP")
-  BIND_INDEX(IndexMUVERARaBitQL2,    ChamferL2_Point, "IndexMUVERARaBitQL2")
-  BIND_INDEX(IndexMUVERARaBitQIP,    ChamferIP_Point, "IndexMUVERARaBitQIP")
-  BIND_INDEX(IndexMUVERATQL2,        ChamferL2_Point, "IndexMUVERATQL2")
-  BIND_INDEX(IndexMUVERATQIP,        ChamferIP_Point, "IndexMUVERATQIP")
-  BIND_INDEX(IndexMUVERASPQTQL2,     ChamferL2_Point, "IndexMUVERASPQTQL2")
-  BIND_INDEX(IndexMUVERASPQTQIP,     ChamferIP_Point, "IndexMUVERASPQTQIP")
+  BIND_INDEX(IndexMUVERAPQL2, ChamferL2_Point, "IndexMUVERAPQL2")
+  BIND_INDEX(IndexMUVERAPQIP, ChamferIP_Point, "IndexMUVERAPQIP")
+  BIND_INDEX(IndexMUVERAFastScanL2, ChamferL2_Point, "IndexMUVERAFastScanL2")
+  BIND_INDEX(IndexMUVERAFastScanIP, ChamferIP_Point, "IndexMUVERAFastScanIP")
+  BIND_INDEX(IndexMUVERARaBitQL2, ChamferL2_Point, "IndexMUVERARaBitQL2")
+  BIND_INDEX(IndexMUVERARaBitQIP, ChamferIP_Point, "IndexMUVERARaBitQIP")
+  BIND_INDEX(IndexMUVERATQL2, ChamferL2_Point, "IndexMUVERATQL2")
+  BIND_INDEX(IndexMUVERATQIP, ChamferIP_Point, "IndexMUVERATQIP")
+  BIND_INDEX(IndexMUVERASPQTQL2, ChamferL2_Point, "IndexMUVERASPQTQL2")
+  BIND_INDEX(IndexMUVERASPQTQIP, ChamferIP_Point, "IndexMUVERASPQTQIP")
 
   // ---- Vamana family ----
   BIND_INDEX(IndexVamanaL2, ChamferL2_Point, "IndexVamanaL2")
   BIND_INDEX(IndexVamanaIP, ChamferIP_Point, "IndexVamanaIP")
-  BIND_INDEX(IndexVamanaPQL2,        ChamferL2_Point, "IndexVamanaPQL2")
-  BIND_INDEX(IndexVamanaPQIP,        ChamferIP_Point, "IndexVamanaPQIP")
-  BIND_INDEX(IndexVamanaFastScanL2,  ChamferL2_Point, "IndexVamanaFastScanL2")
-  BIND_INDEX(IndexVamanaFastScanIP,  ChamferIP_Point, "IndexVamanaFastScanIP")
-  BIND_INDEX(IndexVamanaRaBitQL2,    ChamferL2_Point, "IndexVamanaRaBitQL2")
-  BIND_INDEX(IndexVamanaRaBitQIP,    ChamferIP_Point, "IndexVamanaRaBitQIP")
-  BIND_INDEX(IndexVamanaTQL2,        ChamferL2_Point, "IndexVamanaTQL2")
-  BIND_INDEX(IndexVamanaTQIP,        ChamferIP_Point, "IndexVamanaTQIP")
-  BIND_INDEX(IndexVamanaSPQTQL2,     ChamferL2_Point, "IndexVamanaSPQTQL2")
-  BIND_INDEX(IndexVamanaSPQTQIP,     ChamferIP_Point, "IndexVamanaSPQTQIP")
-  BIND_INDEX(IndexVamanaOneBitTQL2,  ChamferL2_Point, "IndexVamanaOneBitTQL2")
-  BIND_INDEX(IndexVamanaOneBitTQIP,  ChamferIP_Point, "IndexVamanaOneBitTQIP")
-  BIND_INDEX(IndexVamanaEightBitTQL2,  ChamferL2_Point, "IndexVamanaEightBitTQL2")
-  BIND_INDEX(IndexVamanaEightBitTQIP,  ChamferIP_Point, "IndexVamanaEightBitTQIP")
+  BIND_INDEX(IndexVamanaPQL2, ChamferL2_Point, "IndexVamanaPQL2")
+  BIND_INDEX(IndexVamanaPQIP, ChamferIP_Point, "IndexVamanaPQIP")
+  BIND_INDEX(IndexVamanaFastScanL2, ChamferL2_Point, "IndexVamanaFastScanL2")
+  BIND_INDEX(IndexVamanaFastScanIP, ChamferIP_Point, "IndexVamanaFastScanIP")
+  BIND_INDEX(IndexVamanaRaBitQL2, ChamferL2_Point, "IndexVamanaRaBitQL2")
+  BIND_INDEX(IndexVamanaRaBitQIP, ChamferIP_Point, "IndexVamanaRaBitQIP")
+  BIND_INDEX(IndexVamanaTQL2, ChamferL2_Point, "IndexVamanaTQL2")
+  BIND_INDEX(IndexVamanaTQIP, ChamferIP_Point, "IndexVamanaTQIP")
+  BIND_INDEX(IndexVamanaSPQTQL2, ChamferL2_Point, "IndexVamanaSPQTQL2")
+  BIND_INDEX(IndexVamanaSPQTQIP, ChamferIP_Point, "IndexVamanaSPQTQIP")
+  BIND_INDEX(IndexVamanaOneBitTQL2, ChamferL2_Point, "IndexVamanaOneBitTQL2")
+  BIND_INDEX(IndexVamanaOneBitTQIP, ChamferIP_Point, "IndexVamanaOneBitTQIP")
+  BIND_INDEX(IndexVamanaEightBitTQL2, ChamferL2_Point, "IndexVamanaEightBitTQL2")
+  BIND_INDEX(IndexVamanaEightBitTQIP, ChamferIP_Point, "IndexVamanaEightBitTQIP")
 
   // ---- MPool family ----
   BIND_INDEX(IndexMPoolL2, ChamferL2_Point, "IndexMPoolL2")
   BIND_INDEX(IndexMPoolIP, ChamferIP_Point, "IndexMPoolIP")
-  BIND_INDEX(IndexMPoolPQL2,        ChamferL2_Point, "IndexMPoolPQL2")
-  BIND_INDEX(IndexMPoolPQIP,        ChamferIP_Point, "IndexMPoolPQIP")
-  BIND_INDEX(IndexMPoolFastScanL2,  ChamferL2_Point, "IndexMPoolFastScanL2")
-  BIND_INDEX(IndexMPoolFastScanIP,  ChamferIP_Point, "IndexMPoolFastScanIP")
-  BIND_INDEX(IndexMPoolRaBitQL2,    ChamferL2_Point, "IndexMPoolRaBitQL2")
-  BIND_INDEX(IndexMPoolRaBitQIP,    ChamferIP_Point, "IndexMPoolRaBitQIP")
-  BIND_INDEX(IndexMPoolTQL2,        ChamferL2_Point, "IndexMPoolTQL2")
-  BIND_INDEX(IndexMPoolTQIP,        ChamferIP_Point, "IndexMPoolTQIP")
-  BIND_INDEX(IndexMPoolSPQTQL2,     ChamferL2_Point, "IndexMPoolSPQTQL2")
-  BIND_INDEX(IndexMPoolSPQTQIP,     ChamferIP_Point, "IndexMPoolSPQTQIP")
+  BIND_INDEX(IndexMPoolPQL2, ChamferL2_Point, "IndexMPoolPQL2")
+  BIND_INDEX(IndexMPoolPQIP, ChamferIP_Point, "IndexMPoolPQIP")
+  BIND_INDEX(IndexMPoolFastScanL2, ChamferL2_Point, "IndexMPoolFastScanL2")
+  BIND_INDEX(IndexMPoolFastScanIP, ChamferIP_Point, "IndexMPoolFastScanIP")
+  BIND_INDEX(IndexMPoolRaBitQL2, ChamferL2_Point, "IndexMPoolRaBitQL2")
+  BIND_INDEX(IndexMPoolRaBitQIP, ChamferIP_Point, "IndexMPoolRaBitQIP")
+  BIND_INDEX(IndexMPoolTQL2, ChamferL2_Point, "IndexMPoolTQL2")
+  BIND_INDEX(IndexMPoolTQIP, ChamferIP_Point, "IndexMPoolTQIP")
+  BIND_INDEX(IndexMPoolSPQTQL2, ChamferL2_Point, "IndexMPoolSPQTQL2")
+  BIND_INDEX(IndexMPoolSPQTQIP, ChamferIP_Point, "IndexMPoolSPQTQIP")
 
   // ---- SVH IVF family (CompressCenters x LeafModel) ----
   BIND_INDEX(IndexSVHIVFL2, ChamferL2_Point, "IndexSVHIVFL2")
   BIND_INDEX(IndexSVHIVFIP, ChamferIP_Point, "IndexSVHIVFIP")
   BIND_INDEX(IndexSVHIVFCompressL2, ChamferL2_Point, "IndexSVHIVFCompressL2")
   BIND_INDEX(IndexSVHIVFCompressIP, ChamferIP_Point, "IndexSVHIVFCompressIP")
-  BIND_INDEX(IndexSVHIVFPQL2,        ChamferL2_Point, "IndexSVHIVFPQL2")
-  BIND_INDEX(IndexSVHIVFPQIP,        ChamferIP_Point, "IndexSVHIVFPQIP")
-  BIND_INDEX(IndexSVHIVFFastScanL2,  ChamferL2_Point, "IndexSVHIVFFastScanL2")
-  BIND_INDEX(IndexSVHIVFFastScanIP,  ChamferIP_Point, "IndexSVHIVFFastScanIP")
-  BIND_INDEX(IndexSVHIVFRaBitQL2,    ChamferL2_Point, "IndexSVHIVFRaBitQL2")
-  BIND_INDEX(IndexSVHIVFRaBitQIP,    ChamferIP_Point, "IndexSVHIVFRaBitQIP")
-  BIND_INDEX(IndexSVHIVFTQL2,        ChamferL2_Point, "IndexSVHIVFTQL2")
-  BIND_INDEX(IndexSVHIVFTQIP,        ChamferIP_Point, "IndexSVHIVFTQIP")
-  BIND_INDEX(IndexSVHIVFSPQTQL2,     ChamferL2_Point, "IndexSVHIVFSPQTQL2")
-  BIND_INDEX(IndexSVHIVFSPQTQIP,     ChamferIP_Point, "IndexSVHIVFSPQTQIP")
-  BIND_INDEX(IndexSVHIVFCompressPQL2,        ChamferL2_Point, "IndexSVHIVFCompressPQL2")
-  BIND_INDEX(IndexSVHIVFCompressPQIP,        ChamferIP_Point, "IndexSVHIVFCompressPQIP")
-  BIND_INDEX(IndexSVHIVFCompressFastScanL2,  ChamferL2_Point, "IndexSVHIVFCompressFastScanL2")
-  BIND_INDEX(IndexSVHIVFCompressFastScanIP,  ChamferIP_Point, "IndexSVHIVFCompressFastScanIP")
-  BIND_INDEX(IndexSVHIVFCompressRaBitQL2,    ChamferL2_Point, "IndexSVHIVFCompressRaBitQL2")
-  BIND_INDEX(IndexSVHIVFCompressRaBitQIP,    ChamferIP_Point, "IndexSVHIVFCompressRaBitQIP")
-  BIND_INDEX(IndexSVHIVFCompressTQL2,        ChamferL2_Point, "IndexSVHIVFCompressTQL2")
-  BIND_INDEX(IndexSVHIVFCompressTQIP,        ChamferIP_Point, "IndexSVHIVFCompressTQIP")
-  BIND_INDEX(IndexSVHIVFCompressSPQTQL2,     ChamferL2_Point, "IndexSVHIVFCompressSPQTQL2")
-  BIND_INDEX(IndexSVHIVFCompressSPQTQIP,     ChamferIP_Point, "IndexSVHIVFCompressSPQTQIP")
+  BIND_INDEX(IndexSVHIVFPQL2, ChamferL2_Point, "IndexSVHIVFPQL2")
+  BIND_INDEX(IndexSVHIVFPQIP, ChamferIP_Point, "IndexSVHIVFPQIP")
+  BIND_INDEX(IndexSVHIVFFastScanL2, ChamferL2_Point, "IndexSVHIVFFastScanL2")
+  BIND_INDEX(IndexSVHIVFFastScanIP, ChamferIP_Point, "IndexSVHIVFFastScanIP")
+  BIND_INDEX(IndexSVHIVFRaBitQL2, ChamferL2_Point, "IndexSVHIVFRaBitQL2")
+  BIND_INDEX(IndexSVHIVFRaBitQIP, ChamferIP_Point, "IndexSVHIVFRaBitQIP")
+  BIND_INDEX(IndexSVHIVFTQL2, ChamferL2_Point, "IndexSVHIVFTQL2")
+  BIND_INDEX(IndexSVHIVFTQIP, ChamferIP_Point, "IndexSVHIVFTQIP")
+  BIND_INDEX(IndexSVHIVFSPQTQL2, ChamferL2_Point, "IndexSVHIVFSPQTQL2")
+  BIND_INDEX(IndexSVHIVFSPQTQIP, ChamferIP_Point, "IndexSVHIVFSPQTQIP")
+  BIND_INDEX(IndexSVHIVFCompressPQL2, ChamferL2_Point, "IndexSVHIVFCompressPQL2")
+  BIND_INDEX(IndexSVHIVFCompressPQIP, ChamferIP_Point, "IndexSVHIVFCompressPQIP")
+  BIND_INDEX(IndexSVHIVFCompressFastScanL2, ChamferL2_Point, "IndexSVHIVFCompressFastScanL2")
+  BIND_INDEX(IndexSVHIVFCompressFastScanIP, ChamferIP_Point, "IndexSVHIVFCompressFastScanIP")
+  BIND_INDEX(IndexSVHIVFCompressRaBitQL2, ChamferL2_Point, "IndexSVHIVFCompressRaBitQL2")
+  BIND_INDEX(IndexSVHIVFCompressRaBitQIP, ChamferIP_Point, "IndexSVHIVFCompressRaBitQIP")
+  BIND_INDEX(IndexSVHIVFCompressTQL2, ChamferL2_Point, "IndexSVHIVFCompressTQL2")
+  BIND_INDEX(IndexSVHIVFCompressTQIP, ChamferIP_Point, "IndexSVHIVFCompressTQIP")
+  BIND_INDEX(IndexSVHIVFCompressSPQTQL2, ChamferL2_Point, "IndexSVHIVFCompressSPQTQL2")
+  BIND_INDEX(IndexSVHIVFCompressSPQTQIP, ChamferIP_Point, "IndexSVHIVFCompressSPQTQIP")
 
   // ---- SVH Graph family ----
   BIND_INDEX(IndexSVHGraphL2, ChamferL2_Point, "IndexSVHGraphL2")
   BIND_INDEX(IndexSVHGraphIP, ChamferIP_Point, "IndexSVHGraphIP")
-  BIND_INDEX(IndexSVHGraphPQL2,        ChamferL2_Point, "IndexSVHGraphPQL2")
-  BIND_INDEX(IndexSVHGraphPQIP,        ChamferIP_Point, "IndexSVHGraphPQIP")
-  BIND_INDEX(IndexSVHGraphFastScanL2,  ChamferL2_Point, "IndexSVHGraphFastScanL2")
-  BIND_INDEX(IndexSVHGraphFastScanIP,  ChamferIP_Point, "IndexSVHGraphFastScanIP")
-  BIND_INDEX(IndexSVHGraphRaBitQL2,    ChamferL2_Point, "IndexSVHGraphRaBitQL2")
-  BIND_INDEX(IndexSVHGraphRaBitQIP,    ChamferIP_Point, "IndexSVHGraphRaBitQIP")
-  BIND_INDEX(IndexSVHGraphTQL2,        ChamferL2_Point, "IndexSVHGraphTQL2")
-  BIND_INDEX(IndexSVHGraphTQIP,        ChamferIP_Point, "IndexSVHGraphTQIP")
-  BIND_INDEX(IndexSVHGraphSPQTQL2,     ChamferL2_Point, "IndexSVHGraphSPQTQL2")
-  BIND_INDEX(IndexSVHGraphSPQTQIP,     ChamferIP_Point, "IndexSVHGraphSPQTQIP")
+  BIND_INDEX(IndexSVHGraphPQL2, ChamferL2_Point, "IndexSVHGraphPQL2")
+  BIND_INDEX(IndexSVHGraphPQIP, ChamferIP_Point, "IndexSVHGraphPQIP")
+  BIND_INDEX(IndexSVHGraphFastScanL2, ChamferL2_Point, "IndexSVHGraphFastScanL2")
+  BIND_INDEX(IndexSVHGraphFastScanIP, ChamferIP_Point, "IndexSVHGraphFastScanIP")
+  BIND_INDEX(IndexSVHGraphRaBitQL2, ChamferL2_Point, "IndexSVHGraphRaBitQL2")
+  BIND_INDEX(IndexSVHGraphRaBitQIP, ChamferIP_Point, "IndexSVHGraphRaBitQIP")
+  BIND_INDEX(IndexSVHGraphTQL2, ChamferL2_Point, "IndexSVHGraphTQL2")
+  BIND_INDEX(IndexSVHGraphTQIP, ChamferIP_Point, "IndexSVHGraphTQIP")
+  BIND_INDEX(IndexSVHGraphSPQTQL2, ChamferL2_Point, "IndexSVHGraphSPQTQL2")
+  BIND_INDEX(IndexSVHGraphSPQTQIP, ChamferIP_Point, "IndexSVHGraphSPQTQIP")
 
   //======================================
   // Stats Functions
@@ -554,7 +564,10 @@ PYBIND11_MODULE(mvsic, m) {
       .def_readwrite("avg_cmps", &mvsic::StatsExtended::avg_cmps)
       .def_readwrite("recall_1_k", &mvsic::StatsExtended::recall_1_k)
       .def_readwrite("recall_k_k", &mvsic::StatsExtended::recall_k_k)
-      .def_readwrite("avg_timings", &mvsic::StatsExtended::avg_timings);
+      .def_readwrite("avg_timings", &mvsic::StatsExtended::avg_timings)
+      .def_readwrite("latency_p50", &mvsic::StatsExtended::latency_p50)
+      .def_readwrite("latency_p95", &mvsic::StatsExtended::latency_p95)
+      .def_readwrite("latency_p99", &mvsic::StatsExtended::latency_p99);
 
   m.def("ReadGT", &ReadGT, "Read ground truth file", py::arg("file_path"), py::arg("num_points"));
 
@@ -638,22 +651,254 @@ PYBIND11_MODULE(mvsic, m) {
       "Compute extended stats for " index_name_str                                                 \
       " index, using p threads per query, for a sequence of params",                               \
       py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
-      py::arg("params"), py::arg("num_threads"));
+      py::arg("params"), py::arg("num_threads"));                                                  \
+  m.def(                                                                                           \
+      "compute_stats_latency",                                                                     \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const mvsic::SearchParams& params) {                                                      \
+        return compute_stats_latency(index, points, query_points, gt, params);                     \
+      },                                                                                           \
+      "Per-query single-thread latency for " index_name_str " index.", py::arg("index"),           \
+      py::arg("points"), py::arg("query_points"), py::arg("gt"), py::arg("params"));               \
+  m.def(                                                                                           \
+      "compute_stats_latency",                                                                     \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const parlay::sequence<mvsic::SearchParams>& params) {                                    \
+        return compute_stats_latency(index, points, query_points, gt, params);                     \
+      },                                                                                           \
+      "Per-query single-thread latency for " index_name_str " index, sequence of params.",         \
+      py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
+      py::arg("params"));                                                                          \
+  m.def(                                                                                           \
+      "compute_stats_multi_latency",                                                               \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const mvsic::SearchParams& params) {                                                      \
+        return compute_stats_multi_latency(index, points, query_points, gt, params);               \
+      },                                                                                           \
+      "Per-query multi-thread latency for " index_name_str " index (uses ambient parlay pool).",   \
+      py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
+      py::arg("params"));                                                                          \
+  m.def(                                                                                           \
+      "compute_stats_multi_latency",                                                               \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const parlay::sequence<mvsic::SearchParams>& params) {                                    \
+        return compute_stats_multi_latency(index, points, query_points, gt, params);               \
+      },                                                                                           \
+      "Per-query multi-thread latency for " index_name_str " index, sequence of params.",          \
+      py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
+      py::arg("params"));                                                                          \
+  m.def(                                                                                           \
+      "compute_stats_batch",                                                                       \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const mvsic::SearchParams& params) {                                                      \
+        return compute_stats_batch(index, points, query_points, gt, params);                       \
+      },                                                                                           \
+      "Batch (search_all) throughput for " index_name_str " index.", py::arg("index"),             \
+      py::arg("points"), py::arg("query_points"), py::arg("gt"), py::arg("params"));               \
+  m.def(                                                                                           \
+      "compute_stats_batch",                                                                       \
+      [](mvsic::index_type& index, const mvsic::PointCloudSet<mvsic::point_type>& points,          \
+         const mvsic::PointCloudSet<mvsic::point_type>& query_points,                              \
+         const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,                 \
+         const parlay::sequence<mvsic::SearchParams>& params) {                                    \
+        return compute_stats_batch(index, points, query_points, gt, params);                       \
+      },                                                                                           \
+      "Batch (search_all) throughput for " index_name_str " index, sequence of params.",           \
+      py::arg("index"), py::arg("points"), py::arg("query_points"), py::arg("gt"),                 \
+      py::arg("params"));
 
-  BIND_COMPUTE_STATS(IndexMVIVFIP, ChamferIP_Point, "MVIVFIP")
   BIND_COMPUTE_STATS(IndexMVIVFL2, ChamferL2_Point, "MVIVFL2")
-  BIND_COMPUTE_STATS(IndexMVIVFFlatIP, ChamferIP_Point, "MVIVFFlatIP")
+  BIND_COMPUTE_STATS(IndexMVIVFIP, ChamferIP_Point, "MVIVFIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressL2, ChamferL2_Point, "MVIVFCompressL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressIP, ChamferIP_Point, "MVIVFCompressIP")
+  BIND_COMPUTE_STATS(IndexMVIVFPQL2, ChamferL2_Point, "MVIVFPQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFPQIP, ChamferIP_Point, "MVIVFPQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFastScanL2, ChamferL2_Point, "MVIVFFastScanL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFastScanIP, ChamferIP_Point, "MVIVFFastScanIP")
+  BIND_COMPUTE_STATS(IndexMVIVFRaBitQL2, ChamferL2_Point, "MVIVFRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFRaBitQIP, ChamferIP_Point, "MVIVFRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFTQL2, ChamferL2_Point, "MVIVFTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFTQIP, ChamferIP_Point, "MVIVFTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSPQTQL2, ChamferL2_Point, "MVIVFSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSPQTQIP, ChamferIP_Point, "MVIVFSPQTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFOneBitTQL2, ChamferL2_Point, "MVIVFOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFOneBitTQIP, ChamferIP_Point, "MVIVFOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFEightBitTQL2, ChamferL2_Point, "MVIVFEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFEightBitTQIP, ChamferIP_Point, "MVIVFEightBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressPQL2, ChamferL2_Point, "MVIVFCompressPQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressPQIP, ChamferIP_Point, "MVIVFCompressPQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressFastScanL2, ChamferL2_Point, "MVIVFCompressFastScanL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressFastScanIP, ChamferIP_Point, "MVIVFCompressFastScanIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressRaBitQL2, ChamferL2_Point, "MVIVFCompressRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressRaBitQIP, ChamferIP_Point, "MVIVFCompressRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressTQL2, ChamferL2_Point, "MVIVFCompressTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressTQIP, ChamferIP_Point, "MVIVFCompressTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressSPQTQL2, ChamferL2_Point, "MVIVFCompressSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressSPQTQIP, ChamferIP_Point, "MVIVFCompressSPQTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressOneBitTQL2, ChamferL2_Point, "MVIVFCompressOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressOneBitTQIP, ChamferIP_Point, "MVIVFCompressOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressEightBitTQL2, ChamferL2_Point, "MVIVFCompressEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFCompressEightBitTQIP, ChamferIP_Point, "MVIVFCompressEightBitTQIP")
   BIND_COMPUTE_STATS(IndexMVIVFFlatL2, ChamferL2_Point, "MVIVFFlatL2")
-  BIND_COMPUTE_STATS(IndexMVIVFSpillIP, ChamferIP_Point, "MVIVFSpillIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatIP, ChamferIP_Point, "MVIVFFlatIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressL2, ChamferL2_Point, "MVIVFFlatCompressL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressIP, ChamferIP_Point, "MVIVFFlatCompressIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatPQL2, ChamferL2_Point, "MVIVFFlatPQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatPQIP, ChamferIP_Point, "MVIVFFlatPQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatFastScanL2, ChamferL2_Point, "MVIVFFlatFastScanL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatFastScanIP, ChamferIP_Point, "MVIVFFlatFastScanIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatRaBitQL2, ChamferL2_Point, "MVIVFFlatRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatRaBitQIP, ChamferIP_Point, "MVIVFFlatRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatTQL2, ChamferL2_Point, "MVIVFFlatTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatTQIP, ChamferIP_Point, "MVIVFFlatTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatSPQTQL2, ChamferL2_Point, "MVIVFFlatSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatSPQTQIP, ChamferIP_Point, "MVIVFFlatSPQTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatOneBitTQL2, ChamferL2_Point, "MVIVFFlatOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatOneBitTQIP, ChamferIP_Point, "MVIVFFlatOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatEightBitTQL2, ChamferL2_Point, "MVIVFFlatEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatEightBitTQIP, ChamferIP_Point, "MVIVFFlatEightBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressPQL2, ChamferL2_Point, "MVIVFFlatCompressPQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressPQIP, ChamferIP_Point, "MVIVFFlatCompressPQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressFastScanL2, ChamferL2_Point,
+                     "MVIVFFlatCompressFastScanL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressFastScanIP, ChamferIP_Point,
+                     "MVIVFFlatCompressFastScanIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressRaBitQL2, ChamferL2_Point, "MVIVFFlatCompressRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressRaBitQIP, ChamferIP_Point, "MVIVFFlatCompressRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressTQL2, ChamferL2_Point, "MVIVFFlatCompressTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressTQIP, ChamferIP_Point, "MVIVFFlatCompressTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressSPQTQL2, ChamferL2_Point, "MVIVFFlatCompressSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressSPQTQIP, ChamferIP_Point, "MVIVFFlatCompressSPQTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressOneBitTQL2, ChamferL2_Point,
+                     "MVIVFFlatCompressOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressOneBitTQIP, ChamferIP_Point,
+                     "MVIVFFlatCompressOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressEightBitTQL2, ChamferL2_Point,
+                     "MVIVFFlatCompressEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFFlatCompressEightBitTQIP, ChamferIP_Point,
+                     "MVIVFFlatCompressEightBitTQIP")
   BIND_COMPUTE_STATS(IndexMVIVFSpillL2, ChamferL2_Point, "MVIVFSpillL2")
-  BIND_COMPUTE_STATS(IndexMUVERAIP, ChamferIP_Point, "MUVERAIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillIP, ChamferIP_Point, "MVIVFSpillIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressL2, ChamferL2_Point, "MVIVFSpillCompressL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressIP, ChamferIP_Point, "MVIVFSpillCompressIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillPQL2, ChamferL2_Point, "MVIVFSpillPQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillPQIP, ChamferIP_Point, "MVIVFSpillPQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillFastScanL2, ChamferL2_Point, "MVIVFSpillFastScanL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillFastScanIP, ChamferIP_Point, "MVIVFSpillFastScanIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillRaBitQL2, ChamferL2_Point, "MVIVFSpillRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillRaBitQIP, ChamferIP_Point, "MVIVFSpillRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillTQL2, ChamferL2_Point, "MVIVFSpillTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillTQIP, ChamferIP_Point, "MVIVFSpillTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillSPQTQL2, ChamferL2_Point, "MVIVFSpillSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillSPQTQIP, ChamferIP_Point, "MVIVFSpillSPQTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillOneBitTQL2, ChamferL2_Point, "MVIVFSpillOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillOneBitTQIP, ChamferIP_Point, "MVIVFSpillOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillEightBitTQL2, ChamferL2_Point, "MVIVFSpillEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillEightBitTQIP, ChamferIP_Point, "MVIVFSpillEightBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressPQL2, ChamferL2_Point, "MVIVFSpillCompressPQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressPQIP, ChamferIP_Point, "MVIVFSpillCompressPQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressFastScanL2, ChamferL2_Point,
+                     "MVIVFSpillCompressFastScanL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressFastScanIP, ChamferIP_Point,
+                     "MVIVFSpillCompressFastScanIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressRaBitQL2, ChamferL2_Point, "MVIVFSpillCompressRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressRaBitQIP, ChamferIP_Point, "MVIVFSpillCompressRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressTQL2, ChamferL2_Point, "MVIVFSpillCompressTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressTQIP, ChamferIP_Point, "MVIVFSpillCompressTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressSPQTQL2, ChamferL2_Point, "MVIVFSpillCompressSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressSPQTQIP, ChamferIP_Point, "MVIVFSpillCompressSPQTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressOneBitTQL2, ChamferL2_Point,
+                     "MVIVFSpillCompressOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressOneBitTQIP, ChamferIP_Point,
+                     "MVIVFSpillCompressOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressEightBitTQL2, ChamferL2_Point,
+                     "MVIVFSpillCompressEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexMVIVFSpillCompressEightBitTQIP, ChamferIP_Point,
+                     "MVIVFSpillCompressEightBitTQIP")
   BIND_COMPUTE_STATS(IndexMUVERAL2, ChamferL2_Point, "MUVERAL2")
-  BIND_COMPUTE_STATS(IndexVamanaIP, ChamferIP_Point, "VamanaIP")
+  BIND_COMPUTE_STATS(IndexMUVERAIP, ChamferIP_Point, "MUVERAIP")
+  BIND_COMPUTE_STATS(IndexMUVERAPQL2, ChamferL2_Point, "MUVERAPQL2")
+  BIND_COMPUTE_STATS(IndexMUVERAPQIP, ChamferIP_Point, "MUVERAPQIP")
+  BIND_COMPUTE_STATS(IndexMUVERAFastScanL2, ChamferL2_Point, "MUVERAFastScanL2")
+  BIND_COMPUTE_STATS(IndexMUVERAFastScanIP, ChamferIP_Point, "MUVERAFastScanIP")
+  BIND_COMPUTE_STATS(IndexMUVERARaBitQL2, ChamferL2_Point, "MUVERARaBitQL2")
+  BIND_COMPUTE_STATS(IndexMUVERARaBitQIP, ChamferIP_Point, "MUVERARaBitQIP")
+  BIND_COMPUTE_STATS(IndexMUVERATQL2, ChamferL2_Point, "MUVERATQL2")
+  BIND_COMPUTE_STATS(IndexMUVERATQIP, ChamferIP_Point, "MUVERATQIP")
+  BIND_COMPUTE_STATS(IndexMUVERASPQTQL2, ChamferL2_Point, "MUVERASPQTQL2")
+  BIND_COMPUTE_STATS(IndexMUVERASPQTQIP, ChamferIP_Point, "MUVERASPQTQIP")
   BIND_COMPUTE_STATS(IndexVamanaL2, ChamferL2_Point, "VamanaL2")
-  BIND_COMPUTE_STATS(IndexMPoolIP, ChamferIP_Point, "MPoolIP")
+  BIND_COMPUTE_STATS(IndexVamanaIP, ChamferIP_Point, "VamanaIP")
+  BIND_COMPUTE_STATS(IndexVamanaPQL2, ChamferL2_Point, "VamanaPQL2")
+  BIND_COMPUTE_STATS(IndexVamanaPQIP, ChamferIP_Point, "VamanaPQIP")
+  BIND_COMPUTE_STATS(IndexVamanaFastScanL2, ChamferL2_Point, "VamanaFastScanL2")
+  BIND_COMPUTE_STATS(IndexVamanaFastScanIP, ChamferIP_Point, "VamanaFastScanIP")
+  BIND_COMPUTE_STATS(IndexVamanaRaBitQL2, ChamferL2_Point, "VamanaRaBitQL2")
+  BIND_COMPUTE_STATS(IndexVamanaRaBitQIP, ChamferIP_Point, "VamanaRaBitQIP")
+  BIND_COMPUTE_STATS(IndexVamanaTQL2, ChamferL2_Point, "VamanaTQL2")
+  BIND_COMPUTE_STATS(IndexVamanaTQIP, ChamferIP_Point, "VamanaTQIP")
+  BIND_COMPUTE_STATS(IndexVamanaSPQTQL2, ChamferL2_Point, "VamanaSPQTQL2")
+  BIND_COMPUTE_STATS(IndexVamanaSPQTQIP, ChamferIP_Point, "VamanaSPQTQIP")
+  BIND_COMPUTE_STATS(IndexVamanaOneBitTQL2, ChamferL2_Point, "VamanaOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexVamanaOneBitTQIP, ChamferIP_Point, "VamanaOneBitTQIP")
+  BIND_COMPUTE_STATS(IndexVamanaEightBitTQL2, ChamferL2_Point, "VamanaEightBitTQL2")
+  BIND_COMPUTE_STATS(IndexVamanaEightBitTQIP, ChamferIP_Point, "VamanaEightBitTQIP")
   BIND_COMPUTE_STATS(IndexMPoolL2, ChamferL2_Point, "MPoolL2")
-  BIND_COMPUTE_STATS(IndexSVHIVFIP, ChamferIP_Point, "SVHIVFIP")
+  BIND_COMPUTE_STATS(IndexMPoolIP, ChamferIP_Point, "MPoolIP")
+  BIND_COMPUTE_STATS(IndexMPoolPQL2, ChamferL2_Point, "MPoolPQL2")
+  BIND_COMPUTE_STATS(IndexMPoolPQIP, ChamferIP_Point, "MPoolPQIP")
+  BIND_COMPUTE_STATS(IndexMPoolFastScanL2, ChamferL2_Point, "MPoolFastScanL2")
+  BIND_COMPUTE_STATS(IndexMPoolFastScanIP, ChamferIP_Point, "MPoolFastScanIP")
+  BIND_COMPUTE_STATS(IndexMPoolRaBitQL2, ChamferL2_Point, "MPoolRaBitQL2")
+  BIND_COMPUTE_STATS(IndexMPoolRaBitQIP, ChamferIP_Point, "MPoolRaBitQIP")
+  BIND_COMPUTE_STATS(IndexMPoolTQL2, ChamferL2_Point, "MPoolTQL2")
+  BIND_COMPUTE_STATS(IndexMPoolTQIP, ChamferIP_Point, "MPoolTQIP")
+  BIND_COMPUTE_STATS(IndexMPoolSPQTQL2, ChamferL2_Point, "MPoolSPQTQL2")
+  BIND_COMPUTE_STATS(IndexMPoolSPQTQIP, ChamferIP_Point, "MPoolSPQTQIP")
   BIND_COMPUTE_STATS(IndexSVHIVFL2, ChamferL2_Point, "SVHIVFL2")
-  BIND_COMPUTE_STATS(IndexSVHGraphIP, ChamferIP_Point, "SVHGraphIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFIP, ChamferIP_Point, "SVHIVFIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressL2, ChamferL2_Point, "SVHIVFCompressL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressIP, ChamferIP_Point, "SVHIVFCompressIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFPQL2, ChamferL2_Point, "SVHIVFPQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFPQIP, ChamferIP_Point, "SVHIVFPQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFFastScanL2, ChamferL2_Point, "SVHIVFFastScanL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFFastScanIP, ChamferIP_Point, "SVHIVFFastScanIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFRaBitQL2, ChamferL2_Point, "SVHIVFRaBitQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFRaBitQIP, ChamferIP_Point, "SVHIVFRaBitQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFTQL2, ChamferL2_Point, "SVHIVFTQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFTQIP, ChamferIP_Point, "SVHIVFTQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFSPQTQL2, ChamferL2_Point, "SVHIVFSPQTQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFSPQTQIP, ChamferIP_Point, "SVHIVFSPQTQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressPQL2, ChamferL2_Point, "SVHIVFCompressPQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressPQIP, ChamferIP_Point, "SVHIVFCompressPQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressFastScanL2, ChamferL2_Point, "SVHIVFCompressFastScanL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressFastScanIP, ChamferIP_Point, "SVHIVFCompressFastScanIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressRaBitQL2, ChamferL2_Point, "SVHIVFCompressRaBitQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressRaBitQIP, ChamferIP_Point, "SVHIVFCompressRaBitQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressTQL2, ChamferL2_Point, "SVHIVFCompressTQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressTQIP, ChamferIP_Point, "SVHIVFCompressTQIP")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressSPQTQL2, ChamferL2_Point, "SVHIVFCompressSPQTQL2")
+  BIND_COMPUTE_STATS(IndexSVHIVFCompressSPQTQIP, ChamferIP_Point, "SVHIVFCompressSPQTQIP")
   BIND_COMPUTE_STATS(IndexSVHGraphL2, ChamferL2_Point, "SVHGraphL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphIP, ChamferIP_Point, "SVHGraphIP")
+  BIND_COMPUTE_STATS(IndexSVHGraphPQL2, ChamferL2_Point, "SVHGraphPQL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphPQIP, ChamferIP_Point, "SVHGraphPQIP")
+  BIND_COMPUTE_STATS(IndexSVHGraphFastScanL2, ChamferL2_Point, "SVHGraphFastScanL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphFastScanIP, ChamferIP_Point, "SVHGraphFastScanIP")
+  BIND_COMPUTE_STATS(IndexSVHGraphRaBitQL2, ChamferL2_Point, "SVHGraphRaBitQL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphRaBitQIP, ChamferIP_Point, "SVHGraphRaBitQIP")
+  BIND_COMPUTE_STATS(IndexSVHGraphTQL2, ChamferL2_Point, "SVHGraphTQL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphTQIP, ChamferIP_Point, "SVHGraphTQIP")
+  BIND_COMPUTE_STATS(IndexSVHGraphSPQTQL2, ChamferL2_Point, "SVHGraphSPQTQL2")
+  BIND_COMPUTE_STATS(IndexSVHGraphSPQTQIP, ChamferIP_Point, "SVHGraphSPQTQIP")
 }

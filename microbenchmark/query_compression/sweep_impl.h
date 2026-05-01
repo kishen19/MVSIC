@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -99,7 +100,7 @@ void run_sweep(commandLine& P, SearchParams::QueryCompression qc_mode, const cha
       // Ward: merge while min Ward linkage distance <= τ — NOT cosine. Small τ => few merges
       // (full query); large τ => aggressive merges. Default sweep 0 -> τ_max (not ball-carving IP).
       if (qc_mode == SearchParams::QueryCompression::Wards) {
-        if (std::isnan(tau_lo)) tau_lo = 0.0;
+        if (std::isnan(tau_lo)) tau_lo = 0.0001;
         if (std::isnan(tau_hi)) tau_hi = 2.0;
       } else {
         if constexpr (metric) {
@@ -107,7 +108,7 @@ void run_sweep(commandLine& P, SearchParams::QueryCompression qc_mode, const cha
           if (std::isnan(tau_hi)) tau_hi = 4.0;
         } else {
           if (std::isnan(tau_lo)) tau_lo = 1.0;
-          if (std::isnan(tau_hi)) tau_hi = 0.0;
+          if (std::isnan(tau_hi)) tau_hi = 0.0001;
         }
       }
     }
@@ -147,12 +148,36 @@ void run_sweep(commandLine& P, SearchParams::QueryCompression qc_mode, const cha
     std::cout << "), τ range [" << tau_lo << "," << tau_hi << "]";
   }
   std::cout << ", n=" << points.size() << " queries=" << queries.size() << " k=" << k << std::endl;
+  const uint64_t dist_ops_per_tau =
+      static_cast<uint64_t>(points.size()) * static_cast<uint64_t>(queries.size());
+  if (dist_ops_per_tau >= 5'000'000ull) {
+    std::cout
+        << "Note: flat brute-force does ~" << points.size() << "×" << queries.size() << " ≈ "
+        << dist_ops_per_tau
+        << " Chamfer cloud comparisons per τ step; large corpora can take many minutes per τ.\n";
+  }
+  std::cout << std::flush;
+
+  if (!outCsv.empty()) {
+    std::ofstream hf(outCsv, std::ios::trunc);
+    hf << "tau,recall_1_" << k << ",recall_" << k << "_" << k << ",avg_compressed_vectors\n";
+    hf.close();
+    std::cout << "Writing CSV (overwrite): " << outCsv << std::endl;
+  }
 
   const uint32_t batch_align = 1u;
 
-  for (float tau : taus) {
-    auto pred = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>::uninitialized(
-        queries.size());
+  for (size_t ti = 0; ti < taus.size(); ++ti) {
+    const float tau = taus[ti];
+    std::cout << "  [" << (ti + 1) << "/" << taus.size() << "] tau=" << std::fixed
+              << std::setprecision(6) << tau << "  … " << std::flush;
+
+    const auto t_step_start = std::chrono::steady_clock::now();
+
+    // Inner seqs must be default-constructed: assign into uninitialized slots frees garbage.
+    auto pred = parlay::tabulate(queries.size(), [](size_t) {
+      return parlay::sequence<std::pair<uint32_t, float>>();
+    });
     auto counts = parlay::sequence<uint32_t>::uninitialized(queries.size());
     parlay::parallel_for(0, queries.size(), [&](size_t qi) {
       auto compressed = compress_query<ChPoint>(queries[qi], qc_mode, tau, batch_align);
@@ -167,16 +192,16 @@ void run_sweep(commandLine& P, SearchParams::QueryCompression qc_mode, const cha
         static_cast<double>(parlay::reduce(counts)) / static_cast<double>(queries.size());
     auto [r1, rk] = compute_scores(pred, gt, k);
 
-    std::cout << std::fixed << std::setprecision(6) << "tau=" << tau << " recall@1@" << k << "="
-              << r1 << " recall@" << k << "@" << k << "=" << rk << " avg_q=" << std::setprecision(2)
+    const double step_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t_step_start).count();
+
+    std::cout << "done in " << std::setprecision(1) << step_sec << "s\n";
+    std::cout << std::fixed << std::setprecision(6) << "      recall@1@" << k << "=" << r1
+              << " recall@" << k << "@" << k << "=" << rk << " avg_q=" << std::setprecision(2)
               << avg_q << std::endl;
 
     if (!outCsv.empty()) {
-      bool exists = std::ifstream(outCsv).good();
       std::ofstream f(outCsv, std::ios::app);
-      if (!exists) {
-        f << "tau,recall_1_" << k << ",recall_" << k << "_" << k << ",avg_compressed_vectors\n";
-      }
       f << std::fixed << std::setprecision(10) << tau << "," << r1 << "," << rk << ","
         << std::setprecision(6) << avg_q << "\n";
       f.close();

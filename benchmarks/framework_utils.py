@@ -41,33 +41,29 @@ class FastPlaidWrapper:
         print("    Building FastPlaid index...")
         self.index.create(documents_embeddings=documents, **self.build_params)
 
-    def compute_stats_extended(self, queries: list, gt: list, params: dict):  # Expects list of tensors and a single param dict
-        """
-        Runs search for a single parameter combination and computes stats.
-        """
+    def _to_fp_args(self, params: dict):
+        """Translate a single MVSIC search-param dict to FastPlaid kwargs."""
         k = params['k']
         search_args = params.copy()
         search_args['top_k'] = search_args.pop('k')
         # Benchmark configs use num_rerank; FastPlaid expects n_full_scores.
         if 'num_rerank' in search_args and 'n_full_scores' not in search_args:
             search_args['n_full_scores'] = search_args.pop('num_rerank')
+        return k, search_args
 
-        # 1. QPS_seq
-        # start_time = time.time()
-        # # The search method in fast-plaid expects a list of queries and returns a list of results
-        # for _query in queries:
-        #     _ = self.index.search(queries_embeddings=[_query], **search_args)
-        # end_time = time.time()
-        # qps_seq = len(queries) / (end_time - start_time) if (end_time - start_time) > 0 else 0
+    def compute_stats_extended(self, queries: list, gt: list, params: dict):
+        """Default = batch path. Mirrors the legacy wrapper API."""
+        return self.compute_stats_batch(queries, gt, params)
 
-        # 2. QPS_par
+    def compute_stats_batch(self, queries: list, gt: list, params: dict):
+        """Single batched search_all call; reports QPS_par."""
+        k, search_args = self._to_fp_args(params)
+
         start_time = time.time()
         neighbors = self.index.search(queries_embeddings=queries, **search_args)
-        end_time = time.time()
-        batch_search_time = end_time - start_time
-        qps_par = len(queries) / (end_time - start_time) if (end_time - start_time) > 0 else 0
+        batch_search_time = time.time() - start_time
+        qps_par = len(queries) / batch_search_time if batch_search_time > 0 else 0.0
 
-        # 3. Compute scores
         recall_1_k, recall_k_k = mvsic.compute_scores(neighbors, gt, k)
 
         return StatsExtended(
@@ -78,6 +74,42 @@ class FastPlaidWrapper:
             QPS_par=qps_par,
             avg_cmps=0.0,
             avg_timings=[batch_search_time],
+        )
+
+    def compute_stats_latency(self, queries: list, gt: list, params: dict):
+        """Single-query loop (mirrors examples/fast_plaid_benchmark.py).
+
+        Reports QPS_seq from the per-query loop and uses the same per-query
+        outputs to compute recall@k. No batch search_all is performed.
+        """
+        k, search_args = self._to_fp_args(params)
+
+        # Warmup with the first ~5 queries.
+        for q in queries[: min(5, len(queries))]:
+            self.index.search(queries_embeddings=[q], **search_args)
+
+        per_query_latencies = []
+        individual_neighbors = []  # list of [doc_id_list], one per query
+        for q in queries:
+            t0 = time.time()
+            results = self.index.search(queries_embeddings=[q], **search_args)
+            per_query_latencies.append(time.time() - t0)
+            # FastPlaid returns results[0] = [(doc_id, score), ...] for a single query.
+            individual_neighbors.append([res[0] for res in results[0]])
+
+        total_seq = sum(per_query_latencies) or 1e-9
+        qps_seq = len(queries) / total_seq
+
+        recall_1_k, recall_k_k = mvsic.compute_scores(individual_neighbors, gt, k)
+
+        return StatsExtended(
+            k=k,
+            recall_1_k=min(1.0, recall_1_k),
+            recall_k_k=min(1.0, recall_k_k),
+            QPS_seq=qps_seq,
+            QPS_par=qps_seq,
+            avg_cmps=0.0,
+            avg_timings=[total_seq],
         )
 
     def save(self, path: str):

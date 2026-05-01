@@ -1,0 +1,66 @@
+name: "Main experiments build (BEIR5)"
+
+# Index binaries land at <index_dir>/<index_name>/<build_name>/index.bin .
+# Configs reference results/indexes/<dataset>/ which can be a symlink to
+# scratch storage; only the (large) index files live there. Everything else
+# (CSVs, plots, build_stats markdown) stays under experiments/.
+
+datasets:
+  - { name: nfcorpus, path: data/beir/nfcorpus, index_dir: results/indexes/nfcorpus }
+  - { name: scifact,  path: data/beir/scifact,  index_dir: results/indexes/scifact  }
+  - { name: arguana,  path: data/beir/arguana,  index_dir: results/indexes/arguana  }
+  - { name: scidocs,  path: data/beir/scidocs,  index_dir: results/indexes/scidocs  }
+  - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa     }
+
+indices:
+  # ----- MVIVF. TQ8bit / TQ4bit / TQ1bit are search-time variants, not build params. -----
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+
+  # ----- MUVERA: d_fde=2560, Vamana R=200 / L=600. -----
+  - name: muvera
+    metric: ip
+    build_configs:
+      - name: muvera_2560_R200_L600
+        params:
+          verbose: 1
+          d_fde: 2560
+          R: 200
+          L: 600
+
+  # ----- MV-Vamana. -----
+  - name: vamana
+    metric: ip
+    build_configs:
+      - name: vamana_R200
+        params:
+          verbose: 1
+          R: 200
+
+  # ----- SVH Graph (single-vector Vamana-style graph over SVH embeddings). -----
+  - name: svh_graph
+    metric: ip
+    build_configs:
+      - name: svh_graph_R200
+        params:
+          verbose: 1
+          R: 200
+          L: 600
+
+  # ----- FastPlaid (BEIR5 only). Build via FastPlaidWrapper.create. -----
+  - name: fastplaid
+    metric: ip
+    build_configs:
+      - name: fastplaid_nbits4
+        params:
+          nbits: 4
