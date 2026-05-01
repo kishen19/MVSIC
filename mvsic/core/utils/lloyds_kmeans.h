@@ -430,6 +430,18 @@ class TQ8LloydsBackend {
     gather_encoded_(cache, vec_root_indices);
   }
 
+  // Cache-aware ctor that takes ownership of a pre-filled flat float buffer
+  // of size n*d (row-major).  Skips the per-row deep copy the seq<seq> ctors
+  // do.  Caller must guarantee data_flat.size() == n * d.
+  TQ8LloydsBackend(parlay::sequence<float>&& data_flat, size_t n, uint32_t d,
+                   const TQ8VectorCache<metric>& cache,
+                   const parlay::sequence<uint32_t>& vec_root_indices)
+      : d_(d), model_(cache.model) {
+    n_ = n;
+    data_ = std::move(data_flat);
+    gather_encoded_(cache, vec_root_indices);
+  }
+
   size_t size() const { return n_; }
   uint32_t dims() const { return d_; }
   static constexpr bool is_metric() { return metric; }

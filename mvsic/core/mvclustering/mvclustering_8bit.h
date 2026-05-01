@@ -371,26 +371,97 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
       const bool use_outer_sample = (T_c > m);
       const size_t row_count = use_outer_sample ? m : T_c;
 
-      auto data = parlay::sequence<parlay::sequence<float>>(
-          row_count, parlay::sequence<float>::uninitialized(d));
-
       const bool emit_vec_indices = use_vec_cache && row_count > 0;
       const bool need_weights = params.use_weighted_inner_kmeans;
+      const bool will_run_kmeans = (s < row_count);
+      // Fast path: skip the seq<seq> intermediate when inner k-means runs
+      // through the TQ8 cache-aware backend (which has a flat-buffer ctor).
+      const bool use_flat =
+          will_run_kmeans && emit_vec_indices && params.build_with_8btq;
+
       parlay::sequence<uint32_t> vec_root_indices;
       parlay::sequence<float> weights;
       if (emit_vec_indices) vec_root_indices.resize(row_count);
       if (need_weights) weights.resize(row_count);
 
+      if (use_flat) {
+        // Flat-buffer fast path: sample/gather straight into a single n*d
+        // float buffer and hand ownership to the backend.
+        parlay::sequence<float> data_flat =
+            parlay::sequence<float>::uninitialized(row_count * d);
+        if (use_outer_sample) {
+          const size_t* off = pc_offsets_in_data.data();
+          parlay::parallel_for(0, m, [&](size_t r) {
+            const size_t g = static_cast<size_t>(
+                                 parlay::hash32(static_cast<uint32_t>(r))) %
+                             T_c;
+            const size_t k_ub = static_cast<size_t>(
+                std::upper_bound(off, off + (M + 1), g) - off);
+            const size_t j = k_ub - 1;
+            const uint32_t pc_local = grouped[i][j].second;
+            const uint32_t v_in_pc = static_cast<uint32_t>(g - off[j]);
+            std::memcpy(data_flat.data() + r * d,
+                        points.data(pc_local) + v_in_pc * d,
+                        d * sizeof(float));
+            const uint32_t pc_root = local_to_root_pc[pc_local];
+            vec_root_indices[r] =
+                static_cast<uint32_t>((*pc_vec_offsets_)[pc_root] + v_in_pc);
+            if (need_weights) {
+              const uint32_t doc_size = points.get_size(pc_local);
+              weights[r] = (doc_size > 0)
+                               ? 1.0f / static_cast<float>(doc_size)
+                               : 0.0f;
+            }
+          });
+        } else {
+          parlay::parallel_for(0, M, [&](size_t j) {
+            const uint32_t pc_local = grouped[i][j].second;
+            const size_t base = pc_offsets_in_data[j];
+            const uint32_t doc_size = points.get_size(pc_local);
+            const float* src = points.data(pc_local);
+            // Destination is contiguous in the flat buffer, so one memcpy
+            // for the whole PC instead of per-vec.
+            std::memcpy(data_flat.data() + base * d, src,
+                        static_cast<size_t>(doc_size) * d * sizeof(float));
+            const uint32_t pc_root = local_to_root_pc[pc_local];
+            const size_t pc_root_base = (*pc_vec_offsets_)[pc_root];
+            for (uint32_t v = 0; v < doc_size; ++v) {
+              vec_root_indices[base + v] =
+                  static_cast<uint32_t>(pc_root_base + v);
+            }
+            if (need_weights && doc_size > 0) {
+              const float w = 1.0f / static_cast<float>(doc_size);
+              for (uint32_t v = 0; v < doc_size; ++v) weights[base + v] = w;
+            }
+          });
+        }
+
+        ::mvsic::lloyds::TQ8LloydsBackend<metric> B(std::move(data_flat),
+                                                    row_count, d, vec_cache_,
+                                                    vec_root_indices);
+        const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
+        ::mvsic::lloyds::CenterSet new_centers =
+            need_weights
+                ? ::mvsic::lloyds::lloyds_kmeans(B, s, seed_algo, /*niters=*/10,
+                                                  params.verbose >= 3, &weights)
+                : ::mvsic::lloyds::lloyds_kmeans(B, s, seed_algo, /*niters=*/10,
+                                                  params.verbose >= 3);
+        centers.set_point_cloud(i, new_centers);
+        return;
+      }
+
+      // ----- Fallback: seq<seq> intermediate (covers small clusters where we
+      // skip k-means entirely, plus non-cache / non-TQ8 backends). -----
+      auto data = parlay::sequence<parlay::sequence<float>>(
+          row_count, parlay::sequence<float>::uninitialized(d));
       if (use_outer_sample) {
-        // Sample m random global vec indices in [0, T_c), map each to
-        // (pc, v_in_pc) via binary search of pc_offsets_in_data, then gather.
         const size_t* off = pc_offsets_in_data.data();
         parlay::parallel_for(0, m, [&](size_t r) {
           const size_t g =
-              static_cast<size_t>(parlay::hash32(static_cast<uint32_t>(r))) % T_c;
-          // upper_bound returns first off[k] > g; (k - 1) is the PC index.
-          const size_t k_ub =
-              static_cast<size_t>(std::upper_bound(off, off + (M + 1), g) - off);
+              static_cast<size_t>(parlay::hash32(static_cast<uint32_t>(r))) %
+              T_c;
+          const size_t k_ub = static_cast<size_t>(
+              std::upper_bound(off, off + (M + 1), g) - off);
           const size_t j = k_ub - 1;
           const uint32_t pc_local = grouped[i][j].second;
           const uint32_t v_in_pc = static_cast<uint32_t>(g - off[j]);
@@ -409,7 +480,6 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
           }
         });
       } else {
-        // Gather all T_c vecs (small/medium cluster: full inner k-means input).
         parlay::parallel_for(0, M, [&](size_t j) {
           const uint32_t pc_local = grouped[i][j].second;
           const size_t base = pc_offsets_in_data[j];
