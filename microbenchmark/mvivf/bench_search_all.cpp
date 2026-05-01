@@ -61,6 +61,7 @@ static void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P
   sp.query_compression_threshold =
       static_cast<float>(P.getOptionDoubleValue("-query_compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
+  sp.tq8_rerank = P.getOption("-tq8_rerank");
 }
 
 template<typename ChPoint, bool metric>
@@ -121,7 +122,8 @@ void run_benchmark(mvsic::commandLine& P) {
         "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ   Leaf quantizer (default None)\n"
         "  -query_compress none|ball|wards  Query-side compression\n"
         "  -query_compress_threshold <t>  Threshold for ball/wards (default 0.7)\n"
-        "  -compress_rerank               Use compressed query for rerank too\n\n"
+        "  -compress_rerank               Use compressed query for rerank too\n"
+        "  -tq8_rerank                    Rerank with 8-bit TurboQuant kernel\n\n"
         "Build (only used when the skeleton has to be built; defaults mirror\n"
         "IndexParams::mvivf()):\n"
         "  -k_per_level <N> (0)           Branching factor per level (0 = 4*sqrt(n))\n"
@@ -193,6 +195,7 @@ void run_benchmark(mvsic::commandLine& P) {
                 << " tau=" << search_params.query_compression_threshold
                 << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
     }
+    if (search_params.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
 
     bool run_old = (mode == "both" || mode == "old");
     bool run_new = (mode == "both" || mode == "new");
@@ -261,7 +264,7 @@ int main(int argc, char* argv[]) {
                        "[-mode old|new|both] [-qc 0|1] "
                        "[-quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ] "
                        "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
-                       "[-compress_rerank] "
+                       "[-compress_rerank] [-tq8_rerank] "
                        "[-k_per_level <N>] [-max_leaf_size <N>] [-max_depth <N>] "
                        "[-niters <N>] [-mpcc <N>] [-mpcik <N>] [-wgh_kmeans 0|1] "
                        "[-s <N>] [-v <level>]");
