@@ -1,4 +1,3 @@
-#include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -6,32 +5,41 @@
 #include "parlay/primitives.h"
 
 #include "mvsic/core/bench_utils.h"
+#include "mvsic/core/stats.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/core/stats.h"
 #include "mvsic/mvivf/mvivf.h"
+#include "microbenchmark/mvivf/bench_search_all_inst.h"
 
 using namespace mvsic;
 
+// ----- CLI -> compile-time IndexMVIVF<metric, CompressCenters, LeafModel> dispatch. -----
+//
+// All heavy template specializations of run_one are instantiated in separate
+// translation units under bench_search_all_inst/ — one .cc per
+// (metric, quantizer) cell, each instantiating both compress=false and
+// compress=true. Bazel compiles those TUs in parallel; this dispatch TU only
+// sees `extern template` declarations and stays cheap.
 namespace {
+
 #define MVIVF_DISPATCH_LM(metric, C, qm, fn)                                                      \
   do {                                                                                            \
     if      (qm == "None"  || qm == "none")                                                       \
-      fn.template operator()<IndexMVIVF<metric, C, NoQuantizer<metric>>>();                      \
+      fn.template operator()<IndexMVIVF<metric, C, NoQuantizer<metric>>>();                       \
     else if (qm == "PQ"    || qm == "pq")                                                         \
-      fn.template operator()<IndexMVIVF<metric, C, pq_mv::Model<metric>>>();                     \
+      fn.template operator()<IndexMVIVF<metric, C, pq_mv::Model<metric>>>();                      \
     else if (qm == "FS"    || qm == "fs")                                                         \
-      fn.template operator()<IndexMVIVF<metric, C, fastscan_mv::Model<metric>>>();               \
+      fn.template operator()<IndexMVIVF<metric, C, fastscan_mv::Model<metric>>>();                \
     else if (qm == "RQ"    || qm == "rq")                                                         \
-      fn.template operator()<IndexMVIVF<metric, C, rabitq_mv::Model<metric>>>();                 \
+      fn.template operator()<IndexMVIVF<metric, C, rabitq_mv::Model<metric>>>();                  \
     else if (qm == "TQ"    || qm == "tq")                                                         \
-      fn.template operator()<IndexMVIVF<metric, C, turboquant_mv::Model<metric>>>();             \
+      fn.template operator()<IndexMVIVF<metric, C, turboquant_mv::Model<metric>>>();              \
     else if (qm == "SPQTQ" || qm == "spqtq")                                                      \
-      fn.template operator()<IndexMVIVF<metric, C, pqtq_mv::Model<metric>>>();                   \
+      fn.template operator()<IndexMVIVF<metric, C, pqtq_mv::Model<metric>>>();                    \
     else if (qm == "1BTQ"  || qm == "1btq")                                                       \
-      fn.template operator()<IndexMVIVF<metric, C, turboquant_1bit_mv::Model<metric>>>();        \
+      fn.template operator()<IndexMVIVF<metric, C, turboquant_1bit_mv::Model<metric>>>();         \
     else {                                                                                        \
       std::cerr << "Unknown -quant_method: " << qm                                                \
                 << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ)" << std::endl;                       \
@@ -45,9 +53,8 @@ void dispatch_mvivf(bool compress_centers, const std::string& quant_method, Fn&&
   else                  MVIVF_DISPATCH_LM(metric, false, quant_method, fn);
 }
 #undef MVIVF_DISPATCH_LM
-}  // namespace
 
-static void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P) {
+void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P) {
   std::string qc = P.getOptionValue("-query_compress", "none");
   if (qc == "none" || qc == "off" || qc == "0") {
     sp.query_compression = SearchParams::QueryCompression::None;
@@ -65,6 +72,8 @@ static void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P
   sp.tq8_rerank = P.getOption("-tq8_rerank");
 }
 
+}  // namespace
+
 template<typename ChPoint, bool metric>
 void run_benchmark(mvsic::commandLine& P) {
   Eigen::setNbThreads(1);
@@ -75,26 +84,16 @@ void run_benchmark(mvsic::commandLine& P) {
   std::string indexFile = P.getOptionValue("-index", "");
   std::string gtFile = P.getOptionValue("-gt", "");
   bool is_mmap = P.getOption("-mm");
-  // -mode: "both" (default), "old", "new" — lets you isolate each for perf stat
   std::string mode = P.getOptionValue("-mode", "both");
-  // -qc 0|1 selects the CompressCenters template variant (TQ-quantized
-  // centers).  Defaults to 1 to preserve previous behavior of this bench.
   bool compress_centers = P.getOptionIntValue("-qc", 1) != 0;
   std::string quant_method = P.getOptionValue("-quant_method", "None");
 
-  size_t k = P.getOptionLongValue("-k", 10);
-  // -nprobes accepts a single value or a CSV (e.g. "32,128,256,512"). The
-  // index is loaded once and the search is repeated for each value, so a
-  // single invocation covers a whole sweep without paying load cost N times.
+  std::size_t k = P.getOptionLongValue("-k", 10);
   std::string nprobes_str = P.getOptionValue("-nprobes", "100");
-  std::vector<size_t> nprobes_list = bench::parse_csv_ints(nprobes_str);
+  std::vector<std::size_t> nprobes_list = bench::parse_csv_ints(nprobes_str);
   if (nprobes_list.empty()) nprobes_list.push_back(100);
-  size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
+  std::size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
-  // Build-side knobs (only used when the skeleton has to be built; if the
-  // skeleton file already exists, load() restores the serialized fields from
-  // disk and these CLI values are overwritten).  Defaults mirror
-  // IndexParams::mvivf() in mvsic/core/index_params.h.
   uint32_t k_per_level = static_cast<uint32_t>(P.getOptionIntValue("-k_per_level", 0));
   uint32_t max_leaf_size = static_cast<uint32_t>(P.getOptionIntValue("-max_leaf_size", 500));
   uint32_t max_depth = static_cast<uint32_t>(P.getOptionIntValue("-max_depth", 0));
@@ -164,120 +163,39 @@ void run_benchmark(mvsic::commandLine& P) {
   IndexParams index_params =
       IndexParams::mvivf(k_per_level, max_leaf_size, /*compress_input=*/false, verbose, niters,
                          mpcc, mpcik, "Random", /*seed=*/0, wgh_kmeans, s_param, max_depth);
-  // Use the 8BTQ panel kernel for k-means assignment during build. Off by
-  // default; pass `-build_8btq 1` to enable. Massively speeds up the build
-  // step on larger datasets without changing the resulting tree topology
-  // (assignment is approximate either way at int8 precision).
   index_params.build_with_8btq = (P.getOptionIntValue("-build_8btq", 0) != 0);
   if (verbose >= 1) {
     std::cout << "[bench_search_all] build_with_8btq = "
               << (index_params.build_with_8btq ? "true" : "false") << std::endl;
   }
-  const std::filesystem::path idx_path(indexFile);
-  if (!std::filesystem::exists(idx_path)) {
-    // Build and save a raw skeleton.  save() is only valid on the
-    // <metric, false, NoQuantizer> variant; any templated variant can load
-    // that skeleton and retrain its center / leaf quantizers on load.
-    std::cout << "Index not found at " << indexFile
-              << ". Building raw skeleton (compress_centers=0, leaf_quantizer=None)..."
-              << std::endl;
-    using SkeletonIndex = IndexMVIVF<metric, false, NoQuantizer<metric>>;
-    SkeletonIndex skeleton(points.get_dims(), index_params);
-    parlay::internal::timer tb;
-    tb.start();
-    skeleton.build(points);
-    tb.stop();
-    std::cout << "Skeleton built in " << tb.total_time() << " seconds." << std::endl;
-    if (!idx_path.parent_path().empty()) {
-      std::filesystem::create_directories(idx_path.parent_path());
-    }
-    std::cout << "Saving skeleton index to " << indexFile << std::endl;
-    skeleton.save(indexFile);
-  }
+
+  build_skeleton_if_missing<ChPoint, metric>(points, index_params, indexFile);
+
+  // Resolve query-compression options once into the ctx.
+  SearchParams resolved_sp;
+  apply_query_compression_opts(resolved_sp, P);
+
+  MicroSearchAllCtx<ChPoint> ctx{
+      .points = &points,
+      .queries = &queries,
+      .index_params = index_params,
+      .index_path = indexFile,
+      .quant_method_name = quant_method,
+      .mode = mode,
+      .compress_centers = compress_centers,
+      .nprobes_list = nprobes_list,
+      .k = k,
+      .num_rerank = num_rerank,
+      .gt = std::move(gt),
+      .has_gt = has_gt,
+      .query_compression = static_cast<int>(resolved_sp.query_compression),
+      .query_compression_threshold = resolved_sp.query_compression_threshold,
+      .compress_rerank = resolved_sp.compress_rerank,
+      .tq8_rerank = resolved_sp.tq8_rerank,
+  };
 
   dispatch_mvivf<metric>(compress_centers, quant_method, [&]<class IndexT>() {
-    IndexT index(points.get_dims(), index_params);
-    std::cout << "Loading index (compress_centers=" << (compress_centers ? 1 : 0)
-              << ", leaf_quantizer=" << quant_method << ") from " << indexFile << " ..."
-              << std::endl;
-    index.load(indexFile, points);
-
-    bool run_old = (mode == "both" || mode == "old");
-    bool run_new = (mode == "both" || mode == "new");
-
-    for (size_t nprobes : nprobes_list) {
-      std::cout << "\n############################################" << std::endl;
-      std::cout << "  nprobes = " << nprobes << std::endl;
-      std::cout << "############################################" << std::endl;
-
-      SearchParams search_params = SearchParams::mvivf(k, nprobes, num_rerank);
-      apply_query_compression_opts(search_params, P);
-      if (search_params.query_compression != SearchParams::QueryCompression::None) {
-        const char* mname =
-            (search_params.query_compression == SearchParams::QueryCompression::Carve) ? "ball"
-                                                                                       : "wards";
-        std::cout << "Query compression: " << mname
-                  << " tau=" << search_params.query_compression_threshold
-                  << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
-      }
-      if (search_params.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
-
-      parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> pred1, pred2;
-      size_t cmps1 = 0, cmps2 = 0;
-      double time1 = 0, time2 = 0;
-
-      if (run_old) {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "Running search_all (Original)..." << std::endl;
-        parlay::internal::timer t1;
-        t1.start();
-        auto [p1, c1] = index.search_all(queries, points, search_params);
-        t1.stop();
-        pred1 = std::move(p1);
-        cmps1 = c1;
-        time1 = t1.total_time();
-        std::cout << "search_all time: " << time1 << " seconds. Dist cmps: " << cmps1
-                  << std::endl;
-      }
-
-      if (run_new) {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "Running search_all_new..." << std::endl;
-        parlay::internal::timer t2;
-        t2.start();
-        auto [p2, c2] = index.search_all_new(queries, points, search_params);
-        t2.stop();
-        pred2 = std::move(p2);
-        cmps2 = c2;
-        time2 = t2.total_time();
-        std::cout << "search_all_new time: " << time2 << " seconds. Dist cmps: " << cmps2
-                  << std::endl;
-      }
-
-      if (run_old && run_new) {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "Speedup (old / new): " << time1 / time2 << "x" << std::endl;
-        std::cout << "========================================" << std::endl;
-
-        if (has_gt) {
-          auto [r1_old, rk_old] = compute_scores(pred1, gt, k);
-          auto [r1_new, rk_new] = compute_scores(pred2, gt, k);
-          std::cout << "\nRecall vs Ground Truth:" << std::endl;
-          std::cout << "  search_all:     recall@1 = " << r1_old << ", recall@" << k << " = "
-                    << rk_old << std::endl;
-          std::cout << "  search_all_new: recall@1 = " << r1_new << ", recall@" << k << " = "
-                    << rk_new << std::endl;
-        }
-
-        double agreement = compute_recall(pred2, pred1, k, k);
-        std::cout << "\nAgreement (new vs old): " << agreement << std::endl;
-      } else if (has_gt) {
-        auto& pred = run_old ? pred1 : pred2;
-        auto [r1, rk] = compute_scores(pred, gt, k);
-        std::cout << "\nRecall vs Ground Truth: recall@1 = " << r1 << ", recall@" << k << " = "
-                  << rk << std::endl;
-      }
-    }
+    run_one<ChPoint, metric, IndexT>(ctx);
   });
 }
 
