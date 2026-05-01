@@ -241,6 +241,37 @@ inline void hamming_micro_kernel_4panel(const uint8_t* qbuf, size_t qbuf_tile_st
   }
 }
 
+// Two-panel Hamming accumulation. Live state with Mq=8: 8 acc0 + 8 acc1 +
+// 2 panel + 1 query + popcount intermediate ≈ 20 zmm. The 2-panel-wide
+// outer iteration halves the panel-load count and the outer-loop iteration
+// count vs the 4-panel × Mq=4 kernel, while doing the same total popcount
+// work per source-cloud sweep. A win on workloads where panel-data
+// streaming becomes a meaningful fraction of cycles (e.g. NQ at
+// nprobes=4096, where memory pressure across 14M leaf-query pairs leaves
+// less room for L2 reuse than fiqa's nprobes=32).
+template<size_t Mq>
+inline void hamming_micro_kernel_2panel(const uint8_t* qbuf, size_t qbuf_tile_stride,
+                                        const uint8_t* panel0, const uint8_t* panel1,
+                                        size_t num_hamming_tiles, __m512i* acc0, __m512i* acc1) {
+  for (size_t q = 0; q < Mq; ++q) {
+    acc0[q] = _mm512_setzero_si512();
+    acc1[q] = _mm512_setzero_si512();
+  }
+
+  for (size_t t = 0; t < num_hamming_tiles; ++t) {
+    const __m512i pa =
+        _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel0 + t * kTileBytes));
+    const __m512i pb =
+        _mm512_loadu_si512(reinterpret_cast<const __m512i*>(panel1 + t * kTileBytes));
+    for (size_t q = 0; q < Mq; ++q) {
+      const __m512i qb = _mm512_loadu_si512(
+          reinterpret_cast<const __m512i*>(qbuf + q * qbuf_tile_stride + t * kTileBytes));
+      acc0[q] = _mm512_add_epi32(acc0[q], popcnt_d32(_mm512_xor_si512(pa, qb)));
+      acc1[q] = _mm512_add_epi32(acc1[q], popcnt_d32(_mm512_xor_si512(pb, qb)));
+    }
+  }
+}
+
 // Convert a per-query int32 cross-panel min hamming into a float distance
 // and accumulate into the chamfer running total.
 //
@@ -321,6 +352,18 @@ inline int32_t reduce4_min_sum_epi32(const __m512i (&min_h)[4]) {
   const __m128i s2_hi = _mm_shuffle_epi32(s2, _MM_SHUFFLE(2, 3, 0, 1));
   const __m128i s1 = _mm_add_epi32(s2, s2_hi);  // lane 0 holds q0+q1+q2+q3
   return _mm_cvtsi128_si32(s1);
+}
+
+// Bulk reduce 8 __m512i mins → sum of 8 scalar mins. Same trick as
+// reduce4_min_sum_epi32, applied as two halves so we keep the per-half
+// shared-shuffle-tree benefit. (We tried a single 8-wide transpose; the
+// cross-half shuffle dependency was longer than two independent half-trees
+// + 1 add, so the 2× reduce4 form is at least as good and structurally
+// simpler.)
+inline int32_t reduce8_min_sum_epi32(const __m512i (&min_h)[8]) {
+  const __m512i (&lo)[4] = *reinterpret_cast<const __m512i(*)[4]>(&min_h[0]);
+  const __m512i (&hi)[4] = *reinterpret_cast<const __m512i(*)[4]>(&min_h[4]);
+  return reduce4_min_sum_epi32(lo) + reduce4_min_sum_epi32(hi);
 }
 
 // Core Chamfer kernel over PRE-PANELED 1-bit codes, taking a qbuf that has
@@ -1250,6 +1293,200 @@ inline void score_one_db_cloud(const FusedQueryBatch<Metric>& fq,
 }
 
 // =========================================================================
+// Score one db cloud against all embeddings in a FusedQueryBatch, but write
+// per-SOURCE-CLOUD chamfer distances (already averaged) directly. This is
+// the M2M counterpart to the int-min-throughout + bulk-reduce4 wins that
+// were applied to the per-query `chamfer_panels_qbuf` path (Done #6 + #7
+// in 1BTQ-Optimization-Ideas.md), now extended to the batched M2M path.
+//
+// Wins over `score_one_db_cloud + reduce_sum_ps_n in caller`:
+//   - Keeps the per-source-cloud running sum of horizontal-min Hamming
+//     counts in INT32 across all Mq batches; converts to float (and
+//     divides by e_count) exactly once per source cloud at the end. This
+//     removes `num_emb` cvt+fmadd ops + a `num_emb`-wide store + a
+//     `num_emb`-wide load + the per-source `reduce_sum_ps_n` reduction.
+//   - For the common Mq=4 case, uses `reduce4_min_sum_epi32` to fold the
+//     four per-query horizontal mins into a single int32 sum directly
+//     (saves 5 of 8 final-stage scalar mins on the critical path and
+//     eliminates the per-query cvt+fmadd entirely — same trick as Done #7
+//     for the per-query path).
+//
+// Constraint: the Mq=4 batches are formed *within each source cloud's
+// embedding range* (not across the flattened concat as `score_one_db_cloud`
+// does). Source clouds are processed sequentially. Panel data stays in L1
+// across source clouds so the extra reload bandwidth is free; total kernel
+// work is unchanged.
+// =========================================================================
+template<bool Metric>
+inline void score_one_db_cloud_grouped(const FusedQueryBatch<Metric>& fq,
+                                       const Quantized_Point_Cloud_Set<Metric>& db, size_t c,
+                                       float* per_source_chamfer) {
+  const size_t num_src = fq.num_source_clouds;
+  const size_t cs = db.cloud_sizes[c];
+  if (cs == 0) {
+    for (size_t i = 0; i < num_src; ++i)
+      per_source_chamfer[i] = std::numeric_limits<float>::max();
+    return;
+  }
+
+#ifdef __AVX512F__
+  using internal::kMq1bit;
+  using internal::kPanelPoints;
+
+  const float scale_f = (Metric ? 4.0f : 2.0f) / static_cast<float>(fq.padded_dim);
+  constexpr float kValidAddend = Metric ? 0.0f : -1.0f;
+
+  // Panel geometry shared across all source clouds for this db cloud.
+  const size_t full_np = cs / kPanelPoints;
+  const size_t tail_valid = cs - full_np * kPanelPoints;
+  const __mmask16 tail_mask =
+      (tail_valid == 0) ? __mmask16{0} : static_cast<__mmask16>((1u << tail_valid) - 1u);
+  const __m512i kIntMaxV = _mm512_set1_epi32(std::numeric_limits<int32_t>::max());
+
+  const uint8_t* panel_ptr = db.panel_data.data() + db.panel_offsets[c];
+  const size_t panel_bytes = db.panel_bytes;
+  const size_t num_hamming_tiles = fq.num_hamming_tiles;
+  const size_t qbuf_tile_stride = fq.qbuf_tile_stride;
+  const uint8_t* flat_qbuf = fq.flat_qbuf.data();
+
+  for (size_t s = 0; s < num_src; ++s) {
+    const size_t e_start = fq.emb_offsets[s];
+    const size_t e_end = fq.emb_offsets[s + 1];
+    const size_t e_count = e_end - e_start;
+    if (e_count == 0) {
+      per_source_chamfer[s] = std::numeric_limits<float>::max();
+      continue;
+    }
+
+    int32_t h_sum = 0;
+    size_t qi = e_start;
+    constexpr size_t kMqWide = 8;
+
+    // Wide path: Mq=8 batches with the 2-panel kernel. Same total popcount
+    // count as the Mq=4 × 4-panel path, but halves the outer-loop iteration
+    // count per source cloud (4 batches vs 8) and halves the panel-load
+    // count per source-cloud sweep. Live state: 16 acc + 2 panel + 1 query
+    // + intermediate ≈ 20 zmm. Helps on memory-pressured workloads where
+    // per-cloud panel data has to be re-fetched between sources (NQ at
+    // nprobes=4096 streams ~190 MB/query through L1/L2, where the cycle
+    // budget for outer-iter setup starts to matter).
+    for (; qi + kMqWide <= e_end; qi += kMqWide) {
+      const uint8_t* qbuf = flat_qbuf + qi * qbuf_tile_stride;
+
+      __m512i min_h[kMqWide];
+      for (size_t q = 0; q < kMqWide; ++q)
+        min_h[q] = kIntMaxV;
+
+      size_t p = 0;
+      for (; p + 2 <= full_np; p += 2) {
+        __m512i a0[kMqWide], a1[kMqWide];
+        internal::hamming_micro_kernel_2panel<kMqWide>(
+            qbuf, qbuf_tile_stride, panel_ptr + p * panel_bytes,
+            panel_ptr + (p + 1) * panel_bytes, num_hamming_tiles, a0, a1);
+        for (size_t q = 0; q < kMqWide; ++q) {
+          min_h[q] = _mm512_min_epi32(min_h[q], a0[q]);
+          min_h[q] = _mm512_min_epi32(min_h[q], a1[q]);
+        }
+      }
+      if (p < full_np) {
+        __m512i acc[kMqWide];
+        internal::hamming_micro_kernel_1panel<kMqWide>(
+            qbuf, qbuf_tile_stride, panel_ptr + p * panel_bytes, num_hamming_tiles, acc);
+        for (size_t q = 0; q < kMqWide; ++q)
+          min_h[q] = _mm512_min_epi32(min_h[q], acc[q]);
+      }
+      if (tail_valid > 0) {
+        __m512i acc[kMqWide];
+        internal::hamming_micro_kernel_1panel<kMqWide>(
+            qbuf, qbuf_tile_stride, panel_ptr + full_np * panel_bytes, num_hamming_tiles, acc);
+        for (size_t q = 0; q < kMqWide; ++q)
+          min_h[q] = _mm512_mask_min_epi32(min_h[q], tail_mask, min_h[q], acc[q]);
+      }
+
+      h_sum += internal::reduce8_min_sum_epi32(min_h);
+    }
+
+    // Mq=4 batches for the remainder (e_count % 8 in [4, 7]). Matches the
+    // original kernel structure; reduce4_min_sum_epi32 keeps the per-batch
+    // teardown cheap.
+    for (; qi + kMq1bit <= e_end; qi += kMq1bit) {
+      const uint8_t* qbuf = flat_qbuf + qi * qbuf_tile_stride;
+
+      __m512i min_h[kMq1bit];
+      for (size_t q = 0; q < kMq1bit; ++q)
+        min_h[q] = kIntMaxV;
+
+      size_t p = 0;
+      for (; p + 4 <= full_np; p += 4) {
+        __m512i a0[kMq1bit], a1[kMq1bit], a2[kMq1bit], a3[kMq1bit];
+        internal::hamming_micro_kernel_4panel<kMq1bit>(
+            qbuf, qbuf_tile_stride, panel_ptr + p * panel_bytes,
+            panel_ptr + (p + 1) * panel_bytes, panel_ptr + (p + 2) * panel_bytes,
+            panel_ptr + (p + 3) * panel_bytes, num_hamming_tiles, a0, a1, a2, a3);
+        for (size_t q = 0; q < kMq1bit; ++q) {
+          min_h[q] = _mm512_min_epi32(min_h[q], a0[q]);
+          min_h[q] = _mm512_min_epi32(min_h[q], a1[q]);
+          min_h[q] = _mm512_min_epi32(min_h[q], a2[q]);
+          min_h[q] = _mm512_min_epi32(min_h[q], a3[q]);
+        }
+      }
+      for (; p < full_np; ++p) {
+        __m512i acc[kMq1bit];
+        internal::hamming_micro_kernel_1panel<kMq1bit>(
+            qbuf, qbuf_tile_stride, panel_ptr + p * panel_bytes, num_hamming_tiles, acc);
+        for (size_t q = 0; q < kMq1bit; ++q) {
+          min_h[q] = _mm512_min_epi32(min_h[q], acc[q]);
+        }
+      }
+      if (tail_valid > 0) {
+        __m512i acc[kMq1bit];
+        internal::hamming_micro_kernel_1panel<kMq1bit>(
+            qbuf, qbuf_tile_stride, panel_ptr + full_np * panel_bytes, num_hamming_tiles, acc);
+        for (size_t q = 0; q < kMq1bit; ++q) {
+          min_h[q] = _mm512_mask_min_epi32(min_h[q], tail_mask, min_h[q], acc[q]);
+        }
+      }
+
+      if constexpr (kMq1bit == 4) {
+        h_sum += internal::reduce4_min_sum_epi32(min_h);
+      } else {
+        for (size_t q = 0; q < kMq1bit; ++q)
+          h_sum += _mm512_reduce_min_epi32(min_h[q]);
+      }
+    }
+
+    // Tail (< kMq1bit) embeddings inside this source cloud's range.
+    for (; qi < e_end; ++qi) {
+      const uint8_t* qbuf = flat_qbuf + qi * qbuf_tile_stride;
+      __m512i min_h_one = kIntMaxV;
+      for (size_t p = 0; p < full_np; ++p) {
+        __m512i acc;
+        internal::hamming_micro_kernel_1panel<1>(
+            qbuf, qbuf_tile_stride, panel_ptr + p * panel_bytes, num_hamming_tiles, &acc);
+        min_h_one = _mm512_min_epi32(min_h_one, acc);
+      }
+      if (tail_valid > 0) {
+        __m512i acc;
+        internal::hamming_micro_kernel_1panel<1>(
+            qbuf, qbuf_tile_stride, panel_ptr + full_np * panel_bytes, num_hamming_tiles, &acc);
+        min_h_one = _mm512_mask_min_epi32(min_h_one, tail_mask, min_h_one, acc);
+      }
+      h_sum += _mm512_reduce_min_epi32(min_h_one);
+    }
+
+    // Single deferred affine map + average:
+    //   chamfer = (scale_f * h_sum + e_count * addend) / e_count
+    const float ec_f = static_cast<float>(e_count);
+    per_source_chamfer[s] =
+        (scale_f * static_cast<float>(h_sum) + ec_f * kValidAddend) / ec_f;
+  }
+#else
+  for (size_t i = 0; i < num_src; ++i)
+    per_source_chamfer[i] = std::numeric_limits<float>::max();
+#endif
+}
+
+// =========================================================================
 // ManyToMany Batch Operator (mirrors pqtq_mv::ManyToMany).
 // =========================================================================
 template<typename PCS>
@@ -1338,7 +1575,7 @@ class ManyToMany {
       thread_local std::vector<internal::BoundedTopKBucket> buckets;
       thread_local std::vector<const Quantized_Query_Point_Cloud<Metric>*> slice;
       thread_local FusedQueryBatch<Metric> fq;
-      thread_local std::vector<float> emb_min_dists;
+      thread_local std::vector<float> per_src_chamfer;
 
       buckets.resize(q_count);
       for (size_t i = 0; i < q_count; ++i)
@@ -1349,28 +1586,25 @@ class ManyToMany {
         slice[i] = A[q_start + i];
       fq.Build(slice);
 
-      if (emb_min_dists.size() < fq.total_embeddings) emb_min_dists.resize(fq.total_embeddings);
+      if (per_src_chamfer.size() < q_count) per_src_chamfer.resize(q_count);
 
       for (size_t c = 0; c < num_db_clouds; ++c) {
         const size_t cs = B.cloud_sizes[c];
         if (cs == 0) continue;
 
-        score_one_db_cloud<Metric>(fq, B, c, emb_min_dists.data());
+        // Single fused kernel call: scores all source-cloud embeddings
+        // against this db cloud and writes per-source-cloud chamfer
+        // distance directly (already averaged over e_count). Removes the
+        // per-embedding cvt/fmadd, the emb_min[] round-trip through memory,
+        // and the per-source `reduce_sum_ps_n` that the legacy
+        // `score_one_db_cloud` path used to do at the caller.
+        score_one_db_cloud_grouped<Metric>(fq, B, c, per_src_chamfer.data());
         const uint32_t cid = B.get_id(c);
 
         for (size_t i = 0; i < q_count; ++i) {
-          const size_t e_start = fq.emb_offsets[i];
-          const size_t e_count = fq.emb_offsets[i + 1] - e_start;
+          const size_t e_count = fq.emb_offsets[i + 1] - fq.emb_offsets[i];
           if (e_count == 0) continue;
-#ifdef __AVX512F__
-          const float dist_sum = internal::reduce_sum_ps_n(emb_min_dists.data() + e_start, e_count);
-#else
-          float dist_sum = 0.0f;
-          for (size_t e = 0; e < e_count; ++e)
-            dist_sum += emb_min_dists[e_start + e];
-#endif
-          const float chamfer_dist = dist_sum / static_cast<float>(e_count);
-          buckets[i].try_insert(chamfer_dist, cid);
+          buckets[i].try_insert(per_src_chamfer[i], cid);
         }
       }
 

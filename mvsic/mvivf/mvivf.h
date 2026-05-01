@@ -665,6 +665,11 @@ class IndexMVIVF : public Index<metric> {
     const size_t beam_length = 2 * nprobes;
     parlay::internal::timer t;
     double t_dists = 0.0, t_beam = 0.0, t_rest = 0.0;
+    // Wall-time spent processing the root (top-most level): bracket the entire
+    // first iteration of the beam loop, including its child fan-out.
+    parlay::internal::timer t_top;
+    double t_top_level = 0.0;
+    bool top_done = false;
 
     t.start();
     size_t dist_cmps = 0;
@@ -682,6 +687,7 @@ class IndexMVIVF : public Index<metric> {
     t_beam += t.stop();
     t.reset();
 
+    t_top.start();
     while (!beam.empty()) {
       t.start();
       auto it = beam.begin();
@@ -740,10 +746,20 @@ class IndexMVIVF : public Index<metric> {
           t.reset();
         }
       }
+
+      if (!top_done) {
+        t_top.stop();
+        t_top_level = t_top.total_time();
+        top_done = true;
+      }
+    }
+    if (!top_done) {
+      t_top.stop();
+      t_top_level = t_top.total_time();
     }
     GreedySearchResult out;
     out.bytes_accessed = bytes_accessed;
-    out.stats = {static_cast<double>(dist_cmps), t_dists, t_beam, t_rest};
+    out.stats = {static_cast<double>(dist_cmps), t_dists, t_beam, t_rest, t_top_level};
     out.probe_list = std::move(top_probes);
     return out;
   }
@@ -791,7 +807,10 @@ class IndexMVIVF : public Index<metric> {
 
     out.probe_list = std::move(scores);
     out.bytes_accessed = bytes_accessed;
-    out.stats = {static_cast<double>(dist_cmps), t_dists, /*t_beam=*/0.0, t_rest};
+    // Flat search has only one level of internal nodes, so the whole kernel is
+    // the "top-most level".
+    out.stats = {static_cast<double>(dist_cmps), t_dists, /*t_beam=*/0.0, t_rest,
+                 /*t_top_level=*/t_dists + t_rest};
     return out;
   }
 
@@ -884,12 +903,13 @@ class IndexMVIVF : public Index<metric> {
   //   2  t_search_dists
   //   3  t_search_beam
   //   4  t_search_rest
-  //   5  t_compress
-  //   6  t_quantize
-  //   7  t_distances
-  //   8  t_rest
-  //   9  t_rerank
-  //  10  t_greedy
+  //   5  t_search_top_level
+  //   6  t_compress
+  //   7  t_quantize
+  //   8  t_distances
+  //   9  t_rest
+  //  10  t_rerank
+  //  11  t_greedy
   // ---------------------------------------------------------------------------
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,
@@ -1063,6 +1083,11 @@ class IndexMVIVF : public Index<metric> {
                                                                                            num_q);
     auto dist_cmps_gs = parlay::sequence<size_t>::uninitialized(num_q);
     auto bytes_gs = parlay::sequence<size_t>::uninitialized(num_q);
+    // Per-query CPU times: full greedy (sum of phase timers) and just the
+    // top-most level. Summed across queries to estimate the top-level fraction
+    // of greedy work; the wall-clock aggregate is what `t` measures below.
+    auto greedy_cpu = parlay::sequence<double>::uninitialized(num_q);
+    auto top_level_cpu = parlay::sequence<double>::uninitialized(num_q);
     parlay::parallel_for(0, num_q, [&](uint32_t i) {
       CenterQuery q_center{};
       if constexpr (kHasCenterQuant) q_center = center_model_.quantize_query(eff_queries[i]);
@@ -1072,12 +1097,23 @@ class IndexMVIVF : public Index<metric> {
                                        : greedy_search(eff_queries[i], q_center, nprobes);
       dist_cmps_gs[i] = static_cast<size_t>(gs.stats[0]);
       bytes_gs[i] = gs.bytes_accessed;
+      // gs.stats layout: [dist_cmps, t_dists, t_beam, t_rest, t_top_level].
+      greedy_cpu[i] = (gs.stats.size() >= 4) ? gs.stats[1] + gs.stats[2] + gs.stats[3] : 0.0;
+      top_level_cpu[i] = (gs.stats.size() >= 5) ? gs.stats[4] : 0.0;
       parlay::parallel_for(0, gs.probe_list.size(), [&](uint32_t j) {
         leaf_query_pairs[i * nprobes + j] = {gs.probe_list[j].second, std::make_pair(i, j)};
       });
     });
     t.stop();
-    std::cout << "[MVIVF] Greedy Search: " << t.total_time() << " sec" << std::endl;
+    const double greedy_wall = t.total_time();
+    const double sum_greedy_cpu = parlay::reduce(greedy_cpu);
+    const double sum_top_cpu = parlay::reduce(top_level_cpu);
+    const double frac = sum_greedy_cpu > 0.0 ? sum_top_cpu / sum_greedy_cpu : 0.0;
+    std::cout << "[MVIVF] Greedy Search: " << greedy_wall << " sec" << std::endl;
+    std::cout << "[MVIVF] Greedy Search top-level: " << sum_top_cpu
+              << " sec CPU (sum across queries; "
+              << sum_greedy_cpu << " sec total greedy CPU; "
+              << (frac * 100.0) << "% at top level)" << std::endl;
     t.reset();
     bytes_accessed += parlay::reduce(bytes_gs);
     dist_cmps += parlay::reduce(dist_cmps_gs);
@@ -1318,16 +1354,19 @@ class IndexMVIVF : public Index<metric> {
         });
       } else if constexpr (kUseM2M) {
         using M2M = typename has_many_to_many_<LeafModel>::type;
+        // The per-leaf init / scatter loops are nq_grp iterations (typically
+        // 4 on NQ); the inner parlay::parallel_for adds task-scheduler
+        // overhead that's larger than the saved work. Run them serially.
         std::vector<const LeafQuery*> typed(nq_grp);
-        parlay::parallel_for(0, nq_grp,
-                             [&](size_t j) { typed[j] = &q_leaves[group[j].second.first]; });
+        for (size_t j = 0; j < nq_grp; ++j)
+          typed[j] = &q_leaves[group[j].second.first];
         std::vector<std::pair<uint32_t, float>> batch_results(nq_grp * num_rerank);
         M2M::TopKIntoUninitialized(typed, leaf->encoded_leaf, num_rerank, batch_results.data(),
-                                   /*q_block=*/4, /*parallel_query_blocks=*/true);
-        parlay::parallel_for(0, nq_grp, [&](size_t j) {
+                                   /*q_block=*/8, /*parallel_query_blocks=*/true);
+        for (size_t j = 0; j < nq_grp; ++j) {
           uint32_t q_id = group[j].second.first;
           safe_scatter(q_id, batch_results.data() + j * num_rerank, C);
-        });
+        }
       } else {
         parlay::parallel_for(0, nq_grp, [&](size_t j) {
           uint32_t q_id = group[j].second.first;
