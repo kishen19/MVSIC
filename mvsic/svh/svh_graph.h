@@ -237,8 +237,8 @@ class IndexSVHGraph : public Index<metric> {
         std::min(k, unique_clouds.size()));
     if (!search_params.norerank && !unique_clouds.empty()) {
       size_t actual_rerank_count = std::min(num_rerank, unique_clouds.size());
-      total_bytes_accessed +=
-          this->rerank(rerank_query, points, unique_clouds, actual_rerank_count, final_results);
+      total_bytes_accessed += this->rerank_tq8_(rerank_query, points, unique_clouds,
+                                                actual_rerank_count, final_results);
       total_dist_cmps += actual_rerank_count;
     } else {
       parlay::parallel_for(0, final_results.size(),

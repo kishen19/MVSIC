@@ -5,6 +5,8 @@
 #include <variant>
 #include <cstdint>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <type_traits>
 #include "parlay/primitives.h"
 
@@ -323,6 +325,65 @@ class Index {
                                                                       out_results.data());
     size_t num_cmps = (query.size() + candidates_pcs.total_size()) * points.get_dims();
     return num_cmps;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8BTQ-encoded rerank, available to any subclass.
+  //
+  // Lazily trains the 8-bit TurboQuant rotator on the input points and pre-
+  // encodes the full DB the first time `rerank_tq8_` is called; subsequent
+  // queries reuse the cached model + DB.  Rerank scores each candidate by a
+  // single `turboquant_8bit_mv_chamfer_distance(q8, db, c)` instead of an
+  // exact float chamfer over the raw embeddings.
+  //
+  // Candidate ids in `candidates` are positions in the input PointCloudSet
+  // (`points.get_id(i) == i` in the bench loaders), which is also the cloud
+  // index in `tq8_rerank_db_`, so we can index it directly.
+  // ---------------------------------------------------------------------------
+  using BTQModel = ::mvsic::turboquant_8bit_mv::Model<metric>;
+  using BTQEncSet = typename BTQModel::EncodedSet;
+
+ protected:
+  mutable std::unique_ptr<BTQModel> tq8_rerank_model_;
+  mutable std::unique_ptr<BTQEncSet> tq8_rerank_db_;
+  mutable std::once_flag tq8_rerank_once_;
+
+  void ensure_tq8_rerank_db_(const PointCloudSet<ChPoint>& points) const {
+    std::call_once(tq8_rerank_once_, [&] {
+      auto model = std::make_unique<BTQModel>();
+      model->train(points);
+      auto enc = std::make_unique<BTQEncSet>(model->encode(points));
+      tq8_rerank_model_ = std::move(model);
+      tq8_rerank_db_ = std::move(enc);
+    });
+  }
+
+ public:
+  virtual size_t rerank_tq8_(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                             const parlay::sequence<std::pair<uint32_t, float>>& candidates,
+                             size_t num_rerank,
+                             parlay::sequence<std::pair<uint32_t, float>>& out_results) const {
+    ensure_tq8_rerank_db_(points);
+    const auto& db = *tq8_rerank_db_;
+    auto q8 = tq8_rerank_model_->quantize_query(query);
+
+    auto scored = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_rerank);
+    auto bytes = parlay::sequence<size_t>::uninitialized(num_rerank);
+    const size_t per_vec_bytes =
+        db.num_bytes_per_datapoint + sizeof(float) + (metric ? sizeof(float) : 0);
+    parlay::parallel_for(0, num_rerank, [&](size_t i) {
+      const uint32_t id = candidates[i].first;
+      const float d = ::mvsic::turboquant_8bit_mv::turboquant_8bit_mv_chamfer_distance<metric>(
+          q8, db, static_cast<size_t>(id));
+      scored[i] = {id, d};
+      bytes[i] = db.cloud_size(static_cast<size_t>(id)) * per_vec_bytes;
+    });
+
+    parlay::sort_inplace(scored,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+    parlay::parallel_for(0, out_results.size(),
+                         [&](size_t i) { out_results[i] = scored[i]; });
+    return parlay::reduce(bytes);
   }
 
   // Write the index to a file in disk
