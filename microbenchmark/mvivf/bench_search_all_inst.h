@@ -47,6 +47,7 @@ struct MicroSearchAllCtx {
   float query_compression_threshold;
   bool compress_rerank;
   bool tq8_rerank;
+  bool root_m2m;
 };
 
 template <typename ChPoint, bool metric, class IndexT>

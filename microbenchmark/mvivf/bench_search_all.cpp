@@ -70,6 +70,7 @@ void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P) {
       static_cast<float>(P.getOptionDoubleValue("-query_compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
   sp.tq8_rerank = P.getOption("-tq8_rerank");
+  sp.root_m2m = P.getOption("-root_m2m");
 }
 
 }  // namespace
@@ -129,7 +130,9 @@ void run_benchmark(mvsic::commandLine& P) {
         "  -query_compress none|ball|wards  Query-side compression\n"
         "  -query_compress_threshold <t>  Threshold for ball/wards (default 0.7)\n"
         "  -compress_rerank               Use compressed query for rerank too\n"
-        "  -tq8_rerank                    Rerank with 8-bit TurboQuant kernel\n\n"
+        "  -tq8_rerank                    Rerank with 8-bit TurboQuant kernel\n"
+        "  -root_m2m                      Share root-level greedy work across queries\n"
+        "                                 via fused many-to-many chamfer\n\n"
         "Build (only used when the skeleton has to be built; defaults mirror\n"
         "IndexParams::mvivf()):\n"
         "  -k_per_level <N> (0)           Branching factor per level (0 = 4*sqrt(n))\n"
@@ -192,6 +195,7 @@ void run_benchmark(mvsic::commandLine& P) {
       .query_compression_threshold = resolved_sp.query_compression_threshold,
       .compress_rerank = resolved_sp.compress_rerank,
       .tq8_rerank = resolved_sp.tq8_rerank,
+      .root_m2m = resolved_sp.root_m2m,
   };
 
   dispatch_mvivf<metric>(compress_centers, quant_method, [&]<class IndexT>() {
@@ -207,7 +211,7 @@ int main(int argc, char* argv[]) {
                        "[-mode old|new|both] [-qc 0|1] "
                        "[-quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ] "
                        "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
-                       "[-compress_rerank] [-tq8_rerank] "
+                       "[-compress_rerank] [-tq8_rerank] [-root_m2m] "
                        "[-k_per_level <N>] [-max_leaf_size <N>] [-max_depth <N>] "
                        "[-niters <N>] [-mpcc <N>] [-mpcik <N>] [-wgh_kmeans 0|1] "
                        "[-s <N>] [-build_8btq 0|1] [-v <level>]");

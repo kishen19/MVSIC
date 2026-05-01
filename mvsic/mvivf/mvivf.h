@@ -655,8 +655,16 @@ class IndexMVIVF : public Index<metric> {
     std::vector<double> stats = {};
   };
 
+  // When `precomputed_root_dists` is non-null, the first beam iteration (which
+  // processes `root`) reuses that buffer instead of calling
+  // `compressed_centers.distances_all` on root. Caller is responsible for
+  // populating it with at least `root->children.size()` entries that match
+  // root->children index-for-index. The bytes for root->compressed_centers are
+  // expected to be accounted for at the caller's M2M step, not here.
   GreedySearchResult greedy_search(const ChPoint& query, const CenterQuery& q_center,
-                                   size_t nprobes) const {
+                                   size_t nprobes,
+                                   const std::pair<uint32_t, float>* precomputed_root_dists =
+                                       nullptr) const {
     using score_node = std::pair<float, node_t*>;
     auto less = [](const score_node& a, const score_node& b) {
       return a.first < b.first || (a.first == b.first && a.second < b.second);
@@ -703,7 +711,11 @@ class IndexMVIVF : public Index<metric> {
       }
       auto& children = current->children;
       child_dists.resize(children.size());
-      if constexpr (kHasCenterQuant) {
+      if (precomputed_root_dists != nullptr && current == root) {
+        std::memcpy(child_dists.data(), precomputed_root_dists,
+                    children.size() * sizeof(std::pair<uint32_t, float>));
+        // Root bytes are accounted for once at the caller's M2M step.
+      } else if constexpr (kHasCenterQuant) {
         current->compressed_centers.distances_all(q_center, child_dists.data());
         bytes_accessed += current->compressed_centers.num_bytes();
       } else {
@@ -1076,6 +1088,55 @@ class IndexMVIVF : public Index<metric> {
     std::cout << "[MVIVF] Query Quantization: " << t.total_time() << " sec" << std::endl;
     t.reset();
 
+    // Step 0b (optional): root-level many-to-many.
+    //
+    // When enabled, we share the work of computing root-child distances across
+    // all queries: pre-quantize every q_center, fuse them into one batched
+    // chamfer query, and run `chamfer_score_all_fused` once against
+    // root->compressed_centers to fill an [num_q x num_root_children] matrix.
+    // Each per-query greedy_search call below seeds its first iteration from
+    // row i of that matrix instead of recomputing distances itself.
+    //
+    // Only fires when CompressCenters=true (the only configuration where
+    // root->compressed_centers exists) and root has at least one internal
+    // child level (so flat_leaf_search isn't taken below).
+    parlay::sequence<CenterQuery> q_centers;
+    parlay::sequence<std::pair<uint32_t, float>> root_dists;
+    size_t num_root_children = 0;
+    bool use_root_m2m = false;
+    if constexpr (kHasCenterQuant) {
+      if (search_params.root_m2m && root != nullptr) {
+        num_root_children = root->compressed_centers.num_clouds();
+        if (num_root_children > 0) {
+          use_root_m2m = true;
+          t.start();
+          q_centers = parlay::sequence<CenterQuery>(num_q);
+          parlay::parallel_for(0, num_q, [&](size_t i) {
+            q_centers[i] = center_model_.quantize_query(eff_queries[i]);
+          });
+          t.stop();
+          std::cout << "[MVIVF] Root M2M Quantize: " << t.total_time() << " sec" << std::endl;
+          t.reset();
+
+          t.start();
+          turboquant_mv::FusedQueryBatch<metric> fq;
+          std::vector<const CenterQuery*> q_ptrs(num_q);
+          for (size_t i = 0; i < num_q; ++i) q_ptrs[i] = &q_centers[i];
+          fq.Build(q_ptrs);
+          root_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+              num_q * num_root_children);
+          turboquant_mv::chamfer_score_all_fused(fq, root->compressed_centers, root_dists.data());
+          t.stop();
+          std::cout << "[MVIVF] Root M2M Score (" << num_q << "Q x " << num_root_children
+                    << "C): " << t.total_time() << " sec" << std::endl;
+          t.reset();
+          // Root center bytes loaded once for the whole fused kernel; book it
+          // here so per-query bookkeeping in greedy_search can skip them.
+          bytes_accessed += root->compressed_centers.num_bytes();
+        }
+      }
+    }
+
     // Step 1: parallel greedy search.
     t.start();
     auto leaf_query_pairs =
@@ -1090,11 +1151,20 @@ class IndexMVIVF : public Index<metric> {
     auto top_level_cpu = parlay::sequence<double>::uninitialized(num_q);
     parlay::parallel_for(0, num_q, [&](uint32_t i) {
       CenterQuery q_center{};
-      if constexpr (kHasCenterQuant) q_center = center_model_.quantize_query(eff_queries[i]);
+      if constexpr (kHasCenterQuant) {
+        if (use_root_m2m) {
+          q_center = std::move(q_centers[i]);
+        } else {
+          q_center = center_model_.quantize_query(eff_queries[i]);
+        }
+      }
       const double alpha = 1.0;
       bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
-      GreedySearchResult gs = use_flat ? flat_leaf_search(eff_queries[i], q_center, nprobes)
-                                       : greedy_search(eff_queries[i], q_center, nprobes);
+      const std::pair<uint32_t, float>* root_row =
+          (use_root_m2m && !use_flat) ? root_dists.data() + i * num_root_children : nullptr;
+      GreedySearchResult gs = use_flat
+                                  ? flat_leaf_search(eff_queries[i], q_center, nprobes)
+                                  : greedy_search(eff_queries[i], q_center, nprobes, root_row);
       dist_cmps_gs[i] = static_cast<size_t>(gs.stats[0]);
       bytes_gs[i] = gs.bytes_accessed;
       // gs.stats layout: [dist_cmps, t_dists, t_beam, t_rest, t_top_level].

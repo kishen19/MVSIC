@@ -67,6 +67,7 @@ void run_one(MicroSearchAllCtx<ChPoint>& ctx) {
     search_params.query_compression_threshold = ctx.query_compression_threshold;
     search_params.compress_rerank = ctx.compress_rerank;
     search_params.tq8_rerank = ctx.tq8_rerank;
+    search_params.root_m2m = ctx.root_m2m;
 
     if (search_params.query_compression != SearchParams::QueryCompression::None) {
       const char* mname =
@@ -77,6 +78,7 @@ void run_one(MicroSearchAllCtx<ChPoint>& ctx) {
                 << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
     }
     if (search_params.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
+    if (search_params.root_m2m) std::cout << "root_m2m=1" << std::endl;
 
     parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> pred1, pred2;
     std::size_t cmps1 = 0, cmps2 = 0;

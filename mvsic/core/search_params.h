@@ -39,6 +39,15 @@ struct SearchParams {
   // default.
   bool tq8_rerank = false;
 
+  // If true, MVIVF search_all_new shares the root-level distance work across
+  // all queries: pre-quantize every q_center, fuse them, and run a single
+  // many-to-many chamfer kernel against root->compressed_centers to fill an
+  // [num_q x num_root_children] distance matrix. Each per-query greedy search
+  // then seeds its beam/top_probes from the corresponding row instead of
+  // computing root-child distances itself. Requires CompressCenters=true;
+  // ignored otherwise.
+  bool root_m2m = true;
+
   // mvivf search params
   static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0) {
     SearchParams params;
