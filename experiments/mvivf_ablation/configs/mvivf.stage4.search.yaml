@@ -1,0 +1,48 @@
+name: "MVIVF Ablation (search, stage 4: niters)"
+
+datasets:
+  - name: nq
+    path: data/beir/nq
+    index_dir:   results/mvivf_ablation/indices/nq
+    results_dir: experiments/mvivf_ablation/results/nq/stage4
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir:   results/mvivf_ablation/indices/nq500k
+    results_dir: experiments/mvivf_ablation/results/nq500k/stage4
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir:   results/mvivf_ablation/indices/fiqa
+    results_dir: experiments/mvivf_ablation/results/fiqa/stage4
+  - name: arguana
+    path: data/beir/arguana
+    index_dir:   results/mvivf_ablation/indices/arguana
+    results_dir: experiments/mvivf_ablation/results/arguana/stage4
+
+indices:
+  - name: mvivf
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l100_d0_nit0
+        build_params: &stage4_defaults
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 0
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+        search_configs: &ivf_k10
+          - name: k=10
+            params:
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - {name: "", num_rerank: 0}
+      - build_name: mvivf_k0_l100_d0_nit1
+        build_params: { <<: *stage4_defaults, niters: 1 }
+        search_configs: *ivf_k10
+      - build_name: mvivf_k0_l100_d0_nit5
+        build_params: { <<: *stage4_defaults, niters: 5 }
+        search_configs: *ivf_k10
+      - build_name: mvivf_k0_l100_d0_nit10
+        build_params: { <<: *stage4_defaults, niters: 10 }
+        search_configs: *ivf_k10

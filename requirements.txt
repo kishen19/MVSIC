@@ -1,7 +1,7 @@
 # Core AI, Retrieval, and Clustering
 colbert-ai~=0.2.22
 faiss-cpu~=1.12.0
-fast_plaid~=1.2.4.280
+fast_plaid~=1.4.4.290
 
 # Hugging Face Ecosystem
 accelerate==1.11.0

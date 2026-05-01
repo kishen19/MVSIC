@@ -1,0 +1,37 @@
+name: "MVIVF Ablation (build, stage 4: niters)"
+
+datasets:
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/mvivf_ablation/indices/nq
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/mvivf_ablation/indices/nq500k
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/mvivf_ablation/indices/fiqa
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/mvivf_ablation/indices/arguana
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      # Stage-1 winner fixed: k_per_level = 0.
+      # Stage-2 winner fixed: max_leaf_size = 100.
+      # Stage-3 winner fixed: max_depth = 0.
+      - name: mvivf_k0_l100_d0_nit0
+        params: &stage3_defaults
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 0
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+      - name: mvivf_k0_l100_d0_nit1
+        params: { <<: *stage3_defaults, niters: 1 }
+      - name: mvivf_k0_l100_d0_nit5
+        params: { <<: *stage3_defaults, niters: 5 }
+      - name: mvivf_k0_l100_d0_nit10
+        params: { <<: *stage3_defaults, niters: 10 }

@@ -22,8 +22,8 @@ bazel-*
 # VSCode files
 .vscode
 
-# Stats files
-*.csv
+# # Stats files
+# *.csv
 
 /data/
 /results/

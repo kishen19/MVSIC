@@ -57,9 +57,8 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 _KNOB_PATTERNS: dict[str, str] = {
     "k_per_level": r"_k(\d+)(?:_|$)",
     "max_leaf_size": r"_l(\d+)(?:_|$)",
-    # "max_depth": r"_d(\d+)(?:_|$)",
-    "max_depth": r"l500_d(\d+)(?:_|$)",
-    "niters": r"_n(\d+)(?:_|$)",
+    "max_depth": r"_d(\d+)(?:_|$)",
+    "niters": r"_nit(\d+)(?:_|$)",
     "s": r"_s(\d+)(?:_|$)",
     "max_point_clouds_per_cluster": r"_mpcc(\d+)(?:_|$)",
     "max_points_per_centroid_inner_kmeans": r"_mpcik(\d+)(?:_|$)",
