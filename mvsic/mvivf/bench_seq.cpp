@@ -95,6 +95,7 @@ static void apply_query_compression_opts(SearchParams& sp, mvsic::commandLine& P
   sp.query_compression_threshold =
       static_cast<float>(P.getOptionDoubleValue("-query_compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
+  sp.tq8_rerank = P.getOption("-tq8_rerank");
 }
 
 template <typename ChPoint, bool metric>
@@ -174,7 +175,9 @@ void run(commandLine& P) {
           }
           std::cout << "\n=== nprobes=" << nprobes
                     << " (compress_centers=" << (compress_centers ? 1 : 0)
-                    << ", leaf=" << quant_method << ") ===" << std::endl;
+                    << ", leaf=" << quant_method
+                    << ", tq8_rerank=" << (search_params.tq8_rerank ? 1 : 0)
+                    << ") ===" << std::endl;
 
           parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> pred(queries.size());
           parlay::sequence<size_t> cmps(queries.size());
@@ -280,7 +283,8 @@ int main(int argc, char* argv[]) {
       "Query compression:\n"
       "  -query_compress none|ball|wards\n"
       "  -query_compress_threshold <tau>\n"
-      "  -compress_rerank\n");
+      "  -compress_rerank\n"
+      "  -tq8_rerank                    Use 8-bit TurboQuant kernel for rerank\n");
 
   std::string df = P.getOptionValue("-dist_func", "IP");
   if (df == "L2") {

@@ -164,9 +164,11 @@ inline void parse_compression_opts(SearchParams& sp, commandLine& P) {
   sp.query_compression_threshold =
       static_cast<float>(P.getOptionDoubleValue("-compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
+  sp.tq8_rerank = P.getOption("-tq8_rerank");
 }
 
 inline void print_compression_info(const SearchParams& sp) {
+  if (sp.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
   if (sp.query_compression == SearchParams::QueryCompression::None) return;
   const char* mname = (sp.query_compression == SearchParams::QueryCompression::Carve)
                           ? "carve" : "wards";

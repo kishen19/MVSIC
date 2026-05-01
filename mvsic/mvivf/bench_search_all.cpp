@@ -170,4 +170,7 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "  -nprobes <csv>                 nprobes values to sweep\n"
     "  -num_rerank <N>                Rerank width\n\n"
     "Query compression:\n"
-    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n")
+    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n\n"
+    "Rerank kernel:\n"
+    "  -tq8_rerank                    Rerank with the 8-bit TurboQuant kernel "
+    "(default: float)\n")

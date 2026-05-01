@@ -42,6 +42,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <type_traits>
@@ -157,6 +158,19 @@ class IndexMVIVF : public Index<metric> {
   parlay::sequence<float> build_8btq_vec_sqn_;
   parlay::sequence<int32_t> build_8btq_vec_bsum_;
   parlay::sequence<size_t> build_8btq_pc_vec_offsets_;
+
+  // ---------------------------------------------------------------------------
+  // Rerank-time 8BTQ cache. Lazily populated on the first search whose
+  // SearchParams sets `tq8_rerank=true`: trains the rotator on the input
+  // points and encodes every input PC into the panel layout used by the 8BTQ
+  // many-to-many kernel, so rerank can score each candidate via a single
+  // `turboquant_8bit_mv_chamfer_distance(q8, db, c)` call instead of a float
+  // chamfer over the raw embeddings.  Re-used across all subsequent queries.
+  // ---------------------------------------------------------------------------
+  using BTQEncSet = typename BTQModel::EncodedSet;
+  mutable std::unique_ptr<BTQModel> tq8_rerank_model_;
+  mutable std::unique_ptr<BTQEncSet> tq8_rerank_db_;
+  mutable std::once_flag tq8_rerank_once_;
 
   // ---------------------------------------------------------------------------
   // Per-level build timing instrumentation. Compile-time gated by
@@ -811,6 +825,57 @@ class IndexMVIVF : public Index<metric> {
   }
 
   // ---------------------------------------------------------------------------
+  // Lazy build of the 8BTQ rerank DB (model + encoded full-points set).
+  // Called the first time a query reaches `rerank_tq8_` so the no-rerank and
+  // float-rerank paths pay nothing.  Idempotent.
+  // ---------------------------------------------------------------------------
+  void ensure_tq8_rerank_db_(const PointCloudSet<ChPoint>& points) const {
+    std::call_once(tq8_rerank_once_, [&] {
+      auto model = std::make_unique<BTQModel>();
+      model->train(points);
+      auto enc = std::make_unique<BTQEncSet>(model->encode(points));
+      tq8_rerank_model_ = std::move(model);
+      tq8_rerank_db_ = std::move(enc);
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8BTQ-encoded rerank of the top-`num_rerank` candidates.  Replaces the
+  // float chamfer used by the base `rerank()` with the int8 panel kernel.
+  // Returns the number of bytes touched in the encoded DB.
+  //
+  // Candidate ids in `visited` are positions in the input PointCloudSet
+  // (`points.get_id(i) == i` in the bench loaders), which is also the cloud
+  // index in `tq8_rerank_db_`, so we can index it directly.
+  // ---------------------------------------------------------------------------
+  size_t rerank_tq8_(const ChPoint& query, const PointCloudSet<ChPoint>& points,
+                     const parlay::sequence<std::pair<uint32_t, float>>& candidates,
+                     size_t num_rerank,
+                     parlay::sequence<std::pair<uint32_t, float>>& out_results) const {
+    ensure_tq8_rerank_db_(points);
+    const auto& db = *tq8_rerank_db_;
+    auto q8 = tq8_rerank_model_->quantize_query(query);
+
+    auto scored = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_rerank);
+    auto bytes = parlay::sequence<size_t>::uninitialized(num_rerank);
+    const size_t per_vec_bytes =
+        db.num_bytes_per_datapoint + sizeof(float) + (metric ? sizeof(float) : 0);
+    parlay::parallel_for(0, num_rerank, [&](size_t i) {
+      const uint32_t id = candidates[i].first;
+      const float d = ::mvsic::turboquant_8bit_mv::turboquant_8bit_mv_chamfer_distance<metric>(
+          q8, db, static_cast<size_t>(id));
+      scored[i] = {id, d};
+      bytes[i] = db.cloud_size(static_cast<size_t>(id)) * per_vec_bytes;
+    });
+
+    parlay::sort_inplace(scored,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+    parlay::parallel_for(0, out_results.size(),
+                         [&](size_t i) { out_results[i] = scored[i]; });
+    return parlay::reduce(bytes);
+  }
+
+  // ---------------------------------------------------------------------------
   // Single-query search with detailed stats.
   //
   // Timer labels (stats[0..]):
@@ -895,7 +960,12 @@ class IndexMVIVF : public Index<metric> {
         parlay::sequence<std::pair<uint32_t, float>>::uninitialized(std::min(k, visited.size()));
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
-      bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
+      if (search_params.tq8_rerank) {
+        bytes_accessed +=
+            rerank_tq8_(rerank_query, points, visited, num_rerank, final_results);
+      } else {
+        bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
+      }
     } else {
       parlay::parallel_for(0, final_results.size(),
                            [&](size_t i) { final_results[i] = visited[i]; });
@@ -1140,6 +1210,18 @@ class IndexMVIVF : public Index<metric> {
         t.reset();
 
         // ----- Aggregation + Rerank -----
+        // Hoist the (one-time) 8BTQ DB encode outside the parallel_for so we
+        // don't race on lazy initialization. Its cost is reported on its own
+        // timer line; per-query 8BTQ query encoding stays inside the rerank
+        // wall-clock window below (paid by every query, not just the first).
+        if (search_params.tq8_rerank && search_params.num_rerank > 0) {
+          parlay::internal::timer t_db;
+          t_db.start();
+          ensure_tq8_rerank_db_(points);
+          t_db.stop();
+          std::cout << "[MVIVF] SB TQ8 DB Encode (one-time): " << t_db.total_time() << " sec"
+                    << std::endl;
+        }
         t.start();
         auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
         auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
@@ -1169,8 +1251,13 @@ class IndexMVIVF : public Index<metric> {
           bytes_accessed_rerank[q_id] = 0;
           if (search_params.num_rerank > 0) {
             size_t actual_rerank = std::min(num_rerank_sb, top_cands.size());
-            bytes_accessed_rerank[q_id] =
-                this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+            if (search_params.tq8_rerank) {
+              bytes_accessed_rerank[q_id] = rerank_tq8_(rerank_queries[q_id], points, top_cands,
+                                                        actual_rerank, q_final);
+            } else {
+              bytes_accessed_rerank[q_id] =
+                  this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+            }
           } else {
             for (size_t c = 0; c < q_final.size(); ++c)
               q_final[c] = top_cands[c];
@@ -1262,6 +1349,17 @@ class IndexMVIVF : public Index<metric> {
     dist_cmps += parlay::reduce(leaf_cmps);
 
     // Step 4: aggregate + rerank.
+    // Hoist the (one-time) 8BTQ DB encode outside the parallel_for so we don't
+    // race on lazy initialization. Reported on its own timer line; per-query
+    // 8BTQ query encoding stays inside the rerank wall-clock window below.
+    if (search_params.tq8_rerank && search_params.num_rerank > 0) {
+      parlay::internal::timer t_db;
+      t_db.start();
+      ensure_tq8_rerank_db_(points);
+      t_db.stop();
+      std::cout << "[MVIVF] TQ8 DB Encode (one-time): " << t_db.total_time() << " sec"
+                << std::endl;
+    }
     t.start();
     auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
     auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
@@ -1297,8 +1395,13 @@ class IndexMVIVF : public Index<metric> {
 
       if (search_params.num_rerank > 0) {
         size_t actual_rerank = std::min(num_rerank, top_cands.size());
-        bytes_accessed_rerank[q_id] =
-            this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+        if (search_params.tq8_rerank) {
+          bytes_accessed_rerank[q_id] = rerank_tq8_(rerank_queries[q_id], points, top_cands,
+                                                    actual_rerank, q_final);
+        } else {
+          bytes_accessed_rerank[q_id] =
+              this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+        }
       } else {
         for (size_t c = 0; c < q_final.size(); ++c) {
           q_final[c] = top_cands[c];

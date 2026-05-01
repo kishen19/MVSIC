@@ -33,6 +33,12 @@ struct SearchParams {
   float query_compression_threshold = 0.7f;
   bool compress_rerank = false;  // If true, use compressed query for reranking too
 
+  // If true, MVIVF rerank scores candidates with the 8-bit TurboQuant
+  // many-to-many chamfer kernel (over a pre-encoded full-points DB held by
+  // the index) instead of the raw float chamfer.  Exact-float fallback is the
+  // default.
+  bool tq8_rerank = false;
+
   // mvivf search params
   static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0) {
     SearchParams params;

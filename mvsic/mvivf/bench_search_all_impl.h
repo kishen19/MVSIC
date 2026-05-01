@@ -50,6 +50,7 @@ void run_one(RunOneCtx<ChPoint>& ctx) {
     sp.query_compression = sp_base.query_compression;
     sp.query_compression_threshold = sp_base.query_compression_threshold;
     sp.compress_rerank = sp_base.compress_rerank;
+    sp.tq8_rerank = sp_base.tq8_rerank;
     return sp;
   };
 
