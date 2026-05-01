@@ -20,6 +20,7 @@
 //     index pipeline can consume them with no extra changes.
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -347,40 +348,87 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
     auto id_pt = parlay::tabulate(n, [&](uint32_t i) { return std::make_pair(cluster_ids[i], i); });
     auto grouped = group_by_key_inplace(id_pt);
     parlay::parallel_for(0, grouped.size(), [&](size_t i) {
-      auto del_group = parlay::delayed_tabulate(grouped[i].size(),
-                                                [&](size_t j) { return grouped[i][j].second; });
-      auto data = points.filter_flattened(del_group);
+      const size_t M = grouped[i].size();
+      // Per-cluster prefix sum of vec counts: pc_offsets_in_data[j] = sum of
+      // get_size(grouped[i][0..j-1]) (so [j] is the global vec index of the
+      // first vec belonging to PC j within this cluster). M is small (~100-5K),
+      // so a serial scan is fine and simpler than a parlay::scan.
+      parlay::sequence<size_t> pc_offsets_in_data(M + 1);
+      pc_offsets_in_data[0] = 0;
+      for (size_t j = 0; j < M; ++j) {
+        pc_offsets_in_data[j + 1] =
+            pc_offsets_in_data[j] +
+            static_cast<size_t>(points.get_size(grouped[i][j].second));
+      }
+      const size_t T_c = pc_offsets_in_data[M];
 
-      // Build per-row vec_root_indices into the build-top per-vector cache,
-      // matching `data`'s row order (filter_flattened concatenates each PC's
-      // vectors in order; vec j of root_pc is at pc_vec_offsets_[root_pc]+j).
+      // Pick the sample size. When T_c > m we sample m vecs in tuple space and
+      // gather only those; this is statistically equivalent to the internal
+      // sample inside kmeans_subsample but avoids materializing T_c rows we'd
+      // throw away. When T_c <= m we gather all (current behavior).
+      const size_t m = static_cast<size_t>(
+          params.max_points_per_centroid_inner_kmeans) * static_cast<size_t>(s);
+      const bool use_outer_sample = (T_c > m);
+      const size_t row_count = use_outer_sample ? m : T_c;
+
+      auto data = parlay::sequence<parlay::sequence<float>>(
+          row_count, parlay::sequence<float>::uninitialized(d));
+
+      const bool emit_vec_indices = use_vec_cache && row_count > 0;
+      const bool need_weights = params.use_weighted_inner_kmeans;
       parlay::sequence<uint32_t> vec_root_indices;
-      const bool emit_vec_indices = use_vec_cache && data.size() > 0;
-      if (emit_vec_indices || params.use_weighted_inner_kmeans) {
-        // Both branches need the per-doc offsets into `data`.
-      }
-      parlay::sequence<size_t> pc_offsets_in_data;
-      size_t total_vecs_in_data = 0;
-      const bool need_offsets =
-          emit_vec_indices || params.use_weighted_inner_kmeans;
-      if (need_offsets) {
-        const size_t num_docs = grouped[i].size();
-        auto sizes = parlay::delayed_seq<size_t>(num_docs, [&](size_t j) {
-          return static_cast<size_t>(points.get_size(grouped[i][j].second));
-        });
-        std::tie(pc_offsets_in_data, total_vecs_in_data) = parlay::scan(sizes);
-      }
-      if (emit_vec_indices) {
-        vec_root_indices.resize(data.size());
-        const size_t num_docs = grouped[i].size();
-        parlay::parallel_for(0, num_docs, [&](size_t j) {
+      parlay::sequence<float> weights;
+      if (emit_vec_indices) vec_root_indices.resize(row_count);
+      if (need_weights) weights.resize(row_count);
+
+      if (use_outer_sample) {
+        // Sample m random global vec indices in [0, T_c), map each to
+        // (pc, v_in_pc) via binary search of pc_offsets_in_data, then gather.
+        const size_t* off = pc_offsets_in_data.data();
+        parlay::parallel_for(0, m, [&](size_t r) {
+          const size_t g =
+              static_cast<size_t>(parlay::hash32(static_cast<uint32_t>(r))) % T_c;
+          // upper_bound returns first off[k] > g; (k - 1) is the PC index.
+          const size_t k_ub =
+              static_cast<size_t>(std::upper_bound(off, off + (M + 1), g) - off);
+          const size_t j = k_ub - 1;
           const uint32_t pc_local = grouped[i][j].second;
-          const uint32_t pc_root = local_to_root_pc[pc_local];
-          const size_t base = (*pc_vec_offsets_)[pc_root];
-          const size_t out_off = pc_offsets_in_data[j];
+          const uint32_t v_in_pc = static_cast<uint32_t>(g - off[j]);
+          std::memcpy(data[r].begin(), points.data(pc_local) + v_in_pc * d,
+                      d * sizeof(float));
+          if (emit_vec_indices) {
+            const uint32_t pc_root = local_to_root_pc[pc_local];
+            vec_root_indices[r] =
+                static_cast<uint32_t>((*pc_vec_offsets_)[pc_root] + v_in_pc);
+          }
+          if (need_weights) {
+            const uint32_t doc_size = points.get_size(pc_local);
+            weights[r] = (doc_size > 0)
+                             ? 1.0f / static_cast<float>(doc_size)
+                             : 0.0f;
+          }
+        });
+      } else {
+        // Gather all T_c vecs (small/medium cluster: full inner k-means input).
+        parlay::parallel_for(0, M, [&](size_t j) {
+          const uint32_t pc_local = grouped[i][j].second;
+          const size_t base = pc_offsets_in_data[j];
           const uint32_t doc_size = points.get_size(pc_local);
-          for (uint32_t t = 0; t < doc_size; ++t) {
-            vec_root_indices[out_off + t] = static_cast<uint32_t>(base + t);
+          const float* src = points.data(pc_local);
+          for (uint32_t v = 0; v < doc_size; ++v) {
+            std::memcpy(data[base + v].begin(), src + v * d, d * sizeof(float));
+          }
+          if (emit_vec_indices) {
+            const uint32_t pc_root = local_to_root_pc[pc_local];
+            const size_t pc_root_base = (*pc_vec_offsets_)[pc_root];
+            for (uint32_t v = 0; v < doc_size; ++v) {
+              vec_root_indices[base + v] =
+                  static_cast<uint32_t>(pc_root_base + v);
+            }
+          }
+          if (need_weights && doc_size > 0) {
+            const float w = 1.0f / static_cast<float>(doc_size);
+            for (uint32_t v = 0; v < doc_size; ++v) weights[base + v] = w;
           }
         });
       }
@@ -390,33 +438,17 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
       const parlay::sequence<uint32_t>* idx_ptr =
           emit_vec_indices ? &vec_root_indices : nullptr;
 
-      if (s >= data.size()) {
+      if (s >= row_count) {
         centers.set_point_cloud(i, data);
-      } else if (params.use_weighted_inner_kmeans) {
-        if (total_vecs_in_data != data.size()) {
-          std::cerr << "[MVClustering8BTQ] Error: total_vecs != data.size() in weighted "
-                       "inner k-means."
-                    << std::endl;
-          abort();
-        }
-        parlay::sequence<float> weights(total_vecs_in_data);
-        const size_t num_docs = grouped[i].size();
-        parlay::parallel_for(0, num_docs, [&](size_t j) {
-          uint32_t doc_id = grouped[i][j].second;
-          uint32_t doc_size = points.get_size(doc_id);
-          if (doc_size == 0) return;
-          float w = 1.0f / static_cast<float>(doc_size);
-          size_t start = pc_offsets_in_data[j];
-          for (uint32_t t = 0; t < doc_size; ++t) weights[start + t] = w;
-        });
+      } else if (need_weights) {
         auto new_centers = kmeans_weighted_subsample<metric>(
-            data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
-            params.build_with_8btq, cache_ptr, idx_ptr);
+            data, weights, s, params.max_points_per_centroid_inner_kmeans,
+            params.verbose >= 3, params.build_with_8btq, cache_ptr, idx_ptr);
         centers.set_point_cloud(i, new_centers);
       } else {
         auto new_centers = kmeans_subsample<metric>(
-            data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
-            params.build_with_8btq, cache_ptr, idx_ptr);
+            data, s, params.max_points_per_centroid_inner_kmeans,
+            params.verbose >= 3, params.build_with_8btq, cache_ptr, idx_ptr);
         centers.set_point_cloud(i, new_centers);
       }
     });
