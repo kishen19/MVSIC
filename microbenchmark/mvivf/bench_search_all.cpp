@@ -5,6 +5,7 @@
 
 #include "parlay/primitives.h"
 
+#include "mvsic/core/bench_utils.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
@@ -82,7 +83,12 @@ void run_benchmark(mvsic::commandLine& P) {
   std::string quant_method = P.getOptionValue("-quant_method", "None");
 
   size_t k = P.getOptionLongValue("-k", 10);
-  size_t nprobes = P.getOptionLongValue("-nprobes", 100);
+  // -nprobes accepts a single value or a CSV (e.g. "32,128,256,512"). The
+  // index is loaded once and the search is repeated for each value, so a
+  // single invocation covers a whole sweep without paying load cost N times.
+  std::string nprobes_str = P.getOptionValue("-nprobes", "100");
+  std::vector<size_t> nprobes_list = bench::parse_csv_ints(nprobes_str);
+  if (nprobes_list.empty()) nprobes_list.push_back(100);
   size_t num_rerank = P.getOptionLongValue("-num_rerank", k);
 
   // Build-side knobs (only used when the skeleton has to be built; if the
@@ -115,7 +121,8 @@ void run_benchmark(mvsic::commandLine& P) {
         "  -mm                            Memory-map points\n"
         "  -dist_func IP|L2               Distance metric (default IP)\n"
         "  -k <K>                         Top-k (default 10)\n"
-        "  -nprobes <N>                   Number of probes (default 100)\n"
+        "  -nprobes <N|csv>               Probes; single value or CSV like \"32,128,256\" "
+        "(default 100)\n"
         "  -num_rerank <N>                Rerank budget (default = k)\n"
         "  -mode old|new|both             Which kernel to run (default both)\n"
         "  -qc 0|1                        CompressCenters template (default 1)\n"
@@ -134,6 +141,7 @@ void run_benchmark(mvsic::commandLine& P) {
         "  -mpcik <N> (20)                max_points_per_centroid_inner_kmeans\n"
         "  -wgh_kmeans 0|1 (1)            Use weighted inner k-means\n"
         "  -s <N> (0)                     Centroid point-cloud size (0 = avg)\n"
+        "  -build_8btq 0|1 (0)            Use 8BTQ panel kernel for k-means assignment\n"
         "  -v <level> (0)                 Build verbosity\n";
     exit(1);
   }
@@ -156,6 +164,15 @@ void run_benchmark(mvsic::commandLine& P) {
   IndexParams index_params =
       IndexParams::mvivf(k_per_level, max_leaf_size, /*compress_input=*/false, verbose, niters,
                          mpcc, mpcik, "Random", /*seed=*/0, wgh_kmeans, s_param, max_depth);
+  // Use the 8BTQ panel kernel for k-means assignment during build. Off by
+  // default; pass `-build_8btq 1` to enable. Massively speeds up the build
+  // step on larger datasets without changing the resulting tree topology
+  // (assignment is approximate either way at int8 precision).
+  index_params.build_with_8btq = (P.getOptionIntValue("-build_8btq", 0) != 0);
+  if (verbose >= 1) {
+    std::cout << "[bench_search_all] build_with_8btq = "
+              << (index_params.build_with_8btq ? "true" : "false") << std::endl;
+  }
   const std::filesystem::path idx_path(indexFile);
   if (!std::filesystem::exists(idx_path)) {
     // Build and save a raw skeleton.  save() is only valid on the
@@ -185,73 +202,81 @@ void run_benchmark(mvsic::commandLine& P) {
               << std::endl;
     index.load(indexFile, points);
 
-    SearchParams search_params = SearchParams::mvivf(k, nprobes, num_rerank);
-    apply_query_compression_opts(search_params, P);
-    if (search_params.query_compression != SearchParams::QueryCompression::None) {
-      const char* mname = (search_params.query_compression == SearchParams::QueryCompression::Carve)
-                              ? "ball"
-                              : "wards";
-      std::cout << "Query compression: " << mname
-                << " tau=" << search_params.query_compression_threshold
-                << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
-    }
-    if (search_params.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
-
     bool run_old = (mode == "both" || mode == "old");
     bool run_new = (mode == "both" || mode == "new");
 
-    parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> pred1, pred2;
-    size_t cmps1 = 0, cmps2 = 0;
-    double time1 = 0, time2 = 0;
+    for (size_t nprobes : nprobes_list) {
+      std::cout << "\n############################################" << std::endl;
+      std::cout << "  nprobes = " << nprobes << std::endl;
+      std::cout << "############################################" << std::endl;
 
-    if (run_old) {
-      std::cout << "\n========================================" << std::endl;
-      std::cout << "Running search_all (Original)..." << std::endl;
-      parlay::internal::timer t1;
-      t1.start();
-      auto [p1, c1] = index.search_all(queries, points, search_params);
-      t1.stop();
-      pred1 = std::move(p1);
-      cmps1 = c1;
-      time1 = t1.total_time();
-      std::cout << "search_all time: " << time1 << " seconds. Dist cmps: " << cmps1 << std::endl;
-    }
+      SearchParams search_params = SearchParams::mvivf(k, nprobes, num_rerank);
+      apply_query_compression_opts(search_params, P);
+      if (search_params.query_compression != SearchParams::QueryCompression::None) {
+        const char* mname =
+            (search_params.query_compression == SearchParams::QueryCompression::Carve) ? "ball"
+                                                                                       : "wards";
+        std::cout << "Query compression: " << mname
+                  << " tau=" << search_params.query_compression_threshold
+                  << " compress_rerank=" << (search_params.compress_rerank ? 1 : 0) << std::endl;
+      }
+      if (search_params.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
 
-    if (run_new) {
-      std::cout << "\n========================================" << std::endl;
-      std::cout << "Running search_all_new..." << std::endl;
-      parlay::internal::timer t2;
-      t2.start();
-      auto [p2, c2] = index.search_all_new(queries, points, search_params);
-      t2.stop();
-      pred2 = std::move(p2);
-      cmps2 = c2;
-      time2 = t2.total_time();
-      std::cout << "search_all_new time: " << time2 << " seconds. Dist cmps: " << cmps2 << std::endl;
-    }
+      parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> pred1, pred2;
+      size_t cmps1 = 0, cmps2 = 0;
+      double time1 = 0, time2 = 0;
 
-    if (run_old && run_new) {
-      std::cout << "\n========================================" << std::endl;
-      std::cout << "Speedup (old / new): " << time1 / time2 << "x" << std::endl;
-      std::cout << "========================================" << std::endl;
-
-      if (has_gt) {
-        auto [r1_old, rk_old] = compute_scores(pred1, gt, k);
-        auto [r1_new, rk_new] = compute_scores(pred2, gt, k);
-        std::cout << "\nRecall vs Ground Truth:" << std::endl;
-        std::cout << "  search_all:     recall@1 = " << r1_old << ", recall@" << k << " = " << rk_old
-                  << std::endl;
-        std::cout << "  search_all_new: recall@1 = " << r1_new << ", recall@" << k << " = " << rk_new
+      if (run_old) {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "Running search_all (Original)..." << std::endl;
+        parlay::internal::timer t1;
+        t1.start();
+        auto [p1, c1] = index.search_all(queries, points, search_params);
+        t1.stop();
+        pred1 = std::move(p1);
+        cmps1 = c1;
+        time1 = t1.total_time();
+        std::cout << "search_all time: " << time1 << " seconds. Dist cmps: " << cmps1
                   << std::endl;
       }
 
-      double agreement = compute_recall(pred2, pred1, k, k);
-      std::cout << "\nAgreement (new vs old): " << agreement << std::endl;
-    } else if (has_gt) {
-      auto& pred = run_old ? pred1 : pred2;
-      auto [r1, rk] = compute_scores(pred, gt, k);
-      std::cout << "\nRecall vs Ground Truth: recall@1 = " << r1
-                << ", recall@" << k << " = " << rk << std::endl;
+      if (run_new) {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "Running search_all_new..." << std::endl;
+        parlay::internal::timer t2;
+        t2.start();
+        auto [p2, c2] = index.search_all_new(queries, points, search_params);
+        t2.stop();
+        pred2 = std::move(p2);
+        cmps2 = c2;
+        time2 = t2.total_time();
+        std::cout << "search_all_new time: " << time2 << " seconds. Dist cmps: " << cmps2
+                  << std::endl;
+      }
+
+      if (run_old && run_new) {
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "Speedup (old / new): " << time1 / time2 << "x" << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        if (has_gt) {
+          auto [r1_old, rk_old] = compute_scores(pred1, gt, k);
+          auto [r1_new, rk_new] = compute_scores(pred2, gt, k);
+          std::cout << "\nRecall vs Ground Truth:" << std::endl;
+          std::cout << "  search_all:     recall@1 = " << r1_old << ", recall@" << k << " = "
+                    << rk_old << std::endl;
+          std::cout << "  search_all_new: recall@1 = " << r1_new << ", recall@" << k << " = "
+                    << rk_new << std::endl;
+        }
+
+        double agreement = compute_recall(pred2, pred1, k, k);
+        std::cout << "\nAgreement (new vs old): " << agreement << std::endl;
+      } else if (has_gt) {
+        auto& pred = run_old ? pred1 : pred2;
+        auto [r1, rk] = compute_scores(pred, gt, k);
+        std::cout << "\nRecall vs Ground Truth: recall@1 = " << r1 << ", recall@" << k << " = "
+                  << rk << std::endl;
+      }
     }
   });
 }
@@ -267,7 +292,7 @@ int main(int argc, char* argv[]) {
                        "[-compress_rerank] [-tq8_rerank] "
                        "[-k_per_level <N>] [-max_leaf_size <N>] [-max_depth <N>] "
                        "[-niters <N>] [-mpcc <N>] [-mpcik <N>] [-wgh_kmeans 0|1] "
-                       "[-s <N>] [-v <level>]");
+                       "[-s <N>] [-build_8btq 0|1] [-v <level>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2") {
