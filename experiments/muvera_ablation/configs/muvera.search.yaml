@@ -27,6 +27,7 @@ indices:
           d_fde: 2560
           R: 200
           L: 600
+          alpha: 1
         variants:
           - { name: tq4, quantizer: TQ }
         search_configs: &muvera_k10
@@ -35,9 +36,9 @@ indices:
               L: [64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
               config:
-                - { name: nr500,  num_rerank: 500 }
                 - { name: nr1000,  num_rerank: 1000 }
                 - { name: nr2000, num_rerank: 2000 }
+                - { name: nr5000, num_rerank: 5000 }
       - build_name: muvera_5120_R200_L600
         build_params: { <<: *muvera_defaults, d_fde: 5120 }
         variants:

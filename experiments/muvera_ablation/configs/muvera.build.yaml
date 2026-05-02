@@ -24,6 +24,7 @@ indices:
           d_fde: 2560
           R: 200
           L: 600
+          alpha: 1
       - name: muvera_5120_R200_L600
         params: { <<: *muvera_defaults, d_fde: 5120 }
       - name: muvera_10240_R200_L600

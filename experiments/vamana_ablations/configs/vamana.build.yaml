@@ -1,0 +1,37 @@
+name: "Vamana Ablation (build: R and alpha sweep)"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/vamana_ablations/indices/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/vamana_ablations/indices/fiqa
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/vamana_ablations/indices/nq500k
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/vamana_ablations/indices/nq
+
+indices:
+  - name: vamana
+    metric: ip
+    build_configs:
+      - name: vamana_R64_a1.0
+        params: &vamana_defaults
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+          two_pass: false
+      - name: vamana_R64_a0.9
+        params: { <<: *vamana_defaults, R: 64, alpha: 0.9 }
+      - name: vamana_R64_a0.95
+        params: { <<: *vamana_defaults, R: 64, alpha: 0.95 }
+      - name: vamana_R128_a1.0
+        params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 1.0 }
+      - name: vamana_R128_a0.9
+        params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 0.9 }
+      - name: vamana_R128_a0.95
+        params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 0.95 }

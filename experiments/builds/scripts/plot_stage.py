@@ -185,7 +185,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
         print(f"  [skip pareto for {dataset}: missing {qps} or recall_k_k]")
         return
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
     methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
     color_for = {m: cmap(i % 10) for i, m in enumerate(methods_present)}
@@ -199,7 +199,8 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
                 continue
             xs = sub["recall_k_k"].to_numpy(dtype=float)
             ys = sub[qps].to_numpy(dtype=float)
-            ax.scatter(xs, ys, s=18, color=color_for[method], alpha=0.35)
+            # Keep all raw sweep points visible but subdued behind the Pareto line.
+            ax.scatter(xs, ys, s=18, color=color_for[method], alpha=0.22, zorder=1)
             fx, fy = _pareto_curve(xs, ys)
             if fx.size == 0:
                 continue
@@ -207,8 +208,16 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             if variant and variant != "raw":
                 label += f" / {variant}"
             ls = "-" if vi == 0 else "--"
-            ax.plot(fx, fy, marker="o",
-                    linestyle=ls, color=color_for[method], label=label)
+            ax.plot(
+                fx, fy,
+                marker="o",
+                markersize=4.5,
+                linewidth=1.9,
+                linestyle=ls,
+                color=color_for[method],
+                label=label,
+                zorder=3,
+            )
 
     ax.set_xlabel("Recall@k")
     ax.set_ylabel("QPS (batch)" if stage == "batch" else "QPS (per-query)")
