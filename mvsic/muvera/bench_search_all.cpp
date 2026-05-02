@@ -7,9 +7,7 @@ namespace {
 
 // CLI -> compile-time IndexMUVERA<metric, LeafModel> dispatch.  Mirrors the
 // pattern used by mvsic/mvivf/bench_search_all.cpp so callers can exercise
-// each templated quantizer variant from a single binary.  1BTQ is omitted
-// because the SV-variant of turboquant_1bit hasn't been ported yet (only
-// turboquant_1bit_mv exists).
+// each templated quantizer variant from a single binary.
 #define MUVERA_DISPATCH(metric, qm, fn)                                                       \
   do {                                                                                         \
     if      (qm == "None"  || qm == "none")                                                    \
@@ -24,9 +22,11 @@ namespace {
       fn.template operator()<IndexMUVERA<metric, turboquant::Model<metric>>>();                \
     else if (qm == "SPQTQ" || qm == "spqtq")                                                   \
       fn.template operator()<IndexMUVERA<metric, pqtq::Model<metric>>>();                      \
+    else if (qm == "1BTQ"  || qm == "1btq" || qm == "OBTQ" || qm == "obtq")                    \
+      fn.template operator()<IndexMUVERA<metric, turboquant_1bit::Model<metric>>>();           \
     else {                                                                                     \
       std::cerr << "Unknown -quant_method: " << qm                                             \
-                << " (use None, PQ, FS, RQ, TQ, SPQTQ)" << std::endl;                          \
+                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ)" << std::endl;                    \
       std::exit(1);                                                                            \
     }                                                                                          \
   } while (0)
@@ -114,7 +114,7 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "Underlying Vamana params (build):\n"
     "  -R <N> (200)   -L_build <N> (600)   -a <f> (1.1)   -np <N> (1)\n\n"
     "Leaf quantization (selects the templated IndexMUVERA<metric, LeafModel>):\n"
-    "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ    (default None)\n"
+    "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ    (default None)\n"
     "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
     "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n\n"
     "Search sweep:\n"

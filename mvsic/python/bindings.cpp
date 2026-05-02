@@ -472,6 +472,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_INDEX(IndexMUVERATQIP, ChamferIP_Point, "IndexMUVERATQIP")
   BIND_INDEX(IndexMUVERASPQTQL2, ChamferL2_Point, "IndexMUVERASPQTQL2")
   BIND_INDEX(IndexMUVERASPQTQIP, ChamferIP_Point, "IndexMUVERASPQTQIP")
+  BIND_INDEX(IndexMUVERAOneBitTQL2, ChamferL2_Point, "IndexMUVERAOneBitTQL2")
+  BIND_INDEX(IndexMUVERAOneBitTQIP, ChamferIP_Point, "IndexMUVERAOneBitTQIP")
 
   // ---- Vamana family ----
   BIND_INDEX(IndexVamanaL2, ChamferL2_Point, "IndexVamanaL2")
@@ -837,6 +839,8 @@ PYBIND11_MODULE(mvsic, m) {
   BIND_COMPUTE_STATS(IndexMUVERATQIP, ChamferIP_Point, "MUVERATQIP")
   BIND_COMPUTE_STATS(IndexMUVERASPQTQL2, ChamferL2_Point, "MUVERASPQTQL2")
   BIND_COMPUTE_STATS(IndexMUVERASPQTQIP, ChamferIP_Point, "MUVERASPQTQIP")
+  BIND_COMPUTE_STATS(IndexMUVERAOneBitTQL2, ChamferL2_Point, "MUVERAOneBitTQL2")
+  BIND_COMPUTE_STATS(IndexMUVERAOneBitTQIP, ChamferIP_Point, "MUVERAOneBitTQIP")
   BIND_COMPUTE_STATS(IndexVamanaL2, ChamferL2_Point, "VamanaL2")
   BIND_COMPUTE_STATS(IndexVamanaIP, ChamferIP_Point, "VamanaIP")
   BIND_COMPUTE_STATS(IndexVamanaPQL2, ChamferL2_Point, "VamanaPQL2")

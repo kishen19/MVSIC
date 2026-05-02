@@ -19,6 +19,7 @@ cc_library(
         "//mvsic/core/quantization:turboquant_mv",
         "//mvsic/core/quantization:pqtq",
         "//mvsic/core/quantization:pqtq_mv",
+        "//mvsic/core/quantization:turboquant_1bit",
         "//mvsic/core/quantization:turboquant_1bit_mv",
         "//mvsic/core/quantization:turboquant_8bit_mv",
         "//mvsic/core/types:chamfer_ip_point",

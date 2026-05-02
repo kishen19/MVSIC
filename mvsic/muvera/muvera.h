@@ -321,11 +321,7 @@ using IndexMUVERATQL2        = IndexMUVERA<true,  turboquant::Model<true>>;
 using IndexMUVERASPQTQIP     = IndexMUVERA<false, pqtq::Model<false>>;
 using IndexMUVERASPQTQL2     = IndexMUVERA<true,  pqtq::Model<true>>;
 
-// 1-bit TurboQuant: requires a non-_mv port of turboquant_1bit which doesn't
-// exist yet (today only `turboquant_1bit_mv` is implemented).  Uncomment the
-// aliases below once a `turboquant_1bit::Model<bool>` SV-variant is ported.
-//
-// using IndexMUVERAOneBitTQIP  = IndexMUVERA<false, turboquant_1bit::Model<false>>;
-// using IndexMUVERAOneBitTQL2  = IndexMUVERA<true,  turboquant_1bit::Model<true>>;
+using IndexMUVERAOneBitTQIP  = IndexMUVERA<false, turboquant_1bit::Model<false>>;
+using IndexMUVERAOneBitTQL2  = IndexMUVERA<true,  turboquant_1bit::Model<true>>;
 
 }  // namespace mvsic
