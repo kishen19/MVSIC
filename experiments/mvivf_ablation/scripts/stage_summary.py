@@ -209,50 +209,50 @@ def main() -> int:
     df = plot_mod._ensure_group_col(df, args.group_by)  # noqa: SLF001
 
     # 2) Tree quality for all build configs in this stage.
-    tree_stats_by_build = {}
-    if not args.skip_tree_quality and "build_config" in df.columns:
-        if family != "mvivf":
-            print(
-                f"[warn] tree_quality currently supports only regular mvivf, "
-                f"but family={family}; skipping tree-quality for this run."
-            )
-            build_cfgs = []
-        else:
-            build_cfgs = sorted(set(df["build_config"].dropna().astype(str)))
-        for build_cfg in build_cfgs:
-            index_path = args.indices_root / build_cfg / "index.bin"
-            if not index_path.exists():
-                print(f"[warn] missing index for tree-quality: {index_path}")
-                continue
-            out_json = out_dir / f"tree_quality_{build_cfg}.json"
-            try:
-                tree_stats_by_build[build_cfg] = _run_tree_quality(
-                    tree_quality_script=args.tree_quality_script,
-                    index_path=index_path,
-                    db=args.db,
-                    queries=args.queries,
-                    gt=args.gt,
-                    k=args.k,
-                    metric=args.metric,
-                    out_json=out_json,
-                    family=family,
-                )
-            except subprocess.CalledProcessError as e:
-                print(f"[warn] tree_quality failed for {build_cfg}: {e}")
+    # tree_stats_by_build = {}
+    # if not args.skip_tree_quality and "build_config" in df.columns:
+    #     if family != "mvivf":
+    #         print(
+    #             f"[warn] tree_quality currently supports only regular mvivf, "
+    #             f"but family={family}; skipping tree-quality for this run."
+    #         )
+    #         build_cfgs = []
+    #     else:
+    #         build_cfgs = sorted(set(df["build_config"].dropna().astype(str)))
+    #     for build_cfg in build_cfgs:
+    #         index_path = args.indices_root / build_cfg / "index.bin"
+    #         if not index_path.exists():
+    #             print(f"[warn] missing index for tree-quality: {index_path}")
+    #             continue
+    #         out_json = out_dir / f"tree_quality_{build_cfg}.json"
+    #         try:
+    #             tree_stats_by_build[build_cfg] = _run_tree_quality(
+    #                 tree_quality_script=args.tree_quality_script,
+    #                 index_path=index_path,
+    #                 db=args.db,
+    #                 queries=args.queries,
+    #                 gt=args.gt,
+    #                 k=args.k,
+    #                 metric=args.metric,
+    #                 out_json=out_json,
+    #                 family=family,
+    #             )
+    #         except subprocess.CalledProcessError as e:
+    #             print(f"[warn] tree_quality failed for {build_cfg}: {e}")
 
-    tree_rows = []
-    for b in sorted(tree_stats_by_build):
-        row = {"build_config": b}
-        row.update(tree_stats_by_build[b])
-        tree_rows.append(row)
-    tree_df = pd.DataFrame(tree_rows)
-    tree_csv = out_dir / f"{args.stage_label}_tree_quality.csv"
-    tree_md = out_dir / f"{args.stage_label}_tree_quality.md"
-    if not tree_df.empty:
-        tree_df.to_csv(tree_csv, index=False)
-        tree_md.write_text(_to_markdown_table(tree_df))
-        print(f"Wrote {tree_csv}")
-        print(f"Wrote {tree_md}")
+    # tree_rows = []
+    # for b in sorted(tree_stats_by_build):
+    #     row = {"build_config": b}
+    #     row.update(tree_stats_by_build[b])
+    #     tree_rows.append(row)
+    # tree_df = pd.DataFrame(tree_rows)
+    # tree_csv = out_dir / f"{args.stage_label}_tree_quality.csv"
+    # tree_md = out_dir / f"{args.stage_label}_tree_quality.md"
+    # if not tree_df.empty:
+    #     tree_df.to_csv(tree_csv, index=False)
+    #     tree_md.write_text(_to_markdown_table(tree_df))
+    #     print(f"Wrote {tree_csv}")
+    #     print(f"Wrote {tree_md}")
 
     # 3) Optional budget-based winner table.
     if args.with_budget_winners:
