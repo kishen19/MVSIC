@@ -39,20 +39,10 @@ datasets:
     points:  OpenAIArXiv/openai-2000000
     queries: OpenAIArXiv/query
 
-  - name: bigann
-    metric: L2
-    points:  bigann/bigann-10000000
-    queries: bigann/query
-
   - name: deep
     metric: L2
     points:  deep/deep-10000000
     queries: deep/query
-
-  - name: msspacev
-    metric: L2
-    points:  msspacev/msspacev-10000000
-    queries: msspacev/query
 
   - name: msturing
     metric: L2
@@ -63,11 +53,6 @@ datasets:
   # Convention-matching layout (glove-100-angular_{base,query}.fbin etc.).
   - name: glove-100-angular
     metric: IP
-
-  - name: msmarco_websearch
-    metric: IP
-    points:  msmarco_websearch/msmarco-10000000
-    queries: msmarco_websearch/query
 
   # Non-conventional layout: bare base.fbin / query.fbin / groundtruth.
   - name: nytimes-256-angular
