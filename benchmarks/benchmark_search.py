@@ -262,7 +262,14 @@ def _reorder_columns(df: pd.DataFrame, variable_param: str, labels):
 
 
 def _expand_search_params(search_config: dict, variable_param: str):
-    """Cartesian product of params across each named `config` variant."""
+    """Cartesian product of params across each named `config` variant.
+
+    For each entry in ``params.config``, the sweep axis named by ``variable_param``
+    (see ``benchmarks/methods.yaml``, e.g. ``L`` for ``svh_graph``) can be set
+    **per variant**: ``variant.get(variable_param, params[variable_param])``.
+    So each ``{name: nr..., num_rerank: N, L: [...]}`` row can use a different
+    ``L`` list for that rerank bucket only.
+    """
     params = search_config.get('params') or {}
     if not params:
         return []

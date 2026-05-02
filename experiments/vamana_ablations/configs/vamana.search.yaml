@@ -59,6 +59,7 @@ indices:
               config:
                 - { name: nr0,   num_rerank: 0 }
                 - { name: nr20,  num_rerank: 20 }
+                - { name: nr40,  num_rerank: 40 }
       - build_name: vamana_R64_a1.1
         build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 1.1 }
         variants:

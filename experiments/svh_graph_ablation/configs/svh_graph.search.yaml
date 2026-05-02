@@ -53,12 +53,21 @@ indices:
           - name: k=10
             params:
               tq8_rerank: [true]
-              L: [64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
+              # `L` is the sweep axis (`variable_param: L` in methods.yaml).
+              # Omit top-level `L` and set `L` per `config` row so each num_rerank
+              # bucket uses its own beam-width grid (e.g. mostly L > nr plus a few
+              # smaller points for the low-recall end of Pareto curves).
               config:
-                - { name: nr1000,   num_rerank: 1000 }
-                - { name: nr5000,  num_rerank: 5000 }
-                - { name: nr10000, num_rerank: 10000 }
+                - name: nr1000
+                  num_rerank: 1000
+                  L: [64, 128, 256, 512, 1024, 2048, 4096]
+                - name: nr5000
+                  num_rerank: 5000
+                  L: [64, 256, 512, 1024, 2048, 4096, 8192]
+                - name: nr10000
+                  num_rerank: 10000
+                  L: [64, 256, 512, 1024, 4096, 8192, 12288, 16384]
       - build_name: svh_graph_R64_a0.95
         build_params: { <<: *svh_graph_defaults, alpha: 0.95 }
         variants:
