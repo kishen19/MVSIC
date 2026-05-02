@@ -486,28 +486,32 @@ class IndexSVHIVF : public Index<metric> {
     timings.push_back(t.stop());  // t_search_each_total
     t.reset();
 
-    // Step 2: Dedup
+    // Step 2: Aggregate across query vectors (Chamfer-style sum-of-mins).
+    //
+    // search_each already deduped per query vector by cloud id (taking the
+    // min single-vector distance for that qv). Across query vectors, for each
+    // cloud c we compute
+    //     score[c] = sum over qv that hit c of min_dist(qv, c)
+    // and rank by score[c] (lower = better). No normalization by hit count,
+    // so clouds hit by multiple qv accumulate; clouds never hit are skipped.
     t.start();
-    parlay::sort_inplace(results, [](const auto& a, const auto& b) { return a.second < b.second; });
-    parlay::sequence<std::pair<uint32_t, float>> visited;
-    visited.reserve(num_rerank);
-    int bits = std::max<int>(10, std::ceil(std::log2(num_rerank)) - 2);
-    std::vector<uint32_t> hash_filter(1 << bits, -1);
-    auto has_been_seen = [&](uint32_t a) -> bool {
-      int loc = parlay::hash64_2(a) & ((1 << bits) - 1);
-      if (hash_filter[loc] == a) return true;
-      hash_filter[loc] = a;
-      return false;
-    };
-    size_t count = 0;
-    for (size_t i = 0; i < q * num_rerank && count < num_rerank; i++) {
+    std::unordered_map<uint32_t, double> agg;
+    agg.reserve(q * num_rerank);
+    for (size_t i = 0; i < q * num_rerank; ++i) {
       auto [id, dist] = results[i];
-      if (id == UINT32_MAX) break;
-      if (!has_been_seen(id)) {
-        visited.push_back({id, dist});
-        count++;
+      if (id == UINT32_MAX) continue;  // sentinel padding from search_each
+      auto [it, inserted] = agg.try_emplace(id, static_cast<double>(dist));
+      if (!inserted) {
+        it->second += static_cast<double>(dist);
       }
     }
+    parlay::sequence<std::pair<uint32_t, float>> visited;
+    visited.reserve(agg.size());
+    for (const auto& [id, score] : agg) {
+      visited.push_back({id, static_cast<float>(score)});
+    }
+    parlay::sort_inplace(visited, [](const auto& a, const auto& b) { return a.second < b.second; });
+    if (visited.size() > num_rerank) visited.resize(num_rerank);
     timings.push_back(t.stop());  // t_merge_dedup
     t.reset();
 

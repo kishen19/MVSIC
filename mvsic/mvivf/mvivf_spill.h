@@ -547,18 +547,19 @@ class IndexMVIVFSpill : public Index<metric> {
   // ---------------------------------------------------------------------------
   // Single-query search with detailed stats.
   //
-  // Timer labels (matches bench `is_spill` path):
-  //   0  greedy_cmps
+  // Timer labels (matches benchmarks/methods.yaml `mvivf_spill.labels`):
+  //   0  search_cmps   (greedy dist cmps)
   //   1  probe_cmps
-  //   2  t_greedy_dists
-  //   3  t_greedy_beam
-  //   4  t_greedy_rest
-  //   5  t_compress
-  //   6  t_quantize
-  //   7  t_probe
-  //   8  t_dedup
-  //   9  t_rest
-  //  10  t_rerank
+  //   2  t_search_dists
+  //   3  t_search_beam
+  //   4  t_search_rest
+  //   5  t_search_top_level
+  //   6  t_compress
+  //   7  t_quant
+  //   8  t_leaf_dists
+  //   9  t_leaf_dedup
+  //  10  t_leaf_rest
+  //  11  t_rerank
   // ---------------------------------------------------------------------------
   std::tuple<parlay::sequence<std::pair<uint32_t, float>>, size_t, std::vector<double>>
   search_with_stats(const ChPoint& query, const PointCloudSet<ChPoint>& points,

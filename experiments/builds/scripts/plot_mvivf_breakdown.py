@@ -5,9 +5,10 @@ For a given stage (`latency` / `multi_latency` / `batch`), this script collects
 the **best-recall** MVIVF row per dataset and draws a single stacked bar chart
 where each bar is one dataset and each colored segment is one logical stage:
 
-    encode      = query compression + query quantization (= ``t_quant``)
-    greedy      = greedy / flat probe search
-                   (= ``t_search_dists`` + ``t_search_beam`` + ``t_search_rest``)
+    encode      = query compression + query quantization (``t_compress`` + ``t_quant``)
+    greedy      = greedy / flat probe search internals
+                   (``t_search_dists`` + ``t_search_beam`` + ``t_search_rest`` + ``t_search_top_level``)
+                   — wall time ``t_greedy`` is excluded here to avoid double-counting with those internals.
     leaf_probe  = leaf scoring (= ``t_leaf_dists`` + ``t_leaf_rest``)
     rerank      = ``t_rerank``
 
@@ -59,8 +60,8 @@ _PREFIX_FOR_STAGE = {
 # Logical stage -> list of CSV columns to sum.  Keep the keys ordered; that
 # order also drives the stacking order (bottom -> top).
 _LATENCY_SEGMENTS: dict[str, list[str]] = {
-    "encode":     ["t_quant"],  # query compression + quantization
-    "greedy":     ["t_search_dists", "t_search_beam", "t_search_rest"],
+    "encode":     ["t_compress", "t_quant"],
+    "greedy":     ["t_search_dists", "t_search_beam", "t_search_rest", "t_search_top_level"],
     "leaf_probe": ["t_leaf_dists", "t_leaf_rest"],
     "rerank":     ["t_rerank"],
 }

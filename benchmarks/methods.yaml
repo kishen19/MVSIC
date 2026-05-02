@@ -27,6 +27,8 @@ mvivf:
   class: "MVIVF"
   supports_compress: true
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
+  # Order matches IndexMVIVF::search_with_stats (mvivf.h): greedy stats[0..4],
+  # then compress / quantize / leaf dists / sort / rerank / greedy wall.
   labels:
     [
       "search_cmps",
@@ -34,10 +36,13 @@ mvivf:
       "t_search_dists",
       "t_search_beam",
       "t_search_rest",
+      "t_search_top_level",
+      "t_compress",
       "t_quant",
       "t_leaf_dists",
       "t_leaf_rest",
       "t_rerank",
+      "t_greedy",
     ]
 
 mvivf_flat:
@@ -45,13 +50,16 @@ mvivf_flat:
   class: "MVIVFFlat"
   supports_compress: true
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
-  labels: ["search_L", "search_cmps", "t_search", "t_leaf_dists", "t_leaf_rest", "t_rerank"]
+  # Order matches IndexMVIVFFlat::search_with_stats (mvivf_flat.h).
+  labels:
+    ["search_L", "search_cmps", "t_compress", "t_search", "t_leaf_dists", "t_leaf_rest", "t_rerank"]
 
 mvivf_spill:
   variable_param: nprobes
   class: "MVIVFSpill"
   supports_compress: true
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
+  # Order matches IndexMVIVFSpill::search_with_stats (mvivf_spill.h).
   labels:
     [
       "search_cmps",
@@ -59,6 +67,8 @@ mvivf_spill:
       "t_search_dists",
       "t_search_beam",
       "t_search_rest",
+      "t_search_top_level",
+      "t_compress",
       "t_quant",
       "t_leaf_dists",
       "t_leaf_dedup",
@@ -70,34 +80,37 @@ muvera:
   variable_param: L
   class: "MUVERA"
   supports_compress: false
-  # OneBitTQ pending a non-_mv port of turboquant_1bit; see muvera.h comments.
-  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
-  labels: ["search_cmps", "t_fde", "t_quant", "t_search", "t_rerank"]
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
+  # Order matches IndexMUVERA::search_with_stats (muvera.h).
+  labels: ["search_cmps", "t_compress", "t_fde", "t_quant", "t_search", "t_rerank"]
 
 mpool:
   variable_param: L
   class: "MPool"
   supports_compress: false
-  # OneBitTQ pending a non-_mv port of turboquant_1bit; see mpool.h comments.
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
-  labels: ["t_mean_pool", "t_quant", "t_search", "t_rerank"]
+  # Order matches IndexMPool::search_with_stats (mpool.h). No dist_cmps scalar.
+  labels: ["t_compress", "t_mean_pooling", "t_quant", "t_search", "t_rerank"]
 
 vamana:
   variable_param: L
   class: "Vamana"
   supports_compress: false
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
-  labels: ["search_cmps", "t_quant", "t_search", "t_rerank"]
+  # Order matches IndexVamana::search_with_stats (vamana.h).
+  labels: ["search_cmps", "t_compress", "t_quant", "t_search", "t_rerank"]
 
 svh_ivf:
   variable_param: nprobes
   class: "SVHIVF"
   supports_compress: true
-  # OneBitTQ pending a non-_mv port of turboquant_1bit; see svh_ivf.h comments.
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
+  # Order matches IndexSVHIVF::search_with_stats (svh_ivf.h): total dist_cmps,
+  # then top-level timings, then per-search_each columns summed over query vectors.
   labels:
     [
       "search_cmps",
+      "t_compress",
       "t_search_each_total",
       "t_merge_dedup",
       "t_rerank",
@@ -115,9 +128,8 @@ svh_graph:
   variable_param: L
   class: "SVHGraph"
   supports_compress: false
-  # OneBitTQ pending a non-_mv port of turboquant_1bit; see svh_graph.h comments.
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ]
-  labels: ["search_cmps", "t_graph_search", "t_aggregate", "t_rerank"]
+  labels: ["search_cmps", "t_compress", "t_graph_search", "t_aggregate", "t_rerank"]
 
 fastplaid:
   variable_param: n_ivf_probe

@@ -922,7 +922,7 @@ class IndexMVIVF : public Index<metric> {
   // ---------------------------------------------------------------------------
   // Single-query search with detailed stats.
   //
-  // Timer labels (stats[0..]):
+  // Timer labels (stats[0..]) — keep in sync with benchmarks/methods.yaml `mvivf.labels`.
   //   0  search_cmps
   //   1  probe_cmps
   //   2  t_search_dists
@@ -930,9 +930,9 @@ class IndexMVIVF : public Index<metric> {
   //   4  t_search_rest
   //   5  t_search_top_level
   //   6  t_compress
-  //   7  t_quantize
-  //   8  t_distances
-  //   9  t_rest
+  //   7  t_quant
+  //   8  t_leaf_dists
+  //   9  t_leaf_rest
   //  10  t_rerank
   //  11  t_greedy
   // ---------------------------------------------------------------------------

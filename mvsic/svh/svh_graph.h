@@ -149,9 +149,8 @@ class IndexSVHGraph : public Index<metric> {
     CompressedPointCloud<ChPoint> compressed_storage;
     ChPoint effective_query = query;
     if (search_params.query_compression != SearchParams::QueryCompression::None) {
-      compressed_storage = compress_query<ChPoint>(
-          query, search_params.query_compression,
-          search_params.query_compression_threshold);
+      compressed_storage = compress_query<ChPoint>(query, search_params.query_compression,
+                                                   search_params.query_compression_threshold);
       effective_query = compressed_storage.view();
     }
     timings.push_back(t.stop());  // t_compress
@@ -163,12 +162,12 @@ class IndexSVHGraph : public Index<metric> {
     t.start();
 
     auto all_candidates =
-        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q_size * num_rerank);
+        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(q_size * search_params.L);
     auto dist_cmps_seq = parlay::sequence<size_t>::uninitialized(q_size);
     auto bytes_accessed_seq = parlay::sequence<size_t>::uninitialized(q_size);
 
-    auto QP = parlayANN::QueryParams(num_rerank, search_params.L, search_params.cut, G.size(),
-                                     params.ann.R);
+    auto QP = parlayANN::QueryParams(search_params.L, 2 * search_params.L, search_params.cut,
+                                     G.size(), params.ann.R);
 
     parlay::parallel_for(0, q_size, [&](size_t i) {
       typename Point::parameters p_params(d);
@@ -186,13 +185,13 @@ class IndexSVHGraph : public Index<metric> {
       dist_cmps_seq[i] = comps;
       bytes_accessed_seq[i] = bytes;
 
-      size_t count = std::min(num_rerank, visited.size());
+      size_t count = std::min(search_params.L, visited.size());
       for (size_t j = 0; j < count; ++j) {
         uint32_t cloud_id = vector_to_id[visited[j].first].first;
-        all_candidates[i * num_rerank + j] = {cloud_id, visited[j].second};
+        all_candidates[i * search_params.L + j] = {cloud_id, visited[j].second};
       }
-      for (size_t j = count; j < num_rerank; ++j) {
-        all_candidates[i * num_rerank + j] = {UINT32_MAX, std::numeric_limits<float>::max()};
+      for (size_t j = count; j < search_params.L; ++j) {
+        all_candidates[i * search_params.L + j] = {UINT32_MAX, std::numeric_limits<float>::max()};
       }
     });
 
@@ -201,32 +200,54 @@ class IndexSVHGraph : public Index<metric> {
     timings.push_back(t.stop());  // t_graph_search
     t.reset();
 
-    // Step 2: Aggregate across query vectors and Deduplicate Cloud IDs
+    // Step 2: Aggregate across query vectors (Chamfer-style sum-of-mins).
+    //
+    // Two-level reduction:
+    //   1. Per query vector qv: collapse multiple flat-vector hits that belong
+    //      to the same cloud c by taking the MIN single-vector distance
+    //      (so cloud c contributes at most once per qv).
+    //   2. Across query vectors: for each cloud c, accumulate
+    //         score[c] = sum over qv that hit c of min_dist(qv, c)
+    //      and rank by score[c] (lower = better). No normalization by hit
+    //      count, so a cloud must accumulate contributions from multiple qv to
+    //      look strong; clouds never hit are skipped.
     t.start();
-    parlay::sort_inplace(all_candidates,
-                         [](const auto& a, const auto& b) { return a.second < b.second; });
 
-    parlay::sequence<std::pair<uint32_t, float>> unique_clouds;
-    unique_clouds.reserve(num_rerank);
+    std::unordered_map<uint32_t, double> agg;
+    agg.reserve(static_cast<size_t>(q_size) * search_params.L);
 
-    int bits = std::max<int>(10, std::ceil(std::log2(num_rerank)) - 2);
-    std::vector<uint32_t> hash_filter(1 << bits, -1);
-    auto is_duplicate = [&](uint32_t id) -> bool {
-      int loc = parlay::hash64_2(id) & ((1 << bits) - 1);
-      if (hash_filter[loc] == id) return true;
-      hash_filter[loc] = id;
-      return false;
-    };
-
-    size_t cloud_count = 0;
-    for (size_t i = 0; i < all_candidates.size() && cloud_count < num_rerank; ++i) {
-      auto [cid, dist] = all_candidates[i];
-      if (cid == UINT32_MAX) break;
-      if (!is_duplicate(cid)) {
-        unique_clouds.push_back({cid, dist});
-        cloud_count++;
+    for (size_t i = 0; i < q_size; ++i) {
+      // Per-query-vector min over duplicate cloud hits.
+      std::unordered_map<uint32_t, float> qv_min;
+      qv_min.reserve(search_params.L);
+      const size_t row = i * search_params.L;
+      for (size_t j = 0; j < search_params.L; ++j) {
+        auto [cid, dist] = all_candidates[row + j];
+        if (cid == UINT32_MAX) break;  // remainder is sentinel padding
+        auto it = qv_min.find(cid);
+        if (it == qv_min.end()) {
+          qv_min.emplace(cid, dist);
+        } else if (dist < it->second) {
+          it->second = dist;
+        }
+      }
+      // Fold per-qv mins into the global sum accumulator.
+      for (const auto& [cid, mn] : qv_min) {
+        auto [it, inserted] = agg.try_emplace(cid, static_cast<double>(mn));
+        if (!inserted) {
+          it->second += static_cast<double>(mn);
+        }
       }
     }
+
+    parlay::sequence<std::pair<uint32_t, float>> unique_clouds;
+    unique_clouds.reserve(agg.size());
+    for (const auto& [cid, score] : agg) {
+      unique_clouds.push_back({cid, static_cast<float>(score)});
+    }
+    parlay::sort_inplace(unique_clouds,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+    if (unique_clouds.size() > num_rerank) unique_clouds.resize(num_rerank);
     timings.push_back(t.stop());  // t_aggregate
     t.reset();
 
@@ -241,8 +262,8 @@ class IndexSVHGraph : public Index<metric> {
         total_bytes_accessed += this->rerank_tq8_(rerank_query, points, unique_clouds,
                                                   actual_rerank_count, final_results);
       } else {
-        total_bytes_accessed += this->rerank(rerank_query, points, unique_clouds,
-                                             actual_rerank_count, final_results);
+        total_bytes_accessed +=
+            this->rerank(rerank_query, points, unique_clouds, actual_rerank_count, final_results);
       }
       total_dist_cmps += actual_rerank_count;
     } else {
@@ -323,14 +344,14 @@ class IndexSVHGraph : public Index<metric> {
       throw std::runtime_error("[SVHGraph] bad magic: file is not a SVHG skeleton index.");
     }
     if (ver != kVersion) {
-      throw std::runtime_error(
-          "[SVHGraph] SVHGraph index file format changed in v" + std::to_string(kVersion) +
-          "; got v" + std::to_string(ver) + ". Rebuild with current code.");
+      throw std::runtime_error("[SVHGraph] SVHGraph index file format changed in v" +
+                               std::to_string(kVersion) + "; got v" + std::to_string(ver) +
+                               ". Rebuild with current code.");
     }
     if (cid != kClassId) {
-      throw std::runtime_error(
-          "[SVHGraph] unexpected class_id " + std::to_string(cid) + " (expected " +
-          std::to_string(kClassId) + " for the v" + std::to_string(kVersion) + " skeleton).");
+      throw std::runtime_error("[SVHGraph] unexpected class_id " + std::to_string(cid) +
+                               " (expected " + std::to_string(kClassId) + " for the v" +
+                               std::to_string(kVersion) + " skeleton).");
     }
     in.read(reinterpret_cast<char*>(&d), sizeof(unsigned));
     size_t map_sz = 0;
@@ -362,18 +383,18 @@ class IndexSVHGraph : public Index<metric> {
   }
 };
 
-using IndexSVHGraphIP          = IndexSVHGraph<false, NoQuantizer<false>>;
-using IndexSVHGraphL2          = IndexSVHGraph<true,  NoQuantizer<true>>;
-using IndexSVHGraphPQIP        = IndexSVHGraph<false, pq::Model<false>>;
-using IndexSVHGraphPQL2        = IndexSVHGraph<true,  pq::Model<true>>;
-using IndexSVHGraphRaBitQIP    = IndexSVHGraph<false, rabitq::Model<false>>;
-using IndexSVHGraphRaBitQL2    = IndexSVHGraph<true,  rabitq::Model<true>>;
-using IndexSVHGraphFastScanIP  = IndexSVHGraph<false, fastscan::Model<false>>;
-using IndexSVHGraphFastScanL2  = IndexSVHGraph<true,  fastscan::Model<true>>;
-using IndexSVHGraphTQIP        = IndexSVHGraph<false, turboquant::Model<false>>;
-using IndexSVHGraphTQL2        = IndexSVHGraph<true,  turboquant::Model<true>>;
-using IndexSVHGraphSPQTQIP     = IndexSVHGraph<false, pqtq::Model<false>>;
-using IndexSVHGraphSPQTQL2     = IndexSVHGraph<true,  pqtq::Model<true>>;
+using IndexSVHGraphIP = IndexSVHGraph<false, NoQuantizer<false>>;
+using IndexSVHGraphL2 = IndexSVHGraph<true, NoQuantizer<true>>;
+using IndexSVHGraphPQIP = IndexSVHGraph<false, pq::Model<false>>;
+using IndexSVHGraphPQL2 = IndexSVHGraph<true, pq::Model<true>>;
+using IndexSVHGraphRaBitQIP = IndexSVHGraph<false, rabitq::Model<false>>;
+using IndexSVHGraphRaBitQL2 = IndexSVHGraph<true, rabitq::Model<true>>;
+using IndexSVHGraphFastScanIP = IndexSVHGraph<false, fastscan::Model<false>>;
+using IndexSVHGraphFastScanL2 = IndexSVHGraph<true, fastscan::Model<true>>;
+using IndexSVHGraphTQIP = IndexSVHGraph<false, turboquant::Model<false>>;
+using IndexSVHGraphTQL2 = IndexSVHGraph<true, turboquant::Model<true>>;
+using IndexSVHGraphSPQTQIP = IndexSVHGraph<false, pqtq::Model<false>>;
+using IndexSVHGraphSPQTQL2 = IndexSVHGraph<true, pqtq::Model<true>>;
 
 // 1-bit TurboQuant: requires a non-_mv port of turboquant_1bit (only the
 // `turboquant_1bit_mv` multi-vector variant exists today).  Uncomment the
