@@ -129,6 +129,7 @@ cc_binary(
         "//mvsic/core/types:ip_point",
         "//mvsic/core/types:l2_point",
         "//mvsic/core/types:point_range",
+        "//mvsic/core/utils:mmap",
         "//mvsic/core/utils:parse_command_line",
         "@eigen",
         "@parlaylib//parlay:primitives",

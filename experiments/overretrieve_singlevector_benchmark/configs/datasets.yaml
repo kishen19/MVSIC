@@ -69,3 +69,62 @@ datasets:
     metric: IP
     points:  wikipedia_cohere/wikipedia_cohere-1000000
     queries: wikipedia_cohere/query
+
+  # ---- Chamfer (BEIR) datasets, exploded into single vectors via -pcs ----
+  # The .pcs format encodes per-document point clouds; -pcs tells the binary
+  # to flatten the per-cloud structure and treat every individual embedding
+  # as its own base/query vector. All MIPS (IP). Absolute paths since these
+  # live outside data_root.
+  - name: chamfer_arguana
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/arguana/arguana_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/arguana/arguana_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_fiqa
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/fiqa/fiqa_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/fiqa/fiqa_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_hotpotqa
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/hotpotqa/hotpotqa_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/hotpotqa/hotpotqa_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_nfcorpus
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/nfcorpus/nfcorpus_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/nfcorpus/nfcorpus_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_nq
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/nq/nq_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/nq/nq_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_nq500k
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/nq500k/nq500k_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/nq500k/nq500k_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_quora
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/quora/quora_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/quora/quora_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_scidocs
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/scidocs/scidocs_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/scidocs/scidocs_queries.pcs
+    extra_args: ["-pcs"]
+
+  - name: chamfer_scifact
+    metric: IP
+    points:  /mnt/ann_data/chamfer_data/beir/scifact/scifact_points.pcs
+    queries: /mnt/ann_data/chamfer_data/beir/scifact/scifact_queries.pcs
+    extra_args: ["-pcs"]

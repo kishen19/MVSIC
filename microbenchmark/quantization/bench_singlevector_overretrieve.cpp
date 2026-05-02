@@ -8,6 +8,9 @@
 //     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
 //     [-rabitq_bits <bits>] [-fs_block <bits>] [-output_gt_path <path>]
+//     [-pcs]   # load -i/-q as chamfer .pcs files; the per-cloud structure is
+//              # discarded and every individual embedding becomes a single
+//              # base/query vector.
 
 #include <iostream>
 #include <vector>
@@ -30,7 +33,9 @@
 #include "mvsic/core/types/point_range.h"
 #include "mvsic/core/types/l2_point.h"
 #include "mvsic/core/types/ip_point.h"
+#include "mvsic/core/utils/mmap.h"
 #include "mvsic/core/utils/parse_command_line.h"
+#include <sys/mman.h>
 #include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant.h"
@@ -114,6 +119,47 @@ parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_tr
     }
   });
   return results;
+}
+
+// ---- Loader for chamfer .pcs files (explode pointclouds into a flat PR) ----
+// .pcs header: dims (size_t), n_clouds (size_t), num_vectors (size_t),
+// followed by num_vectors*dims floats and trailing offset metadata we don't need.
+//
+// We mmap the file and hand the PointRange a shared_ptr that points directly
+// at the embedding region of the mapping, with a custom deleter that munmaps
+// on destruction. No copy and no allocation beyond the kernel's page cache —
+// pages are faulted in on first touch and reclaimable by the OS under pressure.
+// Requires dims*sizeof(float) to be a multiple of 64B so PointRange's
+// aligned_dims == dims (no per-row padding); all BEIR .pcs files have dims=128.
+template<typename Point>
+mvsic::PointRange<float, Point> load_pcs_as_pointrange(const char* filename) {
+  std::cout << "Loading exploded PCS (mmap) from " << filename << "..." << std::endl;
+  auto mapping = mmap_file(filename);
+  char* addr = mapping.first;
+  size_t length = mapping.second;
+  const size_t* hdr = reinterpret_cast<const size_t*>(addr);
+  const size_t dims = hdr[0];
+  const size_t n_clouds = hdr[1];
+  const size_t num_vec = hdr[2];
+  std::cout << "  dims=" << dims << " clouds=" << n_clouds << " embeddings=" << num_vec
+            << std::endl;
+
+  if (mvsic::dim_round_up(static_cast<long>(dims), sizeof(float)) !=
+      static_cast<long>(dims)) {
+    munmap(addr, length);
+    std::cerr << "PCS mmap loader requires dims (=" << dims
+              << ") to be a multiple of 16 floats (64B cacheline)." << std::endl;
+    std::exit(1);
+  }
+
+  mvsic::PointRange<float, Point> pr;
+  float* values_start = reinterpret_cast<float*>(addr + 3 * sizeof(size_t));
+  pr.values = std::shared_ptr<float[]>(
+      values_start, [addr, length](float*) { munmap(addr, length); });
+  pr.n = num_vec;
+  pr.dims = static_cast<unsigned>(dims);
+  pr.aligned_dims = static_cast<unsigned>(dims);
+  return pr;
 }
 
 // ---- Subset wrapper for dataset-as-query ----
@@ -209,6 +255,7 @@ void run_benchmark(commandLine& P) {
   uint32_t rbits = P.getOptionIntValue("-rabitq_bits", 8);
   uint32_t fs_block = P.getOptionIntValue("-fs_block", 8);
   size_t num_query = P.getOptionLongValue("-num_query", 0);
+  bool use_pcs = P.getOption("-pcs");
 
   if (!inFile || (!qFile && !dataset_as_query)) {
     std::cerr << "Usage: bench_singlevector_overretrieve -i <base> [-q <queries> | -dataset_as_query]\n"
@@ -216,14 +263,16 @@ void run_benchmark(commandLine& P) {
               << "  [-pq_method "
                  "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]\n"
               << "  [-max_k_prime <N>] [-k_growth <r>]\n"
-              << "  [-rabitq_bits <b>] [-fs_block <b>] [-num_query <N>]\n";
+              << "  [-rabitq_bits <b>] [-fs_block <b>] [-num_query <N>]\n"
+              << "  [-pcs]    # load -i/-q as chamfer .pcs files and explode all\n"
+              << "            # individual embeddings into the single-vector dataset\n";
     return;
   }
 
   using PR = mvsic::PointRange<float, Point>;
 
-  std::cout << "Loading base from " << inFile << "..." << std::endl;
-  PR base(inFile);
+  PR base = use_pcs ? load_pcs_as_pointrange<Point>(inFile)
+                    : (std::cout << "Loading base from " << inFile << "..." << std::endl, PR(inFile));
 
   PR queries_obj;
   std::vector<size_t> q_idx;
@@ -242,8 +291,10 @@ void run_benchmark(commandLine& P) {
       gtFile = "";
     }
   } else {
-    std::cout << "Loading queries from " << qFile << "..." << std::endl;
-    queries_obj = PR(qFile);
+    queries_obj = use_pcs
+                      ? load_pcs_as_pointrange<Point>(qFile)
+                      : (std::cout << "Loading queries from " << qFile << "..." << std::endl,
+                         PR(qFile));
     if (num_query > 0 && num_query < queries_obj.size()) {
       std::vector<size_t> idx(num_query);
       std::iota(idx.begin(), idx.end(), 0);
@@ -547,7 +598,8 @@ int main(int argc, char* argv[]) {
                 "[-dist_func L2|IP] "
                 "[-pq_method "
                 "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All] "
-                "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-fs_block <b>]");
+                "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-fs_block <b>] "
+                "[-pcs]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2")
