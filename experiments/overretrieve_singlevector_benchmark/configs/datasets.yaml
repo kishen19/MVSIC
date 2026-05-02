@@ -1,10 +1,12 @@
-name: "Measure Stretch Benchmark — single-vector datasets"
+name: "Overretrieve Single-Vector Benchmark — datasets"
 
 # Default location of the single-vector data tree on disk. By convention each
 # dataset is expected at:
 #   <data_root>/<name>/<name>_base.fbin
 #   <data_root>/<name>/<name>_query.fbin
 #   <data_root>/<name>/<name>_groundtruth        (optional)
+# Datasets whose files don't follow this convention specify points/queries
+# explicitly below.
 #
 # Override at runtime with the DATA_ROOT environment variable or the
 # --data-root flag of run_benchmark.sh.
@@ -14,26 +16,71 @@ data_root: /mnt/ann_data/data
 # Only values set here (or per-dataset) are forwarded to the binary; unset
 # tunables fall back to the binary's own defaults.
 defaults:
-  metric: IP   # angular-cosine datasets are stored L2-normalized -> IP works.
-  k: 10        # Recall@k that the binary reports for each k' in its grid.
+  k: 10           # Recall@k that the binary reports for each k' in its grid.
+  k_growth: 1.1   # geometric-progression rate for the k' schedule
   # pq_method: All        # TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All
   # rabitq_bits: 8        # only used when pq_method=RabitQ (the configurable variant)
   # fs_block: 8           # FastScan block size; must divide the dataset's dim
   # num_query: 1000       # cap queries (omitted = use all)
   # max_k_prime: 20000
-  # k_growth: 2.0
 
 # Per-dataset keys (all optional): metric, k, points, queries, gt,
 # pq_method, rabitq_bits, fs_block, num_query, max_k_prime, k_growth, extra_args.
 # When points/queries/gt are omitted, the conventional <name>/<name>_*.fbin
-# layout under data_root is used. `gt` is optional: if absent, the binary
+# layout under data_root is used. `gt` is omitted everywhere here so the binary
 # computes exact k-NN once via blocked Eigen GEMM and caches it under /tmp.
+#
+# Slice policy: each dataset uses the largest <name>-<count> slice with
+# count <= 10,000,000.
 datasets:
+  # ---- L2 ----
+  - name: OpenAIArXiv
+    metric: L2
+    points:  OpenAIArXiv/openai-2000000
+    queries: OpenAIArXiv/query
+
+  - name: bigann
+    metric: L2
+    points:  bigann/bigann-10000000
+    queries: bigann/query
+
+  - name: deep
+    metric: L2
+    points:  deep/deep-10000000
+    queries: deep/query
+
+  - name: msspacev
+    metric: L2
+    points:  msspacev/msspacev-10000000
+    queries: msspacev/query
+
+  - name: msturing
+    metric: L2
+    points:  msturing/msturing-10000000
+    queries: msturing/query
+
+  # ---- IP / MIPS ----
   # Convention-matching layout (glove-100-angular_{base,query}.fbin etc.).
-  - { name: glove-100-angular }
+  - name: glove-100-angular
+    metric: IP
+
+  - name: msmarco_websearch
+    metric: IP
+    points:  msmarco_websearch/msmarco-10000000
+    queries: msmarco_websearch/query
 
   # Non-conventional layout: bare base.fbin / query.fbin / groundtruth.
   - name: nytimes-256-angular
+    metric: IP
     points:  nytimes-256-angular/base.fbin
     queries: nytimes-256-angular/query.fbin
-    # gt format may not match ReadGT; omit to brute-force + cache to /tmp.
+
+  - name: text2image
+    metric: IP
+    points:  text2image/text2image-10000000
+    queries: text2image/query
+
+  - name: wikipedia_cohere
+    metric: IP
+    points:  wikipedia_cohere/wikipedia_cohere-1000000
+    queries: wikipedia_cohere/query
