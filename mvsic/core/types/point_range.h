@@ -38,7 +38,7 @@
 namespace mvsic {
 
 // tp_size must divide 64 evenly--no weird/large types!
-long dim_round_up(long dim, long tp_size) {
+inline long dim_round_up(long dim, long tp_size) {
   long qt = (dim * tp_size) / 64;
   long remainder = (dim * tp_size) % 64;
   if (remainder == 0)
