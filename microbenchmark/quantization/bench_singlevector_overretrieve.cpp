@@ -1,9 +1,9 @@
-// measure_stretch_tq.cpp
-// Adapted from measure_stretch.cpp for TurboQuant quality evaluation.
+// bench_singlevector_overretrieve.cpp
+// Single-vector analog of bench_chamfer_overretrieve for TurboQuant quality evaluation.
 // Measures recall@k vs k' for TurboQuant, TQ-PQ-4bit, and RaBitQ on real datasets.
 //
 // Usage:
-//   ./measure_stretch_tq -i <base_file> -q <query_file> [-gt <gt_file>]
+//   ./bench_singlevector_overretrieve -i <base_file> -q <query_file> [-gt <gt_file>]
 //     [-k <k>] [-dist_func L2|IP]
 //     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
@@ -41,7 +41,7 @@
 
 using namespace mvsic;
 
-// ---- Ground truth: blocked Eigen GEMM (from measure_stretch.cpp) ----
+// ---- Ground truth: blocked Eigen GEMM ----
 template<typename Point, bool Metric>
 parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_truth(
     const mvsic::PointRange<float, Point>& queries,
@@ -211,7 +211,7 @@ void run_benchmark(commandLine& P) {
   size_t num_query = P.getOptionLongValue("-num_query", 0);
 
   if (!inFile || (!qFile && !dataset_as_query)) {
-    std::cerr << "Usage: measure_stretch_tq -i <base> [-q <queries> | -dataset_as_query]\n"
+    std::cerr << "Usage: bench_singlevector_overretrieve -i <base> [-q <queries> | -dataset_as_query]\n"
               << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP]\n"
               << "  [-pq_method "
                  "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]\n"

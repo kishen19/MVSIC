@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the measure_stretch_tq quality microbenchmark on every dataset listed
+# Run the bench_singlevector_overretrieve quality microbenchmark on every dataset listed
 # in configs/datasets.yaml and write per-dataset output to results/.
 #
 # Usage:
@@ -128,8 +128,8 @@ fi
 # ---------------------------------------------------------------------------
 # Build the binary (deterministic flags come from .bazelrc).
 # ---------------------------------------------------------------------------
-BIN_LABEL="//microbenchmark/quantization:measure_stretch_tq"
-BIN_PATH="$REPO_ROOT/bazel-bin/microbenchmark/quantization/measure_stretch_tq"
+BIN_LABEL="//microbenchmark/quantization:bench_singlevector_overretrieve"
+BIN_PATH="$REPO_ROOT/bazel-bin/microbenchmark/quantization/bench_singlevector_overretrieve"
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "=== bazel build $BIN_LABEL ==="
@@ -148,7 +148,7 @@ SUMMARY="$RESULTS_DIR/summary.txt"
 
 # Header for the summary log (helps verify reproducibility across machines).
 {
-  echo "# Measure Stretch Benchmark — summary"
+  echo "# Overretrieve Single-Vector Benchmark — summary"
   echo "# config: $CONFIG"
   echo "# binary: $BIN_PATH"
   echo "# host:   $(hostname 2>/dev/null || echo unknown)"

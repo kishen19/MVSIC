@@ -400,7 +400,7 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   // ---------------------------------------------------------------------
   // Phase 2: Pre-quantize queries for methods whose quantize_query is not
   // thread-safe. RaBitQ's quantize_query copies into model-internal state
-  // (mirrors the SV variant — see comment in measure_stretch_tq.cpp).
+  // (mirrors the SV variant — see comment in bench_singlevector_overretrieve.cpp).
   // Other methods' quantize_query is called inside the parallel loop.
   // ---------------------------------------------------------------------
   using rq_qq_t = decltype(rq_model.quantize_query(queries[0]));

@@ -116,8 +116,8 @@ cc_binary(
 )
 
 cc_binary(
-    name = "measure_stretch_tq",
-    srcs = ["measure_stretch_tq.cpp"],
+    name = "bench_singlevector_overretrieve",
+    srcs = ["bench_singlevector_overretrieve.cpp"],
     deps = [
         "//mvsic/core:stats",
         "//mvsic/core/quantization:fastscan",
