@@ -120,8 +120,10 @@ cc_binary(
     srcs = ["measure_stretch_tq.cpp"],
     deps = [
         "//mvsic/core:stats",
+        "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:turboquant",
+        "//mvsic/core/quantization:turboquant_1bit",
         "//mvsic/core/quantization:turboquant_8bit_mv",
         "//mvsic/core/quantization/other_methods:turboquant_pq_4bit",
         "//mvsic/core/types:ip_point",

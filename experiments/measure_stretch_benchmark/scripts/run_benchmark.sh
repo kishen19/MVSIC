@@ -56,7 +56,7 @@ mkdir -p "$RESULTS_DIR"
 # ---------------------------------------------------------------------------
 # Parse YAML via python3+PyYAML and emit shell-friendly tab-separated lines:
 #   name<TAB>metric<TAB>k<TAB>points<TAB>queries<TAB>gt<TAB>pq_method<TAB>
-#   rabitq_bits<TAB>num_query<TAB>max_k_prime<TAB>k_growth<TAB>extra_args
+#   rabitq_bits<TAB>fs_block<TAB>num_query<TAB>max_k_prime<TAB>k_growth<TAB>extra_args
 # Unset optional fields are emitted as the empty string.
 # ---------------------------------------------------------------------------
 CONFIG_ROWS="$(
@@ -76,6 +76,7 @@ default_metric      = defaults.get("metric", "IP")
 default_k           = int(defaults.get("k", 10))
 default_pq_method   = defaults.get("pq_method", "")
 default_rabitq_bits = defaults.get("rabitq_bits", "")
+default_fs_block    = defaults.get("fs_block", "")
 default_num_query   = defaults.get("num_query", "")
 default_max_k_prime = defaults.get("max_k_prime", "")
 default_k_growth    = defaults.get("k_growth", "")
@@ -107,14 +108,15 @@ for ds in (cfg.get("datasets") or []):
 
     pq_method   = _str(ds.get("pq_method",   default_pq_method))
     rabitq_bits = _str(ds.get("rabitq_bits", default_rabitq_bits))
+    fs_block    = _str(ds.get("fs_block",    default_fs_block))
     num_query   = _str(ds.get("num_query",   default_num_query))
     max_k_prime = _str(ds.get("max_k_prime", default_max_k_prime))
     k_growth    = _str(ds.get("k_growth",    default_k_growth))
     extra       = " ".join(ds.get("extra_args") or [])
 
     print("\t".join([name, metric, str(k), _abs(points), _abs(queries), gt,
-                     pq_method, rabitq_bits, num_query, max_k_prime, k_growth,
-                     extra]))
+                     pq_method, rabitq_bits, fs_block, num_query, max_k_prime,
+                     k_growth, extra]))
 PY
 )"
 
@@ -158,7 +160,7 @@ SUMMARY="$RESULTS_DIR/summary.txt"
 # Count datasets up-front for "[i/N]" progress.
 N_TOTAL="$(printf '%s\n' "$CONFIG_ROWS" | wc -l | tr -d ' ')"
 i=0
-while IFS=$'\t' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS NUM_QUERY MAX_KP K_GROWTH DS_EXTRA; do
+while IFS=$'\t' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS FS_BLOCK NUM_QUERY MAX_KP K_GROWTH DS_EXTRA; do
   i=$((i + 1))
   echo "=== [$i/$N_TOTAL] $NAME (metric=$METRIC, k=$K) ==="
 
@@ -186,6 +188,7 @@ while IFS=$'\t' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS NU
   [[ -n "$GT"          ]] && CMD+=( -gt          "$GT" )
   [[ -n "$PQ_METHOD"   ]] && CMD+=( -pq_method   "$PQ_METHOD" )
   [[ -n "$RABITQ_BITS" ]] && CMD+=( -rabitq_bits "$RABITQ_BITS" )
+  [[ -n "$FS_BLOCK"    ]] && CMD+=( -fs_block    "$FS_BLOCK" )
   [[ -n "$NUM_QUERY"   ]] && CMD+=( -num_query   "$NUM_QUERY" )
   [[ -n "$MAX_KP"      ]] && CMD+=( -max_k_prime "$MAX_KP" )
   [[ -n "$K_GROWTH"    ]] && CMD+=( -k_growth    "$K_GROWTH" )

@@ -4,9 +4,10 @@
 //
 // Usage:
 //   ./measure_stretch_tq -i <base_file> -q <query_file> [-gt <gt_file>]
-//     [-k <k>] [-dist_func L2|IP] [-pq_method TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All]
+//     [-k <k>] [-dist_func L2|IP]
+//     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
-//     [-rabitq_bits <bits>] [-output_gt_path <path>]
+//     [-rabitq_bits <bits>] [-fs_block <bits>] [-output_gt_path <path>]
 
 #include <iostream>
 #include <vector>
@@ -30,8 +31,10 @@
 #include "mvsic/core/types/l2_point.h"
 #include "mvsic/core/types/ip_point.h"
 #include "mvsic/core/utils/parse_command_line.h"
+#include "mvsic/core/quantization/fastscan.h"
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant.h"
+#include "mvsic/core/quantization/turboquant_1bit.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
 #include "mvsic/core/stats.h"
@@ -41,8 +44,8 @@ using namespace mvsic;
 // ---- Ground truth: blocked Eigen GEMM (from measure_stretch.cpp) ----
 template<typename Point, bool Metric>
 parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>> compute_ground_truth(
-    const PointRange<float, Point>& queries, const PointRange<float, Point>& base_points,
-    size_t k) {
+    const mvsic::PointRange<float, Point>& queries,
+    const mvsic::PointRange<float, Point>& base_points, size_t k) {
   const size_t n_q = queries.size();
   const size_t n_b = base_points.size();
   const size_t dim = queries.get_dims();
@@ -204,17 +207,20 @@ void run_benchmark(commandLine& P) {
   size_t max_kp = P.getOptionLongValue("-max_k_prime", 20000);
   double growth = P.getOptionDoubleValue("-k_growth", 2.0);
   uint32_t rbits = P.getOptionIntValue("-rabitq_bits", 8);
+  uint32_t fs_block = P.getOptionIntValue("-fs_block", 8);
   size_t num_query = P.getOptionLongValue("-num_query", 0);
 
   if (!inFile || (!qFile && !dataset_as_query)) {
     std::cerr << "Usage: measure_stretch_tq -i <base> [-q <queries> | -dataset_as_query]\n"
-              << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP] "
-              << "[-pq_method TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All]\n"
-              << "  [-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-num_query <N>]\n";
+              << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP]\n"
+              << "  [-pq_method "
+                 "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]\n"
+              << "  [-max_k_prime <N>] [-k_growth <r>]\n"
+              << "  [-rabitq_bits <b>] [-fs_block <b>] [-num_query <N>]\n";
     return;
   }
 
-  using PR = PointRange<float, Point>;
+  using PR = mvsic::PointRange<float, Point>;
 
   std::cout << "Loading base from " << inFile << "..." << std::endl;
   PR base(inFile);
@@ -417,6 +423,51 @@ void run_benchmark(commandLine& P) {
         n_q, n_b, gt, k, kps, "TurboQuant-8bit");
   }
 
+  // ==== FastScan (4-bit codes; LUT scan kernel) ====
+  // Per-pair distance uses the scalar fallback in fastscan::Quantized_Query::distance,
+  // which is slow but produces the same value as the SIMD distances_all kernel —
+  // recall is identical and that's what this benchmark reports.
+  if (method == "FastScan" || method == "All") {
+    if (D % fs_block != 0) {
+      std::cerr << "FastScan: D=" << D << " not divisible by -fs_block=" << fs_block
+                << "; skipping.\n";
+    } else {
+      std::cout << "\n--- FastScan (block=" << fs_block << ") ---" << std::endl;
+      parlay::internal::timer t;
+      t.start();
+      fastscan::Model<Metric> model;
+      model.train(base, fs_block);
+      auto enc = model.encode(base);
+      std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+      std::vector<fastscan::Quantized_Query<Metric>> qqs(n_q);
+      parlay::parallel_for(
+          0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
+
+      recall_curve(
+          [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
+          "FastScan-b" + std::to_string(fs_block));
+    }
+  }
+
+  // ==== 1BTQ (single-vector 1-bit TurboQuant) ====
+  if (method == "1BTQ" || method == "All") {
+    std::cout << "\n--- 1BTQ ---" << std::endl;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_1bit::Model<Metric> model;
+    model.train(base);
+    auto enc = model.encode(base);
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    std::vector<turboquant_1bit::Quantized_Query<Metric>> qqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
+
+    recall_curve(
+        [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
+        "1BTQ");
+  }
+
   // ==== TQ-PQ-4bit (B = 1,2,4,8) ====
   if (method == "TQPQ" || method == "All") {
     auto run_tqpq = [&](auto block_tag, const std::string& label) {
@@ -449,12 +500,15 @@ void run_benchmark(commandLine& P) {
   }
 
   // ==== RaBitQ ====
-  if (method == "RabitQ" || method == "All") {
-    std::cout << "\n--- RaBitQ-" << rbits << "bit ---" << std::endl;
+  // `RabitQ` honors -rabitq_bits (any width). `RabitQ1`/`RabitQ4`/`RabitQ8` are
+  // explicit shortcuts; `All` runs the three explicit widths (skips the
+  // configurable one to avoid duplicating an 8-bit run by default).
+  auto run_rabitq = [&](uint32_t bits, const std::string& label) {
+    std::cout << "\n--- " << label << " ---" << std::endl;
     parlay::internal::timer t;
     t.start();
     rabitq::Model<Metric> model;
-    model.train(base, rbits);
+    model.train(base, bits);
     auto enc = model.encode(base);
     std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
@@ -471,20 +525,29 @@ void run_benchmark(commandLine& P) {
           auto pt = enc[j];
           return qqs[qi].distance(pt);
         },
-        n_q, n_b, gt, k, kps, "RaBitQ-" + std::to_string(rbits) + "bit");
-  }
+        n_q, n_b, gt, k, kps, label);
+  };
 
-  if (method != "TQ4" && method != "TurboQuant" && method != "TQ8" && method != "RabitQ" &&
-      method != "TQPQ" && method != "All") {
-    std::cerr << "Unknown method: " << method << " (TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All)"
+  if (method == "RabitQ") run_rabitq(rbits, "RaBitQ-" + std::to_string(rbits) + "bit");
+  if (method == "RabitQ1" || method == "All") run_rabitq(1, "RaBitQ-1bit");
+  if (method == "RabitQ4" || method == "All") run_rabitq(4, "RaBitQ-4bit");
+  if (method == "RabitQ8" || method == "All") run_rabitq(8, "RaBitQ-8bit");
+
+  if (method != "TQ4" && method != "TurboQuant" && method != "TQ8" && method != "FastScan" &&
+      method != "1BTQ" && method != "RabitQ" && method != "RabitQ1" && method != "RabitQ4" &&
+      method != "RabitQ8" && method != "TQPQ" && method != "All") {
+    std::cerr << "Unknown method: " << method
+              << " (TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All)"
               << std::endl;
   }
 }
 int main(int argc, char* argv[]) {
   commandLine P(argc, argv,
                 "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
-                "[-dist_func L2|IP] [-pq_method TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All] "
-                "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>]");
+                "[-dist_func L2|IP] "
+                "[-pq_method "
+                "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All] "
+                "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-fs_block <b>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
   if (df == "L2")

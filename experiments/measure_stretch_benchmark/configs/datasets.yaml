@@ -16,14 +16,15 @@ data_root: /mnt/ann_data/data
 defaults:
   metric: IP   # angular-cosine datasets are stored L2-normalized -> IP works.
   k: 10        # Recall@k that the binary reports for each k' in its grid.
-  # pq_method: All        # TQ4|TurboQuant|TQ8|RabitQ|TQPQ|All
-  # rabitq_bits: 8
+  # pq_method: All        # TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All
+  # rabitq_bits: 8        # only used when pq_method=RabitQ (the configurable variant)
+  # fs_block: 8           # FastScan block size; must divide the dataset's dim
   # num_query: 1000       # cap queries (omitted = use all)
   # max_k_prime: 20000
   # k_growth: 2.0
 
 # Per-dataset keys (all optional): metric, k, points, queries, gt,
-# pq_method, rabitq_bits, num_query, max_k_prime, k_growth, extra_args.
+# pq_method, rabitq_bits, fs_block, num_query, max_k_prime, k_growth, extra_args.
 # When points/queries/gt are omitted, the conventional <name>/<name>_*.fbin
 # layout under data_root is used. `gt` is optional: if absent, the binary
 # computes exact k-NN once via blocked Eigen GEMM and caches it under /tmp.
