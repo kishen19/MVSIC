@@ -54,10 +54,13 @@ fi
 mkdir -p "$RESULTS_DIR"
 
 # ---------------------------------------------------------------------------
-# Parse YAML via python3+PyYAML and emit shell-friendly tab-separated lines:
-#   name<TAB>metric<TAB>k<TAB>points<TAB>queries<TAB>gt<TAB>pq_method<TAB>
-#   rabitq_bits<TAB>fs_block<TAB>num_query<TAB>max_k_prime<TAB>k_growth<TAB>extra_args
-# Unset optional fields are emitted as the empty string.
+# Parse YAML via python3+PyYAML and emit shell-friendly lines separated by
+# the unit-separator (\x1f) control char:
+#   name|metric|k|points|queries|gt|pq_method|rabitq_bits|fs_block|num_query|
+#   max_k_prime|k_growth|extra_args
+# Unset optional fields are emitted as the empty string. We deliberately do
+# NOT use \t — bash treats tab as IFS-whitespace and collapses runs of empty
+# fields, which silently shifts e.g. a non-empty k_growth into the GT slot.
 # ---------------------------------------------------------------------------
 CONFIG_ROWS="$(
   python3 - "$CONFIG" "$DATA_ROOT_OVERRIDE" "$DATASETS_FILTER" <<'PY'
@@ -114,9 +117,9 @@ for ds in (cfg.get("datasets") or []):
     k_growth    = _str(ds.get("k_growth",    default_k_growth))
     extra       = " ".join(ds.get("extra_args") or [])
 
-    print("\t".join([name, metric, str(k), _abs(points), _abs(queries), gt,
-                     pq_method, rabitq_bits, fs_block, num_query, max_k_prime,
-                     k_growth, extra]))
+    print("\x1f".join([name, metric, str(k), _abs(points), _abs(queries), gt,
+                       pq_method, rabitq_bits, fs_block, num_query, max_k_prime,
+                       k_growth, extra]))
 PY
 )"
 
@@ -160,7 +163,7 @@ SUMMARY="$RESULTS_DIR/summary.txt"
 # Count datasets up-front for "[i/N]" progress.
 N_TOTAL="$(printf '%s\n' "$CONFIG_ROWS" | wc -l | tr -d ' ')"
 i=0
-while IFS=$'\t' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS FS_BLOCK NUM_QUERY MAX_KP K_GROWTH DS_EXTRA; do
+while IFS=$'\x1f' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS FS_BLOCK NUM_QUERY MAX_KP K_GROWTH DS_EXTRA; do
   i=$((i + 1))
   echo "=== [$i/$N_TOTAL] $NAME (metric=$METRIC, k=$K) ==="
 

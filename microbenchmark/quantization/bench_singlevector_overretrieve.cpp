@@ -5,7 +5,7 @@
 // Usage:
 //   ./bench_singlevector_overretrieve -i <base_file> -q <query_file> [-gt <gt_file>]
 //     [-k <k>] [-dist_func L2|IP]
-//     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]
+//     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
 //     [-rabitq_bits <bits>] [-fs_block <bits>] [-output_gt_path <path>]
 //     [-pcs]   # load -i/-q as chamfer .pcs files; the per-cloud structure is
@@ -40,8 +40,8 @@
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/turboquant_1bit.h"
+#include "mvsic/core/quantization/turboquant_1bit_ref.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
-#include "mvsic/core/quantization/other_methods/turboquant_pq_4bit.h"
 #include "mvsic/core/stats.h"
 
 using namespace mvsic;
@@ -187,48 +187,109 @@ std::vector<size_t> make_k_primes(size_t k, size_t n_base, size_t max_k_prime, d
 }
 
 // ---- Recall curve: generic over distance function ----
+//
+// Query-blocked sweep. Naively this loop iterates n_q × n_b distance evals,
+// and the obvious "parallel_for over queries, walk all base" structure
+// re-streams the entire encoded base once per query — for n_q=20K, n_b=2.3M
+// that's 20K independent sweeps over a multi-hundred-MB array, which is
+// DRAM-bandwidth-bound on every method.
+//
+// Instead we tile queries into blocks of BQ. Each block sweeps the encoded
+// base once; the inner loop iterates BQ queries so enc[j] stays hot in L1
+// across BQ uses. This collapses base-side memory traffic by BQ× without
+// changing the per-pair distance kernel — the dist_fn closure is unchanged
+// across all methods.
+//
+// We also drop the per-query std::vector<pair>(n_b) buffer (28 MB at this
+// problem size) and use a top-lim max-heap instead. For lim = k_primes.back()
+// (typically ≤ 20K << n_b) this turns a 28 MB allocation per query into a
+// ~240 KB heap, and turns nth_element + sort over n_b into a heap walk over
+// ~lim insertions in expectation (most pairs after the heap fills are early-
+// exited by `d < h.top()`).
 template<typename DistFn>
 void recall_curve(DistFn&& dist_fn, size_t n_q, size_t n_b,
                   const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
                   size_t k, const std::vector<size_t>& k_primes, const std::string& label) {
 
+  parlay::internal::timer search_t;
+  search_t.start();
+
   std::vector<std::atomic<size_t>> tc(k_primes.size());
   for (auto& x : tc)
     x = 0;
-  size_t lim = k_primes.back();
+  const size_t lim = k_primes.back();
 
-  parlay::parallel_for(0, n_q, [&](size_t qi) {
-    std::vector<std::pair<float, uint32_t>> dists(n_b);
-    for (size_t j = 0; j < n_b; ++j)
-      dists[j] = {dist_fn(qi, j), (uint32_t)j};
+  // BQ sized to keep the per-thread working set (BQ × per-query state +
+  // BQ × heap of top-lim pairs) inside L2 while still amortizing base reads.
+  // Quantized_Query / int8 query-code state is small (≤ a few hundred bytes),
+  // and 32 × 12B × lim ≤ ~7.5 MB at lim=20K which fits comfortably in L3.
+  constexpr size_t BQ = 32;
+  const size_t num_blocks = (n_q + BQ - 1) / BQ;
 
-    if (lim < dists.size()) {
-      std::nth_element(dists.begin(), dists.begin() + lim, dists.end());
-      std::sort(dists.begin(), dists.begin() + lim);
-    } else {
-      std::sort(dists.begin(), dists.end());
-    }
+  parlay::parallel_for(0, num_blocks, [&](size_t qb) {
+    const size_t q_start = qb * BQ;
+    const size_t q_end = std::min(q_start + BQ, n_q);
+    const size_t cur = q_end - q_start;
 
-    size_t ak = std::min(k, gt[qi].size());
-    if (ak == 0) return;
+    using Pair = std::pair<float, uint32_t>;  // (distance, base id) — heap by distance
+    std::vector<std::priority_queue<Pair>> heaps(cur);
 
-    size_t cc = 0, ki = 0;
-    for (size_t r = 0; r < lim && ki < k_primes.size(); ++r) {
-      uint32_t rid = dists[r].second;
-      for (size_t g = 0; g < ak; ++g) {
-        if (gt[qi][g].first == rid) {
-          ++cc;
-          break;
+    // Streaming base sweep. The j loop is the cache-miss-driver; the inner
+    // qi loop reuses enc[j] BQ times before it's evicted.
+    for (size_t j = 0; j < n_b; ++j) {
+      const uint32_t jid = static_cast<uint32_t>(j);
+      for (size_t li = 0; li < cur; ++li) {
+        const float d = dist_fn(q_start + li, j);
+        auto& h = heaps[li];
+        if (h.size() < lim) {
+          h.emplace(d, jid);
+        } else if (d < h.top().first) {
+          h.pop();
+          h.emplace(d, jid);
         }
       }
-      while (ki < k_primes.size() && r + 1 == k_primes[ki]) {
-        tc[ki].fetch_add(cc, std::memory_order_relaxed);
-        ++ki;
+    }
+
+    // Drain each heap into a sorted-ascending id list, then reuse the
+    // existing per-query recall-counting logic.
+    std::vector<uint32_t> ids;
+    ids.reserve(lim);
+    for (size_t li = 0; li < cur; ++li) {
+      const size_t qi = q_start + li;
+      auto& h = heaps[li];
+      const size_t hsz = h.size();
+      ids.assign(hsz, 0u);
+      for (size_t r = 0; r < hsz; ++r) {
+        ids[hsz - 1 - r] = h.top().second;
+        h.pop();
+      }
+
+      const size_t ak = std::min(k, gt[qi].size());
+      if (ak == 0) continue;
+
+      size_t cc = 0, ki = 0;
+      for (size_t r = 0; r < hsz && ki < k_primes.size(); ++r) {
+        const uint32_t rid = ids[r];
+        for (size_t g = 0; g < ak; ++g) {
+          if (gt[qi][g].first == rid) {
+            ++cc;
+            break;
+          }
+        }
+        while (ki < k_primes.size() && r + 1 == k_primes[ki]) {
+          tc[ki].fetch_add(cc, std::memory_order_relaxed);
+          ++ki;
+        }
       }
     }
   });
 
+  const double search_secs = search_t.stop();
+
   std::cout << "\n=== " << label << " ===" << std::endl;
+  std::cout << "  search: " << std::fixed << std::setprecision(4) << search_secs << "s"
+            << "  (n_q=" << n_q << " × n_b=" << n_b << " distance evals + recall counting)"
+            << std::endl;
   std::cout << std::setw(10) << "k'" << std::setw(15) << "Recall@" << k << std::endl;
   std::cout << "----------------------------------------" << std::endl;
   // Effective k per query is limited by available ground-truth neighbors.
@@ -261,7 +322,7 @@ void run_benchmark(commandLine& P) {
     std::cerr << "Usage: bench_singlevector_overretrieve -i <base> [-q <queries> | -dataset_as_query]\n"
               << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP]\n"
               << "  [-pq_method "
-                 "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All]\n"
+                 "TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All]\n"
               << "  [-max_k_prime <N>] [-k_growth <r>]\n"
               << "  [-rabitq_bits <b>] [-fs_block <b>] [-num_query <N>]\n"
               << "  [-pcs]    # load -i/-q as chamfer .pcs files and explode all\n"
@@ -519,35 +580,47 @@ void run_benchmark(commandLine& P) {
         "1BTQ");
   }
 
-  // ==== TQ-PQ-4bit (B = 1,2,4,8) ====
-  if (method == "TQPQ" || method == "All") {
-    auto run_tqpq = [&](auto block_tag, const std::string& label) {
-      constexpr size_t B = decltype(block_tag)::value;
-      std::cout << "\n--- TQ-PQ-4bit (B=" << B << ") ---" << std::endl;
-      parlay::internal::timer t;
-      t.start();
-      turboquant_pq_4bit::Model<Metric, B> model;
-      model.train(base);
-      auto enc = model.encode(base);
-      std::cout << "  encode: " << t.stop() << "s" << std::endl;
+  // ==== Ref1BTQAsym (scalar reference: 1-bit DB × full-float query) ====
+  // DB encoding matches 1BTQ (rotate then sign-pack); the query is kept
+  // as full-precision floats and scored against ±1 from the DB sign
+  // bits. The scalar loop makes the math auditable. Use this to upper-
+  // bound what the 1-bit-DB-asymmetric estimator family can achieve.
+  if (method == "Ref1BTQAsym" || method == "All") {
+    std::cout << "\n--- Ref1BTQAsym ---" << std::endl;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_1bit_ref::asym::Model<Metric> model;
+    model.train(base);
+    auto enc = model.encode(base);
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
 
-      std::vector<turboquant_pq_4bit::Quantized_Query<Metric, B>> qqs(n_q);
-      parlay::parallel_for(0, n_q, [&](size_t i) {
-        qqs[i] = model.quantize_query(reinterpret_cast<const float*>(queries.location(i)));
-      });
+    std::vector<turboquant_1bit_ref::asym::Quantized_Query<Metric>> qqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
 
-      recall_curve(
-          [&](size_t qi, size_t j) {
-            auto pt = enc[j];
-            return qqs[qi].distance(pt);
-          },
-          n_q, n_b, gt, k, kps, label);
-    };
+    recall_curve(
+        [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
+        "Ref1BTQAsym");
+  }
 
-    run_tqpq(std::integral_constant<size_t, 1>{}, "TQ-PQ-4bit-B1");
-    run_tqpq(std::integral_constant<size_t, 2>{}, "TQ-PQ-4bit-B2");
-    run_tqpq(std::integral_constant<size_t, 4>{}, "TQ-PQ-4bit-B4");
-    run_tqpq(std::integral_constant<size_t, 8>{}, "TQ-PQ-4bit-B8");
+  // ==== Ref1BTQSym (scalar reference: 1-bit DB × 1-bit query, Hamming) ====
+  // Mirrors what production `turboquant_1bit.h` actually computes, but
+  // as a plain scalar loop. Side-by-side with Ref1BTQAsym this isolates
+  // the cost of sign-quantizing the query.
+  if (method == "Ref1BTQSym" || method == "All") {
+    std::cout << "\n--- Ref1BTQSym ---" << std::endl;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_1bit_ref::sym::Model<Metric> model;
+    model.train(base);
+    auto enc = model.encode(base);
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    std::vector<turboquant_1bit_ref::sym::Quantized_Query<Metric>> qqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
+
+    recall_curve(
+        [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
+        "Ref1BTQSym");
   }
 
   // ==== RaBitQ ====
@@ -585,10 +658,11 @@ void run_benchmark(commandLine& P) {
   if (method == "RabitQ8" || method == "All") run_rabitq(8, "RaBitQ-8bit");
 
   if (method != "TQ4" && method != "TurboQuant" && method != "TQ8" && method != "FastScan" &&
-      method != "1BTQ" && method != "RabitQ" && method != "RabitQ1" && method != "RabitQ4" &&
-      method != "RabitQ8" && method != "TQPQ" && method != "All") {
+      method != "1BTQ" && method != "Ref1BTQAsym" && method != "Ref1BTQSym" &&
+      method != "RabitQ" && method != "RabitQ1" && method != "RabitQ4" && method != "RabitQ8" &&
+      method != "All") {
     std::cerr << "Unknown method: " << method
-              << " (TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All)"
+              << " (TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All)"
               << std::endl;
   }
 }
@@ -597,7 +671,7 @@ int main(int argc, char* argv[]) {
                 "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
                 "[-dist_func L2|IP] "
                 "[-pq_method "
-                "TQ4|TurboQuant|TQ8|FastScan|1BTQ|RabitQ|RabitQ1|RabitQ4|RabitQ8|TQPQ|All] "
+                "TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All] "
                 "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-fs_block <b>] "
                 "[-pcs]");
   std::string df = P.getOptionValue("-dist_func", "IP");
