@@ -1,0 +1,30 @@
+name: "SVH Graph Ablation (build: alpha sweep)"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/svh_graph_ablation/indices/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/svh_graph_ablation/indices/fiqa
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/svh_graph_ablation/indices/nq500k
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/svh_graph_ablation/indices/nq
+
+indices:
+  - name: svh_graph
+    metric: ip
+    build_configs:
+      - name: svh_graph_R64_a1.0
+        params: &svh_graph_defaults
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+      - name: svh_graph_R64_a0.95
+        params: { <<: *svh_graph_defaults, alpha: 0.95 }
+      - name: svh_graph_R64_a0.9
+        params: { <<: *svh_graph_defaults, alpha: 0.9 }

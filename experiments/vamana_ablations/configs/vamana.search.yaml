@@ -1,0 +1,65 @@
+name: "Vamana Ablation (search: R and alpha sweep, TQ4)"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/vamana_ablations/indices/arguana
+    results_dir: experiments/vamana_ablations/results/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/vamana_ablations/indices/fiqa
+    results_dir: experiments/vamana_ablations/results/fiqa
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/vamana_ablations/indices/nq500k
+    results_dir: experiments/vamana_ablations/results/nq500k
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/vamana_ablations/indices/nq
+    results_dir: experiments/vamana_ablations/results/nq
+
+indices:
+  - name: vamana
+    metric: ip
+    builds:
+      - build_name: vamana_R64_a1.0
+        build_params: &vamana_defaults
+          R: 64
+          L: 128
+          alpha: 1.0
+          two_pass: false
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: &vamana_k10
+          - name: k=10
+            params:
+              L: [64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - { name: nr0,   num_rerank: 0 }
+                - { name: nr20,  num_rerank: 20 }
+      - build_name: vamana_R64_a0.9
+        build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 0.9 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *vamana_k10
+      - build_name: vamana_R64_a0.95
+        build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 0.95 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *vamana_k10
+      - build_name: vamana_R128_a1.0
+        build_params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 1.0 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *vamana_k10
+      - build_name: vamana_R128_a0.9
+        build_params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 0.9 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *vamana_k10
+      - build_name: vamana_R128_a0.95
+        build_params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 0.95 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *vamana_k10
