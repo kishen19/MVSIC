@@ -1,6 +1,22 @@
 name: "MVIVF Ablation (search, stage 3: max_depth)"
 
 datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/mvivf_ablation/indices/arguana
+    results_dir: experiments/mvivf_ablation/results/arguana/stage3
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir:   results/mvivf_ablation/indices/fiqa
+    results_dir: experiments/mvivf_ablation/results/fiqa/stage3
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir:   results/mvivf_ablation/indices/hotpotqa
+    results_dir: experiments/mvivf_ablation/results/hotpotqa/stage3
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir:   results/mvivf_ablation/indices/nfcorpus
+    results_dir: experiments/mvivf_ablation/results/nfcorpus/stage3
   - name: nq
     path: data/beir/nq
     index_dir:   results/mvivf_ablation/indices/nq
@@ -9,14 +25,18 @@ datasets:
     path: data/beir/nq500k
     index_dir:   results/mvivf_ablation/indices/nq500k
     results_dir: experiments/mvivf_ablation/results/nq500k/stage3
-  - name: fiqa
-    path: data/beir/fiqa
-    index_dir:   results/mvivf_ablation/indices/fiqa
-    results_dir: experiments/mvivf_ablation/results/fiqa/stage3
-  - name: arguana
-    path: data/beir/arguana
-    index_dir:   results/mvivf_ablation/indices/arguana
-    results_dir: experiments/mvivf_ablation/results/arguana/stage3
+  - name: quora
+    path: data/beir/quora
+    index_dir:   results/mvivf_ablation/indices/quora
+    results_dir: experiments/mvivf_ablation/results/quora/stage3
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir:   results/mvivf_ablation/indices/scidocs
+    results_dir: experiments/mvivf_ablation/results/scidocs/stage3
+  - name: scifact
+    path: data/beir/scifact
+    index_dir:   results/mvivf_ablation/indices/scifact
+    results_dir: experiments/mvivf_ablation/results/scifact/stage3
 
 indices:
   - name: mvivf

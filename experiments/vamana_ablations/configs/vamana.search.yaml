@@ -9,14 +9,34 @@ datasets:
     path: data/beir/fiqa
     index_dir: results/vamana_ablations/indices/fiqa
     results_dir: experiments/vamana_ablations/results/fiqa
-  - name: nq500k
-    path: data/beir/nq500k
-    index_dir: results/vamana_ablations/indices/nq500k
-    results_dir: experiments/vamana_ablations/results/nq500k
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir: results/vamana_ablations/indices/hotpotqa
+    results_dir: experiments/vamana_ablations/results/hotpotqa
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir: results/vamana_ablations/indices/nfcorpus
+    results_dir: experiments/vamana_ablations/results/nfcorpus
   - name: nq
     path: data/beir/nq
     index_dir: results/vamana_ablations/indices/nq
     results_dir: experiments/vamana_ablations/results/nq
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/vamana_ablations/indices/nq500k
+    results_dir: experiments/vamana_ablations/results/nq500k
+  - name: quora
+    path: data/beir/quora
+    index_dir: results/vamana_ablations/indices/quora
+    results_dir: experiments/vamana_ablations/results/quora
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir: results/vamana_ablations/indices/scidocs
+    results_dir: experiments/vamana_ablations/results/scidocs
+  - name: scifact
+    path: data/beir/scifact
+    index_dir: results/vamana_ablations/indices/scifact
+    results_dir: experiments/vamana_ablations/results/scifact
 
 indices:
   - name: vamana
@@ -39,6 +59,11 @@ indices:
               config:
                 - { name: nr0,   num_rerank: 0 }
                 - { name: nr20,  num_rerank: 20 }
+      - build_name: vamana_R64_a1.1
+        build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 1.1 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *vamana_k10
       - build_name: vamana_R64_a1.2
         build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 1.2 }
         variants:

@@ -7,12 +7,27 @@ datasets:
   - name: fiqa
     path: data/beir/fiqa
     index_dir: results/vamana_ablations/indices/fiqa
-  - name: nq500k
-    path: data/beir/nq500k
-    index_dir: results/vamana_ablations/indices/nq500k
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir: results/vamana_ablations/indices/hotpotqa
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir: results/vamana_ablations/indices/nfcorpus
   - name: nq
     path: data/beir/nq
     index_dir: results/vamana_ablations/indices/nq
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/vamana_ablations/indices/nq500k
+  - name: quora
+    path: data/beir/quora
+    index_dir: results/vamana_ablations/indices/quora
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir: results/vamana_ablations/indices/scidocs
+  - name: scifact
+    path: data/beir/scifact
+    index_dir: results/vamana_ablations/indices/scifact
 
 indices:
   - name: vamana
@@ -25,5 +40,7 @@ indices:
           L: 128
           alpha: 1.0
           two_pass: false
+      - name: vamana_R64_a1.1
+        params: { <<: *vamana_defaults, R: 64, alpha: 1.1 }
       - name: vamana_R64_a1.2
         params: { <<: *vamana_defaults, R: 64, alpha: 1.2 }

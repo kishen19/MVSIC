@@ -17,7 +17,17 @@ except ImportError:
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent
-DEFAULT_DATASETS = ["arguana", "fiqa", "nq500k", "nq"]
+DEFAULT_DATASETS = [
+    "arguana",
+    "fiqa",
+    "hotpotqa",
+    "nfcorpus",
+    "nq",
+    "nq500k",
+    "quora",
+    "scidocs",
+    "scifact",
+]
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -160,7 +170,7 @@ def main() -> int:
     p.add_argument(
         "--datasets",
         default=",".join(DEFAULT_DATASETS),
-        help="comma-separated dataset names (default: arguana,fiqa,nq500k,nq)",
+        help="comma-separated dataset names (default: all ablation BEIR suite)",
     )
     p.add_argument(
         "--results",

@@ -7,12 +7,27 @@ datasets:
   - name: fiqa
     path: data/beir/fiqa
     index_dir: results/muvera_ablation/indices/fiqa
-  - name: nq500k
-    path: data/beir/nq500k
-    index_dir: results/muvera_ablation/indices/nq500k
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir: results/muvera_ablation/indices/hotpotqa
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir: results/muvera_ablation/indices/nfcorpus
   - name: nq
     path: data/beir/nq
     index_dir: results/muvera_ablation/indices/nq
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/muvera_ablation/indices/nq500k
+  - name: quora
+    path: data/beir/quora
+    index_dir: results/muvera_ablation/indices/quora
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir: results/muvera_ablation/indices/scidocs
+  - name: scifact
+    path: data/beir/scifact
+    index_dir: results/muvera_ablation/indices/scifact
 
 indices:
   - name: muvera
