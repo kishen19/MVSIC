@@ -54,6 +54,7 @@ QUANTS = [
     ("tq",    "turboquant_mv::Model<{m}>",         "mvsic/core/quantization/turboquant_mv.h"),
     ("spqtq", "pqtq_mv::Model<{m}>",               "mvsic/core/quantization/pqtq_mv.h"),
     ("1btq",  "turboquant_1bit_mv::Model<{m}>",    "mvsic/core/quantization/turboquant_1bit_mv.h"),
+    ("1btqa", "turboquant_1bit_asym_mv::Model<{m}>", "mvsic/core/quantization/turboquant_1bit_asym_mv.h"),
     ("8btq",  "turboquant_8bit_mv::Model<{m}>",    "mvsic/core/quantization/turboquant_8bit_mv.h"),
 ]
 
@@ -136,6 +137,7 @@ HEADER_PRELUDE = """\
 #include "mvsic/core/quantization/pqtq_mv.h"
 #include "mvsic/core/quantization/rabitq_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"

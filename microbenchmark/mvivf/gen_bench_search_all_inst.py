@@ -34,6 +34,7 @@ QUANTS = [
     ("tq",    "turboquant_mv::Model<{m}>"),
     ("spqtq", "pqtq_mv::Model<{m}>"),
     ("1btq",  "turboquant_1bit_mv::Model<{m}>"),
+    ("1btqa", "turboquant_1bit_asym_mv::Model<{m}>"),
 ]
 
 CC_TEMPLATE = """\
@@ -78,6 +79,7 @@ HEADER_PRELUDE = """\
 #include "mvsic/core/quantization/pqtq_mv.h"
 #include "mvsic/core/quantization/rabitq_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
@@ -105,6 +107,7 @@ struct MicroSearchAllCtx {
   float query_compression_threshold;
   bool compress_rerank;
   bool tq8_rerank;
+  bool root_m2m;
 };
 
 template <typename ChPoint, bool metric, class IndexT>

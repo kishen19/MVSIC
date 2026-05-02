@@ -40,9 +40,11 @@ namespace {
       fn.template operator()<IndexMVIVF<metric, C, pqtq_mv::Model<metric>>>();                    \
     else if (qm == "1BTQ"  || qm == "1btq")                                                       \
       fn.template operator()<IndexMVIVF<metric, C, turboquant_1bit_mv::Model<metric>>>();         \
+    else if (qm == "1BTQA" || qm == "1btqa")                                                      \
+      fn.template operator()<IndexMVIVF<metric, C, turboquant_1bit_asym_mv::Model<metric>>>();    \
     else {                                                                                        \
       std::cerr << "Unknown -quant_method: " << qm                                                \
-                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ)" << std::endl;                       \
+                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ, 1BTQA)" << std::endl;                \
       std::exit(1);                                                                               \
     }                                                                                             \
   } while (0)
@@ -126,7 +128,7 @@ void run_benchmark(mvsic::commandLine& P) {
         "  -num_rerank <N>                Rerank budget (default = k)\n"
         "  -mode old|new|both             Which kernel to run (default both)\n"
         "  -qc 0|1                        CompressCenters template (default 1)\n"
-        "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ   Leaf quantizer (default None)\n"
+        "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|1BTQA   Leaf quantizer (default None)\n"
         "  -query_compress none|ball|wards  Query-side compression\n"
         "  -query_compress_threshold <t>  Threshold for ball/wards (default 0.7)\n"
         "  -compress_rerank               Use compressed query for rerank too\n"
@@ -209,7 +211,7 @@ int main(int argc, char* argv[]) {
                        "[-gt <gt>] [-mm] [-dist_func IP|L2] "
                        "[-k <K>] [-nprobes <N>] [-num_rerank <N>] "
                        "[-mode old|new|both] [-qc 0|1] "
-                       "[-quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ] "
+                       "[-quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|1BTQA] "
                        "[-query_compress none|ball|wards] [-query_compress_threshold <tau>] "
                        "[-compress_rerank] [-tq8_rerank] [-root_m2m] "
                        "[-k_per_level <N>] [-max_leaf_size <N>] [-max_depth <N>] "

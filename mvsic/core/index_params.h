@@ -77,7 +77,17 @@ struct IndexParams {
   // via the LeafModel template parameter; this enum is only tagged onto `pq.method`
   // by the single-vector graph families (MUVERA, MPool, SVH_Graph, SVH_IVF) so the
   // legacy variant-based helpers on `Index<metric>` keep dispatching correctly.
-  enum class QuantizerType { None, PQ, RaBitQ, FastScan, TurboQuant, SPQTQ, OneBitTQ, EightBitTQ };
+  enum class QuantizerType {
+    None,
+    PQ,
+    RaBitQ,
+    FastScan,
+    TurboQuant,
+    SPQTQ,
+    OneBitTQ,
+    EightBitTQ,
+    OneBitTQAsym
+  };
 
   // Legacy quantizer hyperparameters. Read by `Index<metric>::train_quantizer`
   // (variant-based dispatch) for the graph-family single-vector indices only.

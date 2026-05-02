@@ -154,6 +154,32 @@ cc_library(
 )
 
 cc_library(
+    name = "turboquant_1bit_asym",
+    hdrs = [
+        "turboquant_1bit_asym.h",
+    ],
+    deps = [
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
+
+cc_library(
+    name = "turboquant_1bit_asym_mv",
+    hdrs = [
+        "turboquant_1bit_asym_mv.h",
+        "turboquant_utils.h",
+    ],
+    deps = [
+        ":turboquant_1bit_asym",
+        "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
+    ],
+)
+
+cc_library(
     name = "turboquant_8bit_mv",
     hdrs = [
         "turboquant_8bit_mv.h",

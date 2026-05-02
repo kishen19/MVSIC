@@ -20,6 +20,7 @@
 #include "mvsic/core/quantization/pqtq_mv.h"
 #include "mvsic/core/quantization/rabitq_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/chamfer_l2_point.h"
@@ -75,6 +76,8 @@ extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, pq
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , pqtq_mv::Model<false>>>(MicroSearchAllCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_1bit_mv::Model<false>>>(MicroSearchAllCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_1bit_mv::Model<false>>>(MicroSearchAllCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_1bit_asym_mv::Model<false>>>(MicroSearchAllCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_1bit_asym_mv::Model<false>>>(MicroSearchAllCtx<ChamferIP_Point>&);
 extern template void build_skeleton_if_missing<ChamferIP_Point, false>(PointCloudSet<ChamferIP_Point>&, const IndexParams&, const std::string&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, NoQuantizer<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , NoQuantizer<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
@@ -90,6 +93,8 @@ extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, pqtq
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , pqtq_mv::Model<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_1bit_mv::Model<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_1bit_mv::Model<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_1bit_asym_mv::Model<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_1bit_asym_mv::Model<true>>>(MicroSearchAllCtx<ChamferL2_Point>&);
 extern template void build_skeleton_if_missing<ChamferL2_Point, true>(PointCloudSet<ChamferL2_Point>&, const IndexParams&, const std::string&);
 
 }  // namespace mvsic

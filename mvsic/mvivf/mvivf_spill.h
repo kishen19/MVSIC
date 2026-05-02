@@ -133,6 +133,7 @@ class IndexMVIVFSpill : public Index<metric> {
       else if constexpr (std::is_same_v<L, turboquant_mv::Model<metric>>) quantization_mode = QT::TurboQuant;
       else if constexpr (std::is_same_v<L, pqtq_mv::Model<metric>>) quantization_mode = QT::SPQTQ;
       else if constexpr (std::is_same_v<L, turboquant_1bit_mv::Model<metric>>) quantization_mode = QT::OneBitTQ;
+      else if constexpr (std::is_same_v<L, turboquant_1bit_asym_mv::Model<metric>>) quantization_mode = QT::OneBitTQAsym;
       else if constexpr (std::is_same_v<L, turboquant_8bit_mv::Model<metric>>) quantization_mode = QT::EightBitTQ;
       else quantization_mode = QT::None;
     }
@@ -190,6 +191,24 @@ class IndexMVIVFSpill : public Index<metric> {
     }
 
     auto grouped = group_by_key_inplace(id_pt);
+    // Safety guard: if clustering collapses to a single non-empty group (e.g.
+    // a duplicate-heavy subcluster where every input assigns to the same
+    // center), no useful split is possible.  Recursing again would just
+    // collapse again and blow the stack, so accept an oversized leaf here.
+    if (grouped.size() <= 1) {
+      if (params.verbose >= 1) {
+        std::cout << "[MVIVF-Spill] Cluster collapse at depth " << depth << " ("
+                  << n << " points > max_leaf_size=" << params.max_leaf_size
+                  << "); making this node a leaf." << std::endl;
+      }
+      auto all_idx =
+          parlay::tabulate(n, [](size_t i) { return static_cast<uint32_t>(i); });
+      node->data = PointCloudSet<ChPoint>(points.filter(all_idx), d);
+      if constexpr (kHasLeafQuant) {
+        node->encoded_leaf = leaf_model_.encode(node->data);
+      }
+      return;
+    }
     node->children.resize(grouped.size());
     if (grouped.size() < centers.size()) {
       auto active_centers_ind = parlay::delayed_seq<uint32_t>(
@@ -1066,6 +1085,8 @@ using IndexMVIVFSpillSPQTQIP     = IndexMVIVFSpill<false, false, pqtq_mv::Model<
 using IndexMVIVFSpillSPQTQL2     = IndexMVIVFSpill<true,  false, pqtq_mv::Model<true>>;
 using IndexMVIVFSpillOneBitTQIP  = IndexMVIVFSpill<false, false, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFSpillOneBitTQL2  = IndexMVIVFSpill<true,  false, turboquant_1bit_mv::Model<true>>;
+using IndexMVIVFSpillOneBitTQAsymIP = IndexMVIVFSpill<false, false, turboquant_1bit_asym_mv::Model<false>>;
+using IndexMVIVFSpillOneBitTQAsymL2 = IndexMVIVFSpill<true,  false, turboquant_1bit_asym_mv::Model<true>>;
 using IndexMVIVFSpillEightBitTQIP = IndexMVIVFSpill<false, false, turboquant_8bit_mv::Model<false>>;
 using IndexMVIVFSpillEightBitTQL2 = IndexMVIVFSpill<true,  false, turboquant_8bit_mv::Model<true>>;
 
@@ -1082,6 +1103,8 @@ using IndexMVIVFSpillCompressSPQTQIP     = IndexMVIVFSpill<false, true, pqtq_mv:
 using IndexMVIVFSpillCompressSPQTQL2     = IndexMVIVFSpill<true,  true, pqtq_mv::Model<true>>;
 using IndexMVIVFSpillCompressOneBitTQIP  = IndexMVIVFSpill<false, true, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFSpillCompressOneBitTQL2  = IndexMVIVFSpill<true,  true, turboquant_1bit_mv::Model<true>>;
+using IndexMVIVFSpillCompressOneBitTQAsymIP = IndexMVIVFSpill<false, true, turboquant_1bit_asym_mv::Model<false>>;
+using IndexMVIVFSpillCompressOneBitTQAsymL2 = IndexMVIVFSpill<true,  true, turboquant_1bit_asym_mv::Model<true>>;
 using IndexMVIVFSpillCompressEightBitTQIP = IndexMVIVFSpill<false, true, turboquant_8bit_mv::Model<false>>;
 using IndexMVIVFSpillCompressEightBitTQL2 = IndexMVIVFSpill<true,  true, turboquant_8bit_mv::Model<true>>;
 

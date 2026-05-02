@@ -15,6 +15,7 @@
 #include "mvsic/core/quantization/pqtq_mv.h"
 #include "mvsic/core/quantization/rabitq_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -41,6 +42,8 @@ extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, fal
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, true , pqtq_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_1bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_1bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
+extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_1bit_asym_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
+extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_1bit_asym_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_8bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_8bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, NoQuantizer<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
@@ -57,6 +60,8 @@ extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false,
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , pqtq_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, turboquant_1bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , turboquant_1bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
+extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, turboquant_1bit_asym_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
+extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , turboquant_1bit_asym_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, turboquant_8bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , turboquant_8bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, NoQuantizer<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
@@ -73,6 +78,8 @@ extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , pqtq_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_1bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_1bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
+extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_1bit_asym_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
+extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_1bit_asym_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_8bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_8bit_mv::Model<false>>>(BenchRunOneCtx<ChamferIP_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, false, NoQuantizer<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
@@ -89,6 +96,8 @@ extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, false
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, true , pqtq_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_1bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_1bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
+extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_1bit_asym_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
+extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_1bit_asym_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_8bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_8bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, NoQuantizer<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
@@ -105,6 +114,8 @@ extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, f
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , pqtq_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, turboquant_1bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , turboquant_1bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
+extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, turboquant_1bit_asym_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
+extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , turboquant_1bit_asym_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, turboquant_8bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , turboquant_8bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, NoQuantizer<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
@@ -121,6 +132,8 @@ extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, 
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , pqtq_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_1bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_1bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
+extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_1bit_asym_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
+extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_1bit_asym_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_8bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 extern template void bench_run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_8bit_mv::Model<true>>>(BenchRunOneCtx<ChamferL2_Point>&);
 

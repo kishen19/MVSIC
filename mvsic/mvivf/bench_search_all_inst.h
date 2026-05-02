@@ -18,6 +18,7 @@
 #include "mvsic/core/quantization/pqtq_mv.h"
 #include "mvsic/core/quantization/rabitq_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
@@ -61,6 +62,8 @@ extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, pq
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , pqtq_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_1bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_1bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_1bit_asym_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_1bit_asym_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, false, turboquant_8bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVF<false, true , turboquant_8bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, NoQuantizer<false>>>(RunOneCtx<ChamferIP_Point>&);
@@ -77,6 +80,8 @@ extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , pqtq_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, turboquant_1bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , turboquant_1bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, turboquant_1bit_asym_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , turboquant_1bit_asym_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, false, turboquant_8bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFFlat<false, true , turboquant_8bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, NoQuantizer<false>>>(RunOneCtx<ChamferIP_Point>&);
@@ -93,6 +98,8 @@ extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, fals
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , pqtq_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_1bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_1bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_1bit_asym_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
+extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_1bit_asym_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_8bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_8bit_mv::Model<false>>>(RunOneCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, NoQuantizer<true>>>(RunOneCtx<ChamferL2_Point>&);
@@ -109,6 +116,8 @@ extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, pqtq
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , pqtq_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_1bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_1bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_1bit_asym_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_1bit_asym_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, false, turboquant_8bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVF<true, true , turboquant_8bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, NoQuantizer<true>>>(RunOneCtx<ChamferL2_Point>&);
@@ -125,6 +134,8 @@ extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, 
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , pqtq_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, turboquant_1bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , turboquant_1bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, turboquant_1bit_asym_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , turboquant_1bit_asym_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, false, turboquant_8bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFFlat<true, true , turboquant_8bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, NoQuantizer<true>>>(RunOneCtx<ChamferL2_Point>&);
@@ -141,6 +152,8 @@ extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false,
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , pqtq_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_1bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_1bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_1bit_asym_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
+extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_1bit_asym_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_8bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_8bit_mv::Model<true>>>(RunOneCtx<ChamferL2_Point>&);
 

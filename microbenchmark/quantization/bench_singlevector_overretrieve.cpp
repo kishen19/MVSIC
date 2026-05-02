@@ -5,7 +5,7 @@
 // Usage:
 //   ./bench_singlevector_overretrieve -i <base_file> -q <query_file> [-gt <gt_file>]
 //     [-k <k>] [-dist_func L2|IP]
-//     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All]
+//     [-pq_method TQ4|TurboQuant|TQ8|FastScan|1BTQ|1BTQAsym|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All]
 //     [-dataset_as_query] [-max_k_prime <N>] [-k_growth <rate>]
 //     [-rabitq_bits <bits>] [-fs_block <bits>] [-output_gt_path <path>]
 //     [-pcs]   # load -i/-q as chamfer .pcs files; the per-cloud structure is
@@ -40,6 +40,7 @@
 #include "mvsic/core/quantization/rabitq.h"
 #include "mvsic/core/quantization/turboquant.h"
 #include "mvsic/core/quantization/turboquant_1bit.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym.h"
 #include "mvsic/core/quantization/turboquant_1bit_ref.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/stats.h"
@@ -322,7 +323,7 @@ void run_benchmark(commandLine& P) {
     std::cerr << "Usage: bench_singlevector_overretrieve -i <base> [-q <queries> | -dataset_as_query]\n"
               << "  [-gt <gt>] [-k <k>] [-dist_func L2|IP]\n"
               << "  [-pq_method "
-                 "TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All]\n"
+                 "TQ4|TurboQuant|TQ8|FastScan|1BTQ|1BTQAsym|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All]\n"
               << "  [-max_k_prime <N>] [-k_growth <r>]\n"
               << "  [-rabitq_bits <b>] [-fs_block <b>] [-num_query <N>]\n"
               << "  [-pcs]    # load -i/-q as chamfer .pcs files and explode all\n"
@@ -539,27 +540,35 @@ void run_benchmark(commandLine& P) {
   // Per-pair distance uses the scalar fallback in fastscan::Quantized_Query::distance,
   // which is slow but produces the same value as the SIMD distances_all kernel —
   // recall is identical and that's what this benchmark reports.
-  if (method == "FastScan" || method == "All") {
-    if (D % fs_block != 0) {
-      std::cerr << "FastScan: D=" << D << " not divisible by -fs_block=" << fs_block
+  auto run_fastscan = [&](uint32_t block) {
+    if (D % block != 0) {
+      std::cerr << "FastScan: D=" << D << " not divisible by block=" << block
                 << "; skipping.\n";
-    } else {
-      std::cout << "\n--- FastScan (block=" << fs_block << ") ---" << std::endl;
-      parlay::internal::timer t;
-      t.start();
-      fastscan::Model<Metric> model;
-      model.train(base, fs_block);
-      auto enc = model.encode(base);
-      std::cout << "  encode: " << t.stop() << "s" << std::endl;
-
-      std::vector<fastscan::Quantized_Query<Metric>> qqs(n_q);
-      parlay::parallel_for(
-          0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
-
-      recall_curve(
-          [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
-          "FastScan-b" + std::to_string(fs_block));
+      return;
     }
+    std::cout << "\n--- FastScan (block=" << block << ") ---" << std::endl;
+    parlay::internal::timer t;
+    t.start();
+    fastscan::Model<Metric> model;
+    model.train(base, block);
+    auto enc = model.encode(base);
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    std::vector<fastscan::Quantized_Query<Metric>> qqs(n_q);
+    parlay::parallel_for(
+        0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
+
+    recall_curve(
+        [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
+        "FastScan-b" + std::to_string(block));
+  };
+
+  if (method == "FastScan") {
+    run_fastscan(fs_block);
+  } else if (method == "All") {
+    run_fastscan(2);
+    run_fastscan(4);
+    run_fastscan(8);
   }
 
   // ==== 1BTQ (single-vector 1-bit TurboQuant) ====
@@ -580,12 +589,35 @@ void run_benchmark(commandLine& P) {
         "1BTQ");
   }
 
+  // ==== 1BTQAsym (1-bit DB × int4-quantized query, AVX-512 VPDPBUSD) ====
+  // Same DB encoding as 1BTQ; query is rotated, max-abs scaled to [-7,+7]
+  // and stored as int8 (sign-extended). Per-pair score uses one
+  // VPDPBUSD per 64 dims with a 64-bit mask load from the DB sign bits.
+  // Closes most of the recall gap to Ref1BTQAsym at ~2-3x the per-pair
+  // cost of the symmetric 1BTQ kernel.
+  if (method == "1BTQAsym" || method == "All") {
+    std::cout << "\n--- 1BTQAsym ---" << std::endl;
+    parlay::internal::timer t;
+    t.start();
+    turboquant_1bit_asym::Model<Metric> model;
+    model.train(base);
+    auto enc = model.encode(base);
+    std::cout << "  encode: " << t.stop() << "s" << std::endl;
+
+    std::vector<turboquant_1bit_asym::Quantized_Query<Metric>> qqs(n_q);
+    parlay::parallel_for(0, n_q, [&](size_t i) { qqs[i] = model.quantize_query(queries[i]); });
+
+    recall_curve(
+        [&](size_t qi, size_t j) { return enc[j].distance(qqs[qi]); }, n_q, n_b, gt, k, kps,
+        "1BTQAsym");
+  }
+
   // ==== Ref1BTQAsym (scalar reference: 1-bit DB × full-float query) ====
   // DB encoding matches 1BTQ (rotate then sign-pack); the query is kept
   // as full-precision floats and scored against ±1 from the DB sign
   // bits. The scalar loop makes the math auditable. Use this to upper-
   // bound what the 1-bit-DB-asymmetric estimator family can achieve.
-  if (method == "Ref1BTQAsym" || method == "All") {
+  if (method == "Ref1BTQAsym") {
     std::cout << "\n--- Ref1BTQAsym ---" << std::endl;
     parlay::internal::timer t;
     t.start();
@@ -606,7 +638,7 @@ void run_benchmark(commandLine& P) {
   // Mirrors what production `turboquant_1bit.h` actually computes, but
   // as a plain scalar loop. Side-by-side with Ref1BTQAsym this isolates
   // the cost of sign-quantizing the query.
-  if (method == "Ref1BTQSym" || method == "All") {
+  if (method == "Ref1BTQSym") {
     std::cout << "\n--- Ref1BTQSym ---" << std::endl;
     parlay::internal::timer t;
     t.start();
@@ -658,11 +690,12 @@ void run_benchmark(commandLine& P) {
   if (method == "RabitQ8" || method == "All") run_rabitq(8, "RaBitQ-8bit");
 
   if (method != "TQ4" && method != "TurboQuant" && method != "TQ8" && method != "FastScan" &&
-      method != "1BTQ" && method != "Ref1BTQAsym" && method != "Ref1BTQSym" &&
+      method != "1BTQ" && method != "1BTQAsym" &&
+      method != "Ref1BTQAsym" && method != "Ref1BTQSym" &&
       method != "RabitQ" && method != "RabitQ1" && method != "RabitQ4" && method != "RabitQ8" &&
       method != "All") {
     std::cerr << "Unknown method: " << method
-              << " (TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All)"
+              << " (TQ4|TurboQuant|TQ8|FastScan|1BTQ|1BTQAsym|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All)"
               << std::endl;
   }
 }
@@ -671,7 +704,7 @@ int main(int argc, char* argv[]) {
                 "-i <base> [-q <queries> | -dataset_as_query] [-gt <gt>] [-k <k>] "
                 "[-dist_func L2|IP] "
                 "[-pq_method "
-                "TQ4|TurboQuant|TQ8|FastScan|1BTQ|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All] "
+                "TQ4|TurboQuant|TQ8|FastScan|1BTQ|1BTQAsym|Ref1BTQAsym|Ref1BTQSym|RabitQ|RabitQ1|RabitQ4|RabitQ8|All] "
                 "[-max_k_prime <N>] [-k_growth <r>] [-rabitq_bits <b>] [-fs_block <b>] "
                 "[-pcs]");
   std::string df = P.getOptionValue("-dist_func", "IP");

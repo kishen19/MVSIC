@@ -33,6 +33,7 @@
 #include "mvsic/core/quantization/pqtq_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
+#include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 
 // Params
@@ -156,6 +157,10 @@ struct quantizer_method_of<turboquant_1bit_mv::Model<M>, M> {
   static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::OneBitTQ;
 };
 template<bool M>
+struct quantizer_method_of<turboquant_1bit_asym_mv::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::OneBitTQAsym;
+};
+template<bool M>
 struct quantizer_method_of<turboquant_8bit_mv::Model<M>, M> {
   static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::EightBitTQ;
 };
@@ -213,6 +218,7 @@ struct MVQuantTypes {
   using TQ_Set = turboquant_mv::Quantized_Point_Cloud_Set<metric>;
   using PQTQ_Set = pqtq_mv::Quantized_Point_Cloud_Set<metric>;
   using OBTQ_Set = turboquant_1bit_mv::Quantized_Point_Cloud_Set<metric>;
+  using OBTQA_Set = turboquant_1bit_asym_mv::Quantized_Point_Cloud_Set<metric>;
   using EBTQ_Set = turboquant_8bit_mv::Quantized_Point_Cloud_Set<metric>;
   // ChPoint (Query) Alternate
   using PQ_Query = pq_mv::Quantized_Query_Point_Cloud<metric>;
@@ -221,6 +227,7 @@ struct MVQuantTypes {
   using TQ_Query = turboquant_mv::Quantized_Query_Point_Cloud<metric>;
   using PQTQ_Query = pqtq_mv::Quantized_Query_Point_Cloud<metric>;
   using OBTQ_Query = turboquant_1bit_mv::Quantized_Query_Point_Cloud<metric>;
+  using OBTQA_Query = turboquant_1bit_asym_mv::Quantized_Query_Point_Cloud<metric>;
   using EBTQ_Query = turboquant_8bit_mv::Quantized_Query_Point_Cloud<metric>;
   // Main Model Object
   using PQ_Model = pq_mv::Model<metric>;
@@ -229,14 +236,15 @@ struct MVQuantTypes {
   using TQ_Model = turboquant_mv::Model<metric>;
   using PQTQ_Model = pqtq_mv::Model<metric>;
   using OBTQ_Model = turboquant_1bit_mv::Model<metric>;
+  using OBTQA_Model = turboquant_1bit_asym_mv::Model<metric>;
   using EBTQ_Model = turboquant_8bit_mv::Model<metric>;
   // Unified Objects
   using QuantSet = std::variant<std::monostate, PQ_Set, FS_Set, RQ_Set, TQ_Set, PQTQ_Set, OBTQ_Set,
-                                EBTQ_Set>;
+                                EBTQ_Set, OBTQA_Set>;
   using QuantQuery = std::variant<std::monostate, PQ_Query, FS_Query, RQ_Query, TQ_Query,
-                                  PQTQ_Query, OBTQ_Query, EBTQ_Query>;
+                                  PQTQ_Query, OBTQ_Query, EBTQ_Query, OBTQA_Query>;
   using QuantModel = std::variant<std::monostate, PQ_Model, FS_Model, RQ_Model, TQ_Model,
-                                  PQTQ_Model, OBTQ_Model, EBTQ_Model>;
+                                  PQTQ_Model, OBTQ_Model, EBTQ_Model, OBTQA_Model>;
 };
 
 // Base Index Class
@@ -434,6 +442,11 @@ class Index {
         std::get<typename MVQT::OBTQ_Model>(Model).train(points);
         break;
       }
+      case QT::OneBitTQAsym: {
+        Model.template emplace<typename MVQT::OBTQA_Model>();
+        std::get<typename MVQT::OBTQA_Model>(Model).train(points);
+        break;
+      }
       case QT::EightBitTQ: {
         Model.template emplace<typename MVQT::EBTQ_Model>();
         std::get<typename MVQT::EBTQ_Model>(Model).train(points);
@@ -494,6 +507,7 @@ class Index {
       case QT::TurboQuant: return std::get<typename MVQT::TQ_Model>(Model).encode(points);
       case QT::SPQTQ: return std::get<typename MVQT::PQTQ_Model>(Model).encode(points);
       case QT::OneBitTQ: return std::get<typename MVQT::OBTQ_Model>(Model).encode(points);
+      case QT::OneBitTQAsym: return std::get<typename MVQT::OBTQA_Model>(Model).encode(points);
       case QT::EightBitTQ: return std::get<typename MVQT::EBTQ_Model>(Model).encode(points);
       case QT::None:
       default: return std::monostate{};
@@ -524,6 +538,8 @@ class Index {
       case QT::TurboQuant: return std::get<typename MVQT::TQ_Model>(Model).quantize_query(query);
       case QT::SPQTQ: return std::get<typename MVQT::PQTQ_Model>(Model).quantize_query(query);
       case QT::OneBitTQ: return std::get<typename MVQT::OBTQ_Model>(Model).quantize_query(query);
+      case QT::OneBitTQAsym:
+        return std::get<typename MVQT::OBTQA_Model>(Model).quantize_query(query);
       case QT::EightBitTQ:
         return std::get<typename MVQT::EBTQ_Model>(Model).quantize_query(query);
       case QT::None:
@@ -574,6 +590,10 @@ class Index {
       case QT::OneBitTQ:
         std::get<typename MVQT::OBTQ_Set>(s_var).distances_all(
             std::get<typename MVQT::OBTQ_Query>(q_var), out);
+        break;
+      case QT::OneBitTQAsym:
+        std::get<typename MVQT::OBTQA_Set>(s_var).distances_all(
+            std::get<typename MVQT::OBTQA_Query>(q_var), out);
         break;
       case QT::EightBitTQ:
         std::get<typename MVQT::EBTQ_Set>(s_var).distances_all(

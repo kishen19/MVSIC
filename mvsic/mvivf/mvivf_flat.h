@@ -106,6 +106,7 @@ class IndexMVIVFFlat : public Index<metric> {
       else if constexpr (std::is_same_v<L, turboquant_mv::Model<metric>>) quantization_mode = QT::TurboQuant;
       else if constexpr (std::is_same_v<L, pqtq_mv::Model<metric>>) quantization_mode = QT::SPQTQ;
       else if constexpr (std::is_same_v<L, turboquant_1bit_mv::Model<metric>>) quantization_mode = QT::OneBitTQ;
+      else if constexpr (std::is_same_v<L, turboquant_1bit_asym_mv::Model<metric>>) quantization_mode = QT::OneBitTQAsym;
       else if constexpr (std::is_same_v<L, turboquant_8bit_mv::Model<metric>>) quantization_mode = QT::EightBitTQ;
       else quantization_mode = QT::None;
     }
@@ -517,6 +518,8 @@ using IndexMVIVFFlatSPQTQIP     = IndexMVIVFFlat<false, false, pqtq_mv::Model<fa
 using IndexMVIVFFlatSPQTQL2     = IndexMVIVFFlat<true,  false, pqtq_mv::Model<true>>;
 using IndexMVIVFFlatOneBitTQIP  = IndexMVIVFFlat<false, false, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFFlatOneBitTQL2  = IndexMVIVFFlat<true,  false, turboquant_1bit_mv::Model<true>>;
+using IndexMVIVFFlatOneBitTQAsymIP = IndexMVIVFFlat<false, false, turboquant_1bit_asym_mv::Model<false>>;
+using IndexMVIVFFlatOneBitTQAsymL2 = IndexMVIVFFlat<true,  false, turboquant_1bit_asym_mv::Model<true>>;
 using IndexMVIVFFlatEightBitTQIP = IndexMVIVFFlat<false, false, turboquant_8bit_mv::Model<false>>;
 using IndexMVIVFFlatEightBitTQL2 = IndexMVIVFFlat<true,  false, turboquant_8bit_mv::Model<true>>;
 
@@ -533,6 +536,8 @@ using IndexMVIVFFlatCompressSPQTQIP     = IndexMVIVFFlat<false, true, pqtq_mv::M
 using IndexMVIVFFlatCompressSPQTQL2     = IndexMVIVFFlat<true,  true, pqtq_mv::Model<true>>;
 using IndexMVIVFFlatCompressOneBitTQIP  = IndexMVIVFFlat<false, true, turboquant_1bit_mv::Model<false>>;
 using IndexMVIVFFlatCompressOneBitTQL2  = IndexMVIVFFlat<true,  true, turboquant_1bit_mv::Model<true>>;
+using IndexMVIVFFlatCompressOneBitTQAsymIP = IndexMVIVFFlat<false, true, turboquant_1bit_asym_mv::Model<false>>;
+using IndexMVIVFFlatCompressOneBitTQAsymL2 = IndexMVIVFFlat<true,  true, turboquant_1bit_asym_mv::Model<true>>;
 using IndexMVIVFFlatCompressEightBitTQIP = IndexMVIVFFlat<false, true, turboquant_8bit_mv::Model<false>>;
 using IndexMVIVFFlatCompressEightBitTQL2 = IndexMVIVFFlat<true,  true, turboquant_8bit_mv::Model<true>>;
 

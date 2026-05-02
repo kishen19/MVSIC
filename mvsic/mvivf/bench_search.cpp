@@ -41,11 +41,13 @@ inline const char* variant_name(MVIVFVariant v) {
       fn.template operator()<Fam<metric, C, pqtq_mv::Model<metric>>>();                           \
     else if (qm == "1BTQ"  || qm == "1btq")                                                       \
       fn.template operator()<Fam<metric, C, turboquant_1bit_mv::Model<metric>>>();                \
+    else if (qm == "1BTQA" || qm == "1btqa")                                                      \
+      fn.template operator()<Fam<metric, C, turboquant_1bit_asym_mv::Model<metric>>>();           \
     else if (qm == "8BTQ"  || qm == "8btq")                                                       \
       fn.template operator()<Fam<metric, C, turboquant_8bit_mv::Model<metric>>>();                \
     else {                                                                                        \
       std::cerr << "Unknown -quant_method: " << qm                                                \
-                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ, 8BTQ)" << std::endl;                 \
+                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ, 1BTQA, 8BTQ)" << std::endl;          \
       std::exit(1);                                                                               \
     }                                                                                             \
   } while (0)
@@ -193,7 +195,7 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "  -wgh_kmeans 0|1 (1)   -s <N> (0)\n\n"
     "Quantization (picks the concrete templated class for load/build):\n"
     "  -qc 0|1                        CompressCenters (TQ-quantize centers); default 0\n"
-    "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|8BTQ    Leaf quantizer (default None)\n"
+    "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|1BTQA|8BTQ    Leaf quantizer (default None)\n"
     "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
     "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n\n"
     "Search sweep:\n"
