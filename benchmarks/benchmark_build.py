@@ -30,6 +30,9 @@ indices:
           # for mvivf_spill only:
           num_spill: 2           # a -> top-a spill at the root (level 0)
           num_spill_l2: 1        # b -> top-b spill at the second level (level 1)
+          # opt-in MVIVF k-means assignment via the 8-bit TurboQuant
+          # VPDPBUSD panel kernel (centroid update still float). Default false.
+          # build_with_8btq: false
 ```
 
 Layout on disk
@@ -109,6 +112,7 @@ def _index_params_dict(p) -> dict:
         "num_spill_l2": int(p.num_spill_l2),
         "s": int(p.s),
         "compress_input": bool(p.compress_input),
+        "build_with_8btq": bool(p.build_with_8btq),
         "mvclus": {
             "niters": int(p.mvclus.niters),
             "max_point_clouds_per_cluster": int(p.mvclus.max_point_clouds_per_cluster),

@@ -49,7 +49,11 @@ struct SearchParams {
   bool root_m2m = true;
 
   // mvivf search params
-  static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0) {
+  static SearchParams mvivf(size_t k, size_t nprobes, size_t num_rerank = 0,
+                            bool tq8_rerank = true,
+                            QueryCompression query_compression = QueryCompression::None,
+                            float query_compression_threshold = 0.7f,
+                            bool compress_rerank = false) {
     SearchParams params;
     params.method = "mvivf";
     params.k = k;
@@ -58,11 +62,19 @@ struct SearchParams {
     assert(nprobes > 0);
     params.num_rerank = num_rerank;
     assert(num_rerank == 0 || num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // mvivf_spill search params
-  static SearchParams mvivf_spill(size_t k, size_t nprobes, size_t num_rerank = 0) {
+  static SearchParams mvivf_spill(size_t k, size_t nprobes, size_t num_rerank = 0,
+                                  bool tq8_rerank = true,
+                                  QueryCompression query_compression = QueryCompression::None,
+                                  float query_compression_threshold = 0.7f,
+                                  bool compress_rerank = false) {
     SearchParams params;
     params.method = "mvivf_spill";
     params.k = k;
@@ -71,11 +83,19 @@ struct SearchParams {
     assert(nprobes > 0);
     params.num_rerank = num_rerank;
     assert(num_rerank == 0 || num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // mvivf_flat search params
-  static SearchParams mvivf_flat(size_t k, size_t nprobes, size_t num_rerank = 0) {
+  static SearchParams mvivf_flat(size_t k, size_t nprobes, size_t num_rerank = 0,
+                                 bool tq8_rerank = true,
+                                 QueryCompression query_compression = QueryCompression::None,
+                                 float query_compression_threshold = 0.7f,
+                                 bool compress_rerank = false) {
     SearchParams params;
     params.method = "mvivf_flat";
     params.k = k;
@@ -84,23 +104,38 @@ struct SearchParams {
     assert(nprobes > 0);
     params.num_rerank = num_rerank;
     assert(num_rerank == 0 || num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // vamana
-  static SearchParams vamana(size_t k, size_t L, double cut = 1.35, size_t num_rerank = 0) {
+  static SearchParams vamana(size_t k, size_t L, double cut = 1.35, size_t num_rerank = 0,
+                             bool tq8_rerank = true,
+                             QueryCompression query_compression = QueryCompression::None,
+                             float query_compression_threshold = 0.7f,
+                             bool compress_rerank = false) {
     SearchParams params;
     params.method = "vamana";
     params.k = k;
     params.L = L;
     params.cut = cut;
     params.num_rerank = num_rerank;
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // muvera
+  // Note: muvera does NOT use query_compression here (the field exists on
+  // SearchParams for cross-method uniformity, but the muvera search path
+  // does not benefit from it; do not surface it in the factory).
   static SearchParams muvera(size_t k, size_t L, size_t num_rerank, double cut = 1.35,
-                             bool norerank = false) {
+                             bool norerank = false, bool tq8_rerank = true) {
     SearchParams params;
     params.method = "muvera";
     params.k = k;
@@ -109,12 +144,16 @@ struct SearchParams {
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
     return params;
   }
 
   // mean_pooling
   static SearchParams mpool(size_t k, size_t L, size_t num_rerank, double cut = 1.35,
-                            bool norerank = false) {
+                            bool norerank = false, bool tq8_rerank = true,
+                            QueryCompression query_compression = QueryCompression::None,
+                            float query_compression_threshold = 0.7f,
+                            bool compress_rerank = false) {
     SearchParams params;
     params.method = "mpool";
     params.k = k;
@@ -123,11 +162,19 @@ struct SearchParams {
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // svh_ivf search params
-  static SearchParams svh_ivf(size_t k, size_t nprobes, size_t num_rerank, bool norerank = false) {
+  static SearchParams svh_ivf(size_t k, size_t nprobes, size_t num_rerank, bool norerank = false,
+                              bool tq8_rerank = true,
+                              QueryCompression query_compression = QueryCompression::None,
+                              float query_compression_threshold = 0.7f,
+                              bool compress_rerank = false) {
     SearchParams params;
     params.method = "svh_ivf";
     params.k = k;
@@ -137,12 +184,19 @@ struct SearchParams {
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // svh_graph search params
   static SearchParams svh_graph(size_t k, size_t L, size_t num_rerank, double cut = 1.35,
-                                bool norerank = false) {
+                                bool norerank = false, bool tq8_rerank = true,
+                                QueryCompression query_compression = QueryCompression::None,
+                                float query_compression_threshold = 0.7f,
+                                bool compress_rerank = false) {
     SearchParams params;
     params.method = "svh_graph";
     params.k = k;
@@ -152,17 +206,28 @@ struct SearchParams {
     params.norerank = norerank;
     params.num_rerank = num_rerank;
     assert(num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 
   // flat (brute-force) search params
-  static SearchParams flat(size_t k, size_t num_rerank = 0) {
+  static SearchParams flat(size_t k, size_t num_rerank = 0, bool tq8_rerank = true,
+                           QueryCompression query_compression = QueryCompression::None,
+                           float query_compression_threshold = 0.7f,
+                           bool compress_rerank = false) {
     SearchParams params;
     params.method = "flat";
     params.k = k;
     assert(k > 0);
     params.num_rerank = num_rerank;
     assert(num_rerank == 0 || num_rerank >= k);
+    params.tq8_rerank = tq8_rerank;
+    params.query_compression = query_compression;
+    params.query_compression_threshold = query_compression_threshold;
+    params.compress_rerank = compress_rerank;
     return params;
   }
 

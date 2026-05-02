@@ -42,6 +42,9 @@ indices:
               # query_compression: ["None", "Wards"]
               # query_compression_threshold: [0.7]
               # compress_rerank: [false]
+              # optional: 8-bit TurboQuant rerank gate. Defaults to true; set
+              # to false to fall back to exact-float rerank for any method.
+              # tq8_rerank: [true]
               config:
                 - {name: "", num_rerank: 0}
 ```
@@ -287,13 +290,15 @@ def _expand_search_params(search_config: dict, variable_param: str):
 def _build_search_params(method_name: str, p: dict):
     """
     Map a parameter dict to a SearchParams object.
-    Pulls out the optional query-compression fields and applies them
-    after construction.
+    Pulls out the optional query-compression and tq8_rerank fields and
+    applies them after construction so the underlying factory signatures
+    don't need to be method-name aware.
     """
     p = dict(p)
     qc_name = p.pop('query_compression', None)
     qc_thr = p.pop('query_compression_threshold', None)
     qc_rerank = p.pop('compress_rerank', None)
+    tq8_rerank = p.pop('tq8_rerank', None)
 
     f = _search_factory(method_name)
     sp = f(**p)
@@ -311,6 +316,8 @@ def _build_search_params(method_name: str, p: dict):
         sp.query_compression_threshold = float(qc_thr)
     if qc_rerank is not None:
         sp.compress_rerank = bool(qc_rerank)
+    if tq8_rerank is not None:
+        sp.tq8_rerank = bool(tq8_rerank)
     return sp
 
 

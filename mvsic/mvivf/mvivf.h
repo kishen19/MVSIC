@@ -201,10 +201,9 @@ class IndexMVIVF : public Index<metric> {
   uint64_t build_t0_us_ = 0;
 
   static inline uint64_t now_us_() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
   }
 
   void reset_level_timings_() {
@@ -223,11 +222,13 @@ class IndexMVIVF : public Index<metric> {
 
   static inline void atomic_min_(std::atomic<uint64_t>& dst, uint64_t v) {
     uint64_t cur = dst.load(std::memory_order_relaxed);
-    while (v < cur && !dst.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+    while (v < cur && !dst.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+    }
   }
   static inline void atomic_max_(std::atomic<uint64_t>& dst, uint64_t v) {
     uint64_t cur = dst.load(std::memory_order_relaxed);
-    while (v > cur && !dst.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {}
+    while (v > cur && !dst.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+    }
   }
 
   void print_level_timings_() const {
@@ -237,7 +238,8 @@ class IndexMVIVF : public Index<metric> {
       return os.str();
     };
     std::cout << "[MVIVF] Per-level build breakdown:\n";
-    std::cout << "[MVIVF]   sum_cpu = sum across all workers; wall = (last_exit - first_entry) at level\n";
+    std::cout << "[MVIVF]   sum_cpu = sum across all workers; wall = (last_exit - first_entry) at "
+                 "level\n";
     std::cout << "[MVIVF]   "
               << "  d   internal     leaves     n_pts"
               << "  cpu_clus(s)  cpu_split(s)  cpu_leafenc(s)   wall(s)\n";
@@ -252,14 +254,9 @@ class IndexMVIVF : public Index<metric> {
       uint64_t lo = level_last_out_us_[d].load(std::memory_order_relaxed);
       uint64_t wall = (fi == UINT64_MAX || lo <= fi) ? 0 : (lo - fi);
       if (ni == 0 && nl == 0 && uc == 0 && us == 0 && ue == 0) continue;
-      std::cout << "[MVIVF]   " << std::setw(3) << d
-                << std::setw(11) << ni
-                << std::setw(11) << nl
-                << std::setw(10) << np
-                << std::setw(13) << fmt_s(uc)
-                << std::setw(14) << fmt_s(us)
-                << std::setw(16) << fmt_s(ue)
-                << std::setw(10) << fmt_s(wall) << "\n";
+      std::cout << "[MVIVF]   " << std::setw(3) << d << std::setw(11) << ni << std::setw(11) << nl
+                << std::setw(10) << np << std::setw(13) << fmt_s(uc) << std::setw(14) << fmt_s(us)
+                << std::setw(16) << fmt_s(ue) << std::setw(10) << fmt_s(wall) << "\n";
     }
     std::cout.flush();
   }
@@ -425,8 +422,8 @@ class IndexMVIVF : public Index<metric> {
     compress_internal_centers_();
     double t_compress_centers = t.stop();
     if (params.verbose >= 1) {
-      std::cout << "[MVIVF] Leaf-data computed: "
-                << (t_compute_leaf_flat + t_compress_centers) << " sec ("
+      std::cout << "[MVIVF] Leaf-data computed: " << (t_compute_leaf_flat + t_compress_centers)
+                << " sec ("
                 << "compute_leaf_flat=" << t_compute_leaf_flat << "s, "
                 << "compress_internal_centers=" << t_compress_centers << "s)" << std::endl;
     }
@@ -549,8 +546,7 @@ class IndexMVIVF : public Index<metric> {
           node_t* child = new node_t();
           node->children[i] = child;
           const bool depth_exhausted = (params.max_depth > 0) && (depth + 1 >= params.max_depth);
-          const bool will_be_leaf =
-              depth_exhausted || child_points.size() <= params.max_leaf_size;
+          const bool will_be_leaf = depth_exhausted || child_points.size() <= params.max_leaf_size;
 #if MVIVF_BUILD_STATS
           level_us_split_[bucket].fetch_add(now_us_() - t_child_split_start,
                                             std::memory_order_relaxed);
@@ -661,10 +657,9 @@ class IndexMVIVF : public Index<metric> {
   // populating it with at least `root->children.size()` entries that match
   // root->children index-for-index. The bytes for root->compressed_centers are
   // expected to be accounted for at the caller's M2M step, not here.
-  GreedySearchResult greedy_search(const ChPoint& query, const CenterQuery& q_center,
-                                   size_t nprobes,
-                                   const std::pair<uint32_t, float>* precomputed_root_dists =
-                                       nullptr) const {
+  GreedySearchResult greedy_search(
+      const ChPoint& query, const CenterQuery& q_center, size_t nprobes,
+      const std::pair<uint32_t, float>* precomputed_root_dists = nullptr) const {
     using score_node = std::pair<float, node_t*>;
     auto less = [](const score_node& a, const score_node& b) {
       return a.first < b.first || (a.first == b.first && a.second < b.second);
@@ -899,10 +894,8 @@ class IndexMVIVF : public Index<metric> {
       bytes[i] = db.cloud_size(static_cast<size_t>(id)) * per_vec_bytes;
     });
 
-    parlay::sort_inplace(scored,
-                         [](const auto& a, const auto& b) { return a.second < b.second; });
-    parlay::parallel_for(0, out_results.size(),
-                         [&](size_t i) { out_results[i] = scored[i]; });
+    parlay::sort_inplace(scored, [](const auto& a, const auto& b) { return a.second < b.second; });
+    parlay::parallel_for(0, out_results.size(), [&](size_t i) { out_results[i] = scored[i]; });
     return parlay::reduce(bytes);
   }
 
@@ -993,8 +986,7 @@ class IndexMVIVF : public Index<metric> {
     if (search_params.num_rerank > 0) {
       size_t num_rerank = std::min(search_params.num_rerank, visited.size());
       if (search_params.tq8_rerank) {
-        bytes_accessed +=
-            rerank_tq8_(rerank_query, points, visited, num_rerank, final_results);
+        bytes_accessed += rerank_tq8_(rerank_query, points, visited, num_rerank, final_results);
       } else {
         bytes_accessed += this->rerank(rerank_query, points, visited, num_rerank, final_results);
       }
@@ -1048,7 +1040,7 @@ class IndexMVIVF : public Index<metric> {
   std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t> search_all_new(
       const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
       const SearchParams& search_params) {
-    if (search_params.nprobes <= 16) {
+    if (search_params.nprobes <= 2) {
       return Index<metric>::search_all(query_points, points, search_params);
     }
     parlay::internal::timer t;
@@ -1121,7 +1113,8 @@ class IndexMVIVF : public Index<metric> {
           t.start();
           turboquant_mv::FusedQueryBatch<metric> fq;
           std::vector<const CenterQuery*> q_ptrs(num_q);
-          for (size_t i = 0; i < num_q; ++i) q_ptrs[i] = &q_centers[i];
+          for (size_t i = 0; i < num_q; ++i)
+            q_ptrs[i] = &q_centers[i];
           fq.Build(q_ptrs);
           root_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
               num_q * num_root_children);
@@ -1162,9 +1155,8 @@ class IndexMVIVF : public Index<metric> {
       bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
       const std::pair<uint32_t, float>* root_row =
           (use_root_m2m && !use_flat) ? root_dists.data() + i * num_root_children : nullptr;
-      GreedySearchResult gs = use_flat
-                                  ? flat_leaf_search(eff_queries[i], q_center, nprobes)
-                                  : greedy_search(eff_queries[i], q_center, nprobes, root_row);
+      GreedySearchResult gs = use_flat ? flat_leaf_search(eff_queries[i], q_center, nprobes)
+                                       : greedy_search(eff_queries[i], q_center, nprobes, root_row);
       dist_cmps_gs[i] = static_cast<size_t>(gs.stats[0]);
       bytes_gs[i] = gs.bytes_accessed;
       // gs.stats layout: [dist_cmps, t_dists, t_beam, t_rest, t_top_level].
@@ -1181,8 +1173,7 @@ class IndexMVIVF : public Index<metric> {
     const double frac = sum_greedy_cpu > 0.0 ? sum_top_cpu / sum_greedy_cpu : 0.0;
     std::cout << "[MVIVF] Greedy Search: " << greedy_wall << " sec" << std::endl;
     std::cout << "[MVIVF] Greedy Search top-level: " << sum_top_cpu
-              << " sec CPU (sum across queries; "
-              << sum_greedy_cpu << " sec total greedy CPU; "
+              << " sec CPU (sum across queries; " << sum_greedy_cpu << " sec total greedy CPU; "
               << (frac * 100.0) << "% at top level)" << std::endl;
     t.reset();
     bytes_accessed += parlay::reduce(bytes_gs);
@@ -1358,8 +1349,8 @@ class IndexMVIVF : public Index<metric> {
           if (search_params.num_rerank > 0) {
             size_t actual_rerank = std::min(num_rerank_sb, top_cands.size());
             if (search_params.tq8_rerank) {
-              bytes_accessed_rerank[q_id] = rerank_tq8_(rerank_queries[q_id], points, top_cands,
-                                                        actual_rerank, q_final);
+              bytes_accessed_rerank[q_id] =
+                  rerank_tq8_(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
             } else {
               bytes_accessed_rerank[q_id] =
                   this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
@@ -1466,16 +1457,14 @@ class IndexMVIVF : public Index<metric> {
       t_db.start();
       ensure_tq8_rerank_db_(points);
       t_db.stop();
-      std::cout << "[MVIVF] TQ8 DB Encode (one-time): " << t_db.total_time() << " sec"
-                << std::endl;
+      std::cout << "[MVIVF] TQ8 DB Encode (one-time): " << t_db.total_time() << " sec" << std::endl;
     }
     t.start();
     auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
     auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
     parlay::parallel_for(0, num_q, [&](size_t q_id) {
       size_t base_idx = q_id * max_cands;
-      size_t num_scattered =
-          std::min(cand_counts[q_id].load(std::memory_order_relaxed), max_cands);
+      size_t num_scattered = std::min(cand_counts[q_id].load(std::memory_order_relaxed), max_cands);
       auto* cands = all_candidates.begin() + base_idx;
 
       // Compact: remove sentinel entries (UINT32_MAX) from TopKIntoUninitialized padding
@@ -1505,8 +1494,8 @@ class IndexMVIVF : public Index<metric> {
       if (search_params.num_rerank > 0) {
         size_t actual_rerank = std::min(num_rerank, top_cands.size());
         if (search_params.tq8_rerank) {
-          bytes_accessed_rerank[q_id] = rerank_tq8_(rerank_queries[q_id], points, top_cands,
-                                                    actual_rerank, q_final);
+          bytes_accessed_rerank[q_id] =
+              rerank_tq8_(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
         } else {
           bytes_accessed_rerank[q_id] =
               this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
@@ -1528,6 +1517,12 @@ class IndexMVIVF : public Index<metric> {
     std::cout << "[MVIVF] Dist Cmps: " << dist_cmps << std::endl;
 
     return std::make_pair(std::move(final_results), bytes_accessed);
+  }
+
+  std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t> search_all(
+      const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
+      const SearchParams& search_params) override {
+    return search_all_new(query_points, points, search_params);
   }
 
   // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-name: "Vamana Ablation (search: R and alpha sweep, TQ4)"
+name: "Vamana Ablation (search: alpha sweep, TQ4)"
 
 datasets:
   - name: arguana
@@ -33,33 +33,14 @@ indices:
         search_configs: &vamana_k10
           - name: k=10
             params:
+              tq8_rerank: [true]
               L: [64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
               config:
                 - { name: nr0,   num_rerank: 0 }
                 - { name: nr20,  num_rerank: 20 }
-      - build_name: vamana_R64_a0.9
-        build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 0.9 }
-        variants:
-          - { name: tq4, quantizer: TQ }
-        search_configs: *vamana_k10
-      - build_name: vamana_R64_a0.95
-        build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 0.95 }
-        variants:
-          - { name: tq4, quantizer: TQ }
-        search_configs: *vamana_k10
-      - build_name: vamana_R128_a1.0
-        build_params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 1.0 }
-        variants:
-          - { name: tq4, quantizer: TQ }
-        search_configs: *vamana_k10
-      - build_name: vamana_R128_a0.9
-        build_params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 0.9 }
-        variants:
-          - { name: tq4, quantizer: TQ }
-        search_configs: *vamana_k10
-      - build_name: vamana_R128_a0.95
-        build_params: { <<: *vamana_defaults, R: 128, L: 256, alpha: 0.95 }
+      - build_name: vamana_R64_a1.2
+        build_params: { <<: *vamana_defaults, R: 64, L: 128, alpha: 1.2 }
         variants:
           - { name: tq4, quantizer: TQ }
         search_configs: *vamana_k10

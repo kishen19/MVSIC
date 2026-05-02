@@ -32,6 +32,7 @@ indices:
         search_configs: &svh_graph_k10
           - name: k=10
             params:
+              tq8_rerank: [true]
               L: [64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
               config:

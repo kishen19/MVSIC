@@ -13,7 +13,8 @@ datasets:
   - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa     }
 
 indices:
-  # ----- MVIVF. TQ8bit / TQ4bit / TQ1bit are search-time variants, not build params. -----
+  # ----- MVIVF. TQ4/TQ1/TQ8 are search-time variants; build `build_with_8btq` uses
+  # 8-bit TurboQuant for the MVIVF k-means assignment path. -----
   - name: mvivf
     metric: ip
     build_configs:
@@ -26,17 +27,20 @@ indices:
           niters: 5
           s: 0
           max_point_clouds_per_cluster: 100
+          build_with_8btq: true
 
   # ----- MUVERA: d_fde=2560, Vamana R=200 / L=600. -----
+  # Ablations: d_fde=10240 is the winner
   - name: muvera
     metric: ip
     build_configs:
-      - name: muvera_2560_R200_L600
+      - name: muvera_10240_R200_L600
         params:
           verbose: 1
-          d_fde: 2560
+          d_fde: 10240
           R: 200
           L: 600
+          alpha: 1
 
   # ----- MV-Vamana. -----
   - name: vamana

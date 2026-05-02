@@ -100,7 +100,7 @@ struct IndexParams {
                            uint32_t max_points_per_centroid_inner_kmeans = 20,
                            std::string init = "Random", uint32_t seed = 0,
                            bool use_weighted_inner_kmeans = true, uint32_t s = 0,
-                           uint32_t max_depth = 0) {
+                           uint32_t max_depth = 0, bool build_with_8btq = false) {
     IndexParams params;
     params.method = "mvivf";
     params.k_per_level = k_per_level;
@@ -112,6 +112,7 @@ struct IndexParams {
         niters, max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans,
         (params.verbose > 0) ? params.verbose - 1 : 0, init, seed, use_weighted_inner_kmeans);
     params.s = s;
+    params.build_with_8btq = build_with_8btq;
     return params;
   }
 
@@ -120,7 +121,8 @@ struct IndexParams {
                                 uint32_t max_point_clouds_per_cluster = 100,
                                 uint32_t max_points_per_centroid_inner_kmeans = 20,
                                 std::string init = "Random", uint32_t seed = 0,
-                                bool use_weighted_inner_kmeans = true, uint32_t s = 0) {
+                                bool use_weighted_inner_kmeans = true, uint32_t s = 0,
+                                bool build_with_8btq = false) {
     IndexParams params;
     params.method = "mvivf_flat";
     params.k_per_level = k_per_level;
@@ -130,6 +132,7 @@ struct IndexParams {
         niters, max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans,
         (params.verbose > 0) ? params.verbose - 1 : 0, init, seed, use_weighted_inner_kmeans);
     params.s = s;
+    params.build_with_8btq = build_with_8btq;
     return params;
   }
 
@@ -140,7 +143,8 @@ struct IndexParams {
                                  uint32_t max_points_per_centroid_inner_kmeans = 20,
                                  std::string init = "Random", uint32_t seed = 0,
                                  bool use_weighted_inner_kmeans = true, uint32_t s = 0,
-                                 uint32_t max_depth = 0, uint32_t num_spill_l2 = 1) {
+                                 uint32_t max_depth = 0, uint32_t num_spill_l2 = 1,
+                                 bool build_with_8btq = false) {
     IndexParams params;
     params.method = "mvivf_spill";
     params.k_per_level = k_per_level;
@@ -154,6 +158,7 @@ struct IndexParams {
         niters, max_point_clouds_per_cluster, max_points_per_centroid_inner_kmeans,
         (params.verbose > 0) ? params.verbose - 1 : 0, init, seed, use_weighted_inner_kmeans);
     params.s = s;
+    params.build_with_8btq = build_with_8btq;
     return params;
   }
 

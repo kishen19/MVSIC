@@ -88,26 +88,29 @@ void register_common(py::module_& m) {
       .def_readwrite("two_pass", &mvsic::IndexParams::two_pass)
       .def_readwrite("pq", &mvsic::IndexParams::pq)
       .def_readwrite("max_points_per_centroid", &mvsic::IndexParams::max_points_per_centroid)
+      .def_readwrite("build_with_8btq", &mvsic::IndexParams::build_with_8btq)
       .def_static("mvivf", &mvsic::IndexParams::mvivf, py::arg("k_per_level") = 0,
                   py::arg("max_leaf_size") = 500, py::arg("compress_input") = false,
                   py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 100,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
-                  py::arg("s") = 0, py::arg("max_depth") = 0)
+                  py::arg("s") = 0, py::arg("max_depth") = 0,
+                  py::arg("build_with_8btq") = false)
       .def_static("mvivf_flat", &mvsic::IndexParams::mvivf_flat, py::arg("k_per_level") = 0,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 100,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
-                  py::arg("s") = 0)
+                  py::arg("s") = 0, py::arg("build_with_8btq") = false)
       .def_static("mvivf_spill", &mvsic::IndexParams::mvivf_spill, py::arg("k_per_level") = 0,
                   py::arg("max_leaf_size") = 500, py::arg("num_spill") = 2,
                   py::arg("compress_input") = false, py::arg("verbose") = 0, py::arg("niters") = 5,
                   py::arg("max_point_clouds_per_cluster") = 100,
                   py::arg("max_points_per_centroid_inner_kmeans") = 20, py::arg("init") = "Random",
                   py::arg("seed") = 0, py::arg("use_weighted_inner_kmeans") = true,
-                  py::arg("s") = 0, py::arg("max_depth") = 0, py::arg("num_spill_l2") = 1)
+                  py::arg("s") = 0, py::arg("max_depth") = 0, py::arg("num_spill_l2") = 1,
+                  py::arg("build_with_8btq") = false)
       .def_static(
           "muvera_custom", &mvsic::IndexParams::muvera_custom, py::arg("num_repetitions") = 20,
           py::arg("num_simhash_projections") = 4, py::arg("seed") = 1,
@@ -150,42 +153,79 @@ void register_common(py::module_& m) {
                   py::arg("num_clusters_per_block") = 16, py::arg("num_points_per_cluster") = 100,
                   py::arg("rabitq_bits") = 4);
 
-  auto sp =
-      py::class_<mvsic::SearchParams>(m, "SearchParams")
-          .def(py::init([]() { return mvsic::SearchParams(); }))
-          .def_readwrite("method", &mvsic::SearchParams::method)
-          .def_readwrite("k", &mvsic::SearchParams::k)
-          .def_readwrite("num_rerank", &mvsic::SearchParams::num_rerank)
-          .def_readwrite("nprobes", &mvsic::SearchParams::nprobes)
-          .def_readwrite("L", &mvsic::SearchParams::L)
-          .def_readwrite("cut", &mvsic::SearchParams::cut)
-          .def_readwrite("norerank", &mvsic::SearchParams::norerank)
-          .def_readwrite("query_compression", &mvsic::SearchParams::query_compression)
-          .def_readwrite("query_compression_threshold",
-                         &mvsic::SearchParams::query_compression_threshold)
-          .def_readwrite("compress_rerank", &mvsic::SearchParams::compress_rerank)
-          .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
-                      py::arg("num_rerank") = 0)
-          .def_static("mvivf_spill", &mvsic::SearchParams::mvivf_spill, py::arg("k"),
-                      py::arg("nprobes"), py::arg("num_rerank") = 0)
-          .def_static("mvivf_flat", &mvsic::SearchParams::mvivf_flat, py::arg("k"),
-                      py::arg("nprobes"), py::arg("num_rerank") = 0)
-          .def_static("vamana", &mvsic::SearchParams::vamana, py::arg("k"), py::arg("L"),
-                      py::arg("cut") = 1.35, py::arg("num_rerank") = 0)
-          .def_static("muvera", &mvsic::SearchParams::muvera, py::arg("k"), py::arg("L"),
-                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
-          .def_static("mpool", &mvsic::SearchParams::mpool, py::arg("k"), py::arg("L"),
-                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false)
-          .def_static("svh_ivf", &mvsic::SearchParams::svh_ivf, py::arg("k"), py::arg("nprobes"),
-                      py::arg("num_rerank"), py::arg("norerank") = false)
-          .def_static("svh_graph", &mvsic::SearchParams::svh_graph, py::arg("k"), py::arg("L"),
-                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false);
-
+  // QueryCompression must be registered before any SearchParams::def_static that
+  // uses QueryCompression::None as a py::arg default ("type not registered yet").
+  auto sp = py::class_<mvsic::SearchParams>(m, "SearchParams");
   py::enum_<mvsic::SearchParams::QueryCompression>(sp, "QueryCompression")
       .value("NONE", mvsic::SearchParams::QueryCompression::None)
       .value("CARVE", mvsic::SearchParams::QueryCompression::Carve)
       .value("WARDS", mvsic::SearchParams::QueryCompression::Wards)
       .export_values();
+
+  sp.def(py::init([]() { return mvsic::SearchParams(); }))
+      .def_readwrite("method", &mvsic::SearchParams::method)
+      .def_readwrite("k", &mvsic::SearchParams::k)
+      .def_readwrite("num_rerank", &mvsic::SearchParams::num_rerank)
+      .def_readwrite("nprobes", &mvsic::SearchParams::nprobes)
+      .def_readwrite("L", &mvsic::SearchParams::L)
+      .def_readwrite("cut", &mvsic::SearchParams::cut)
+      .def_readwrite("norerank", &mvsic::SearchParams::norerank)
+      .def_readwrite("tq8_rerank", &mvsic::SearchParams::tq8_rerank)
+      .def_readwrite("query_compression", &mvsic::SearchParams::query_compression)
+      .def_readwrite("query_compression_threshold",
+                     &mvsic::SearchParams::query_compression_threshold)
+      .def_readwrite("compress_rerank", &mvsic::SearchParams::compress_rerank)
+      .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
+                      py::arg("num_rerank") = 0, py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false)
+          .def_static("mvivf_spill", &mvsic::SearchParams::mvivf_spill, py::arg("k"),
+                      py::arg("nprobes"), py::arg("num_rerank") = 0,
+                      py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false)
+          .def_static("mvivf_flat", &mvsic::SearchParams::mvivf_flat, py::arg("k"),
+                      py::arg("nprobes"), py::arg("num_rerank") = 0,
+                      py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false)
+          .def_static("vamana", &mvsic::SearchParams::vamana, py::arg("k"), py::arg("L"),
+                      py::arg("cut") = 1.35, py::arg("num_rerank") = 0,
+                      py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false)
+          .def_static("muvera", &mvsic::SearchParams::muvera, py::arg("k"), py::arg("L"),
+                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false,
+                      py::arg("tq8_rerank") = true)
+          .def_static("mpool", &mvsic::SearchParams::mpool, py::arg("k"), py::arg("L"),
+                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false,
+                      py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false)
+          .def_static("svh_ivf", &mvsic::SearchParams::svh_ivf, py::arg("k"), py::arg("nprobes"),
+                      py::arg("num_rerank"), py::arg("norerank") = false,
+                      py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false)
+          .def_static("svh_graph", &mvsic::SearchParams::svh_graph, py::arg("k"), py::arg("L"),
+                      py::arg("num_rerank"), py::arg("cut") = 1.35, py::arg("norerank") = false,
+                      py::arg("tq8_rerank") = true,
+                      py::arg("query_compression") =
+                          mvsic::SearchParams::QueryCompression::None,
+                      py::arg("query_compression_threshold") = 0.7f,
+                      py::arg("compress_rerank") = false);
 
   //======================================
   // Point Cloud and Point Types

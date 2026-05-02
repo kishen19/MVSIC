@@ -23,6 +23,7 @@ indices:
           niters: 5
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true
           num_spill: 2
       - name: spill_s4
         params: { <<: *spill_defaults, num_spill: 4 }

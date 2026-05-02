@@ -29,6 +29,7 @@ indices:
           niters: 0
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true
       - name: mvivf_k0_l100_d0_nit1
         params: { <<: *stage3_defaults, niters: 1 }
       - name: mvivf_k0_l100_d0_nit5

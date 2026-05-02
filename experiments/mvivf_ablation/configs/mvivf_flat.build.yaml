@@ -18,6 +18,7 @@ indices:
           niters: 5
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true
       - name: flat_256
         params: { <<: *flat_defaults, k_per_level: 256 }
       - name: flat_512
