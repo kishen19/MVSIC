@@ -116,19 +116,24 @@ def _pareto_curve(xs: np.ndarray, ys: np.ndarray,
     return fx[keep_idx], fy[keep_idx]
 
 
+def _r_from_build(build: str) -> int:
+    m = re.search(r"_R(\d+)", build)
+    return int(m.group(1)) if m else 10**9
+
+
+def _alpha_from_build(build: str) -> float:
+    """Parse `_a<number>` as alpha (e.g. `..._a1.0`, `..._a1.2`). Same as SVH graph plot."""
+    m = re.search(r"_a(\d+(?:\.\d+)?)", build)
+    return float(m.group(1)) if m else 99.0
+
+
 def _build_sort_key(build: str) -> tuple[int, float]:
-    m_r = re.search(r"_R(\d+)", build)
-    m_a = re.search(r"_a(\d+)", build)
-    r = int(m_r.group(1)) if m_r else 10**9
-    a = (int(m_a.group(1)) / 10.0) if m_a else 99.0
-    return r, a
+    return _r_from_build(build), _alpha_from_build(build)
 
 
 def _build_label(build: str) -> str:
-    r, a = _build_sort_key(build)
-    if r < 10**9 and a < 99.0:
-        return f"R={r}, alpha={a:.1f}"
-    return build
+    a = _alpha_from_build(build)
+    return f"alpha={a:g}" if a < 99.0 else build
 
 
 def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None:
@@ -154,6 +159,17 @@ def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> Non
             fx, fy, marker="o", markersize=4.5, linewidth=1.9,
             color=colors[b], label=_build_label(b), zorder=3
         )
+
+    parts = [
+        sub[sub["build"] == b]["recall_k_k"].to_numpy(dtype=float)
+        for b in builds
+        if not sub[sub["build"] == b].empty
+    ]
+    if parts:
+        lo = float(np.min(np.concatenate(parts)))
+        ax.set_xlim(max(0.0, lo - 0.02), 1.0)
+    else:
+        ax.set_xlim(0.0, 1.0)
 
     ax.set_xlabel("Recall@k")
     ax.set_ylabel("QPS (per-query)")

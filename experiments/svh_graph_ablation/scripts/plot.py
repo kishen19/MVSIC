@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SVH Graph ablation Pareto plots (latency only, no breakdown bars)."""
+"""SVH Graph ablation Pareto plots: side-by-side Recall (1@k) vs QPS and Recall (k@k) vs QPS."""
 from __future__ import annotations
 
 import argparse
@@ -116,19 +116,77 @@ def _pareto_curve(xs: np.ndarray, ys: np.ndarray,
     return fx[keep_idx], fy[keep_idx]
 
 
+def _alpha_from_build(build: str) -> float:
+    """Parse trailing `_a<number>` as alpha (e.g. `..._a1.0`, `..._a0.95`)."""
+    m = re.search(r"_a(\d+(?:\.\d+)?)", build)
+    return float(m.group(1)) if m else 99.0
+
+
 def _build_sort_key(build: str) -> float:
-    m = re.search(r"_a(\d+)", build)
-    return (int(m.group(1)) / 10.0) if m else 99.0
+    return _alpha_from_build(build)
 
 
 def _build_label(build: str) -> str:
-    a = _build_sort_key(build)
-    return f"alpha={a:.1f}" if a < 99.0 else build
+    a = _alpha_from_build(build)
+    return f"alpha={a:g}" if a < 99.0 else build
+
+
+def _plot_pareto_panel(
+    ax,
+    sub: pd.DataFrame,
+    builds: list[str],
+    colors: dict[str, object],
+    x_col: str,
+    xlabel: str,
+    *,
+    show_ylabel: bool,
+    show_legend: bool,
+) -> None:
+    for b in builds:
+        s = sub[sub["build"] == b].dropna(subset=[x_col, "QPS_seq"])
+        if s.empty:
+            continue
+        xs = s[x_col].to_numpy(dtype=float)
+        ys = s["QPS_seq"].to_numpy(dtype=float)
+        ax.scatter(xs, ys, s=18, color=colors[b], alpha=0.22, zorder=1)
+        fx, fy = _pareto_curve(xs, ys)
+        if fx.size == 0:
+            continue
+        ax.plot(
+            fx,
+            fy,
+            marker="o",
+            markersize=4.5,
+            linewidth=1.9,
+            color=colors[b],
+            label=_build_label(b) if show_legend else None,
+            zorder=3,
+        )
+    ax.set_xlabel(xlabel)
+    if show_ylabel:
+        ax.set_ylabel("QPS (per-query)")
+    ax.set_yscale("log")
+    ax.grid(True, which="both", alpha=0.3)
+    if show_legend:
+        ax.legend(loc="best", fontsize=8)
+
+    xs_parts: list[np.ndarray] = []
+    for b in builds:
+        s = sub[sub["build"] == b].dropna(subset=[x_col, "QPS_seq"])
+        if not s.empty:
+            xs_parts.append(s[x_col].to_numpy(dtype=float))
+    if xs_parts:
+        lo = float(np.min(np.concatenate(xs_parts)))
+        ax.set_xlim(max(0.0, lo - 0.02), 1.0)
+    else:
+        ax.set_xlim(0.0, 1.0)
 
 
 def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None:
-    sub = df[(df["method"] == "svh_graph")].dropna(subset=["recall_k_k", "QPS_seq"])
-    if sub.empty:
+    sub = df[(df["method"] == "svh_graph")]
+    has_left = not sub.dropna(subset=["recall_1_k", "QPS_seq"]).empty
+    has_right = not sub.dropna(subset=["recall_k_k", "QPS_seq"]).empty
+    if not has_left and not has_right:
         print(f"  [skip {dataset}] no SVH Graph rows with recall/QPS")
         return
 
@@ -136,27 +194,32 @@ def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> Non
     cmap = plt.colormaps.get_cmap("tab10")
     colors = {b: cmap(i % 10) for i, b in enumerate(builds)}
 
-    fig, ax = plt.subplots(figsize=(7, 5))
-    for b in builds:
-        s = sub[sub["build"] == b]
-        xs = s["recall_k_k"].to_numpy(dtype=float)
-        ys = s["QPS_seq"].to_numpy(dtype=float)
-        ax.scatter(xs, ys, s=18, color=colors[b], alpha=0.22, zorder=1)
-        fx, fy = _pareto_curve(xs, ys)
-        if fx.size == 0:
-            continue
-        ax.plot(
-            fx, fy, marker="o", markersize=4.5, linewidth=1.9,
-            color=colors[b], label=_build_label(b), zorder=3
+    fig, (ax_left, ax_right) = plt.subplots(
+        1, 2, figsize=(12, 5), sharey=True, layout="constrained"
+    )
+    if has_left:
+        _plot_pareto_panel(
+            ax_left,
+            sub,
+            builds,
+            colors,
+            "recall_1_k",
+            "Recall (1@k)",
+            show_ylabel=True,
+            show_legend=not has_right,
         )
-
-    ax.set_xlabel("Recall@k")
-    ax.set_ylabel("QPS (per-query)")
-    ax.set_yscale("log")
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="best", fontsize=8)
-    ax.set_title(f"{dataset}: SVH Graph ablation Pareto")
-    fig.tight_layout()
+    if has_right:
+        _plot_pareto_panel(
+            ax_right,
+            sub,
+            builds,
+            colors,
+            "recall_k_k",
+            "Recall (k@k)",
+            show_ylabel=not has_left,
+            show_legend=has_right,
+        )
+    fig.suptitle(f"{dataset}: SVH Graph ablation Pareto", fontsize=11)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)

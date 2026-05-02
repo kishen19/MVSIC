@@ -65,6 +65,7 @@ import argparse
 import os
 import signal
 import sys
+import traceback
 from itertools import product
 
 import pandas as pd
@@ -407,27 +408,35 @@ def _run_fastplaid(ds, index_details, method_info, mode):
 
                 rows = []
                 for params in params_list:
-                    if mode == "latency":
-                        res = index.compute_stats_latency(queries, gt, params)
-                    else:
-                        res = index.compute_stats_batch(queries, gt, params)
-                    print(
-                        f"      {params} | "
-                        f"R@{params['k']}={res.recall_k_k:.3f} "
-                        f"QPS_seq={res.QPS_seq if res.QPS_seq is not None else 0:.1f} "
-                        f"QPS_par={res.QPS_par if res.QPS_par is not None else 0:.1f}",
-                        flush=True,
-                    )
-                    row = {
-                        "k": res.k,
-                        "recall_1_k": res.recall_1_k,
-                        "recall_k_k": res.recall_k_k,
-                        "QPS_seq": res.QPS_seq if res.QPS_seq is not None else 0.0,
-                        "QPS_par": res.QPS_par if res.QPS_par is not None else 0.0,
-                        "avg_cmps": res.avg_cmps,
-                    }
-                    row.update(params)
-                    rows.append(row)
+                    try:
+                        if mode == "latency":
+                            res = index.compute_stats_latency(queries, gt, params)
+                        else:
+                            res = index.compute_stats_batch(queries, gt, params)
+                        print(
+                            f"      {params} | "
+                            f"R@{params['k']}={res.recall_k_k:.3f} "
+                            f"QPS_seq={res.QPS_seq if res.QPS_seq is not None else 0:.1f} "
+                            f"QPS_par={res.QPS_par if res.QPS_par is not None else 0:.1f}",
+                            flush=True,
+                        )
+                        row = {
+                            "k": res.k,
+                            "recall_1_k": res.recall_1_k,
+                            "recall_k_k": res.recall_k_k,
+                            "QPS_seq": res.QPS_seq if res.QPS_seq is not None else 0.0,
+                            "QPS_par": res.QPS_par if res.QPS_par is not None else 0.0,
+                            "avg_cmps": res.avg_cmps,
+                        }
+                        row.update(params)
+                        rows.append(row)
+                    except Exception as e:
+                        jid = f"{ds_name}/fastplaid/{build_name}/{search_name}/{sv_name}"
+                        print(
+                            f"  [FAIL {jid}] {type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        traceback.print_exc()
 
                 df = pd.DataFrame(rows)
                 if os.path.exists(results_path):
@@ -451,35 +460,61 @@ def _csv_prefix_for(mode):
     }.get(mode, '')
 
 
-def run_search(config: dict, methods: dict, num_threads=None, mode=None):
-    for ds in config['datasets']:
-        ds_name = ds['name']
-        ds_path = ds['path']
-        index_dir = ds['index_dir']
-        results_dir = ds['results_dir']
+
+def run_search(
+    config: dict,
+    methods: dict,
+    num_threads=None,
+    mode=None,
+    *,
+    fail_fast: bool = False,
+) -> int:
+    """Return the number of failed jobs / parameter evaluations."""
+    failures: list[tuple[str, str]] = []
+    abort = False
+
+    for ds in config["datasets"]:
+        if abort:
+            break
+        ds_name = ds["name"]
+        ds_path = ds["path"]
+        index_dir = ds["index_dir"]
+        results_dir = ds["results_dir"]
         print(f"\n=== Dataset: {ds_name} ({ds_path}) ===", flush=True)
 
         points, queries, gt = None, None, None
 
-        for index_details in config['indices']:
-            index_name = index_details['name']
-            metric = index_details.get('metric', 'ip')
+        for index_details in config["indices"]:
+            if abort:
+                break
+            index_name = index_details["name"]
+            metric = index_details.get("metric", "ip")
             method_info = methods[index_name]
-            family = method_info['class']
-            variable_param = method_info.get('variable_param')
-            labels = method_info.get('labels') or []
+            family = method_info["class"]
+            variable_param = method_info.get("variable_param")
+            labels = method_info.get("labels") or []
 
-            if index_name == 'fastplaid':
-                _run_fastplaid(ds, index_details, method_info, mode)
+            if index_name == "fastplaid":
+                try:
+                    _run_fastplaid(ds, index_details, method_info, mode)
+                except Exception as e:
+                    jid = f"{ds_name}/fastplaid"
+                    print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
+                    traceback.print_exc()
+                    failures.append((jid, str(e)))
+                    if fail_fast:
+                        abort = True
                 continue
 
             factory = _resolve_factory(index_name)
 
-            for build in index_details['builds']:
-                build_name = build['build_name']
-                build_params = build.get('build_params') or {}
-                variants = build.get('variants') or [
-                    {'name': '', 'compress': False, 'quantizer': 'None'}
+            for build in index_details["builds"]:
+                if abort:
+                    break
+                build_name = build["build_name"]
+                build_params = build.get("build_params") or {}
+                variants = build.get("variants") or [
+                    {"name": "", "compress": False, "quantizer": "None"}
                 ]
 
                 index_path = os.path.join(
@@ -499,168 +534,263 @@ def run_search(config: dict, methods: dict, num_threads=None, mode=None):
                 ip = factory(**build_params)
 
                 for variant in variants:
-                    v_name = variant.get('name', '')
-                    v_compress = bool(variant.get('compress', False))
-                    v_quantizer = variant.get('quantizer', 'None')
+                    if abort:
+                        break
+                    v_name = variant.get("name", "")
+                    v_compress = bool(variant.get("compress", False))
+                    v_quantizer = variant.get("quantizer", "None")
 
-                    cls_name, index_cls = _resolve_class(
-                        family, v_compress, v_quantizer, metric,
-                        method_info=method_info,
-                    )
-                    print(
-                        f"  [{index_name}/{build_name}/{v_name or 'raw'}] "
-                        f"using {cls_name}",
-                        flush=True,
-                    )
-                    index = index_cls(dim, ip)
-                    index.load(index_path, points)
+                    job_id = f"{ds_name}/{index_name}/{build_name}/{v_name or 'raw'}"
 
-                    variant_results_dir = os.path.join(
-                        results_dir, index_name, build_name
-                    )
-                    if v_name:
-                        variant_results_dir = os.path.join(variant_results_dir, v_name)
-                    os.makedirs(variant_results_dir, exist_ok=True)
+                    try:
+                        cls_name, index_cls = _resolve_class(
+                            family,
+                            v_compress,
+                            v_quantizer,
+                            metric,
+                            method_info=method_info,
+                        )
+                        print(
+                            f"  [{index_name}/{build_name}/{v_name or 'raw'}] "
+                            f"using {cls_name}",
+                            flush=True,
+                        )
+                        index = index_cls(dim, ip)
+                        index.load(index_path, points)
 
-                    for search_config in build.get('search_configs', []):
-                        search_name = search_config['name']
-                        search_out_dir = os.path.join(variant_results_dir, search_name)
-                        os.makedirs(search_out_dir, exist_ok=True)
-
-                        combos = _expand_search_params(search_config, variable_param)
-                        variants_map = {}
-                        for p in combos:
-                            vn = p.pop('_variant_name')
-                            variants_map.setdefault(vn, []).append(p)
-
-                        for sv_name, params_list in variants_map.items():
-                            if mode:
-                                prefix = _csv_prefix_for(mode)
-                            else:
-                                # Backward compat: legacy --latency / --num_threads=1 path.
-                                prefix = "latency_" if num_threads else ""
-                            suffix = f"_{sv_name}" if sv_name else ""
-                            results_path = os.path.join(
-                                search_out_dir, f"{prefix}results{suffix}.csv"
+                        variant_results_dir = os.path.join(
+                            results_dir, index_name, build_name
+                        )
+                        if v_name:
+                            variant_results_dir = os.path.join(
+                                variant_results_dir, v_name
                             )
+                        os.makedirs(variant_results_dir, exist_ok=True)
 
-                            append = search_config.get('append', True)
-                            if os.path.exists(results_path) and not append:
-                                os.remove(results_path)
+                        for search_config in build.get("search_configs", []):
+                            search_name = search_config["name"]
+                            search_out_dir = os.path.join(
+                                variant_results_dir, search_name
+                            )
+                            os.makedirs(search_out_dir, exist_ok=True)
 
-                            existing = None
-                            if os.path.exists(results_path) and append:
-                                try:
-                                    existing = pd.read_csv(results_path)
-                                except pd.errors.EmptyDataError:
-                                    existing = None
+                            combos = _expand_search_params(
+                                search_config, variable_param
+                            )
+                            variants_map = {}
+                            for p in combos:
+                                vn = p.pop("_variant_name")
+                                variants_map.setdefault(vn, []).append(p)
 
-                            if variable_param:
-                                params_list.sort(
-                                    key=lambda p: p.get(variable_param, 0)
+                            for sv_name, params_list in variants_map.items():
+                                if mode:
+                                    prefix = _csv_prefix_for(mode)
+                                else:
+                                    prefix = "latency_" if num_threads else ""
+                                suffix = f"_{sv_name}" if sv_name else ""
+                                results_path = os.path.join(
+                                    search_out_dir, f"{prefix}results{suffix}.csv"
                                 )
 
-                            all_results = []
-                            for params in params_list:
-                                skip = False
-                                recall_from_cache = None
-                                if existing is not None:
-                                    mask = pd.Series([True] * len(existing))
-                                    for k, v in params.items():
-                                        if k in existing.columns:
-                                            mask &= existing[k] == v
-                                    if mask.any():
-                                        skip = True
-                                        recall_from_cache = existing[mask].iloc[0][
-                                            'recall_k_k'
-                                        ]
+                                append = search_config.get("append", True)
+                                if os.path.exists(results_path) and not append:
+                                    os.remove(results_path)
 
-                                if skip:
-                                    class Mock:
-                                        def __init__(self, r):
-                                            self.recall_k_k = r
-                                    current = Mock(recall_from_cache)
-                                else:
-                                    sp = _build_search_params(index_name, params)
-                                    with suppress_stdout_stderr():
-                                        if mode == 'latency':
-                                            res = mvsic.compute_stats_latency(
-                                                index, points, queries, gt, [sp]
-                                            )
-                                        elif mode == 'multi_latency':
-                                            res = mvsic.compute_stats_multi_latency(
-                                                index, points, queries, gt, [sp]
-                                            )
-                                        elif mode == 'batch':
-                                            res = mvsic.compute_stats_batch(
-                                                index, points, queries, gt, [sp]
-                                            )
-                                        elif num_threads:
-                                            # Back-compat path for older callers.
-                                            res = mvsic.compute_stats_extended_p_threaded(
-                                                index, points, queries, gt,
-                                                [sp], num_threads,
-                                            )
-                                        else:
-                                            res = mvsic.compute_stats_extended(
-                                                index, points, queries, gt, [sp]
-                                            )
-                                        current = StatsExtended(
-                                            k=params['k'],
-                                            recall_1_k=min(1.0, res[0].recall_1_k),
-                                            recall_k_k=min(1.0, res[0].recall_k_k),
-                                            QPS_seq=res[0].QPS_seq,
-                                            QPS_par=res[0].QPS_par,
-                                            avg_cmps=res[0].avg_cmps,
-                                            avg_timings=res[0].avg_timings,
-                                        )
-                                    print(
-                                        f"      {params} | "
-                                        f"R@{params['k']}={current.recall_k_k:.3f} "
-                                        f"QPS_seq={current.QPS_seq:.1f}",
-                                        flush=True,
-                                    )
-                                    df = pd.concat(
-                                        [
-                                            pd.DataFrame([current]),
-                                            pd.DataFrame([params]),
-                                        ],
-                                        axis=1,
-                                    )
-                                    df = df.loc[:, ~df.columns.duplicated()]
-                                    df = _expand_timings(df, labels)
-                                    df = _reorder_columns(df, variable_param, labels)
-                                    df = df.map(_format_scalar)
+                                existing = None
+                                if os.path.exists(results_path) and append:
+                                    try:
+                                        existing = pd.read_csv(results_path)
+                                    except pd.errors.EmptyDataError:
+                                        existing = None
 
-                                    if os.path.exists(results_path):
+                                if variable_param:
+                                    params_list.sort(
+                                        key=lambda p: p.get(variable_param, 0)
+                                    )
+
+                                all_results = []
+                                for params in params_list:
+                                    skip = False
+                                    recall_from_cache = None
+                                    if existing is not None:
+                                        mask = pd.Series([True] * len(existing))
+                                        for k, v in params.items():
+                                            if k in existing.columns:
+                                                mask &= existing[k] == v
+                                        if mask.any():
+                                            skip = True
+                                            recall_from_cache = existing[
+                                                mask
+                                            ].iloc[0]["recall_k_k"]
+
+                                    if skip:
+
+                                        class Mock:
+                                            def __init__(self, r):
+                                                self.recall_k_k = r
+
+                                        current = Mock(recall_from_cache)
+                                    else:
                                         try:
-                                            prev = pd.read_csv(results_path)
-                                            df = pd.concat([prev, df], ignore_index=True)
-                                        except pd.errors.EmptyDataError:
-                                            pass
-                                    if variable_param and variable_param in df.columns:
-                                        df = df.sort_values(by=variable_param)
-                                    df.to_csv(results_path, index=False)
+                                            sp = _build_search_params(
+                                                index_name, params
+                                            )
+                                            with suppress_stdout_stderr():
+                                                if mode == "latency":
+                                                    res = mvsic.compute_stats_latency(
+                                                        index,
+                                                        points,
+                                                        queries,
+                                                        gt,
+                                                        [sp],
+                                                    )
+                                                elif mode == "multi_latency":
+                                                    res = mvsic.compute_stats_multi_latency(
+                                                        index,
+                                                        points,
+                                                        queries,
+                                                        gt,
+                                                        [sp],
+                                                    )
+                                                elif mode == "batch":
+                                                    res = mvsic.compute_stats_batch(
+                                                        index,
+                                                        points,
+                                                        queries,
+                                                        gt,
+                                                        [sp],
+                                                    )
+                                                elif num_threads:
+                                                    res = mvsic.compute_stats_extended_p_threaded(
+                                                        index,
+                                                        points,
+                                                        queries,
+                                                        gt,
+                                                        [sp],
+                                                        num_threads,
+                                                    )
+                                                else:
+                                                    res = mvsic.compute_stats_extended(
+                                                        index,
+                                                        points,
+                                                        queries,
+                                                        gt,
+                                                        [sp],
+                                                    )
+                                                current = StatsExtended(
+                                                    k=params["k"],
+                                                    recall_1_k=min(
+                                                        1.0, res[0].recall_1_k
+                                                    ),
+                                                    recall_k_k=min(
+                                                        1.0, res[0].recall_k_k
+                                                    ),
+                                                    QPS_seq=res[0].QPS_seq,
+                                                    QPS_par=res[0].QPS_par,
+                                                    avg_cmps=res[0].avg_cmps,
+                                                    avg_timings=res[0].avg_timings,
+                                                )
+                                            print(
+                                                f"      {params} | "
+                                                f"R@{params['k']}={current.recall_k_k:.3f} "
+                                                f"QPS_seq={current.QPS_seq:.1f}",
+                                                flush=True,
+                                            )
+                                            df = pd.concat(
+                                                [
+                                                    pd.DataFrame([current]),
+                                                    pd.DataFrame([params]),
+                                                ],
+                                                axis=1,
+                                            )
+                                            df = df.loc[:, ~df.columns.duplicated()]
+                                            df = _expand_timings(df, labels)
+                                            df = _reorder_columns(
+                                                df, variable_param, labels
+                                            )
+                                            df = df.map(_format_scalar)
 
-                                all_results.append(current)
+                                            if os.path.exists(results_path):
+                                                try:
+                                                    prev = pd.read_csv(results_path)
+                                                    df = pd.concat(
+                                                        [prev, df], ignore_index=True
+                                                    )
+                                                except pd.errors.EmptyDataError:
+                                                    pass
+                                            if (
+                                                variable_param
+                                                and variable_param in df.columns
+                                            ):
+                                                df = df.sort_values(
+                                                    by=variable_param
+                                                )
+                                            df.to_csv(results_path, index=False)
+                                        except Exception as e:
+                                            pe = f"{job_id}/{search_name}/{sv_name}"
+                                            print(
+                                                f"  [FAIL {pe}] params={params} | "
+                                                f"{type(e).__name__}: {e}",
+                                                flush=True,
+                                            )
+                                            traceback.print_exc()
+                                            continue
 
-                                # Early-exit heuristics: perfect recall / plateau / drop.
-                                if current.recall_k_k >= 1.0:
-                                    print("      recall@k reached 1.0, stopping sweep", flush=True)
-                                    break
-                                if (
-                                    len(all_results) > 3
-                                    and current.recall_k_k == all_results[-2].recall_k_k
-                                    and current.recall_k_k == all_results[-3].recall_k_k
-                                ):
-                                    print("      recall plateau, stopping sweep", flush=True)
-                                    break
-                                if (
-                                    len(all_results) > 1
-                                    and current.recall_k_k < all_results[-2].recall_k_k
-                                ):
-                                    print("      recall dropped, stopping sweep", flush=True)
-                                    break
+                                    all_results.append(current)
+
+                                    if current.recall_k_k >= 1.0:
+                                        print(
+                                            "      recall@k reached 1.0, stopping sweep",
+                                            flush=True,
+                                        )
+                                        break
+                                    if (
+                                        len(all_results) > 3
+                                        and current.recall_k_k
+                                        == all_results[-2].recall_k_k
+                                        and current.recall_k_k
+                                        == all_results[-3].recall_k_k
+                                    ):
+                                        print(
+                                            "      recall plateau, stopping sweep",
+                                            flush=True,
+                                        )
+                                        break
+                                    if (
+                                        len(all_results) > 1
+                                        and current.recall_k_k
+                                        < all_results[-2].recall_k_k
+                                    ):
+                                        print(
+                                            "      recall dropped, stopping sweep",
+                                            flush=True,
+                                        )
+                                        break
+                    except Exception as e:
+                        print(
+                            f"  [FAIL {job_id}] {type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        traceback.print_exc()
+                        failures.append((job_id, str(e)))
+                        if fail_fast:
+                            abort = True
+                            break
+                if abort:
+                    break
+            if abort:
+                break
+        if abort:
+            break
+
+    if failures:
+        print(
+            f"\nSearch finished with {len(failures)} failed job(s)/stage(s):",
+            flush=True,
+        )
+        for jid, msg in failures:
+            print(f"  {jid}: {msg}", flush=True)
+    return len(failures)
 
 
 def main():
@@ -695,6 +825,11 @@ def main():
         action="store_true",
         help="Back-compat alias for --mode latency.",
     )
+    ap.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop after the first failed job or parameter evaluation.",
+    )
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -707,7 +842,14 @@ def main():
     if args.latency and mode is None and num_threads is None:
         mode = 'latency'
 
-    run_search(config, methods, num_threads=num_threads, mode=mode)
+    n_fail = run_search(
+        config,
+        methods,
+        num_threads=num_threads,
+        mode=mode,
+        fail_fast=args.fail_fast,
+    )
+    raise SystemExit(1 if n_fail else 0)
 
 
 if __name__ == "__main__":

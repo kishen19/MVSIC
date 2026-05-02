@@ -152,6 +152,17 @@ def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> Non
             color=colors[b], label=_build_label(b), zorder=3
         )
 
+    parts = [
+        sub[sub["build"] == b]["recall_k_k"].to_numpy(dtype=float)
+        for b in builds
+        if not sub[sub["build"] == b].empty
+    ]
+    if parts:
+        lo = float(np.min(np.concatenate(parts)))
+        ax.set_xlim(max(0.0, lo - 0.02), 1.0)
+    else:
+        ax.set_xlim(0.0, 1.0)
+
     ax.set_xlabel("Recall@k")
     ax.set_ylabel("QPS (per-query)")
     ax.set_yscale("log")

@@ -54,6 +54,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 
 import yaml
 from framework_utils import load_dataset
@@ -127,26 +128,41 @@ def _index_params_dict(p) -> dict:
     return out
 
 
-def run_build(config: dict, methods: dict, rebuild_all: bool = False):
-    for ds in config['datasets']:
-        ds_name = ds['name']
-        ds_path = ds['path']
-        index_dir = ds['index_dir']
+def run_build(
+    config: dict,
+    methods: dict,
+    *,
+    rebuild_all: bool = False,
+    fail_fast: bool = False,
+) -> int:
+    """
+    Run all build jobs. Returns the number of failed jobs (0 = all ok).
+
+    Python exceptions in one job are caught so the sweep continues; native
+    crashes (segfault, etc.) still terminate the process.
+    """
+    failures: list[tuple[str, str]] = []
+
+    for ds in config["datasets"]:
+        ds_name = ds["name"]
+        ds_path = ds["path"]
+        index_dir = ds["index_dir"]
         print(f"\n=== Dataset: {ds_name} ({ds_path}) ===", flush=True)
 
         points = None
 
-        for index_details in config['indices']:
-            index_name = index_details['name']
-            metric = index_details.get('metric', 'ip')
+        for index_details in config["indices"]:
+            index_name = index_details["name"]
+            metric = index_details.get("metric", "ip")
             method_info = methods[index_name]
 
-            index_class = _resolve_base_class(method_info['class'], metric)
+            index_class = _resolve_base_class(method_info["class"], metric)
             factory = _resolve_factory(index_name)
 
-            for bc in index_details['build_configs']:
-                build_name = bc['name']
-                build_params = bc.get('params') or {}
+            for bc in index_details["build_configs"]:
+                build_name = bc["name"]
+                build_params = bc.get("params") or {}
+                job_id = f"{ds_name}/{index_name}/{build_name}"
 
                 out_dir = os.path.join(index_dir, index_name, build_name)
                 os.makedirs(out_dir, exist_ok=True)
@@ -154,59 +170,89 @@ def run_build(config: dict, methods: dict, rebuild_all: bool = False):
                 params_path = os.path.join(out_dir, "index_params.json")
                 stats_path = os.path.join(out_dir, "build_stats.json")
 
-                if os.path.exists(index_path) and not (rebuild_all or bc.get('rebuild', False)):
-                    print(f"  [{index_name}/{build_name}] exists at {index_path}; skip.", flush=True)
+                if os.path.exists(index_path) and not (
+                    rebuild_all or bc.get("rebuild", False)
+                ):
+                    print(
+                        f"  [{index_name}/{build_name}] exists at {index_path}; skip.",
+                        flush=True,
+                    )
                     continue
 
-                if points is None:
-                    points, _, _ = load_dataset(ds_path, ds_name)
-                dim = points[0].get_dims()
+                try:
+                    if points is None:
+                        points, _, _ = load_dataset(ds_path, ds_name)
+                    dim = points[0].get_dims()
 
-                ip = factory(**build_params)
-                with open(params_path, 'w') as f:
-                    json.dump(_index_params_dict(ip), f, indent=2, sort_keys=True)
+                    ip = factory(**build_params)
+                    with open(params_path, "w") as f:
+                        json.dump(_index_params_dict(ip), f, indent=2, sort_keys=True)
 
-                print(f"  [{index_name}/{build_name}] building ({metric.upper()}) -> {index_path}", flush=True)
-                index = index_class(dim, ip)
-                t0 = time.time()
-                index.build(points)
-                build_time = time.time() - t0
-
-                index.save(index_path)
-                size_bytes = (
-                    sum(
-                        os.path.getsize(os.path.join(r, f))
-                        for r, _, files in os.walk(index_path)
-                        for f in files
+                    print(
+                        f"  [{index_name}/{build_name}] building ({metric.upper()}) -> {index_path}",
+                        flush=True,
                     )
-                    if os.path.isdir(index_path)
-                    else os.path.getsize(index_path)
-                )
+                    index = index_class(dim, ip)
+                    t0 = time.time()
+                    index.build(points)
+                    build_time = time.time() - t0
 
-                stats = {
-                    'built_at': time.strftime('%Y-%m-%d %H:%M:%S %Z', time.localtime()),
-                    'build_time_sec': build_time,
-                    'index_size_mb': size_bytes / (1024 * 1024),
-                    'build_params': build_params,
-                }
-                git_sha, git_dirty = _git_info(os.getcwd())
-                if git_sha:
-                    stats['git_sha'] = git_sha
-                    stats['git_dirty'] = git_dirty
-                if index_name == 'mvivf':
-                    try:
-                        stats['kmeans_tree_height'] = index.get_height()
-                        stats.update(mvsic.get_mvivf_tree_stats(index))
-                    except Exception as e:
-                        print(f"    (skipping tree stats: {e})", flush=True)
+                    index.save(index_path)
+                    size_bytes = (
+                        sum(
+                            os.path.getsize(os.path.join(r, f))
+                            for r, _, files in os.walk(index_path)
+                            for f in files
+                        )
+                        if os.path.isdir(index_path)
+                        else os.path.getsize(index_path)
+                    )
 
-                with open(stats_path, 'w') as f:
-                    json.dump(stats, f, indent=2)
+                    stats = {
+                        "built_at": time.strftime(
+                            "%Y-%m-%d %H:%M:%S %Z", time.localtime()
+                        ),
+                        "build_time_sec": build_time,
+                        "index_size_mb": size_bytes / (1024 * 1024),
+                        "build_params": build_params,
+                    }
+                    git_sha, git_dirty = _git_info(os.getcwd())
+                    if git_sha:
+                        stats["git_sha"] = git_sha
+                        stats["git_dirty"] = git_dirty
+                    if index_name == "mvivf":
+                        try:
+                            stats["kmeans_tree_height"] = index.get_height()
+                            stats.update(mvsic.get_mvivf_tree_stats(index))
+                        except Exception as e:
+                            print(f"    (skipping tree stats: {e})", flush=True)
 
-                print(
-                    f"    build_time={build_time:.2f}s  size={stats['index_size_mb']:.2f}MB",
-                    flush=True,
-                )
+                    with open(stats_path, "w") as f:
+                        json.dump(stats, f, indent=2)
+
+                    print(
+                        f"    build_time={build_time:.2f}s  size={stats['index_size_mb']:.2f}MB",
+                        flush=True,
+                    )
+                except Exception as e:
+                    print(
+                        f"  [FAIL {job_id}] {type(e).__name__}: {e}",
+                        flush=True,
+                    )
+                    traceback.print_exc()
+                    failures.append((job_id, str(e)))
+                    if fail_fast:
+                        break
+            if fail_fast and failures:
+                break
+        if fail_fast and failures:
+            break
+
+    if failures:
+        print(f"\nBuild finished with {len(failures)} failed job(s):", flush=True)
+        for jid, msg in failures:
+            print(f"  {jid}: {msg}", flush=True)
+    return len(failures)
 
 
 def main():
@@ -218,6 +264,11 @@ def main():
     ap.add_argument(
         "--rebuild", action="store_true", help="Rebuild even if index file exists"
     )
+    ap.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop the sweep after the first failed job.",
+    )
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -225,7 +276,13 @@ def main():
     with open(args.methods) as f:
         methods = yaml.safe_load(f)
 
-    run_build(config, methods, rebuild_all=args.rebuild)
+    n_fail = run_build(
+        config,
+        methods,
+        rebuild_all=args.rebuild,
+        fail_fast=args.fail_fast,
+    )
+    raise SystemExit(1 if n_fail else 0)
 
 
 if __name__ == "__main__":
