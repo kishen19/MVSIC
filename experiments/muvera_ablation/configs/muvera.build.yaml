@@ -1,0 +1,30 @@
+name: "MUVERA Ablation (build: d_fde sweep)"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/muvera_ablation/indices/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/muvera_ablation/indices/fiqa
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/muvera_ablation/indices/nq500k
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/muvera_ablation/indices/nq
+
+indices:
+  - name: muvera
+    metric: ip
+    build_configs:
+      - name: muvera_2560_R200_L600
+        params: &muvera_defaults
+          verbose: 1
+          d_fde: 2560
+          R: 200
+          L: 600
+      - name: muvera_5120_R200_L600
+        params: { <<: *muvera_defaults, d_fde: 5120 }
+      - name: muvera_10240_R200_L600
+        params: { <<: *muvera_defaults, d_fde: 10240 }

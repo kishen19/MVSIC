@@ -13,6 +13,7 @@ The loader also accepts lowercase qps_seq/qps_par and normalizes them.
 Latency(ms) = 1000 / QPS_seq.
 
 Outputs:
+    <out-dir>/<prefix>_pareto.pdf    (x=recall_k_k, y=QPS_seq Pareto by group)
     <out-dir>/<prefix>_latency.pdf   (x=recall_k_k, y=latency_ms)
     <out-dir>/<prefix>_cmps.pdf      (x=recall_k_k, y=avg_cmps)
 """
@@ -197,6 +198,67 @@ def _plot_xy(df: pd.DataFrame, group_col: str, x_col: str, y_col: str,
     plt.close(fig)
 
 
+def _pareto_curve(xs: pd.Series, ys: pd.Series, min_recall_spacing: float = 0.005) -> tuple[pd.Series, pd.Series]:
+    """Build a simplified Pareto curve (maximize recall and QPS)."""
+    if xs.empty:
+        return xs, ys
+
+    # Keep max QPS for each recall value.
+    tmp = pd.DataFrame({"x": xs.astype(float), "y": ys.astype(float)})
+    tmp = tmp.loc[tmp.groupby("x")["y"].idxmax()]
+
+    # True Pareto front.
+    tmp = tmp.sort_values(by=["x", "y"], ascending=[False, False])
+    front_rows = []
+    best_y = float("-inf")
+    for _, r in tmp.iterrows():
+        if float(r["y"]) > best_y:
+            front_rows.append(r)
+            best_y = float(r["y"])
+    if not front_rows:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    front = pd.DataFrame(front_rows).sort_values("x")
+
+    if min_recall_spacing > 0 and len(front) > 2:
+        simplified = [front.iloc[0]]
+        for i in range(1, len(front) - 1):
+            if abs(float(front.iloc[i]["x"]) - float(simplified[-1]["x"])) > min_recall_spacing:
+                simplified.append(front.iloc[i])
+        simplified.append(front.iloc[-1])
+        front = pd.DataFrame(simplified).drop_duplicates(subset=["x", "y"], keep="first")
+    return front["x"], front["y"]
+
+
+def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path, title: str) -> None:
+    if "QPS_seq" not in df.columns:
+        raise SystemExit("Missing QPS_seq column in merged CSVs.")
+    if "recall_k_k" not in df.columns:
+        raise SystemExit("Missing recall_k_k column in merged CSVs.")
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for key, sub in df.groupby(group_col):
+        sub = sub.dropna(subset=["recall_k_k", "QPS_seq"])
+        if sub.empty:
+            continue
+        ax.scatter(sub["recall_k_k"], sub["QPS_seq"], s=16, alpha=0.35)
+        fx, fy = _pareto_curve(sub["recall_k_k"], sub["QPS_seq"])
+        if len(fx) == 0:
+            continue
+        ax.plot(fx, fy, marker="o", label=f"{group_col}={key}")
+
+    ax.set_xlabel("Recall@k (k@k)")
+    ax.set_ylabel("QPS (per-query)")
+    ax.set_yscale("log")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="best")
+    ax.set_title(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    print(f"Wrote {out_path}")
+    plt.close(fig)
+
+
 def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path, prefix: str = "stage1") -> None:
     if "QPS_seq" in df.columns:
         df = df.assign(latency_ms=1000.0 / df["QPS_seq"])
@@ -211,6 +273,12 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path, prefix: str = 
     if recall_x not in df.columns:
         raise SystemExit("Missing recall_k_k column in merged CSVs.")
 
+    _plot_qps_pareto(
+        df,
+        group_col=group_col,
+        out_path=out_dir / f"{prefix}_pareto.pdf",
+        title=f"{prefix}: QPS vs recall Pareto (grouped by {group_col})",
+    )
     _plot_xy(
         df,
         group_col=group_col,

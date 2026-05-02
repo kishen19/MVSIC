@@ -134,6 +134,50 @@ def _pareto_front(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     return mask
 
 
+def _pareto_curve(xs: np.ndarray, ys: np.ndarray,
+                  min_recall_spacing: float = 0.005) -> tuple[np.ndarray, np.ndarray]:
+    """Benchmark-style Pareto curve for recall-vs-QPS points.
+
+    Steps:
+      1) De-duplicate recall values by keeping max QPS at each recall.
+      2) Keep non-dominated points (maximize recall and QPS).
+      3) Optionally simplify jagged fronts with a minimum recall spacing.
+    """
+    if xs.size == 0:
+        return xs, ys
+
+    # 1) De-duplicate by recall: for each unique recall, keep highest QPS.
+    best_by_recall: dict[float, float] = {}
+    for x, y in zip(xs, ys):
+        cur = best_by_recall.get(float(x))
+        if cur is None or float(y) > cur:
+            best_by_recall[float(x)] = float(y)
+    xs_u = np.array(sorted(best_by_recall.keys()), dtype=float)
+    ys_u = np.array([best_by_recall[x] for x in xs_u], dtype=float)
+
+    # 2) True Pareto front.
+    front_mask = _pareto_front(xs_u, ys_u)
+    fx = xs_u[front_mask]
+    fy = ys_u[front_mask]
+    if fx.size == 0:
+        return fx, fy
+    order = np.argsort(fx)
+    fx = fx[order]
+    fy = fy[order]
+
+    # 3) Simplify with min recall spacing.
+    if min_recall_spacing <= 0 or fx.size <= 2:
+        return fx, fy
+    keep_idx = [0]
+    for i in range(1, fx.size - 1):
+        if abs(fx[i] - fx[keep_idx[-1]]) > min_recall_spacing:
+            keep_idx.append(i)
+    if keep_idx[-1] != fx.size - 1:
+        keep_idx.append(fx.size - 1)
+    keep_idx = np.array(keep_idx, dtype=int)
+    return fx[keep_idx], fy[keep_idx]
+
+
 def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
                  out_path: pathlib.Path) -> None:
     qps = _qps_column(stage)
@@ -156,13 +200,14 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             xs = sub["recall_k_k"].to_numpy(dtype=float)
             ys = sub[qps].to_numpy(dtype=float)
             ax.scatter(xs, ys, s=18, color=color_for[method], alpha=0.35)
-            front = _pareto_front(xs, ys)
-            order = np.argsort(xs[front])
+            fx, fy = _pareto_curve(xs, ys)
+            if fx.size == 0:
+                continue
             label = f"{_PRETTY_METHOD.get(method, method)}"
             if variant and variant != "raw":
                 label += f" / {variant}"
             ls = "-" if vi == 0 else "--"
-            ax.plot(xs[front][order], ys[front][order], marker="o",
+            ax.plot(fx, fy, marker="o",
                     linestyle=ls, color=color_for[method], label=label)
 
     ax.set_xlabel("Recall@k")

@@ -1,0 +1,50 @@
+name: "MUVERA Ablation (search: d_fde sweep, TQ4)"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/muvera_ablation/indices/arguana
+    results_dir: experiments/muvera_ablation/results/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/muvera_ablation/indices/fiqa
+    results_dir: experiments/muvera_ablation/results/fiqa
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/muvera_ablation/indices/nq500k
+    results_dir: experiments/muvera_ablation/results/nq500k
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/muvera_ablation/indices/nq
+    results_dir: experiments/muvera_ablation/results/nq
+
+indices:
+  - name: muvera
+    metric: ip
+    builds:
+      - build_name: muvera_2560_R200_L600
+        build_params: &muvera_defaults
+          d_fde: 2560
+          R: 200
+          L: 600
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: &muvera_k10
+          - name: k=10
+            params:
+              L: [64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - { name: nr500,  num_rerank: 500 }
+                - { name: nr1000,  num_rerank: 1000 }
+                - { name: nr2000, num_rerank: 2000 }
+      - build_name: muvera_5120_R200_L600
+        build_params: { <<: *muvera_defaults, d_fde: 5120 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *muvera_k10
+      - build_name: muvera_10240_R200_L600
+        build_params: { <<: *muvera_defaults, d_fde: 10240 }
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs: *muvera_k10

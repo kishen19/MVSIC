@@ -58,7 +58,29 @@ cc_library(
     patch_cmds = [
         "find include -type f \\( -name '*.hpp' -o -name '*.h' \\) -exec sed -i 's|rabitqlib/third/Eigen/|Eigen/|g' {} +",
         "sed -i 's/size_t bottom_log_dim = floor_log2(dim);/size_t bottom_log_dim = floor_log2(padded_dim);/g' include/rabitqlib/utils/rotator.hpp",
-        "sed -i 's/case 11: this->fht_float_ = helper_float_11; break;/case 11: this->fht_float_ = helper_float_11; break; case 12: this->fht_float_ = helper_float_12; break; case 13: this->fht_float_ = helper_float_13; break; case 14: this->fht_float_ = helper_float_14; break;/g' include/rabitqlib/utils/rotator.hpp",
+        """python3 - <<'PY'
+from pathlib import Path
+p = Path("include/rabitqlib/utils/rotator.hpp")
+s = p.read_text()
+needle = "            case 11:\\n                this->fht_float_ = helper_float_11;\\n                break;\\n"
+insert = (
+    "            case 11:\\n"
+    "                this->fht_float_ = helper_float_11;\\n"
+    "                break;\\n"
+    "            case 12:\\n"
+    "                this->fht_float_ = helper_float_12;\\n"
+    "                break;\\n"
+    "            case 13:\\n"
+    "                this->fht_float_ = helper_float_13;\\n"
+    "                break;\\n"
+    "            case 14:\\n"
+    "                this->fht_float_ = helper_float_14;\\n"
+    "                break;\\n"
+)
+if "case 12:" not in s and needle in s:
+    s = s.replace(needle, insert)
+    p.write_text(s)
+PY""",
     ],
     strip_prefix = "RaBitQ-Library-main",
     urls = ["https://github.com/VectorDB-NTU/RaBitQ-Library/archive/refs/heads/main.zip"],
