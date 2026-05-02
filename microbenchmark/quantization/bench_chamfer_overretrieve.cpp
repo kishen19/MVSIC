@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <cstdint>
 #include <cstdlib>
@@ -167,7 +168,9 @@ template<typename ChPoint>
 static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<ChPoint>& queries,
                          uint32_t pq_block, uint32_t pq_k, uint32_t fs_block, uint32_t rbits,
                          uint32_t k, const char* gt_file = nullptr, bool gt_neighbor_indices = false,
-                         bool run_pq = true, bool run_rabitq = true) {
+                         bool run_pq = true, bool run_rabitq = true,
+                         const std::string& db_cache_key = "",
+                         const std::string& q_cache_key = "") {
   constexpr bool Metric = ChPoint::is_metric();
 
   const uint32_t D = db.get_dims();
@@ -250,15 +253,6 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   auto tqpq4_db = tqpq4_model.encode(db);
   auto tqpq8_db = tqpq8_model.encode(db);
 
-  std::vector<std::pair<uint32_t, float>> exact_scores(Nclouds);
-  std::vector<std::pair<uint32_t, float>> approx_scores(Nclouds);
-
-  // Optionally load pre-computed ground truth.
-  std::vector<std::vector<std::pair<uint32_t, float>>> gt_data;
-  if (gt_file) {
-    gt_data = load_ground_truth(gt_file, Qclouds, k);
-  }
-
   enum Method {
     PQ = 0,
     FASTSCAN = 1,
@@ -286,77 +280,190 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
   std::vector<double> sum_recall(NUM_METHODS * kprime_grid.size(), 0.0);
   auto idx2 = [&](Method m, size_t i) { return static_cast<size_t>(m) * kprime_grid.size() + i; };
 
-  std::cout << "Outer iterations: " << Qclouds << std::endl;
-  for (size_t qi = 0; qi < Qclouds; ++qi) {
-    if (gt_file) {
-      // Use pre-computed ground truth (already sorted by ascending distance).
-    } else {
-      db.distances(queries[qi], exact_scores.data());
-      std::sort(exact_scores.begin(), exact_scores.end(),
-                [](const auto& a, const auto& b) { return a.second < b.second; });
+  // ---------------------------------------------------------------------
+  // Phase 1: Build per-query exact-top-k id sets (the "ground truth" used
+  // for recall denominators).
+  //   - If -gt was given: load that file (with optional row-index mapping).
+  //   - Else if a /tmp cache hit exists for (db, q, N, Q, k, metric): load it.
+  //   - Else: per-query brute force (db.distances + sort), then write cache.
+  // The cache stores top-k logical ids only (we never need exact distances
+  // for the recall denominator).
+  // ---------------------------------------------------------------------
+  std::vector<std::unordered_set<uint32_t>> exact_sets(Qclouds);
+
+  // Cache path is only set in file mode (synth mode passes empty keys).
+  auto make_gt_cache_path = [&]() -> std::string {
+    if (db_cache_key.empty() || q_cache_key.empty()) return "";
+    return "/tmp/chamfer_gt_" + db_cache_key + "_" + q_cache_key + "_n" +
+           std::to_string(Nclouds) + "_q" + std::to_string(Qclouds) + "_k" + std::to_string(k) +
+           "_" + (Metric ? "L2" : "IP") + ".bin";
+  };
+
+  // Cache file format: int32 nq, int32 k, then nq*k uint32 logical ids
+  // (one row per query, sorted ascending by distance). Read returns true on
+  // success and populates `exact_sets` directly.
+  auto try_load_cached_gt = [&](const std::string& path) -> bool {
+    if (path.empty() || !std::filesystem::exists(path)) return false;
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) return false;
+    int32_t nq_i32 = 0, k_i32 = 0;
+    in.read(reinterpret_cast<char*>(&nq_i32), sizeof(int32_t));
+    in.read(reinterpret_cast<char*>(&k_i32), sizeof(int32_t));
+    if (!in || static_cast<size_t>(nq_i32) != Qclouds || static_cast<uint32_t>(k_i32) != k) {
+      std::cerr << "WARNING: cached GT header mismatch at " << path
+                << " (got nq=" << nq_i32 << " k=" << k_i32 << "); recomputing.\n";
+      return false;
     }
+    std::vector<uint32_t> ids(static_cast<size_t>(nq_i32) * static_cast<size_t>(k_i32));
+    in.read(reinterpret_cast<char*>(ids.data()), ids.size() * sizeof(uint32_t));
+    if (!in) {
+      std::cerr << "WARNING: cached GT file truncated at " << path << "; recomputing.\n";
+      return false;
+    }
+    parlay::parallel_for(0, Qclouds, [&](size_t qi) {
+      auto& es = exact_sets[qi];
+      es.reserve(static_cast<size_t>(k) * 2);
+      for (uint32_t j = 0; j < k; ++j)
+        es.insert(ids[qi * static_cast<size_t>(k) + static_cast<size_t>(j)]);
+    });
+    std::cout << "Loaded cached GT from " << path << "\n";
+    return true;
+  };
 
-    const auto& sorted_exact = gt_file ? gt_data[qi] : exact_scores;
-
-    std::unordered_set<uint32_t> exact_set;
-    exact_set.reserve(static_cast<size_t>(k) * 2);
-    for (uint32_t j = 0; j < k; ++j) {
-      uint32_t nid = sorted_exact[j].first;
-      if (gt_file && gt_neighbor_indices) {
-        if (nid >= Nclouds) {
-          std::cerr << "ERROR: ground-truth neighbor index " << nid << " >= Nclouds " << Nclouds
-                    << " (query " << qi << ")\n";
-          return 1;
-        }
-        nid = db.get_id(static_cast<size_t>(nid));
+  auto save_cached_gt = [&](const std::string& path) {
+    if (path.empty()) return;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+      std::cerr << "WARNING: could not open " << path << " for GT cache write.\n";
+      return;
+    }
+    int32_t nq_i32 = static_cast<int32_t>(Qclouds);
+    int32_t k_i32 = static_cast<int32_t>(k);
+    out.write(reinterpret_cast<const char*>(&nq_i32), sizeof(int32_t));
+    out.write(reinterpret_cast<const char*>(&k_i32), sizeof(int32_t));
+    std::vector<uint32_t> flat(Qclouds * static_cast<size_t>(k));
+    for (size_t qi = 0; qi < Qclouds; ++qi) {
+      // Set iteration order is unstable, but we only check membership on read,
+      // so order in the cache doesn't matter as long as the same ids are stored.
+      size_t j = 0;
+      for (uint32_t id : exact_sets[qi]) {
+        flat[qi * static_cast<size_t>(k) + j++] = id;
+        if (j >= static_cast<size_t>(k)) break;
       }
-      exact_set.insert(nid);
     }
+    out.write(reinterpret_cast<const char*>(flat.data()), flat.size() * sizeof(uint32_t));
+    if (!out) {
+      std::cerr << "WARNING: short write to GT cache " << path << "\n";
+      return;
+    }
+    std::cout << "  cached GT to " << path << "\n";
+  };
+
+  if (gt_file) {
+    auto gt_data = load_ground_truth(gt_file, Qclouds, k);
+    parlay::parallel_for(0, Qclouds, [&](size_t qi) {
+      auto& es = exact_sets[qi];
+      es.reserve(static_cast<size_t>(k) * 2);
+      for (uint32_t j = 0; j < k; ++j) {
+        uint32_t nid = gt_data[qi][j].first;
+        if (gt_neighbor_indices) {
+          if (nid >= Nclouds) {
+            std::cerr << "ERROR: ground-truth neighbor index " << nid << " >= Nclouds " << Nclouds
+                      << " (query " << qi << ")\n";
+            std::abort();
+          }
+          nid = db.get_id(static_cast<size_t>(nid));
+        }
+        es.insert(nid);
+      }
+    });
+  } else {
+    const std::string cache_path = make_gt_cache_path();
+    if (!try_load_cached_gt(cache_path)) {
+      std::cout << "Computing exact GT (brute force)..." << std::endl;
+      parlay::internal::timer t;
+      t.start();
+      std::vector<std::pair<uint32_t, float>> scratch(Nclouds);
+      for (size_t qi = 0; qi < Qclouds; ++qi) {
+        db.distances(queries[qi], scratch.data());
+        std::sort(scratch.begin(), scratch.end(),
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        auto& es = exact_sets[qi];
+        es.reserve(static_cast<size_t>(k) * 2);
+        for (uint32_t j = 0; j < k; ++j) es.insert(scratch[j].first);
+      }
+      std::cout << "  GT: " << t.stop() << "s" << std::endl;
+      save_cached_gt(cache_path);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 2: Pre-quantize queries for methods whose quantize_query is not
+  // thread-safe. RaBitQ's quantize_query copies into model-internal state
+  // (mirrors the SV variant — see comment in measure_stretch_tq.cpp).
+  // Other methods' quantize_query is called inside the parallel loop.
+  // ---------------------------------------------------------------------
+  using rq_qq_t = decltype(rq_model.quantize_query(queries[0]));
+  std::vector<rq_qq_t> rq_qs;
+  if (run_rabitq) {
+    rq_qs.reserve(Qclouds);
+    for (size_t qi = 0; qi < Qclouds; ++qi)
+      rq_qs.push_back(rq_model.quantize_query(queries[qi]));
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 3: Per-query parallel evaluation. Each query writes its own
+  // contribution row; reduce serially at the end. tl_approx is per-thread
+  // so threads don't fight over a single shared buffer.
+  // ---------------------------------------------------------------------
+  parlay::sequence<std::vector<double>> per_query_contrib(Qclouds);
+  std::cout << "Outer iterations: " << Qclouds << " (parallel)" << std::endl;
+  parlay::parallel_for(0, Qclouds, [&](size_t qi) {
+    per_query_contrib[qi].resize(NUM_METHODS * kprime_grid.size(), 0.0);
+
+    static thread_local std::vector<std::pair<uint32_t, float>> tl_approx;
+    tl_approx.resize(Nclouds);
+
+    const auto& exact_set = exact_sets[qi];
 
     auto eval_method = [&](Method meth) {
-      std::sort(approx_scores.begin(), approx_scores.end(),
+      std::sort(tl_approx.begin(), tl_approx.end(),
                 [](const auto& a, const auto& b) { return a.second < b.second; });
-      // distances_all() already stores logical cloud ids (same as db.get_id(cid)) in .first.
-      std::vector<uint32_t> approx_ids;
-      approx_ids.reserve(Nclouds);
-      for (const auto& p : approx_scores) approx_ids.push_back(p.first);
-
+      // distances_all() stores logical cloud ids (same as db.get_id(cid)) in .first.
       for (size_t i = 0; i < kprime_grid.size(); ++i) {
         const size_t kp = static_cast<size_t>(kprime_grid[i]);
         size_t hits = 0;
-        const size_t limit = std::min(kp, approx_ids.size());
+        const size_t limit = std::min(kp, tl_approx.size());
         for (size_t j = 0; j < limit; ++j) {
-          if (exact_set.find(approx_ids[j]) != exact_set.end()) ++hits;
+          if (exact_set.find(tl_approx[j].first) != exact_set.end()) ++hits;
         }
-        sum_recall[idx2(meth, i)] += static_cast<double>(hits) / static_cast<double>(k);
+        per_query_contrib[qi][idx2(meth, i)] =
+            static_cast<double>(hits) / static_cast<double>(k);
       }
     };
 
     if (run_pq) {
       auto qq = pq_model.quantize_query(queries[qi]);
-      pq_db.distances_all(qq, approx_scores.data());
+      pq_db.distances_all(qq, tl_approx.data());
       eval_method(PQ);
     }
     {
       auto qq = fs_model.quantize_query(queries[qi]);
-      fs_db.distances_all(qq, approx_scores.data());
+      fs_db.distances_all(qq, tl_approx.data());
       eval_method(FASTSCAN);
     }
     if (run_rabitq) {
-      auto qq = rq_model.quantize_query(queries[qi]);
-      rq_db.distances_all(qq, approx_scores.data());
+      rq_db.distances_all(rq_qs[qi], tl_approx.data());
       eval_method(RABITQ);
     }
-
     {
       auto qq = tq_model.quantize_query(queries[qi]);
-      tq_db.distances_all(qq, approx_scores.data());
+      tq_db.distances_all(qq, tl_approx.data());
       eval_method(TURBOQUANT_MV);
     }
-
     {
       auto qq = tq8_model.quantize_query(queries[qi]);
-      tq8_db.distances_all(qq, approx_scores.data());
+      tq8_db.distances_all(qq, tl_approx.data());
       eval_method(TURBOQUANT_8BIT_MV);
     }
 
@@ -364,35 +471,38 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     // instead of VNNI GEMM batch distance. Isolates GEMM kernel issues.
     //    {
     //      auto qq = tq_model.quantize_query(queries[qi]);
-    //      parlay::parallel_for(0, Nclouds, [&](size_t cid) {
+    //      for (size_t cid = 0; cid < Nclouds; ++cid) {
     //        float d = qq.distance_perpoint(tq_db[cid]);
-    //        approx_scores[cid] = {static_cast<uint32_t>(cid), d};
-    //      });
+    //        tl_approx[cid] = {static_cast<uint32_t>(cid), d};
+    //      }
     //      eval_method(TQ_SCALAR);
     //    }
 
-    // TQ-PQ (wrapper / multi-vector)
     {
       auto qq = tqpq1_model.quantize_query(queries[qi]);
-      tqpq1_db.distances_all(qq, approx_scores.data());
+      tqpq1_db.distances_all(qq, tl_approx.data());
       eval_method(TQPQ_B1);
     }
     {
       auto qq = tqpq2_model.quantize_query(queries[qi]);
-      tqpq2_db.distances_all(qq, approx_scores.data());
+      tqpq2_db.distances_all(qq, tl_approx.data());
       eval_method(TQPQ_B2);
     }
     {
       auto qq = tqpq4_model.quantize_query(queries[qi]);
-      tqpq4_db.distances_all(qq, approx_scores.data());
+      tqpq4_db.distances_all(qq, tl_approx.data());
       eval_method(TQPQ_B4);
     }
     {
       auto qq = tqpq8_model.quantize_query(queries[qi]);
-      tqpq8_db.distances_all(qq, approx_scores.data());
+      tqpq8_db.distances_all(qq, tl_approx.data());
       eval_method(TQPQ_B8);
     }
-  }
+  });
+
+  for (size_t qi = 0; qi < Qclouds; ++qi)
+    for (size_t i = 0; i < sum_recall.size(); ++i)
+      sum_recall[i] += per_query_contrib[qi][i];
 
   std::cout << "\n=== Recall@" << k << " vs candidate budget k' ===\n";
   std::cout << "Averages over Q=" << Qclouds << " query clouds.\n\n";
@@ -467,8 +577,12 @@ static int run_files(commandLine& P, uint32_t pq_block, uint32_t pq_k, uint32_t 
   std::cout << "  db=" << dbFile << (mm ? " (mmap)\n" : "\n");
   std::cout << "  q =" << qFile << "\n";
   const bool gt_neighbor_indices = P.getOption("-gt_neighbor_indices");
+  // File-mode cache keys for the GT cache (skipped in synth mode).
+  const std::string db_cache_key = std::filesystem::path(dbFile).stem().string();
+  const std::string q_cache_key = std::filesystem::path(qFile).stem().string();
   return run_from_sets<ChPoint>(db, queries, pq_block, pq_k, fs_block, rbits, k, gt_file,
-                                gt_neighbor_indices, run_pq, run_rabitq);
+                                gt_neighbor_indices, run_pq, run_rabitq, db_cache_key,
+                                q_cache_key);
 }
 
 int main(int argc, char** argv) {
