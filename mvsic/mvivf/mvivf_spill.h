@@ -909,14 +909,26 @@ class IndexMVIVFSpill : public Index<metric> {
     //
     // Dedup is required because spill replicates points across leaves (root
     // spill = a, level-1 spill = b), so a single point id can show up in
-    // multiple per-leaf scatter buffers.  We do dedup *sequentially* per
-    // query: the outer parlay::parallel_for already saturates cores, and
-    // calling parallelized routines (deduplicate_and_topC) per query nests
-    // parallel_for blocks and tanks aggregation throughput.  Steps:
-    //   (1) compact sentinels in place
-    //   (2) std::sort by id, collapse adjacent duplicates keeping min value
-    //   (3) std::nth_element by value to obtain the top num_rerank
-    //   (4) rerank as in the regular MVIVF path
+    // multiple per-leaf scatter buffers.  We do this sequentially per query
+    // to avoid nesting parallel_for inside the outer parlay::parallel_for.
+    //
+    // The naive approach (full sort by id, collapse adjacent, nth_element)
+    // pays O(N log N) where N = nprobes * num_rerank.  For large num_rerank
+    // this dominates aggregation cost.  Instead we exploit a tight bound:
+    // any single point id appears in the candidate pool at most `max_dups`
+    // times, where max_dups <= num_spill * num_spill_l2 (root replication
+    // factor times level-1 replication factor; deeper levels use top-1).
+    // Therefore the top `num_rerank` distinct ids by value contribute at
+    // most num_rerank * max_dups entries to the pool, all with values <=
+    // the num_rerank-th distinct id's value.  So:
+    //   (1) compact sentinels in place                           // O(N)
+    //   (2) nth_element by value to bring top K = num_rerank *   // O(N)
+    //       max_dups entries to the front
+    //   (3) std::sort that K-window by id, collapse duplicates   // O(K log K)
+    //       keeping min value
+    //   (4) nth_element by value on the deduped window to get    // O(K')
+    //       the top num_rerank distinct
+    //   (5) rerank as in the regular MVIVF path
     if (search_params.tq8_rerank && search_params.num_rerank > 0) {
       parlay::internal::timer t_db;
       t_db.start();
@@ -943,17 +955,31 @@ class IndexMVIVFSpill : public Index<metric> {
         }
       }
 
-      // (2) Sequential dedup: sort by id, collapse adjacent duplicates
-      // keeping the smallest distance.  Writing back into `cands` in place
-      // avoids any allocation.
-      std::sort(cands, cands + num_valid,
+      // (2) nth_element: bring the top K = num_rerank * max_dups entries by
+      // distance to [0..K).  Because every distinct id has at most max_dups
+      // occurrences in the pool, the top num_rerank distinct are guaranteed
+      // to lie within these K entries.  Skipping the rest saves an
+      // O(N log N) full sort when N >> K (typical: N = nprobes *
+      // num_rerank, K = O(num_rerank)).
+      const size_t max_dups =
+          static_cast<size_t>(std::max<uint32_t>(params.num_spill, 1u)) *
+          static_cast<size_t>(std::max<uint32_t>(params.num_spill_l2, 1u));
+      const size_t K_part = std::min(num_valid, num_rerank * max_dups);
+      if (K_part < num_valid) {
+        std::nth_element(cands, cands + K_part, cands + num_valid,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+      }
+
+      // (3) Sequential dedup on the K-window: sort by id, collapse adjacent
+      // duplicates keeping the smallest value.  In place to avoid alloc.
+      std::sort(cands, cands + K_part,
                 [](const auto& a, const auto& b) { return a.first < b.first; });
       size_t deduped = 0;
-      for (size_t c = 0; c < num_valid;) {
+      for (size_t c = 0; c < K_part;) {
         const uint32_t id = cands[c].first;
         float min_v = cands[c].second;
         size_t j = c + 1;
-        while (j < num_valid && cands[j].first == id) {
+        while (j < K_part && cands[j].first == id) {
           if (cands[j].second < min_v) min_v = cands[j].second;
           ++j;
         }
@@ -961,7 +987,8 @@ class IndexMVIVFSpill : public Index<metric> {
         c = j;
       }
 
-      // (3) Top num_rerank by distance.
+      // (4) Top num_rerank by value (deduped is already <= 2 * num_rerank
+      // after step 2, so this is cheap).
       size_t take = std::min(num_rerank, deduped);
       if (take > 0 && take < deduped) {
         std::nth_element(cands, cands + take, cands + deduped,
