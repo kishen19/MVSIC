@@ -111,3 +111,9 @@ case "$TASK" in
   all)    build_run; search_run; plot_run;;
   *)      echo "unknown task: $TASK"; exit 2;;
 esac
+
+# Best-effort drop of OS page cache so the next dataset starts cold.
+# `sudo -n` never prompts; if a password is required and not cached it just
+# fails and we swallow the error. Safe no-op if sudo is unavailable.
+sync || true
+echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true

@@ -5,6 +5,9 @@ Used by experiments/builds/scripts/run_builds.sh and the per-stage runners
 (run_latency.sh, run_multi_latency.sh, run_batch.sh).
 
 Both filters pass through unchanged if not provided.
+
+Optional ``--strip-indices`` removes named entries from ``indices`` after the
+other filters (runners use this to scope FastPlaid without editing YAML files).
 """
 from __future__ import annotations
 
@@ -27,6 +30,14 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--dataset", default=None, help="Match datasets[].name (single dataset).")
     ap.add_argument("--method", default=None, help="Match indices[].name (single method).")
+    ap.add_argument(
+        "--strip-indices",
+        default=None,
+        help=(
+            "Comma-separated index names to remove from ``indices`` after other filters "
+            "(used by run scripts to scope FastPlaid without editing checked-in YAML)."
+        ),
+    )
     args = ap.parse_args()
 
     with open(args.in_path, encoding="utf-8") as f:
@@ -53,6 +64,15 @@ def main() -> int:
                 f"method {args.method!r} not found; available: {names}"
             )
         cfg["indices"] = sel
+
+    if args.strip_indices:
+        drop = {x.strip() for x in args.strip_indices.split(",") if x.strip()}
+        indices = cfg.get("indices") or []
+        cfg["indices"] = [
+            i
+            for i in indices
+            if isinstance(i, dict) and str(i.get("name")) not in drop
+        ]
 
     with open(args.out, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

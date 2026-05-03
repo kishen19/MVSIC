@@ -1,16 +1,11 @@
-name: "Main experiments latency (ViDoRe)"
+name: "Main experiments latency (MS MARCO)"
+
+# MS MARCO is kept as its own config so we can sweep different params (the
+# corpus is much larger than the BEIR shards). Mirror the BEIR search
+# definitions here -- override in this file as needed.
 
 datasets:
-  - { name: docvqa,            path: data/vidore/docvqa,            index_dir: results/indexes/vidore/docvqa,            results_dir: experiments/latency/results/docvqa,            is_mmap: true }
-  - { name: infovqa,           path: data/vidore/infovqa,           index_dir: results/indexes/vidore/infovqa,           results_dir: experiments/latency/results/infovqa,           is_mmap: true }
-  - { name: arxivqa,           path: data/vidore/arxivqa,           index_dir: results/indexes/vidore/arxivqa,           results_dir: experiments/latency/results/arxivqa,           is_mmap: true }
-  - { name: tabfquad,          path: data/vidore/tabfquad,          index_dir: results/indexes/vidore/tabfquad,          results_dir: experiments/latency/results/tabfquad,          is_mmap: true }
-  - { name: chartqa,           path: data/vidore/chartqa,           index_dir: results/indexes/vidore/chartqa,           results_dir: experiments/latency/results/chartqa,           is_mmap: true }
-  - { name: shiftproject,      path: data/vidore/shiftproject,      index_dir: results/indexes/vidore/shiftproject,      results_dir: experiments/latency/results/shiftproject,      is_mmap: true }
-  - { name: synth_ai,          path: data/vidore/synth_ai,          index_dir: results/indexes/vidore/synth_ai,          results_dir: experiments/latency/results/synth_ai,          is_mmap: true }
-  - { name: synth_energy,      path: data/vidore/synth_energy,      index_dir: results/indexes/vidore/synth_energy,      results_dir: experiments/latency/results/synth_energy,      is_mmap: true }
-  - { name: synth_gov,         path: data/vidore/synth_gov,         index_dir: results/indexes/vidore/synth_gov,         results_dir: experiments/latency/results/synth_gov,         is_mmap: true }
-  - { name: synth_healthcare,  path: data/vidore/synth_healthcare,  index_dir: results/indexes/vidore/synth_healthcare,  results_dir: experiments/latency/results/synth_healthcare,  is_mmap: true }
+  - { name: msmarco, path: data/beir/msmarco, index_dir: results/indexes/msmarco, results_dir: experiments/latency/results/msmarco, is_mmap: true }
 
 indices:
   # -------------------- MVIVF --------------------

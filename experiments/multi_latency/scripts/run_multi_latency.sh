@@ -5,11 +5,11 @@
 # of truth and only rewrites `results_dir` to land under
 # experiments/multi_latency/results/.
 #
-# Usage:
-#   experiments/multi_latency/scripts/run_multi_latency.sh --dataset beir5
+# Usage (one dataset per invocation):
+#   experiments/multi_latency/scripts/run_multi_latency.sh --dataset nfcorpus
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --method mvivf
 #
-# FastPlaid does not support this mode and is skipped automatically.
+# FastPlaid does not support this mode and is stripped from the config automatically.
 
 set -euo pipefail
 
@@ -23,8 +23,8 @@ DATASET=""
 METHOD=""
 EXTRA_ARGS=()
 
-BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
-DATASET_ALIASES=(beir5 nq hotpotqa nq500k quora vidore)
+BEIR_DATASETS=(nfcorpus scifact arguana scidocs fiqa quora nq hotpotqa nq500k)
+DATASET_ALIASES=(vidore msmarco)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {
@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$DATASET" ]]; then
-  echo "Specify --dataset <alias|single-name>. Aliases: ${DATASET_ALIASES[*]}; or one of beir5: ${BEIR5_DATASETS[*]}." >&2
+  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; or one BEIR dataset: ${BEIR_DATASETS[*]}." >&2
   exit 2
 fi
 
@@ -54,7 +54,7 @@ is_in() {
   return 1
 }
 
-if [[ "$METHOD" == "fastplaid" ]]; then
+if [[ "${METHOD:-}" == "fastplaid" ]]; then
   echo "[warn] FastPlaid does not support multi-latency; skipping." >&2
   exit 0
 fi
@@ -63,22 +63,20 @@ SRC_YAML=""
 FILTER_DATASET=""
 if is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
   SRC_YAML="$CONFIGS_DIR/${DATASET}.search.yaml"
-elif is_in "$DATASET" "${BEIR5_DATASETS[@]}"; then
-  SRC_YAML="$CONFIGS_DIR/beir5.search.yaml"
+elif is_in "$DATASET" "${BEIR_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beir.search.yaml"
   FILTER_DATASET="$DATASET"
 else
-  echo "Unknown --dataset '$DATASET'." >&2
+  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR names: ${BEIR_DATASETS[*]}." >&2
   exit 2
 fi
 [[ -f "$SRC_YAML" ]] || { echo "[error] config not found: $SRC_YAML" >&2; exit 2; }
 
-# Rewrite results_dir to land under experiments/multi_latency/results/.
 REWRITTEN="$(mktemp "${TMPDIR:-/tmp}/main_mlat_rw.XXXXXX.yaml")"
 TEMP_YAMLS+=("$REWRITTEN")
 python3 "$REWRITE_PY" --in "$SRC_YAML" --out "$REWRITTEN" \
     --from-stage latency --to-stage multi_latency
 
-# Drop the FastPlaid index entry if present (multi-latency unsupported).
 NO_FASTPLAID="$(mktemp "${TMPDIR:-/tmp}/main_mlat_nofp.XXXXXX.yaml")"
 TEMP_YAMLS+=("$NO_FASTPLAID")
 python3 - "$REWRITTEN" "$NO_FASTPLAID" << 'PY'
@@ -89,10 +87,9 @@ cfg["indices"] = [i for i in cfg.get("indices") or [] if i.get("name") != "fastp
 with open(dst, "w") as f: yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
 
-# Optional dataset/method filtering.
 NEED_FILTER=0
 [[ -n "$FILTER_DATASET" ]] && NEED_FILTER=1
-[[ -n "$METHOD" && "$METHOD" != "all" ]] && NEED_FILTER=1
+[[ -n "${METHOD:-}" && "$METHOD" != "all" ]] && NEED_FILTER=1
 
 CONFIG_PATH="$NO_FASTPLAID"
 if [[ "$NEED_FILTER" -eq 1 ]]; then
@@ -100,7 +97,7 @@ if [[ "$NEED_FILTER" -eq 1 ]]; then
   TEMP_YAMLS+=("$TMP")
   args=(python3 "$FILTER_PY" --in "$NO_FASTPLAID" --out "$TMP")
   [[ -n "$FILTER_DATASET" ]] && args+=(--dataset "$FILTER_DATASET")
-  [[ -n "$METHOD" && "$METHOD" != "all" ]] && args+=(--method "$METHOD")
+  [[ -n "${METHOD:-}" && "$METHOD" != "all" ]] && args+=(--method "$METHOD")
   if ! "${args[@]}"; then
     echo "[error] filter_config.py failed" >&2
     exit 2
@@ -113,3 +110,6 @@ python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
     --config "$CONFIG_PATH" \
     --mode multi_latency \
     "${EXTRA_ARGS[@]}"
+
+sync || true
+echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true

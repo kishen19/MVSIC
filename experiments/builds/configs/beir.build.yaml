@@ -1,0 +1,80 @@
+name: "Main experiments build (BEIR)"
+
+# Index binaries land at <index_dir>/<index_name>/<build_name>/index.bin .
+# Configs reference results/indexes/<dataset>/ which can be a symlink to
+# scratch storage; only the (large) index files live there. Everything else
+# (CSVs, plots, build_stats markdown) stays under experiments/.
+#
+# `is_mmap: true` mmaps the points (database) PCS file at load time. Queries
+# are always loaded normally. Keep on for the bigger BEIR shards so we don't
+# pay a full RAM hit before benchmarking begins.
+
+datasets:
+  - { name: nfcorpus, path: data/beir/nfcorpus, index_dir: results/indexes/nfcorpus, is_mmap: true }
+  - { name: scifact,  path: data/beir/scifact,  index_dir: results/indexes/scifact,  is_mmap: true }
+  - { name: arguana,  path: data/beir/arguana,  index_dir: results/indexes/arguana,  is_mmap: true }
+  - { name: scidocs,  path: data/beir/scidocs,  index_dir: results/indexes/scidocs,  is_mmap: true }
+  - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa,     is_mmap: true }
+  - { name: quora,    path: data/beir/quora,    index_dir: results/indexes/quora,    is_mmap: true }
+  - { name: nq,       path: data/beir/nq,       index_dir: results/indexes/nq,       is_mmap: true }
+  - { name: hotpotqa, path: data/beir/hotpotqa, index_dir: results/indexes/hotpotqa, is_mmap: true }
+  - { name: nq500k,   path: data/beir/nq500k,   index_dir: results/indexes/nq500k,   is_mmap: true }
+
+indices:
+  # ----- MVIVF. TQ4/TQ1/TQ8 are search-time variants; build `build_with_8btq` uses
+  # 8-bit TurboQuant for the MVIVF k-means assignment path. -----
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+
+  # ----- MUVERA: d_fde=10240, Vamana R=200 / L=600 (winner from ablations). -----
+  - name: muvera
+    metric: ip
+    build_configs:
+      - name: muvera_10240_R200_L600_a1.0
+        params:
+          verbose: 1
+          d_fde: 10240
+          R: 200
+          L: 600
+          alpha: 1.0
+
+  # ----- MV-Vamana. -----
+  - name: vamana
+    metric: ip
+    build_configs:
+      - name: vamana_R64_L128_a1.0
+        params:
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+
+  # ----- SVH Graph (single-vector Vamana-style graph over SVH embeddings). -----
+  - name: svh_graph
+    metric: ip
+    build_configs:
+      - name: svh_graph_R64_L128_a1.0
+        params:
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+
+  # ----- FastPlaid (BEIR only). Build via FastPlaidWrapper.create. -----
+  - name: fastplaid
+    metric: ip
+    build_configs:
+      - name: fastplaid_nbits4
+        params:
+          nbits: 4

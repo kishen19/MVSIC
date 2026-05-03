@@ -1,0 +1,61 @@
+name: "Main experiments build (MS MARCO)"
+
+# MS MARCO is kept as its own config so we can sweep different params (the
+# corpus is much larger than the BEIR shards). Mirror the BEIR build
+# definitions here -- override in this file as needed.
+
+datasets:
+  - { name: msmarco, path: data/beir/msmarco, index_dir: results/indexes/msmarco, is_mmap: true }
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+
+  - name: muvera
+    metric: ip
+    build_configs:
+      - name: muvera_10240_R200_L600_a1.0
+        params:
+          verbose: 1
+          d_fde: 10240
+          R: 200
+          L: 600
+          alpha: 1.0
+
+  - name: vamana
+    metric: ip
+    build_configs:
+      - name: vamana_R64_L128_a1.0
+        params:
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+
+  - name: svh_graph
+    metric: ip
+    build_configs:
+      - name: svh_graph_R64_L128_a1.0
+        params:
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+
+  - name: fastplaid
+    metric: ip
+    build_configs:
+      - name: fastplaid_nbits4
+        params:
+          nbits: 4

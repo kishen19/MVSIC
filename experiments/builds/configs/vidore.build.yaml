@@ -1,22 +1,22 @@
 name: "Main experiments build (ViDoRe)"
 
 datasets:
-  - { name: docvqa,   path: data/vidore/docvqa,   index_dir: results/indexes/vidore/docvqa   }
-  - { name: infovqa,  path: data/vidore/infovqa,  index_dir: results/indexes/vidore/infovqa  }
-  - { name: arxivqa,  path: data/vidore/arxivqa,  index_dir: results/indexes/vidore/arxivqa  }
-  - { name: tabfquad, path: data/vidore/tabfquad, index_dir: results/indexes/vidore/tabfquad }
-  - { name: chartqa,  path: data/vidore/chartqa,  index_dir: results/indexes/vidore/chartqa  }
-  - { name: shiftproject,    path: data/vidore/shiftproject,    index_dir: results/indexes/vidore/shiftproject    }
-  - { name: synth_ai,        path: data/vidore/synth_ai,        index_dir: results/indexes/vidore/synth_ai        }
-  - { name: synth_energy,    path: data/vidore/synth_energy,    index_dir: results/indexes/vidore/synth_energy    }
-  - { name: synth_gov,       path: data/vidore/synth_gov,       index_dir: results/indexes/vidore/synth_gov       }
-  - { name: synth_healthcare, path: data/vidore/synth_healthcare, index_dir: results/indexes/vidore/synth_healthcare }
+  - { name: docvqa,            path: data/vidore/docvqa,            index_dir: results/indexes/vidore/docvqa,            is_mmap: true }
+  - { name: infovqa,           path: data/vidore/infovqa,           index_dir: results/indexes/vidore/infovqa,           is_mmap: true }
+  - { name: arxivqa,           path: data/vidore/arxivqa,           index_dir: results/indexes/vidore/arxivqa,           is_mmap: true }
+  - { name: tabfquad,          path: data/vidore/tabfquad,          index_dir: results/indexes/vidore/tabfquad,          is_mmap: true }
+  - { name: chartqa,           path: data/vidore/chartqa,           index_dir: results/indexes/vidore/chartqa,           is_mmap: true }
+  - { name: shiftproject,      path: data/vidore/shiftproject,      index_dir: results/indexes/vidore/shiftproject,      is_mmap: true }
+  - { name: synth_ai,          path: data/vidore/synth_ai,          index_dir: results/indexes/vidore/synth_ai,          is_mmap: true }
+  - { name: synth_energy,      path: data/vidore/synth_energy,      index_dir: results/indexes/vidore/synth_energy,      is_mmap: true }
+  - { name: synth_gov,         path: data/vidore/synth_gov,         index_dir: results/indexes/vidore/synth_gov,         is_mmap: true }
+  - { name: synth_healthcare,  path: data/vidore/synth_healthcare,  index_dir: results/indexes/vidore/synth_healthcare,  is_mmap: true }
 
 indices:
   - name: mvivf
     metric: ip
     build_configs:
-      - name: mvivf_k0_l100_d0_n5_s0_mpcc100
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
         params:
           verbose: 1
           k_per_level: 0
@@ -25,38 +25,37 @@ indices:
           niters: 5
           s: 0
           max_point_clouds_per_cluster: 100
-          pq_method: 7
-          quantize_centers: true
+          build_with_8btq: true
 
   - name: muvera
     metric: ip
     build_configs:
-      - name: muvera_2560_R200_L600
+      - name: muvera_10240_R200_L600_a1.0
         params:
           verbose: 1
-          d_fde: 2560
+          d_fde: 10240
           R: 200
           L: 600
-          pq_method: 0
-          quantize_centers: false
+          alpha: 1.0
 
   - name: vamana
     metric: ip
     build_configs:
-      - name: vamana_R200
+      - name: vamana_R64_L128_a1.0
         params:
           verbose: 1
-          R: 200
-          pq_method: 0
-          quantize_centers: false
+          R: 64
+          L: 128
+          alpha: 1.0
 
   - name: svh_graph
     metric: ip
     build_configs:
-      - name: svh_graph_R200
+      - name: svh_graph_R64_L128_a1.0
         params:
           verbose: 1
-          R: 200
-          L: 600
+          R: 64
+          L: 128
+          alpha: 1.0
 
-  # FastPlaid intentionally omitted: only run on BEIR5.
+  # FastPlaid intentionally omitted: only run on BEIR.

@@ -399,7 +399,7 @@ class IndexMVIVF : public Index<metric> {
                     q.num_queries * sizeof(int32_t));
       });
 
-      if (params.verbose >= 1) {
+    if (params.verbose >= 1) {
         std::cout << "[MVIVF] 8BTQ pre-encode (" << n << " PCs, " << total_vecs
                   << " vecs): " << t.stop() << " sec" << std::endl;
       }
@@ -480,7 +480,7 @@ class IndexMVIVF : public Index<metric> {
     PointCloudSet<ChPoint> centers;
     parlay::sequence<uint32_t> cluster_ids;
     auto run_clus = [&](auto& Clus) {
-      Clus.train(points);
+    Clus.train(points);
       cluster_ids = Clus.get_clustering(points);
       centers = std::move(Clus.get_centers());
     };
@@ -608,24 +608,24 @@ class IndexMVIVF : public Index<metric> {
     leaves_flat.clear();
     leaf_to_root_child_.clear();
     if (!root) return;
-    std::vector<ChPoint> center_points;
-    std::vector<uint32_t> root_child_for_leaf;
-    std::function<void(node_t*, node_t*, size_t, uint32_t)> visit =
-        [&](node_t* node, node_t* parent, size_t child_idx, uint32_t root_child_idx) {
-          if (node->children.empty()) {
-            leaves_flat.push_back(node);
-            auto& centers_pc = parent->data;
-            center_points.push_back(centers_pc[child_idx]);
-            root_child_for_leaf.push_back(root_child_idx);
-          } else {
-            for (size_t i = 0; i < node->children.size(); ++i) {
-              visit(node->children[i], node, i,
-                    (parent == root) ? static_cast<uint32_t>(i) : root_child_idx);
+      std::vector<ChPoint> center_points;
+      std::vector<uint32_t> root_child_for_leaf;
+      std::function<void(node_t*, node_t*, size_t, uint32_t)> visit =
+          [&](node_t* node, node_t* parent, size_t child_idx, uint32_t root_child_idx) {
+            if (node->children.empty()) {
+              leaves_flat.push_back(node);
+              auto& centers_pc = parent->data;
+              center_points.push_back(centers_pc[child_idx]);
+              root_child_for_leaf.push_back(root_child_idx);
+            } else {
+              for (size_t i = 0; i < node->children.size(); ++i) {
+                visit(node->children[i], node, i,
+                      (parent == root) ? static_cast<uint32_t>(i) : root_child_idx);
+              }
             }
-          }
-        };
-    visit(root, nullptr, 0, 0);
-    leaf_to_root_child_ = std::move(root_child_for_leaf);
+          };
+      visit(root, nullptr, 0, 0);
+      leaf_to_root_child_ = std::move(root_child_for_leaf);
     if (center_points.empty()) return;
     PointCloudSet<ChPoint> raw_centers(center_points, d);
     if constexpr (kHasCenterQuant) {
@@ -856,8 +856,8 @@ class IndexMVIVF : public Index<metric> {
     auto visited = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(total_size);
     auto bytes_accessed = parlay::sequence<size_t>::uninitialized(nprobes);
 
-    parlay::parallel_for(0, nprobes, [&](size_t i) {
-      node_t* leaf = probe_list[i].second;
+      parlay::parallel_for(0, nprobes, [&](size_t i) {
+        node_t* leaf = probe_list[i].second;
       if constexpr (kHasLeafQuant) {
         leaf->encoded_leaf.distances_all(q_leaf, &visited[offsets[i]]);
         bytes_accessed[i] = leaf->encoded_leaf.num_bytes();
@@ -1576,10 +1576,10 @@ class IndexMVIVF : public Index<metric> {
 
  private:
   size_t traverse_tree_(node_t* node, parlay::sequence<node_t*>& ind_to_node,
-                        std::unordered_map<node_t*, size_t>& node_to_ind,
-                        parlay::sequence<size_t>& center_offsets,
-                        parlay::sequence<size_t>& children_offsets,
-                        parlay::sequence<size_t>& point_offsets, size_t height) {
+                       std::unordered_map<node_t*, size_t>& node_to_ind,
+                       parlay::sequence<size_t>& center_offsets,
+                       parlay::sequence<size_t>& children_offsets,
+                       parlay::sequence<size_t>& point_offsets, size_t height) {
     node_to_ind[node] = ind_to_node.size();
     ind_to_node.push_back(node);
     if (node->children.size() == 0) {
@@ -1595,7 +1595,7 @@ class IndexMVIVF : public Index<metric> {
     size_t h = height + 1;
     for (node_t* child : node->children) {
       h = std::max(h, traverse_tree_(child, ind_to_node, node_to_ind, center_offsets,
-                                     children_offsets, point_offsets, height + 1));
+                                    children_offsets, point_offsets, height + 1));
     }
     return h;
   }
@@ -1652,7 +1652,7 @@ class IndexMVIVF : public Index<metric> {
     std::unordered_map<node_t*, size_t> node_to_ind;
     parlay::sequence<size_t> center_offsets, children_offsets, point_offsets;
     size_t height = traverse_tree_(root, ind_to_node, node_to_ind, center_offsets, children_offsets,
-                                   point_offsets, 0);
+                                  point_offsets, 0);
     kmeanstree_height = height;
 
     size_t total_center = parlay::scan_inplace(center_offsets);
@@ -1816,17 +1816,17 @@ class IndexMVIVF : public Index<metric> {
     compress_internal_centers_();
 
     if constexpr (kHasLeafQuant) {
-      parlay::parallel_for(
-          0, num,
-          [&](size_t i) {
-            node_t* node = ind_to_node[i];
-            if (!node) return;
+    parlay::parallel_for(
+        0, num,
+        [&](size_t i) {
+          node_t* node = ind_to_node[i];
+          if (!node) return;
             if (node->children.empty() && node->data.size() > 0) {
               node->encoded_leaf = leaf_model_.encode(node->data);
-            }
-          },
-          /*granularity=*/1);
-    }
+          }
+        },
+        /*granularity=*/1);
+  }
     double t_retrain_ms = t_retrain.stop() * 1000.0;
     std::cerr << "[MVIVF] load: tree_io=" << t_io_ms << "ms retrain=" << t_retrain_ms
               << "ms (compress_centers=" << (kHasCenterQuant ? 1 : 0)

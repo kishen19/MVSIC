@@ -381,7 +381,26 @@ def _run_fastplaid(ds, index_details, method_info, mode):
         # (Skipping points to save memory.)
 
         dim = queries[0].shape[1]
-        index = _FastPlaidWrapper(dim, build_params, index_path=index_root)
+        # Mode-aware device selection (CPU-only setup):
+        #   latency -> ``device="cpu"``  (single-device fast path; single-threaded
+        #              kernel pinned via ``torch.set_num_threads(1)`` inside
+        #              ``compute_stats_latency``).
+        #   batch   -> ``device=None``   (FastPlaid default = ``["cpu"] *
+        #              cpu_count`` -> one joblib worker per core; uses all
+        #              threads for the single batched ``search`` call).
+        # On a GPU box we let FastPlaid auto-select ``["cuda"]`` for both modes.
+        try:
+            import torch as _torch_for_device  # FastPlaid is already imported.
+            _has_cuda = _torch_for_device.cuda.is_available()
+        except Exception:
+            _has_cuda = False
+        if mode == "latency":
+            fp_device = "cuda" if _has_cuda else "cpu"
+        else:
+            fp_device = None  # FastPlaid default (multi-CPU or single GPU)
+        index = _FastPlaidWrapper(
+            dim, build_params, index_path=index_root, device=fp_device
+        )
 
         variant_results_dir = os.path.join(
             results_dir, "fastplaid", build_name
@@ -535,7 +554,9 @@ def run_search(
                     continue
 
                 if points is None or queries is None or gt is None:
-                    points, queries, gt = load_dataset(ds_path, ds_name)
+                    points, queries, gt = load_dataset(
+                        ds_path, ds_name, is_mmap=bool(ds.get("is_mmap", False))
+                    )
                 dim = queries[0].get_dims()
 
                 ip = factory(**build_params)

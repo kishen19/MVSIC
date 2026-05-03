@@ -61,6 +61,31 @@ from framework_utils import load_dataset
 
 import mvsic
 
+# FastPlaid is an optional baseline; only imported when the config asks for it.
+_FastPlaidWrapper = None
+_load_point_clouds = None
+
+
+def _ensure_fastplaid_imports():
+    global _FastPlaidWrapper, _load_point_clouds
+    if _FastPlaidWrapper is None:
+        from framework_utils import FastPlaidWrapper as _FPW  # type: ignore
+        from utils import load_point_clouds as _lpc  # type: ignore
+
+        _FastPlaidWrapper = _FPW
+        _load_point_clouds = _lpc
+
+
+def _dir_size_bytes(path: str) -> int:
+    total = 0
+    for r, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(r, f))
+            except OSError:
+                pass
+    return total
+
 
 def _signal_handler(sig, frame):
     print('\nCtrl+C detected. Exiting gracefully.')
@@ -149,12 +174,89 @@ def run_build(
         index_dir = ds["index_dir"]
         print(f"\n=== Dataset: {ds_name} ({ds_path}) ===", flush=True)
 
-        points = None
+        points = None             # mvsic.PointCloudSetIP, used by C++ indices.
+        points_tensors = None     # list[torch.Tensor], used by FastPlaid.
 
         for index_details in config["indices"]:
             index_name = index_details["name"]
             metric = index_details.get("metric", "ip")
             method_info = methods[index_name]
+
+            if index_name == "fastplaid":
+                for bc in index_details["build_configs"]:
+                    build_name = bc["name"]
+                    build_params = bc.get("params") or {}
+                    job_id = f"{ds_name}/fastplaid/{build_name}"
+
+                    out_dir = os.path.join(index_dir, "fastplaid", build_name)
+                    os.makedirs(out_dir, exist_ok=True)
+                    done_marker = os.path.join(out_dir, "_BUILD_OK")
+                    stats_path = os.path.join(out_dir, "build_stats.json")
+
+                    if os.path.exists(done_marker) and not (
+                        rebuild_all or bc.get("rebuild", False)
+                    ):
+                        print(
+                            f"  [fastplaid/{build_name}] exists at {out_dir}; skip.",
+                            flush=True,
+                        )
+                        continue
+
+                    try:
+                        _ensure_fastplaid_imports()
+                        if points_tensors is None:
+                            points_path = os.path.join(
+                                ds_path, f"{ds_name}_points.pcs"
+                            )
+                            points_tensors = _load_point_clouds(points_path)
+                        dim = points_tensors[0].shape[1]
+
+                        print(
+                            f"  [fastplaid/{build_name}] building (IP) -> {out_dir}",
+                            flush=True,
+                        )
+                        wrapper = _FastPlaidWrapper(
+                            dim, build_params, index_path=out_dir
+                        )
+                        t0 = time.time()
+                        wrapper.build(points_tensors)
+                        build_time = time.time() - t0
+
+                        size_bytes = _dir_size_bytes(out_dir)
+                        stats = {
+                            "built_at": time.strftime(
+                                "%Y-%m-%d %H:%M:%S %Z", time.localtime()
+                            ),
+                            "build_time_sec": build_time,
+                            "index_size_mb": size_bytes / (1024 * 1024),
+                            "build_params": build_params,
+                        }
+                        git_sha, git_dirty = _git_info(os.getcwd())
+                        if git_sha:
+                            stats["git_sha"] = git_sha
+                            stats["git_dirty"] = git_dirty
+                        with open(stats_path, "w") as f:
+                            json.dump(stats, f, indent=2)
+                        with open(done_marker, "w") as f:
+                            f.write("ok\n")
+
+                        print(
+                            f"    build_time={build_time:.2f}s  "
+                            f"size={stats['index_size_mb']:.2f}MB",
+                            flush=True,
+                        )
+                    except Exception as e:
+                        print(
+                            f"  [FAIL {job_id}] {type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        traceback.print_exc()
+                        failures.append((job_id, str(e)))
+                        if fail_fast:
+                            break
+                if fail_fast and failures:
+                    break
+                continue
 
             index_class = _resolve_base_class(method_info["class"], metric)
             factory = _resolve_factory(index_name)
@@ -181,7 +283,9 @@ def run_build(
 
                 try:
                     if points is None:
-                        points, _, _ = load_dataset(ds_path, ds_name)
+                        points, _, _ = load_dataset(
+                            ds_path, ds_name, is_mmap=bool(ds.get("is_mmap", False))
+                        )
                     dim = points[0].get_dims()
 
                     ip = factory(**build_params)
