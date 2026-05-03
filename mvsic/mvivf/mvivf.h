@@ -55,6 +55,7 @@
 #include "mvsic/core/mvclustering/mvclustering.h"
 #include "mvsic/core/mvclustering/mvclustering_8bit.h"
 #include "mvsic/core/query_compression.h"
+#include "mvsic/core/utils/interval_heap.h"
 #include "mvsic/core/utils/util.h"
 
 namespace mvsic {
@@ -681,10 +682,6 @@ class IndexMVIVF : public Index<metric> {
       const ChPoint& query, const CenterQuery& q_center, size_t nprobes,
       const std::pair<uint32_t, float>* precomputed_root_dists = nullptr) const {
     using score_node = std::pair<float, node_t*>;
-    auto less = [](const score_node& a, const score_node& b) {
-      return a.first < b.first || (a.first == b.first && a.second < b.second);
-    };
-    (void)less;
     const size_t beam_length = 2 * nprobes;
     parlay::internal::timer t;
     double t_dists = 0.0, t_beam = 0.0, t_rest = 0.0;
@@ -697,7 +694,11 @@ class IndexMVIVF : public Index<metric> {
     t.start();
     size_t dist_cmps = 0;
     size_t bytes_accessed = 0;
-    std::set<score_node> beam;
+    // Bounded-capacity DEPQ.  Replaces std::set, which was paying for ordered
+    // iteration and stable iterators we never used while charging a heap node
+    // and a cache miss per insert/erase.  IntervalHeap keeps the same set of
+    // entries on a single contiguous vector with O(log N) min/max ops.
+    IntervalHeap<score_node> beam(beam_length);
     parlay::sequence<score_node> top_probes;
     top_probes.reserve(nprobes + 1);
     std::vector<std::pair<uint32_t, float>> child_dists;
@@ -706,16 +707,14 @@ class IndexMVIVF : public Index<metric> {
     t.reset();
 
     t.start();
-    beam.insert({0.0f, root});
+    beam.push({0.0f, root});
     t_beam += t.stop();
     t.reset();
 
     t_top.start();
     while (!beam.empty()) {
       t.start();
-      auto it = beam.begin();
-      score_node best = *it;
-      beam.erase(it);
+      score_node best = beam.pop_min();
       t_beam += t.stop();
       t.reset();
 
@@ -759,15 +758,10 @@ class IndexMVIVF : public Index<metric> {
           t.reset();
         } else {
           t.start();
-          const size_t bs = beam.size();
-          if (bs < beam_length)
-            beam.insert({cd, child});
-          else {
-            auto worst_it = std::prev(beam.end());
-            if (cd < worst_it->first) {
-              beam.erase(worst_it);
-              beam.insert({cd, child});
-            }
+          if (beam.size() < beam_length) {
+            beam.push({cd, child});
+          } else if (cd < beam.top_max().first) {
+            beam.replace_max({cd, child});
           }
           t_beam += t.stop();
           t.reset();

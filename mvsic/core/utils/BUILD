@@ -7,6 +7,11 @@ cc_library(
     hdrs = ["csvfile.h"],
 )
 
+cc_library(
+    name = "interval_heap",
+    hdrs = ["interval_heap.h"],
+)
+
 # cc_library(
 #     name = "faiss_kmeans_util",
 #     hdrs = ["faiss_kmeans_util.h"],
@@ -73,6 +78,7 @@ cc_library(
     name = "util",
     hdrs = ["util.h"],
     deps = [
+        ":interval_heap",
         "@highway//hwy/contrib/sort:vqsort",
         "@parlaylib//parlay:primitives",
     ],

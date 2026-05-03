@@ -85,10 +85,15 @@ static constexpr size_t kMaxSafeAccumTiles = 31;
 // (~157 vs 161 QPS) — see 1BTQ-Optimization-Ideas.md "Idea C" for analysis.
 static constexpr size_t kMq1bit = 4;
 
-// Maximum supported top-k bucket capacity. 64 covers common num_rerank
-// values (up to 64) without heap allocation. Bounded by a constant so the
+// Maximum supported top-k bucket capacity. 128 covers common num_rerank
+// values (up to 128) without heap allocation. Bounded by a constant so the
 // bucket can live in stack-allocated SoA arrays.
-static constexpr size_t kMaxBucketK = 64;
+//
+// Why this matters: the slow path (k > kMaxBucketK) replaces the bucket
+// with std::priority_queue, which costs O(log k) cache-missing pointer
+// chases per insert. With nprobes=2048 probes * ~500 leaf points * O(num_q)
+// queries, exceeding this limit by even one is a multi-second penalty.
+static constexpr size_t kMaxBucketK = 128;
 
 // Compute number of tiles required to cover `nbytes` bytes per point. Each
 // tile holds 4 bytes per point.
