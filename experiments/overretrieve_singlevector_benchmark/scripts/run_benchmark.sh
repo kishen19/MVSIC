@@ -7,8 +7,14 @@
 #   scripts/run_benchmark.sh --datasets glove-100-angular       # subset
 #   scripts/run_benchmark.sh --data-root /some/path             # override data_root
 #   scripts/run_benchmark.sh --skip-build                       # don't re-run bazel build
+#   scripts/run_benchmark.sh --skip-existing                    # skip datasets whose previous run succeeded
 #   scripts/run_benchmark.sh --config <yaml>                    # alternate config file
 #   scripts/run_benchmark.sh -- -pq_method TQ4 -num_query 500   # forward extra binary flags
+#
+# --skip-existing semantics: a dataset is considered done when both
+# results/<name>.txt and results/<name>.ok exist. The .ok marker is written
+# only after the binary exits 0; failed runs delete it. To force a re-run of
+# a single dataset, remove its .ok (or both files) and re-invoke.
 #
 # Reproducibility notes:
 #   * Repo root is derived from this script's location, so the script works
@@ -30,19 +36,21 @@ RESULTS_DIR="$EXP_DIR/results"
 DATASETS_FILTER=""
 DATA_ROOT_OVERRIDE="${DATA_ROOT:-}"
 SKIP_BUILD=0
+SKIP_EXISTING=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --config)     CONFIG="$2"; shift 2 ;;
-    --datasets)   DATASETS_FILTER="$2"; shift 2 ;;
-    --data-root)  DATA_ROOT_OVERRIDE="$2"; shift 2 ;;
-    --results-dir) RESULTS_DIR="$2"; shift 2 ;;
-    --skip-build) SKIP_BUILD=1; shift ;;
-    --)           shift; EXTRA_ARGS+=("$@"); break ;;
+    --config)        CONFIG="$2"; shift 2 ;;
+    --datasets)      DATASETS_FILTER="$2"; shift 2 ;;
+    --data-root)     DATA_ROOT_OVERRIDE="$2"; shift 2 ;;
+    --results-dir)   RESULTS_DIR="$2"; shift 2 ;;
+    --skip-build)    SKIP_BUILD=1; shift ;;
+    --skip-existing) SKIP_EXISTING=1; shift ;;
+    --)              shift; EXTRA_ARGS+=("$@"); break ;;
     -h|--help)
-      sed -n '2,21p' "$0"; exit 0 ;;
-    *)            EXTRA_ARGS+=("$1"); shift ;;
+      sed -n '2,26p' "$0"; exit 0 ;;
+    *)               EXTRA_ARGS+=("$1"); shift ;;
   esac
 done
 
@@ -183,6 +191,14 @@ while IFS=$'\x1f' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS 
   fi
 
   OUT="$RESULTS_DIR/$NAME.txt"
+  OK_MARKER="$RESULTS_DIR/$NAME.ok"
+
+  if [[ "$SKIP_EXISTING" -eq 1 && -f "$OUT" && -f "$OK_MARKER" ]]; then
+    echo "  -> skipping (results exist: $OUT)"
+    echo "[$NAME] SKIPPED-EXISTING -> $OUT" >> "$SUMMARY"
+    continue
+  fi
+
   CMD=( "$BIN_PATH"
         -dist_func "$METRIC"
         -i "$POINTS"
@@ -206,6 +222,10 @@ while IFS=$'\x1f' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS 
     CMD+=( "${EXTRA_ARGS[@]}" )
   fi
 
+  # About to (re-)run this dataset: clear any stale OK marker so a failure
+  # doesn't leave a misleading marker from a previous successful run.
+  rm -f "$OK_MARKER"
+
   {
     echo "# command: ${CMD[*]}"
     echo "# host:    $(hostname 2>/dev/null || echo unknown)"
@@ -215,6 +235,7 @@ while IFS=$'\x1f' read -r NAME METRIC K POINTS QUERIES GT PQ_METHOD RABITQ_BITS 
 
   # Run, mirroring stdout to console and to the per-dataset file.
   if "${CMD[@]}" 2>&1 | tee -a "$OUT"; then
+    : > "$OK_MARKER"
     echo "[$NAME] OK -> $OUT" >> "$SUMMARY"
   else
     rc=${PIPESTATUS[0]}

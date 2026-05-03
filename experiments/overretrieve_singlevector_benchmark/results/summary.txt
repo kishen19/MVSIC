@@ -1,0 +1,16 @@
+# Overretrieve Single-Vector Benchmark — summary
+# config: /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/configs/datasets.yaml
+# binary: /home/laxmand_google_com/current/mvsic-paper/MVSIC/bazel-bin/microbenchmark/quantization/bench_singlevector_overretrieve
+# host:   c4-test
+# date:   2026-05-02T21:41:18Z
+# git:    762bc3a (main)
+
+[chamfer_arguana] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_arguana.txt
+[chamfer_fiqa] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_fiqa.txt
+[chamfer_hotpotqa] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_hotpotqa.txt
+[chamfer_nfcorpus] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_nfcorpus.txt
+[chamfer_nq] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_nq.txt
+[chamfer_nq500k] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_nq500k.txt
+[chamfer_quora] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_quora.txt
+[chamfer_scidocs] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_scidocs.txt
+[chamfer_scifact] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_singlevector_benchmark/results/chamfer_scifact.txt

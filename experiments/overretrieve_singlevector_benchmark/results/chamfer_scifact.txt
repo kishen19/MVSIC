@@ -1,0 +1,825 @@
+# command: /home/laxmand_google_com/current/mvsic-paper/MVSIC/bazel-bin/microbenchmark/quantization/bench_singlevector_overretrieve -dist_func IP -i /mnt/ann_data/chamfer_data/beir/scifact/scifact_points.pcs -q /mnt/ann_data/chamfer_data/beir/scifact/scifact_queries.pcs -k 10 -num_query 1000 -max_k_prime 1000 -k_growth 1.1 -pcs
+# host:    c4-test
+# date:    2026-05-03T00:01:41Z
+
+Loading exploded PCS (mmap) from /mnt/ann_data/chamfer_data/beir/scifact/scifact_points.pcs...
+  dims=128 clouds=5183 embeddings=1221388
+Loading exploded PCS (mmap) from /mnt/ann_data/chamfer_data/beir/scifact/scifact_queries.pcs...
+  dims=128 clouds=300 embeddings=9600
+  using random 1000 of 9600 queries (seed=0xC0FFEE)
+Computing exact k-NN...
+GT: 3.29804s
+  cached GT to /tmp/gt_cache_scifact_points_q1000_n1221388_IP_randC0FFEE.bin (1000 queries, k=100)
+
+N=1221388 Q=1000 D=128 dist=IP k=10
+
+--- TurboQuant ---
+FhtKacRotator is selected
+  encode: 0.041518s
+
+=== TurboQuant ===
+  search: 0.7973s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.8727
+        11         0.9085
+        12         0.9317
+        13         0.9460
+        14         0.9583
+        16         0.9728
+        17         0.9775
+        19         0.9832
+        21         0.9867
+        23         0.9900
+        25         0.9917
+        28         0.9936
+        31         0.9954
+        34         0.9964
+        37         0.9973
+        41         0.9975
+        45         0.9983
+        50         0.9988
+        55         0.9990
+        61         0.9992
+        67         0.9992
+        74         0.9993
+        81         0.9994
+        89         0.9998
+        98         0.9998
+       108         0.9998
+       119         0.9999
+       131         0.9999
+       144         0.9999
+       158         0.9999
+       174         0.9999
+       191         1.0000
+       211         1.0000
+       232         1.0000
+       255         1.0000
+       281         1.0000
+       309         1.0000
+       340         1.0000
+       374         1.0000
+       411         1.0000
+       452         1.0000
+       497         1.0000
+       547         1.0000
+       602         1.0000
+       662         1.0000
+       728         1.0000
+       801         1.0000
+       881         1.0000
+       970         1.0000
+      1000         1.0000
+
+--- TurboQuant-8bit ---
+FhtKacRotator is selected
+  encode: 0.0469s
+
+=== TurboQuant-8bit ===
+  search: 0.6754s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.9910
+        11         0.9990
+        12         0.9995
+        13         1.0000
+        14         1.0000
+        16         1.0000
+        17         1.0000
+        19         1.0000
+        21         1.0000
+        23         1.0000
+        25         1.0000
+        28         1.0000
+        31         1.0000
+        34         1.0000
+        37         1.0000
+        41         1.0000
+        45         1.0000
+        50         1.0000
+        55         1.0000
+        61         1.0000
+        67         1.0000
+        74         1.0000
+        81         1.0000
+        89         1.0000
+        98         1.0000
+       108         1.0000
+       119         1.0000
+       131         1.0000
+       144         1.0000
+       158         1.0000
+       174         1.0000
+       191         1.0000
+       211         1.0000
+       232         1.0000
+       255         1.0000
+       281         1.0000
+       309         1.0000
+       340         1.0000
+       374         1.0000
+       411         1.0000
+       452         1.0000
+       497         1.0000
+       547         1.0000
+       602         1.0000
+       662         1.0000
+       728         1.0000
+       801         1.0000
+       881         1.0000
+       970         1.0000
+      1000         1.0000
+
+--- FastScan (block=2) ---
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+  encode: 0.2853s
+
+=== FastScan-b2 ===
+  search: 4.8327s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.5016
+        11         0.5276
+        12         0.5521
+        13         0.5754
+        14         0.5935
+        16         0.6261
+        17         0.6415
+        19         0.6668
+        21         0.6874
+        23         0.7068
+        25         0.7235
+        28         0.7452
+        31         0.7642
+        34         0.7804
+        37         0.7960
+        41         0.8105
+        45         0.8252
+        50         0.8394
+        55         0.8508
+        61         0.8642
+        67         0.8744
+        74         0.8836
+        81         0.8921
+        89         0.8994
+        98         0.9060
+       108         0.9133
+       119         0.9214
+       131         0.9284
+       144         0.9356
+       158         0.9406
+       174         0.9456
+       191         0.9504
+       211         0.9551
+       232         0.9587
+       255         0.9626
+       281         0.9662
+       309         0.9691
+       340         0.9718
+       374         0.9748
+       411         0.9769
+       452         0.9788
+       497         0.9812
+       547         0.9828
+       602         0.9848
+       662         0.9854
+       728         0.9864
+       801         0.9879
+       881         0.9888
+       970         0.9904
+      1000         0.9904
+
+--- FastScan (block=4) ---
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+  encode: 0.1481s
+
+=== FastScan-b4 ===
+  search: 2.6906s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.3886
+        11         0.4107
+        12         0.4317
+        13         0.4502
+        14         0.4670
+        16         0.4953
+        17         0.5069
+        19         0.5335
+        21         0.5562
+        23         0.5769
+        25         0.5950
+        28         0.6160
+        31         0.6365
+        34         0.6530
+        37         0.6677
+        41         0.6846
+        45         0.6998
+        50         0.7162
+        55         0.7317
+        61         0.7478
+        67         0.7618
+        74         0.7744
+        81         0.7868
+        89         0.7973
+        98         0.8096
+       108         0.8186
+       119         0.8271
+       131         0.8369
+       144         0.8455
+       158         0.8532
+       174         0.8602
+       191         0.8668
+       211         0.8748
+       232         0.8809
+       255         0.8866
+       281         0.8926
+       309         0.8988
+       340         0.9054
+       374         0.9100
+       411         0.9148
+       452         0.9192
+       497         0.9239
+       547         0.9283
+       602         0.9315
+       662         0.9355
+       728         0.9391
+       801         0.9433
+       881         0.9463
+       970         0.9496
+      1000         0.9504
+
+--- FastScan (block=8) ---
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+  encode: 0.1062s
+
+=== FastScan-b8 ===
+  search: 1.3650s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.1895
+        11         0.2002
+        12         0.2106
+        13         0.2216
+        14         0.2301
+        16         0.2485
+        17         0.2563
+        19         0.2717
+        21         0.2860
+        23         0.3001
+        25         0.3147
+        28         0.3299
+        31         0.3436
+        34         0.3568
+        37         0.3690
+        41         0.3836
+        45         0.3968
+        50         0.4134
+        55         0.4259
+        61         0.4413
+        67         0.4528
+        74         0.4671
+        81         0.4804
+        89         0.4932
+        98         0.5050
+       108         0.5184
+       119         0.5305
+       131         0.5425
+       144         0.5547
+       158         0.5666
+       174         0.5776
+       191         0.5896
+       211         0.6021
+       232         0.6137
+       255         0.6243
+       281         0.6344
+       309         0.6442
+       340         0.6537
+       374         0.6641
+       411         0.6727
+       452         0.6832
+       497         0.6915
+       547         0.7000
+       602         0.7077
+       662         0.7148
+       728         0.7219
+       801         0.7299
+       881         0.7369
+       970         0.7432
+      1000         0.7456
+
+--- 1BTQ ---
+FhtKacRotator is selected
+  encode: 0.0409s
+
+=== 1BTQ ===
+  search: 0.5377s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.4140
+        11         0.4373
+        12         0.4566
+        13         0.4754
+        14         0.4944
+        16         0.5275
+        17         0.5404
+        19         0.5664
+        21         0.5897
+        23         0.6099
+        25         0.6255
+        28         0.6492
+        31         0.6672
+        34         0.6862
+        37         0.7016
+        41         0.7209
+        45         0.7377
+        50         0.7556
+        55         0.7692
+        61         0.7863
+        67         0.7978
+        74         0.8116
+        81         0.8226
+        89         0.8324
+        98         0.8425
+       108         0.8529
+       119         0.8613
+       131         0.8702
+       144         0.8774
+       158         0.8820
+       174         0.8885
+       191         0.8949
+       211         0.9012
+       232         0.9081
+       255         0.9127
+       281         0.9173
+       309         0.9209
+       340         0.9259
+       374         0.9297
+       411         0.9342
+       452         0.9383
+       497         0.9421
+       547         0.9459
+       602         0.9485
+       662         0.9509
+       728         0.9537
+       801         0.9568
+       881         0.9600
+       970         0.9627
+      1000         0.9630
+
+--- 1BTQAsym ---
+FhtKacRotator is selected
+  encode: 0.0151s
+
+=== 1BTQAsym ===
+  search: 0.5964s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.4992
+        11         0.5241
+        12         0.5475
+        13         0.5690
+        14         0.5884
+        16         0.6236
+        17         0.6395
+        19         0.6700
+        21         0.6931
+        23         0.7140
+        25         0.7307
+        28         0.7512
+        31         0.7716
+        34         0.7887
+        37         0.8029
+        41         0.8195
+        45         0.8340
+        50         0.8486
+        55         0.8605
+        61         0.8705
+        67         0.8808
+        74         0.8903
+        81         0.9009
+        89         0.9101
+        98         0.9178
+       108         0.9266
+       119         0.9334
+       131         0.9391
+       144         0.9439
+       158         0.9475
+       174         0.9528
+       191         0.9568
+       211         0.9608
+       232         0.9645
+       255         0.9680
+       281         0.9709
+       309         0.9731
+       340         0.9758
+       374         0.9782
+       411         0.9798
+       452         0.9818
+       497         0.9834
+       547         0.9849
+       602         0.9866
+       662         0.9879
+       728         0.9892
+       801         0.9902
+       881         0.9912
+       970         0.9919
+      1000         0.9920
+
+--- RaBitQ-1bit ---
+FhtKacRotator is selected
+  encode: 0.0133s
+
+=== RaBitQ-1bit ===
+  search: 0.7754s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.4947
+        11         0.5221
+        12         0.5471
+        13         0.5703
+        14         0.5890
+        16         0.6246
+        17         0.6398
+        19         0.6682
+        21         0.6925
+        23         0.7147
+        25         0.7333
+        28         0.7545
+        31         0.7715
+        34         0.7893
+        37         0.8069
+        41         0.8253
+        45         0.8399
+        50         0.8564
+        55         0.8695
+        61         0.8838
+        67         0.8933
+        74         0.9037
+        81         0.9118
+        89         0.9216
+        98         0.9291
+       108         0.9368
+       119         0.9426
+       131         0.9486
+       144         0.9532
+       158         0.9574
+       174         0.9628
+       191         0.9666
+       211         0.9700
+       232         0.9739
+       255         0.9769
+       281         0.9789
+       309         0.9801
+       340         0.9818
+       374         0.9840
+       411         0.9860
+       452         0.9879
+       497         0.9889
+       547         0.9902
+       602         0.9915
+       662         0.9928
+       728         0.9939
+       801         0.9945
+       881         0.9954
+       970         0.9960
+      1000         0.9963
+
+--- RaBitQ-4bit ---
+FhtKacRotator is selected
+  encode: 0.0629s
+
+=== RaBitQ-4bit ===
+  search: 1.5455s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.8878
+        11         0.9245
+        12         0.9462
+        13         0.9616
+        14         0.9711
+        16         0.9843
+        17         0.9878
+        19         0.9923
+        21         0.9947
+        23         0.9964
+        25         0.9980
+        28         0.9987
+        31         0.9989
+        34         0.9995
+        37         0.9997
+        41         0.9997
+        45         0.9998
+        50         0.9999
+        55         0.9999
+        61         0.9999
+        67         0.9999
+        74         0.9999
+        81         0.9999
+        89         0.9999
+        98         1.0000
+       108         1.0000
+       119         1.0000
+       131         1.0000
+       144         1.0000
+       158         1.0000
+       174         1.0000
+       191         1.0000
+       211         1.0000
+       232         1.0000
+       255         1.0000
+       281         1.0000
+       309         1.0000
+       340         1.0000
+       374         1.0000
+       411         1.0000
+       452         1.0000
+       497         1.0000
+       547         1.0000
+       602         1.0000
+       662         1.0000
+       728         1.0000
+       801         1.0000
+       881         1.0000
+       970         1.0000
+      1000         1.0000
+
+--- RaBitQ-8bit ---
+FhtKacRotator is selected
+  encode: 0.0279s
+
+=== RaBitQ-8bit ===
+  search: 1.5721s  (n_q=1000 × n_b=1221388 distance evals + recall counting)
+        k'        Recall@10
+----------------------------------------
+        10         0.9824
+        11         0.9950
+        12         0.9985
+        13         0.9993
+        14         0.9994
+        16         0.9998
+        17         0.9998
+        19         0.9998
+        21         1.0000
+        23         1.0000
+        25         1.0000
+        28         1.0000
+        31         1.0000
+        34         1.0000
+        37         1.0000
+        41         1.0000
+        45         1.0000
+        50         1.0000
+        55         1.0000
+        61         1.0000
+        67         1.0000
+        74         1.0000
+        81         1.0000
+        89         1.0000
+        98         1.0000
+       108         1.0000
+       119         1.0000
+       131         1.0000
+       144         1.0000
+       158         1.0000
+       174         1.0000
+       191         1.0000
+       211         1.0000
+       232         1.0000
+       255         1.0000
+       281         1.0000
+       309         1.0000
+       340         1.0000
+       374         1.0000
+       411         1.0000
+       452         1.0000
+       497         1.0000
+       547         1.0000
+       602         1.0000
+       662         1.0000
+       728         1.0000
+       801         1.0000
+       881         1.0000
+       970         1.0000
+      1000         1.0000

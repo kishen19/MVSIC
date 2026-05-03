@@ -338,6 +338,7 @@ void run_benchmark(commandLine& P) {
 
   PR queries_obj;
   std::vector<size_t> q_idx;
+  bool queries_subsampled = false;
   if (dataset_as_query) {
     size_t nq = std::min((size_t)1000, base.size());
     if (num_query > 0) nq = std::min(nq, num_query);
@@ -358,12 +359,24 @@ void run_benchmark(commandLine& P) {
                       : (std::cout << "Loading queries from " << qFile << "..." << std::endl,
                          PR(qFile));
     if (num_query > 0 && num_query < queries_obj.size()) {
-      std::vector<size_t> idx(num_query);
+      // Uniform random sample without replacement, fixed seed for reproducibility.
+      // Reservoir-style: build the full identity vector then partial-shuffle the
+      // first num_query slots — O(num_query) swaps, deterministic across runs.
+      const size_t N = queries_obj.size();
+      std::vector<size_t> idx(N);
       std::iota(idx.begin(), idx.end(), 0);
+      std::mt19937_64 rng(0xC0FFEEULL);
+      for (size_t i = 0; i < num_query; ++i) {
+        std::uniform_int_distribution<size_t> dist(i, N - 1);
+        std::swap(idx[i], idx[dist(rng)]);
+      }
+      idx.resize(num_query);
       PointRangeSubsetWrapper<PR> w{queries_obj, idx};
       PR trimmed(w, queries_obj.get_dims());
       queries_obj = std::move(trimmed);
-      std::cout << "  using first " << num_query << " queries" << std::endl;
+      queries_subsampled = true;
+      std::cout << "  using random " << num_query << " of " << N << " queries (seed=0xC0FFEE)"
+                << std::endl;
     }
   }
   PR& queries = queries_obj;
@@ -373,10 +386,14 @@ void run_benchmark(commandLine& P) {
   const size_t n_q = queries.size(), n_b = base.size(), D = queries.get_dims();
 
   // Build a deterministic cache path from dataset basename + query/base counts + metric.
+  // Random subsampling produces a different query set than "first n_q", so tag
+  // the cache path to avoid silently reusing a stale cache from the prior mode.
   auto make_gt_cache_path = [&]() -> std::string {
     std::string base_name = std::filesystem::path(inFile).stem().string();
-    return "/tmp/gt_cache_" + base_name + "_q" + std::to_string(n_q) + "_n" + std::to_string(n_b) +
-           "_" + (Metric ? "L2" : "IP") + ".bin";
+    std::string p = "/tmp/gt_cache_" + base_name + "_q" + std::to_string(n_q) + "_n" +
+                    std::to_string(n_b) + "_" + (Metric ? "L2" : "IP");
+    if (queries_subsampled) p += "_randC0FFEE";
+    return p + ".bin";
   };
 
   if (gtFile != "") {
