@@ -171,6 +171,9 @@ def main() -> int:
     ap.add_argument("--queries", type=pathlib.Path, required=True)
     ap.add_argument("--gt", type=pathlib.Path, required=True)
     ap.add_argument("--group-by", default="k_per_level")
+    ap.add_argument("--label-by", default=None,
+                    help="Optional secondary label column (e.g. index_name) "
+                         "for mixed-method stages (5/6/7).")
     ap.add_argument("--stage-label", default="stage1",
                     help="Output prefix for plots/tables, e.g. stage1, stage2, ...")
     ap.add_argument("--budgets", default="0.5,1.0,2.0")
@@ -200,7 +203,8 @@ def main() -> int:
     plot_mod = _load_plot_module()
     df = plot_mod.load_csvs(args.results)
     # plot_mod.plot() handles group-column synthesis and writes <stage-label>_*.pdf.
-    plot_mod.plot(df, args.group_by, out_dir, prefix=args.stage_label)
+    plot_mod.plot(df, args.group_by, out_dir, prefix=args.stage_label,
+                  extra_label_col=args.label_by)
 
     # Recompute latency here so winner selection has explicit numeric field.
     if "QPS_seq" not in df.columns:

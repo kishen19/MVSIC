@@ -2,12 +2,26 @@
 # Build the indices for the main experiments.
 #
 # Usage (one dataset per invocation; use ``--method`` to pick one index or omit for all):
-#   experiments/builds/scripts/run_builds.sh --dataset nfcorpus
-#   experiments/builds/scripts/run_builds.sh --dataset arguana --method mvivf
+#   experiments/builds/scripts/run_builds.sh --dataset beir5            # all BEIR-5 shards (beir5.build.yaml)
+#   experiments/builds/scripts/run_builds.sh --dataset beirbig          # quora/nq/hotpotqa (beirbig.build.yaml)
+#   experiments/builds/scripts/run_builds.sh --dataset nq500k           # standalone (nq500k.build.yaml)
+#   experiments/builds/scripts/run_builds.sh --dataset arguana          # one shard from beir5.build.yaml
+#   experiments/builds/scripts/run_builds.sh --dataset nq --method mvivf
 #   experiments/builds/scripts/run_builds.sh --dataset vidore --method muvera
 #   experiments/builds/scripts/run_builds.sh --dataset nfcorpus --method fastplaid
+#   experiments/builds/scripts/run_builds.sh --dataset arguana --exclude mvivf,muvera
 #
-# FastPlaid is scoped to the classic BEIR-5 shards only (see fastplaid_scope.sh).
+# FastPlaid is opt-in for builds too: omitted by default / ``--method all``. Use
+# ``--method fastplaid`` or ``--with-fastplaid`` (see fastplaid_scope.sh). It is
+# never built on beirbig / nq500k / msmarco even with --with-fastplaid.
+#
+# ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
+# resolved config (after --method / --dataset filtering and FastPlaid scoping).
+# It does not affect the FastPlaid opt-in path.
+#
+# ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
+# resolved config (after --method / --dataset filtering and FastPlaid scoping).
+# It does not affect the FastPlaid opt-in path.
 #
 # Index binaries land at  results/indexes/<dataset>/<method>/<build_name>/index.bin .
 # The configs reference that path; you may symlink results/indexes to scratch.
@@ -22,15 +36,21 @@ source "$REPO_ROOT/experiments/builds/scripts/fastplaid_scope.sh"
 cd "$REPO_ROOT"
 
 DATASET=""
-METHOD=""        # all | mvivf | muvera | vamana | svh_graph | fastplaid
+METHOD=""        # empty | all | mvivf | muvera | vamana | svh_graph | fastplaid
+EXCLUDE=""       # comma-separated indices[].name to drop after filtering
+WITH_FASTPLAID=0
 TASK="build"     # build (only)
 EXTRA_ARGS=()
 
-# Names that share experiments/builds/configs/beir.build.yaml (must match BEIR_MERGED_NAMES in fastplaid_scope.sh).
-BEIR_DATASETS=(nfcorpus scifact arguana scidocs fiqa quora nq hotpotqa nq500k)
+# Per-shard dataset names, grouped by the YAML they share. Keep in sync with
+# BEIR5_NAMES / BEIRBIG_NAMES in fastplaid_scope.sh and with the {build,search}
+# yaml filenames in experiments/{builds,latency}/configs.
+BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
+BEIRBIG_DATASETS=(quora nq hotpotqa)
 
-# Top-level config files: vidore.build.yaml, msmarco.build.yaml
-DATASET_ALIASES=(vidore msmarco)
+# Top-level config aliases (each has a dedicated <ds>.build.yaml file and is
+# accepted directly without a per-dataset name filter).
+DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {
@@ -45,13 +65,15 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) DATASET="$2"; shift 2;;
     --method)  METHOD="$2";  shift 2;;
+    --exclude) EXCLUDE="$2"; shift 2;;
     --task)    TASK="$2";    shift 2;;
+    --with-fastplaid) WITH_FASTPLAID=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
 
 if [[ -z "$DATASET" ]]; then
-  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; or one BEIR dataset: ${BEIR_DATASETS[*]}." >&2
+  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
   exit 2
 fi
 
@@ -65,11 +87,14 @@ SRC_YAML=""
 FILTER_DATASET=""
 if is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
   SRC_YAML="$CONFIGS_DIR/${DATASET}.build.yaml"
-elif is_in "$DATASET" "${BEIR_DATASETS[@]}"; then
-  SRC_YAML="$CONFIGS_DIR/beir.build.yaml"
+elif is_in "$DATASET" "${BEIR5_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beir5.build.yaml"
+  FILTER_DATASET="$DATASET"
+elif is_in "$DATASET" "${BEIRBIG_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beirbig.build.yaml"
   FILTER_DATASET="$DATASET"
 else
-  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR names: ${BEIR_DATASETS[*]}." >&2
+  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
   exit 2
 fi
 
@@ -102,10 +127,11 @@ if [[ "$NEED_FILTER" -eq 1 ]]; then
 fi
 
 eff_ds="${FILTER_DATASET:-}"
-if [[ -z "$eff_ds" && "$DATASET" == "msmarco" ]]; then
-  eff_ds="msmarco"
+if [[ -z "$eff_ds" ]] && is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
+  eff_ds="$DATASET"
 fi
-if [[ -n "$eff_ds" ]] && fastplaid_should_strip_indices "$eff_ds"; then
+
+if fastplaid_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_FASTPLAID"; then
   strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_build_stripfp.XXXXXX.yaml")"
   TEMP_YAMLS+=("$strip_tmp")
   if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices fastplaid; then
@@ -113,6 +139,16 @@ if [[ -n "$eff_ds" ]] && fastplaid_should_strip_indices "$eff_ds"; then
     exit 2
   fi
   CONFIG_PATH="$strip_tmp"
+fi
+
+if [[ -n "$EXCLUDE" ]]; then
+  excl_tmp="$(mktemp "${TMPDIR:-/tmp}/main_build_exclude.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$excl_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$excl_tmp" --strip-indices "$EXCLUDE"; then
+    echo "[error] filter_config.py --strip-indices ($EXCLUDE) failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$excl_tmp"
 fi
 
 drop_caches_tail() {

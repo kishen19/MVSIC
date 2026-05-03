@@ -1,11 +1,11 @@
-name: "Main experiments latency (MS MARCO)"
+name: "Main experiments latency (nq500k)"
 
-# MS MARCO is kept as its own config so we can sweep different params (the
-# corpus is much larger than the BEIR shards). Mirror the BEIR search
-# definitions here -- override in this file as needed.
+# Standalone search config for the 500k subsample of NQ. Kept separate so its
+# nprobes / num_rerank ladders can drift independently from the BEIR shards.
+# FastPlaid is intentionally absent.
 
 datasets:
-  - { name: msmarco, path: data/beir/msmarco, index_dir: results/indexes/msmarco, results_dir: experiments/latency/results/msmarco, is_mmap: true }
+  - { name: nq500k, path: data/beir/nq500k, index_dir: results/indexes/nq500k, results_dir: experiments/latency/results/nq500k, is_mmap: true }
 
 indices:
   - name: mvivf

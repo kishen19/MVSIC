@@ -132,19 +132,44 @@ default_group_by_for_stage() {
   #   stage 2: max_leaf_size
   #   stage 3: max_depth
   #   stage 4: niters
-  #   stage 5: s
-  #   stage 6: max_point_clouds_per_cluster
+  #   stage 5: num_spill (mvivf vs mvivf_spill mixed)
+  #   stage 6: query_compression (None vs Wards, mixed mvivf + mvivf_spill)
+  #   stage 7: variant_name (1BTQ vs FastScan quantizer variants)
   case "$name:$stage" in
     mvivf:1) echo "k_per_level" ;;
     mvivf:2) echo "max_leaf_size" ;;
     mvivf:3) echo "max_depth" ;;
     mvivf:4) echo "niters" ;;
-    mvivf:5) echo "s" ;;
-    mvivf:6) echo "max_point_clouds_per_cluster" ;;
+    mvivf:5) echo "num_spill" ;;
+    mvivf:6) echo "query_compression" ;;
+    mvivf:7) echo "variant_name" ;;
     mvivf_spill:1) echo "num_spill" ;;
     mvivf_spill:2) echo "num_spill_l2" ;;
     mvivf_flat:1) echo "k_per_level" ;;
     *) echo "build_config" ;;
+  esac
+}
+
+# Stages 5/6/7 mix multiple index families (mvivf + mvivf_spill) under the
+# same stage results dir, so we additionally split each curve by `index_name`.
+default_label_by_for_stage() {
+  local name="$1"
+  local stage="$2"
+  case "$name:$stage" in
+    mvivf:5|mvivf:6|mvivf:7) echo "index_name" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Whether the stage results live directly under stage<N>/ (true for mixed-
+# method stages where evaluate_one must point --results at the stage dir
+# rather than stage<N>/<name>/).
+stage_is_mixed() {
+  local name="$1"
+  local stage="$2"
+  case "$name:$stage" in
+    mvivf:5|mvivf:6|mvivf:7) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -179,6 +204,7 @@ evaluate_one() {
       group="build_config"
     fi
   fi
+  local label_by="$(default_label_by_for_stage "$name" "$STAGE")"
   IFS=',' read -r -a ds_arr <<< "$DATASETS"
   for ds in "${ds_arr[@]}"; do
     ds="$(echo "$ds" | xargs)"
@@ -186,7 +212,13 @@ evaluate_one() {
     local base="data/beir/${ds}/${ds}"
     local indices_root_rel="results/mvivf_ablation"
     local results_root_rel="experiments/mvivf_ablation"
-    local results_root="$REPO_ROOT/${results_root_rel}/results/${ds}/stage${STAGE}/${name}"
+    local results_root
+    if stage_is_mixed "$name" "$STAGE"; then
+      # Mixed-method stage: load every index_name subtree under stage<N>/.
+      results_root="$REPO_ROOT/${results_root_rel}/results/${ds}/stage${STAGE}"
+    else
+      results_root="$REPO_ROOT/${results_root_rel}/results/${ds}/stage${STAGE}/${name}"
+    fi
     local indices_root="$REPO_ROOT/${indices_root_rel}/indices/${ds}/${name}"
     echo "=== Evaluate: ${name} (${ds}) stage${STAGE} ==="
     local cmd=(
@@ -199,6 +231,9 @@ evaluate_one() {
       --group-by "$group"
       --stage-label "$stage_label"
     )
+    if [[ -n "$label_by" ]]; then
+      cmd+=(--label-by "$label_by")
+    fi
     if [[ "$WITH_WINNERS" -eq 1 ]]; then
       cmd+=(--with-budget-winners)
     fi

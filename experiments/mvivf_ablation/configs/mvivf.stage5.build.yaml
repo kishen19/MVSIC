@@ -1,0 +1,71 @@
+name: "MVIVF Ablation (build, stage 5: num_spill)"
+
+# Stage 5 mixes the base mvivf build (effective num_spill = 1) with several
+# mvivf_spill builds at varying num_spill (level-1 only; num_spill_l2 = 1).
+# Stage-1..stage-4 winners (k_per_level, max_leaf_size, max_depth, niters,
+# mpcc, mpcik) are pinned in both index families below.
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/mvivf_ablation/indices/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/mvivf_ablation/indices/fiqa
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir: results/mvivf_ablation/indices/hotpotqa
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir: results/mvivf_ablation/indices/nfcorpus
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/mvivf_ablation/indices/nq
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/mvivf_ablation/indices/nq500k
+  - name: quora
+    path: data/beir/quora
+    index_dir: results/mvivf_ablation/indices/quora
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir: results/mvivf_ablation/indices/scidocs
+  - name: scifact
+    path: data/beir/scifact
+    index_dir: results/mvivf_ablation/indices/scifact
+
+indices:
+  - name: mvivf_spill
+    metric: ip
+    build_configs:
+      # Stage-1 winner fixed: k_per_level = 0.
+      # Stage-2 winner fixed: max_leaf_size = 100.
+      # Stage-3 winner fixed: max_depth = 0.
+      # Stage-4 winner fixed: niters = 5.
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100_spill_10_1
+        params: &spill_defaults
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true
+          num_spill: 10
+          num_spill_l2: 1
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100_spill_4_1
+        params: { <<: *spill_defaults, num_spill: 4 }
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100_spill_2_1
+        params: { <<: *spill_defaults, num_spill: 2 }
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        params:
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true

@@ -1,11 +1,15 @@
-name: "Main experiments latency (MS MARCO)"
+name: "Main experiments latency (BEIR-big: quora, nq, hotpotqa)"
 
-# MS MARCO is kept as its own config so we can sweep different params (the
-# corpus is much larger than the BEIR shards). Mirror the BEIR search
-# definitions here -- override in this file as needed.
+# Larger BEIR shards. Mirrors beir5.search.yaml so we can tune a different
+# nprobes / num_rerank ladder here later (without churning the BEIR-5 file).
+# FastPlaid is intentionally absent: its memory profile is too large here.
+#
+# For nq500k (single-shard config), see nq500k.search.yaml.
 
 datasets:
-  - { name: msmarco, path: data/beir/msmarco, index_dir: results/indexes/msmarco, results_dir: experiments/latency/results/msmarco, is_mmap: true }
+  - { name: quora,    path: data/beir/quora,    index_dir: results/indexes/quora,    results_dir: experiments/latency/results/quora,    is_mmap: true }
+  - { name: nq,       path: data/beir/nq,       index_dir: results/indexes/nq,       results_dir: experiments/latency/results/nq,       is_mmap: true }
+  - { name: hotpotqa, path: data/beir/hotpotqa, index_dir: results/indexes/hotpotqa, results_dir: experiments/latency/results/hotpotqa, is_mmap: true }
 
 indices:
   - name: mvivf

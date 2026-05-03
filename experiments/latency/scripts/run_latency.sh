@@ -2,11 +2,20 @@
 # Run the single-thread per-query latency sweep.
 #
 # Usage (one dataset per invocation):
-#   experiments/latency/scripts/run_latency.sh --dataset nfcorpus
-#   experiments/latency/scripts/run_latency.sh --dataset arguana --method mvivf
+#   experiments/latency/scripts/run_latency.sh --dataset beir5         # all BEIR-5 shards (beir5.search.yaml)
+#   experiments/latency/scripts/run_latency.sh --dataset beirbig       # quora/nq/hotpotqa (beirbig.search.yaml)
+#   experiments/latency/scripts/run_latency.sh --dataset nq500k        # standalone (nq500k.search.yaml)
+#   experiments/latency/scripts/run_latency.sh --dataset arguana       # one shard from beir5.search.yaml
+#   experiments/latency/scripts/run_latency.sh --dataset nq --method mvivf
 #   experiments/latency/scripts/run_latency.sh --dataset vidore --method muvera
+#   experiments/latency/scripts/run_latency.sh --dataset arguana --exclude mvivf
 #
-# FastPlaid is scoped to the classic BEIR-5 shards only (see fastplaid_scope.sh).
+# FastPlaid is opt-in: omit by default and for ``--method all``. Use ``--method fastplaid``
+# or ``--with-fastplaid`` to include it (BEIR-5 + vidore only; see fastplaid_scope.sh).
+#
+# ``--exclude <name>[,<name>...]`` drops those indices[].name entries after the
+# --method / --dataset filtering and FastPlaid scoping. It does not affect the
+# FastPlaid opt-in path.
 
 set -euo pipefail
 
@@ -27,10 +36,13 @@ cd "$REPO_ROOT"
 
 DATASET=""
 METHOD=""
+EXCLUDE=""       # comma-separated indices[].name to drop after filtering
+WITH_FASTPLAID=0
 EXTRA_ARGS=()
 
-BEIR_DATASETS=(nfcorpus scifact arguana scidocs fiqa quora nq hotpotqa nq500k)
-DATASET_ALIASES=(vidore msmarco)
+BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
+BEIRBIG_DATASETS=(quora nq hotpotqa)
+DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {
@@ -45,12 +57,14 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) DATASET="$2"; shift 2;;
     --method)  METHOD="$2";  shift 2;;
+    --exclude) EXCLUDE="$2"; shift 2;;
+    --with-fastplaid) WITH_FASTPLAID=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
 
 if [[ -z "$DATASET" ]]; then
-  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; or one BEIR dataset: ${BEIR_DATASETS[*]}." >&2
+  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
   exit 2
 fi
 
@@ -64,11 +78,14 @@ SRC_YAML=""
 FILTER_DATASET=""
 if is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
   SRC_YAML="$CONFIGS_DIR/${DATASET}.search.yaml"
-elif is_in "$DATASET" "${BEIR_DATASETS[@]}"; then
-  SRC_YAML="$CONFIGS_DIR/beir.search.yaml"
+elif is_in "$DATASET" "${BEIR5_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beir5.search.yaml"
+  FILTER_DATASET="$DATASET"
+elif is_in "$DATASET" "${BEIRBIG_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beirbig.search.yaml"
   FILTER_DATASET="$DATASET"
 else
-  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR names: ${BEIR_DATASETS[*]}." >&2
+  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
   exit 2
 fi
 
@@ -98,10 +115,11 @@ if [[ "$NEED_FILTER" -eq 1 ]]; then
 fi
 
 eff_ds="${FILTER_DATASET:-}"
-if [[ -z "$eff_ds" && "$DATASET" == "msmarco" ]]; then
-  eff_ds="msmarco"
+if [[ -z "$eff_ds" ]] && is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
+  eff_ds="$DATASET"
 fi
-if [[ -n "$eff_ds" ]] && fastplaid_should_strip_indices "$eff_ds"; then
+
+if fastplaid_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_FASTPLAID"; then
   strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_latency_stripfp.XXXXXX.yaml")"
   TEMP_YAMLS+=("$strip_tmp")
   if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices fastplaid; then
@@ -109,6 +127,16 @@ if [[ -n "$eff_ds" ]] && fastplaid_should_strip_indices "$eff_ds"; then
     exit 2
   fi
   CONFIG_PATH="$strip_tmp"
+fi
+
+if [[ -n "$EXCLUDE" ]]; then
+  excl_tmp="$(mktemp "${TMPDIR:-/tmp}/main_latency_exclude.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$excl_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$excl_tmp" --strip-indices "$EXCLUDE"; then
+    echo "[error] filter_config.py --strip-indices ($EXCLUDE) failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$excl_tmp"
 fi
 
 echo "=== Latency: $CONFIG_PATH ==="

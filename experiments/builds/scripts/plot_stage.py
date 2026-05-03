@@ -5,13 +5,15 @@ Reads CSVs under
 
     experiments/<stage>/results/<dataset>/<index_name>/<build_name>/<variant_name>/<search_name>/<prefix>_<sv>.csv
 
-(prefix = `latency_` / `multi_latency_` / `batch_`) and emits two PDFs per
-dataset:
+(prefix = `latency_` / `multi_latency_` / `batch_`) and emits PDFs per dataset:
 
-    <out_dir>/<dataset>_pareto.pdf      side-by-side Recall (1@k) and Recall (k@k)
-                                         vs. QPS (matches svh_graph_ablation style)
-    <out_dir>/<dataset>_breakdown.pdf   stacked bar of timer labels at the
-                                         best-recall sweep point per method x variant
+    <out_dir>/<dataset>_pareto.pdf           Recall vs QPS (same as before).
+    <out_dir>/<dataset>_pareto_latency_ms.pdf   (*latency* & *multi_latency* only)
+                                             Recall vs latency ms (``1000 / QPS_seq``).
+    <out_dir>/<dataset>_breakdown.pdf        stacked timer bars @ best recall.
+
+For latency / multi_latency, x-axis limits match the QPS Pareto plots (left ≥ 0.88 / 0.82;
+right ~ 1.002).
 
 The timer-label list per method comes from `benchmarks/methods.yaml`.
 
@@ -57,6 +59,12 @@ _PRETTY_METHOD = {
     "svh_graph": "SVH Graph",
     "fastplaid": "FastPlaid",
 }
+
+# Main experiment Pareto x-axis: zoom into high-recall region [left, right].
+_XLIM_LEFT_RECALL_1_K = 0.88
+_XLIM_LEFT_RECALL_K_K = 0.82
+# Tiny pad past 1.0 so markers / ticks at recall == 1 are not clipped by the spine.
+_XLIM_RIGHT_RECALL = 1.002
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -178,8 +186,72 @@ def _pareto_curve(xs: np.ndarray, ys: np.ndarray,
     return fx[keep_idx], fy[keep_idx]
 
 
+def _pareto_curve_recall_latency_ms(
+    xs: np.ndarray,
+    qps: np.ndarray,
+    min_recall_spacing: float = 0.005,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Same sweep points as QPS Pareto, but y = ``1000 / QPS`` ms.
+
+    Per recall bucket keep **minimum** latency; frontier maximizes recall and
+    minimizes latency (same undominated set as QPS Pareto when QPS > 0).
+    """
+    eps = 1e-12
+    qps_f = np.maximum(np.asarray(qps, dtype=float), eps)
+    lat = 1000.0 / qps_f
+
+    best_by_recall: dict[float, float] = {}
+    for x, y in zip(xs, lat):
+        xf = float(x)
+        yf = float(y)
+        cur = best_by_recall.get(xf)
+        if cur is None or yf < cur:
+            best_by_recall[xf] = yf
+
+    xs_u = np.array(sorted(best_by_recall.keys()), dtype=float)
+    ys_u = np.array([best_by_recall[x] for x in xs_u], dtype=float)
+
+    order = np.argsort(-xs_u, kind="stable")
+    keep_i: list[int] = []
+    best_lat = np.inf
+    for i in order:
+        if ys_u[i] < best_lat:
+            keep_i.append(i)
+            best_lat = ys_u[i]
+    mask = np.zeros_like(xs_u, dtype=bool)
+    mask[np.array(keep_i, dtype=int)] = True
+
+    fx = xs_u[mask]
+    fy = ys_u[mask]
+    if fx.size == 0:
+        return fx, fy
+    ord_x = np.argsort(fx)
+    fx = fx[ord_x]
+    fy = fy[ord_x]
+
+    if min_recall_spacing <= 0 or fx.size <= 2:
+        return fx, fy
+    keep_idx = [0]
+    for i in range(1, fx.size - 1):
+        if abs(fx[i] - fx[keep_idx[-1]]) > min_recall_spacing:
+            keep_idx.append(i)
+    if keep_idx[-1] != fx.size - 1:
+        keep_idx.append(fx.size - 1)
+    keep_idx = np.array(keep_idx, dtype=int)
+    return fx[keep_idx], fy[keep_idx]
+
+
+def _xlim_left_floor_for_recall_col(x_col: str) -> float:
+    if x_col == "recall_1_k":
+        return _XLIM_LEFT_RECALL_1_K
+    if x_col == "recall_k_k":
+        return _XLIM_LEFT_RECALL_K_K
+    return 0.0
+
+
 def _pareto_panel_xlim(ax, df: pd.DataFrame, methods_present: list[str],
                        x_col: str, qps: str) -> None:
+    floor = _xlim_left_floor_for_recall_col(x_col)
     xs_parts: list[np.ndarray] = []
     for method in methods_present:
         sub_m = df[df["method"] == method]
@@ -189,9 +261,10 @@ def _pareto_panel_xlim(ax, df: pd.DataFrame, methods_present: list[str],
                 xs_parts.append(sub[x_col].to_numpy(dtype=float))
     if xs_parts:
         lo = float(np.min(np.concatenate(xs_parts)))
-        ax.set_xlim(max(0.0, lo - 0.02), 1.0)
+        left = max(floor, lo - 0.02)
+        ax.set_xlim(left, _XLIM_RIGHT_RECALL)
     else:
-        ax.set_xlim(0.0, 1.0)
+        ax.set_xlim(floor, _XLIM_RIGHT_RECALL)
 
 
 def _plot_pareto_panel(
@@ -243,6 +316,62 @@ def _plot_pareto_panel(
         ax.set_ylabel(y_label)
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    if show_legend:
+        ax.legend(loc="best", fontsize=8)
+    _pareto_panel_xlim(ax, df, methods_present, x_col, qps)
+
+
+def _plot_pareto_latency_ms_panel(
+    ax,
+    df: pd.DataFrame,
+    qps: str,
+    x_col: str,
+    xlabel: str,
+    *,
+    show_ylabel: bool,
+    show_legend: bool,
+) -> None:
+    methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
+    cmap = plt.colormaps.get_cmap("tab10")
+    color_for = {m: cmap(i % 10) for i, m in enumerate(methods_present)}
+    y_label = "Latency (ms)"
+
+    for method in methods_present:
+        sub_m = df[df["method"] == method]
+        for vi, variant in enumerate(sorted(sub_m["variant"].unique())):
+            sub = sub_m[sub_m["variant"] == variant].dropna(subset=[x_col, qps])
+            if sub.empty:
+                continue
+            xs = sub[x_col].to_numpy(dtype=float)
+            qv = sub[qps].to_numpy(dtype=float)
+            lat_ms = 1000.0 / np.maximum(qv, 1e-12)
+            ax.scatter(xs, lat_ms, s=18, color=color_for[method], alpha=0.22, zorder=1)
+            fx, fy = _pareto_curve_recall_latency_ms(xs, qv)
+            if fx.size == 0:
+                continue
+            label = f"{_PRETTY_METHOD.get(method, method)}"
+            if variant and variant != "raw":
+                label += f" / {variant}"
+            ls = "-" if vi == 0 else "--"
+            ax.plot(
+                fx,
+                fy,
+                marker="o",
+                markersize=4.5,
+                linewidth=1.9,
+                linestyle=ls,
+                color=color_for[method],
+                label=label if show_legend else None,
+                zorder=3,
+            )
+
+    ax.set_xlabel(xlabel)
+    if show_ylabel:
+        ax.set_ylabel(y_label)
+    ax.set_yscale("log")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.spines["top"].set_visible(False)
     if show_legend:
         ax.legend(loc="best", fontsize=8)
     _pareto_panel_xlim(ax, df, methods_present, x_col, qps)
@@ -319,6 +448,82 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
         )
 
     fig.suptitle(f"{dataset}: recall vs QPS [{stage}]", fontsize=11)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
+                          out_path: pathlib.Path) -> None:
+    """Recall vs ``1000/QPS_seq`` (ms). Only for latency / multi_latency stages."""
+    qps = _qps_column(stage)
+    if qps not in df.columns:
+        print(f"  [skip latency-ms plot for {dataset}: missing {qps}]")
+        return
+
+    has_left = "recall_1_k" in df.columns and not df.dropna(
+        subset=["recall_1_k", qps]
+    ).empty
+    has_right = "recall_k_k" in df.columns and not df.dropna(
+        subset=["recall_k_k", qps]
+    ).empty
+
+    if not has_left and not has_right:
+        print(
+            f"  [skip latency-ms plot for {dataset}: no rows with recall and {qps}]"
+        )
+        return
+
+    if has_left and has_right:
+        fig, (ax_left, ax_right) = plt.subplots(
+            1, 2, figsize=(12, 5), sharey=True, layout="constrained"
+        )
+        _plot_pareto_latency_ms_panel(
+            ax_left,
+            df,
+            qps,
+            "recall_1_k",
+            "Recall (1@k)",
+            show_ylabel=True,
+            show_legend=False,
+        )
+        _plot_pareto_latency_ms_panel(
+            ax_right,
+            df,
+            qps,
+            "recall_k_k",
+            "Recall (k@k)",
+            show_ylabel=False,
+            show_legend=True,
+        )
+    elif has_left:
+        fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+        _plot_pareto_latency_ms_panel(
+            ax_one,
+            df,
+            qps,
+            "recall_1_k",
+            "Recall (1@k)",
+            show_ylabel=True,
+            show_legend=True,
+        )
+    else:
+        fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+        _plot_pareto_latency_ms_panel(
+            ax_one,
+            df,
+            qps,
+            "recall_k_k",
+            "Recall (k@k)",
+            show_ylabel=True,
+            show_legend=True,
+        )
+
+    fig.suptitle(
+        f"{dataset}: recall vs latency (1000 / QPS_seq ms) [{stage}]",
+        fontsize=11,
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
@@ -439,6 +644,10 @@ def main() -> int:
             continue
         print(f"[{ds}] {len(df)} rows from {df['method'].nunique()} methods")
         _plot_pareto(df, args.stage, ds, out_dir / f"{ds}_pareto.pdf")
+        if args.stage in ("latency", "multi_latency"):
+            _plot_pareto_latency_ms(
+                df, args.stage, ds, out_dir / f"{ds}_pareto_latency_ms.pdf"
+            )
         _plot_breakdown(df, methods_yaml, args.stage, ds, out_dir / f"{ds}_breakdown.pdf")
     return 0
 

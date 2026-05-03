@@ -2,7 +2,9 @@
 """Latency-stage plots. Thin wrapper around builds/scripts/plot_stage.py.
 
 Emits side-by-side Recall (1@k) and Recall (k@k) vs QPS Pareto PDFs (see
-plot_stage.py), plus timer breakdown PDFs, under experiments/latency/results/_plots/.
+plot_stage.py), the same recall vs latency-ms variant (``1000 / QPS_seq`` as
+``{dataset}_pareto_latency_ms.pdf``), plus timer breakdown PDFs, under
+experiments/latency/results/_plots/.
 
 Usage:
     experiments/latency/scripts/plot.py

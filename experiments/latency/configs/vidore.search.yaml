@@ -14,7 +14,6 @@ datasets:
 
 indices:
   # -------------------- MVIVF --------------------
-  # Greedy: TQ4bit, Leaf probing: TQ1bit (variant), Rerank: TQ8bit (num_rerank>0).
   - name: mvivf
     metric: ip
     builds:
@@ -28,21 +27,20 @@ indices:
           max_point_clouds_per_cluster: 100
           build_with_8btq: true
         variants:
-          - { name: tq1, compress: true, quantizer: OneBitTQ }   # 1-bit leaf probing
+          - { name: tq1, compress: true, quantizer: OneBitTQ }
         search_configs:
           - name: k=10
             params:
               tq8_rerank: [true]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+              query_compression: ["Wards"]
+              query_compression_threshold: [0.5]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
               k: [10]
               config:
                 - { name: nr20,   num_rerank: 20 }
-                - { name: nr40,   num_rerank: 40 }
-                - { name: nr60,  num_rerank: 60 }
-                - { name: nr80,  num_rerank: 80 }
+                - { name: nr50,   num_rerank: 50 }
 
   # -------------------- MUVERA --------------------
-  # Build: FDE+Vamana. Search: Vamana w/ TQ4bit. Rerank: TQ8bit via num_rerank.
   - name: muvera
     metric: ip
     builds:
@@ -58,13 +56,11 @@ indices:
           - name: k=10
             params:
               tq8_rerank: [true]
-              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
               k: [10]
               config:
+                - { name: nr500,   num_rerank: 500 }
                 - { name: nr1000,   num_rerank: 1000 }
-                - { name: nr2000,   num_rerank: 2000 }
-                - { name: nr5000,   num_rerank: 5000 }
-                - { name: nr10000,   num_rerank: 10000 }
 
   # -------------------- MV-Vamana --------------------
   - name: vamana
@@ -85,14 +81,9 @@ indices:
               k: [10]
               config:
                 - { name: nr20, num_rerank: 20 }
-                - { name: nr40, num_rerank: 40 }
-                - { name: nr60, num_rerank: 60 }
-                - { name: nr80, num_rerank: 80 }
+                - { name: nr50, num_rerank: 50 }
 
   # -------------------- SVH Graph --------------------
-  # `L` is the sweep axis (`variable_param: L` in methods.yaml). Set `L`
-  # *per* num_rerank bucket so each bucket walks beam widths >= num_rerank
-  # plus a couple of small points to anchor the low-recall end of the curve.
   - name: svh_graph
     metric: ip
     builds:
@@ -110,12 +101,10 @@ indices:
               L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
               k: [10]
               config:
-                - { name: nr50,   num_rerank: 50}
-                - { name: nr100,   num_rerank: 100}
-                - { name: nr500,   num_rerank: 500}
-                - { name: nr1000,   num_rerank: 1000}
+                - { name: nr50,    num_rerank: 50 }
+                - { name: nr100,   num_rerank: 100 }
 
-  # -------------------- FastPlaid (BEIR only) --------------------
+  # -------------------- FastPlaid (BEIR-5 only) --------------------
   - name: fastplaid
     metric: ip
     builds:
@@ -125,10 +114,8 @@ indices:
         search_configs:
           - name: k=10
             params:
-              n_ivf_probe: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+              n_ivf_probe: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
               k: [10]
               config:
-                - { name: nr8,   num_rerank: 8 }
-                - { name: nr64,   num_rerank: 64 }
-                - { name: nr256,  num_rerank: 256 }
+                - { name: nr512, num_rerank: 512 }
                 - { name: nr1024, num_rerank: 1024 }

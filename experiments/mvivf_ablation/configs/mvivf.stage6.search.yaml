@@ -1,0 +1,100 @@
+name: "MVIVF Ablation (search, stage 6: query_compression)"
+
+# Stage 6 sweeps `query_compression` across three settings on each index:
+#   1) None      -- no query compression (baseline)
+#   2) Carve     -- ball carving             (threshold = 0.7)
+#   3) Wards     -- ball carving + Ward's    (threshold = 0.5)
+# The two index families (mvivf, mvivf_spill at the stage-5 winner) times
+# three QC settings = six curves on a single axis (group by
+# `query_compression`, label by `index_name`). Each QC setting lives in its
+# own per-config row so each one can carry its own threshold.
+# Update `num_spill` to match the stage-5 winner before running.
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir:   results/mvivf_ablation/indices/arguana
+    results_dir: experiments/mvivf_ablation/results/arguana/stage6
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir:   results/mvivf_ablation/indices/fiqa
+    results_dir: experiments/mvivf_ablation/results/fiqa/stage6
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir:   results/mvivf_ablation/indices/hotpotqa
+    results_dir: experiments/mvivf_ablation/results/hotpotqa/stage6
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir:   results/mvivf_ablation/indices/nfcorpus
+    results_dir: experiments/mvivf_ablation/results/nfcorpus/stage6
+  - name: nq
+    path: data/beir/nq
+    index_dir:   results/mvivf_ablation/indices/nq
+    results_dir: experiments/mvivf_ablation/results/nq/stage6
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir:   results/mvivf_ablation/indices/nq500k
+    results_dir: experiments/mvivf_ablation/results/nq500k/stage6
+  - name: quora
+    path: data/beir/quora
+    index_dir:   results/mvivf_ablation/indices/quora
+    results_dir: experiments/mvivf_ablation/results/quora/stage6
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir:   results/mvivf_ablation/indices/scidocs
+    results_dir: experiments/mvivf_ablation/results/scidocs/stage6
+  - name: scifact
+    path: data/beir/scifact
+    index_dir:   results/mvivf_ablation/indices/scifact
+    results_dir: experiments/mvivf_ablation/results/scifact/stage6
+
+indices:
+  - name: mvivf_spill
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l100_d0_nit5_s0_mpcc100_spill_2_1
+        build_params: &spill_winner_params
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true
+          num_spill: 2
+          num_spill_l2: 1
+        search_configs: &qc_sweep_k10
+          - name: k=10
+            params:
+              tq8_rerank: [true]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+              k: [10]
+              # Per-row overrides keep each QC setting in its own CSV (so
+              # they merge cleanly during plotting) and let Carve/Wards
+              # use different thresholds.
+              config:
+                - name: qc_none
+                  num_rerank: 0
+                  query_compression: ["None"]
+                  query_compression_threshold: [0.7]
+                - name: qc_carve
+                  num_rerank: 0
+                  query_compression: ["Carve"]
+                  query_compression_threshold: [0.7]
+                - name: qc_wards
+                  num_rerank: 0
+                  query_compression: ["Wards"]
+                  query_compression_threshold: [0.5]
+  - name: mvivf
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        build_params:
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true
+        search_configs: *qc_sweep_k10

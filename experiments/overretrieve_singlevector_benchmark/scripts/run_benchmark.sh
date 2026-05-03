@@ -246,3 +246,4 @@ done <<< "$CONFIG_ROWS"
 
 echo
 echo "=== Done. Summary: $SUMMARY ==="
+echo "Plot results:  python3 \"$EXP_DIR/scripts/plot.py\" --results-dir \"$RESULTS_DIR\""

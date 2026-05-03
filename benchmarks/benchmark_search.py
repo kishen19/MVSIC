@@ -312,12 +312,12 @@ def _build_search_params(method_name: str, p: dict):
     sp = f(**p)
 
     if qc_name is not None:
+        # The pybind11 enum (see mvsic/python/register_common.cc) exposes
+        # NONE / CARVE / WARDS (all caps); accept any case in the YAML.
         qc_enum = {
-            'NONE': mvsic.SearchParams.QueryCompression.None_
-                if hasattr(mvsic.SearchParams.QueryCompression, 'None_')
-                else getattr(mvsic.SearchParams.QueryCompression, 'None'),
-            'CARVE': mvsic.SearchParams.QueryCompression.Carve,
-            'WARDS': mvsic.SearchParams.QueryCompression.Wards,
+            'NONE':  mvsic.SearchParams.QueryCompression.NONE,
+            'CARVE': mvsic.SearchParams.QueryCompression.CARVE,
+            'WARDS': mvsic.SearchParams.QueryCompression.WARDS,
         }[str(qc_name).upper()]
         sp.query_compression = qc_enum
     if qc_thr is not None:

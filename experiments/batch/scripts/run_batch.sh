@@ -6,10 +6,19 @@
 # experiments/batch/results/.
 #
 # Usage (one dataset per invocation):
-#   experiments/batch/scripts/run_batch.sh --dataset nfcorpus
-#   experiments/batch/scripts/run_batch.sh --dataset arguana --method mvivf
+#   experiments/batch/scripts/run_batch.sh --dataset beir5             # all BEIR-5 shards
+#   experiments/batch/scripts/run_batch.sh --dataset beirbig           # quora/nq/hotpotqa
+#   experiments/batch/scripts/run_batch.sh --dataset nq500k            # standalone
+#   experiments/batch/scripts/run_batch.sh --dataset arguana           # one BEIR-5 shard
+#   experiments/batch/scripts/run_batch.sh --dataset nq --method mvivf
+#   experiments/batch/scripts/run_batch.sh --dataset arguana --exclude mvivf
 #
-# FastPlaid is scoped to the classic BEIR-5 shards only (see fastplaid_scope.sh).
+# FastPlaid is opt-in: omit by default and for ``--method all``. Use ``--method fastplaid``
+# or ``--with-fastplaid`` to include it (BEIR-5 only; see fastplaid_scope.sh).
+#
+# ``--exclude <name>[,<name>...]`` drops those indices[].name entries after the
+# --method / --dataset filters and FastPlaid scoping. It does not affect the
+# FastPlaid opt-in path.
 
 set -euo pipefail
 
@@ -23,10 +32,13 @@ cd "$REPO_ROOT"
 
 DATASET=""
 METHOD=""
+EXCLUDE=""       # comma-separated indices[].name to drop after filtering
+WITH_FASTPLAID=0
 EXTRA_ARGS=()
 
-BEIR_DATASETS=(nfcorpus scifact arguana scidocs fiqa quora nq hotpotqa nq500k)
-DATASET_ALIASES=(vidore msmarco)
+BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
+BEIRBIG_DATASETS=(quora nq hotpotqa)
+DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {
@@ -41,12 +53,14 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dataset) DATASET="$2"; shift 2;;
     --method)  METHOD="$2";  shift 2;;
+    --exclude) EXCLUDE="$2"; shift 2;;
+    --with-fastplaid) WITH_FASTPLAID=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
 
 if [[ -z "$DATASET" ]]; then
-  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; or one BEIR dataset: ${BEIR_DATASETS[*]}." >&2
+  echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
   exit 2
 fi
 
@@ -65,11 +79,14 @@ SRC_YAML=""
 FILTER_DATASET=""
 if is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
   SRC_YAML="$CONFIGS_DIR/${DATASET}.search.yaml"
-elif is_in "$DATASET" "${BEIR_DATASETS[@]}"; then
-  SRC_YAML="$CONFIGS_DIR/beir.search.yaml"
+elif is_in "$DATASET" "${BEIR5_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beir5.search.yaml"
+  FILTER_DATASET="$DATASET"
+elif is_in "$DATASET" "${BEIRBIG_DATASETS[@]}"; then
+  SRC_YAML="$CONFIGS_DIR/beirbig.search.yaml"
   FILTER_DATASET="$DATASET"
 else
-  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR names: ${BEIR_DATASETS[*]}." >&2
+  echo "Unknown --dataset '$DATASET'. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
   exit 2
 fi
 [[ -f "$SRC_YAML" ]] || { echo "[error] config not found: $SRC_YAML" >&2; exit 2; }
@@ -98,10 +115,11 @@ if [[ "$NEED_FILTER" -eq 1 ]]; then
 fi
 
 eff_ds="${FILTER_DATASET:-}"
-if [[ -z "$eff_ds" && "$DATASET" == "msmarco" ]]; then
-  eff_ds="msmarco"
+if [[ -z "$eff_ds" ]] && is_in "$DATASET" "${DATASET_ALIASES[@]}"; then
+  eff_ds="$DATASET"
 fi
-if [[ -n "$eff_ds" ]] && fastplaid_should_strip_indices "$eff_ds"; then
+
+if fastplaid_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_FASTPLAID"; then
   strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_stripfp.XXXXXX.yaml")"
   TEMP_YAMLS+=("$strip_tmp")
   if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices fastplaid; then
@@ -109,6 +127,16 @@ if [[ -n "$eff_ds" ]] && fastplaid_should_strip_indices "$eff_ds"; then
     exit 2
   fi
   CONFIG_PATH="$strip_tmp"
+fi
+
+if [[ -n "$EXCLUDE" ]]; then
+  excl_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_exclude.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$excl_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$excl_tmp" --strip-indices "$EXCLUDE"; then
+    echo "[error] filter_config.py --strip-indices ($EXCLUDE) failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$excl_tmp"
 fi
 
 echo "=== Batch: $CONFIG_PATH ==="

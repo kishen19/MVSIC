@@ -44,33 +44,35 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # Stage knobs that can appear in canonical build_config names.  Keys are the
-# long names used as the `--group-by` argument; values are regexes matched
-# against `build_config` (or fallback path strings) with a single capture
-# group for the integer value.
+# long names used as the `--group-by` argument; values are (regex, capture
+# index) matched against `build_config` (or fallback path strings); the
+# capture group holds the integer value.
 #
 # Build-config naming convention (mvivf):
 #     mvivf_k<K>_l<L>_d<D>_n<N>_s<S>_mpcc<M>_mpcik<MK>
 # Only the suffixes relevant to the current stage need to be present; missing
 # suffixes leave the corresponding derived column NaN.
 #
-# For mvivf_spill we also support `_s<N>` -> num_spill (same regex as `s`;
-# choose whichever column is meaningful for the family being plotted).
-_KNOB_PATTERNS: dict[str, str] = {
-    "k_per_level": r"_k(\d+)(?:_|$)",
-    "max_leaf_size": r"_l(\d+)(?:_|$)",
-    "max_depth": r"_d(\d+)(?:_|$)",
-    "niters": r"_nit(\d+)(?:_|$)",
-    "s": r"_s(\d+)(?:_|$)",
-    "max_point_clouds_per_cluster": r"_mpcc(\d+)(?:_|$)",
-    "max_points_per_centroid_inner_kmeans": r"_mpcik(\d+)(?:_|$)",
-    # mvivf_spill aliases (same regex as `s`, exposed under a different name).
-    "num_spill": r"_s(\d+)(?:_|$)",
-    "num_spill_l2": r"_l2s(\d+)(?:_|$)",
+# For mvivf_spill use `_spill_<N>_<N2>` -> num_spill / num_spill_l2, or `_s<N>`
+# for the generic `s` knob (same sweep axis as older configs).
+_KNOB_PATTERNS: dict[str, tuple[str, int]] = {
+    "k_per_level": (r"_k(\d+)(?:_|$)", 0),
+    "max_leaf_size": (r"_l(\d+)(?:_|$)", 0),
+    "max_depth": (r"_d(\d+)(?:_|$)", 0),
+    "niters": (r"_nit(\d+)(?:_|$)", 0),
+    "s": (r"_s(\d+)(?:_|$)", 0),
+    "max_point_clouds_per_cluster": (r"_mpcc(\d+)(?:_|$)", 0),
+    "max_points_per_centroid_inner_kmeans": (r"_mpcik(\d+)(?:_|$)", 0),
+    # mvivf_spill: first number after _spill_, optional second (e.g. ..._spill_10_1_...).
+    "num_spill": (r"_spill_(\d+)(?:_|$)", 0),
+    "num_spill_l2": (r"_spill_(\d+)_(\d+)(?:_|$)", 1),
 }
 
 
-def _derive_knob_column(series: pd.Series, pattern: str) -> pd.Series:
-    extracted = series.astype(str).str.extract(pattern)[0]
+def _derive_knob_column(
+    series: pd.Series, pattern: str, capture_group: int = 0
+) -> pd.Series:
+    extracted = series.astype(str).str.extract(pattern)[capture_group]
     return extracted.apply(
         lambda x: int(x) if isinstance(x, str) and x.isdigit() else x
     )
@@ -79,10 +81,10 @@ def _derive_knob_column(series: pd.Series, pattern: str) -> pd.Series:
 def _populate_knobs(df: pd.DataFrame, source_col: str = "build_config") -> pd.DataFrame:
     if source_col not in df.columns:
         return df
-    for col, pat in _KNOB_PATTERNS.items():
+    for col, (pat, group_i) in _KNOB_PATTERNS.items():
         if col in df.columns:
             continue
-        df[col] = _derive_knob_column(df[source_col], pat)
+        df[col] = _derive_knob_column(df[source_col], pat, group_i)
     return df
 
 
@@ -159,19 +161,41 @@ def load_csvs(path: pathlib.Path) -> pd.DataFrame:
 
 def _ensure_group_col(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     df = df.copy()
-    if group_col in df.columns and df[group_col].notna().any():
-        return df
-    # Try to derive from build_config / source paths using the canonical
-    # short-name convention (see _KNOB_PATTERNS above).
-    pattern = _KNOB_PATTERNS.get(group_col)
-    if pattern is not None:
-        for src_col in ("build_config", "source_relpath", "source_abspath"):
-            if src_col not in df.columns:
-                continue
-            derived = _derive_knob_column(df[src_col], pattern)
-            if derived.notna().any():
-                df[group_col] = derived
-                break
+    have_col = group_col in df.columns and df[group_col].notna().any()
+    if not have_col:
+        # Try to derive from build_config / source paths using the canonical
+        # short-name convention (see _KNOB_PATTERNS above).
+        entry = _KNOB_PATTERNS.get(group_col)
+        if entry is not None:
+            pattern, group_i = entry
+            for src_col in ("build_config", "source_relpath", "source_abspath"):
+                if src_col not in df.columns:
+                    continue
+                derived = _derive_knob_column(df[src_col], pattern, group_i)
+                if derived.notna().any():
+                    df[group_col] = derived
+                    break
+
+    # Stage-5 trick: plain mvivf builds (no `_spill_<n>`) act as the
+    # `num_spill = 1` baseline against mvivf_spill rows. Backfill those rows
+    # so they show up as a single curve next to the spill-ratio sweep.
+    if group_col == "num_spill" and "build_config" in df.columns:
+        if group_col not in df.columns:
+            df[group_col] = pd.NA
+        is_plain = (
+            df["build_config"].astype(str).str.startswith("mvivf_")
+            & ~df["build_config"].astype(str).str.contains("_spill_")
+        )
+        df.loc[is_plain & df[group_col].isna(), group_col] = 1
+
+    # Stage-6 default: when grouping by `query_compression` and the column was
+    # not written (older CSVs), backfill "None" so they land in the no-QC
+    # baseline curve.
+    if group_col == "query_compression":
+        if group_col not in df.columns:
+            df[group_col] = "None"
+        df[group_col] = df[group_col].fillna("None").replace("", "None")
+
     if group_col not in df.columns or not df[group_col].notna().any():
         raise SystemExit(
             f"group column '{group_col}' not found and could not be derived "
@@ -180,14 +204,56 @@ def _ensure_group_col(df: pd.DataFrame, group_col: str) -> pd.DataFrame:
     return df
 
 
+def _series_keys(df: pd.DataFrame, group_col: str,
+                 extra_label_col: str | None) -> list[str]:
+    """Group columns to split curves by. Always includes ``group_col``; when
+    ``extra_label_col`` is set and present in the frame it's prepended so that
+    e.g. (index_name, query_compression) becomes one curve each."""
+    keys = []
+    if extra_label_col and extra_label_col in df.columns:
+        keys.append(extra_label_col)
+    keys.append(group_col)
+    return keys
+
+
+def _series_label(key, group_col: str, extra_label_col: str | None) -> str:
+    if extra_label_col is None:
+        return f"{group_col}={key}"
+    extra_val, group_val = (key if isinstance(key, tuple) else (None, key))
+    if extra_val is None:
+        return f"{group_col}={group_val}"
+    return f"{extra_val} / {group_col}={group_val}"
+
+
+# Recall window every ablation plot zooms into. Anything outside this band
+# is dropped before plotting (a recall column is assumed for the x-axis).
+_RECALL_XLIM = (0.6, 1.0)
+# Tiny visual pad so a marker at recall == 1 is not clipped by the spine.
+_RECALL_XLIM_PAD_RIGHT = 1.002
+
+
+def _filter_to_recall_window(
+    df: pd.DataFrame, x_col: str, lo: float, hi: float
+) -> pd.DataFrame:
+    if x_col not in df.columns:
+        return df
+    s = pd.to_numeric(df[x_col], errors="coerce")
+    return df[s.between(lo, hi)]
+
+
 def _plot_xy(df: pd.DataFrame, group_col: str, x_col: str, y_col: str,
-             x_label: str, y_label: str, title: str, out_path: pathlib.Path) -> None:
+             x_label: str, y_label: str, title: str, out_path: pathlib.Path,
+             extra_label_col: str | None = None) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
-    for key, sub in df.groupby(group_col):
+    keys = _series_keys(df, group_col, extra_label_col)
+    df = _filter_to_recall_window(df, x_col, *_RECALL_XLIM)
+    for key, sub in df.groupby(keys):
         sub = sub.sort_values(x_col)
-        ax.plot(sub[x_col], sub[y_col], marker="o", label=f"{group_col}={key}")
+        ax.plot(sub[x_col], sub[y_col], marker="o",
+                label=_series_label(key, group_col, extra_label_col))
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
+    ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(loc="best")
     ax.set_title(title)
@@ -229,14 +295,17 @@ def _pareto_curve(xs: pd.Series, ys: pd.Series, min_recall_spacing: float = 0.00
     return front["x"], front["y"]
 
 
-def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path, title: str) -> None:
+def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path,
+                     title: str, extra_label_col: str | None = None) -> None:
     if "QPS_seq" not in df.columns:
         raise SystemExit("Missing QPS_seq column in merged CSVs.")
     if "recall_k_k" not in df.columns:
         raise SystemExit("Missing recall_k_k column in merged CSVs.")
 
     fig, ax = plt.subplots(figsize=(7, 5))
-    for key, sub in df.groupby(group_col):
+    keys = _series_keys(df, group_col, extra_label_col)
+    df = _filter_to_recall_window(df, "recall_k_k", *_RECALL_XLIM)
+    for key, sub in df.groupby(keys):
         sub = sub.dropna(subset=["recall_k_k", "QPS_seq"])
         if sub.empty:
             continue
@@ -244,7 +313,9 @@ def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path, t
         fx, fy = _pareto_curve(sub["recall_k_k"], sub["QPS_seq"])
         if len(fx) == 0:
             continue
-        ax.plot(fx, fy, marker="o", label=f"{group_col}={key}")
+        ax.plot(fx, fy, marker="o",
+                label=_series_label(key, group_col, extra_label_col))
+    ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
 
     ax.set_xlabel("Recall@k (k@k)")
     ax.set_ylabel("QPS (per-query)")
@@ -259,7 +330,8 @@ def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path, t
     plt.close(fig)
 
 
-def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path, prefix: str = "stage1") -> None:
+def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
+         prefix: str = "stage1", extra_label_col: str | None = None) -> None:
     if "QPS_seq" in df.columns:
         df = df.assign(latency_ms=1000.0 / df["QPS_seq"])
     else:
@@ -273,11 +345,17 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path, prefix: str = 
     if recall_x not in df.columns:
         raise SystemExit("Missing recall_k_k column in merged CSVs.")
 
+    title_suffix = (
+        f"grouped by {group_col}"
+        if extra_label_col is None
+        else f"grouped by {extra_label_col} \u00d7 {group_col}"
+    )
     _plot_qps_pareto(
         df,
         group_col=group_col,
         out_path=out_dir / f"{prefix}_pareto.pdf",
-        title=f"{prefix}: QPS vs recall Pareto (grouped by {group_col})",
+        title=f"{prefix}: QPS vs recall Pareto ({title_suffix})",
+        extra_label_col=extra_label_col,
     )
     _plot_xy(
         df,
@@ -286,8 +364,9 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path, prefix: str = 
         y_col="latency_ms",
         x_label="Recall@k (k@k)",
         y_label="Sequential latency per query (ms)",
-        title=f"{prefix}: latency vs recall (grouped by {group_col})",
+        title=f"{prefix}: latency vs recall ({title_suffix})",
         out_path=out_dir / f"{prefix}_latency.pdf",
+        extra_label_col=extra_label_col,
     )
     _plot_xy(
         df,
@@ -296,8 +375,9 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path, prefix: str = 
         y_col="avg_cmps",
         x_label="Recall@k (k@k)",
         y_label="Average bytes accessed per query",
-        title=f"{prefix}: bytes accessed vs recall (grouped by {group_col})",
+        title=f"{prefix}: bytes accessed vs recall ({title_suffix})",
         out_path=out_dir / f"{prefix}_cmps.pdf",
+        extra_label_col=extra_label_col,
     )
 
 
@@ -306,6 +386,13 @@ def main() -> int:
     p.add_argument("--results", type=pathlib.Path, required=True)
     p.add_argument("--group-by", default="build_config",
                    help="CSV column to group curves by.")
+    p.add_argument(
+        "--label-by",
+        default=None,
+        help=("Optional secondary column whose value is prefixed onto each "
+              "curve label (e.g. `index_name` for stage 5/6/7 plots that mix "
+              "mvivf and mvivf_spill in the same axes)."),
+    )
     p.add_argument(
         "--out-dir",
         type=pathlib.Path,
@@ -321,7 +408,8 @@ def main() -> int:
     args = p.parse_args()
     df = load_csvs(args.results)
     out_dir = args.out_dir if args.out_dir is not None else args.results
-    plot(df, args.group_by, out_dir, prefix=args.prefix)
+    plot(df, args.group_by, out_dir, prefix=args.prefix,
+         extra_label_col=args.label_by)
     return 0
 
 

@@ -1,4 +1,4 @@
-name: "Main experiments build (BEIR)"
+name: "Main experiments build (BEIR-5: nfcorpus, scifact, arguana, scidocs, fiqa)"
 
 # Index binaries land at <index_dir>/<index_name>/<build_name>/index.bin .
 # Configs reference results/indexes/<dataset>/ which can be a symlink to
@@ -6,8 +6,11 @@ name: "Main experiments build (BEIR)"
 # (CSVs, plots, build_stats markdown) stays under experiments/.
 #
 # `is_mmap: true` mmaps the points (database) PCS file at load time. Queries
-# are always loaded normally. Keep on for the bigger BEIR shards so we don't
-# pay a full RAM hit before benchmarking begins.
+# are always loaded normally. Kept on for parity with the bigger BEIR shards.
+#
+# These five BEIR-5 corpora share one set of build params; for the larger
+# BEIR shards (nq, hotpotqa, quora) see beirbig.build.yaml, and for nq500k
+# see nq500k.build.yaml.
 
 datasets:
   - { name: nfcorpus, path: data/beir/nfcorpus, index_dir: results/indexes/nfcorpus, is_mmap: true }
@@ -15,10 +18,6 @@ datasets:
   - { name: arguana,  path: data/beir/arguana,  index_dir: results/indexes/arguana,  is_mmap: true }
   - { name: scidocs,  path: data/beir/scidocs,  index_dir: results/indexes/scidocs,  is_mmap: true }
   - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa,     is_mmap: true }
-  - { name: quora,    path: data/beir/quora,    index_dir: results/indexes/quora,    is_mmap: true }
-  - { name: nq,       path: data/beir/nq,       index_dir: results/indexes/nq,       is_mmap: true }
-  - { name: hotpotqa, path: data/beir/hotpotqa, index_dir: results/indexes/hotpotqa, is_mmap: true }
-  - { name: nq500k,   path: data/beir/nq500k,   index_dir: results/indexes/nq500k,   is_mmap: true }
 
 indices:
   # ----- MVIVF. TQ4/TQ1/TQ8 are search-time variants; build `build_with_8btq` uses
@@ -71,7 +70,7 @@ indices:
           L: 128
           alpha: 1.0
 
-  # ----- FastPlaid (BEIR only). Build via FastPlaidWrapper.create. -----
+  # ----- FastPlaid (BEIR-5 only). Build via FastPlaidWrapper.create. -----
   - name: fastplaid
     metric: ip
     build_configs:
