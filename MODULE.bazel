@@ -17,6 +17,25 @@ bazel_dep(name = "pybind11_bazel", version = "3.0.0")
 bazel_dep(name = "rules_python", version = "1.7.0")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+# System-installed Intel oneAPI MKL.  Exposes only the headers; libraries are
+# linked via `linkopts` in cc_binary rules (linker -L paths are allowed to
+# reference outside the execution root, but -isystem isn't).  Used by
+# //data-tools:compute_ground_truth.
+new_local_repository(
+    name = "mkl",
+    path = "/opt/intel/oneapi/mkl/latest",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "mkl_headers",
+    hdrs = glob(["include/**/*.h"]),
+    includes = ["include"],
+)
+""",
+)
 
 http_archive(
     name = "parlaylib",

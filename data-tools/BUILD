@@ -3,15 +3,41 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# Direct-MKL ground-truth tool.  MKL is system-installed via
+# intel-oneapi-mkl-devel; we link against /opt/intel/oneapi/mkl/latest/* with
+# rpath embedded so the binary runs without LD_LIBRARY_PATH.  Threading uses
+# Intel OpenMP runtime (libiomp5) which is independent of parlay's homegrown
+# scheduler — no -fopenmp / clang-libomp/libgomp interplay required.
 cc_binary(
     name = "compute_ground_truth",
     srcs = ["compute_ground_truth.cpp"],
+    linkopts = [
+        "-Wl,--no-as-needed",
+        "-L/opt/intel/oneapi/mkl/latest/lib",
+        "-L/opt/intel/oneapi/compiler/latest/lib",
+        "-Wl,-rpath,/opt/intel/oneapi/mkl/latest/lib",
+        "-Wl,-rpath,/opt/intel/oneapi/compiler/latest/lib",
+        "-lmkl_intel_lp64",
+        "-lmkl_intel_thread",
+        "-lmkl_core",
+        "-liomp5",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+    ],
     deps = [
-        "//mvsic/core/types:chamfer_ip_point",
-        "//mvsic/core/types:chamfer_l2_point",
-        "//mvsic/core/types:point_cloud_set",
+        "@mkl//:mkl_headers",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_binary(
+    name = "convert_pointcloud_format",
+    srcs = ["convert_pointcloud_format.cpp"],
+    deps = [
+        "//mvsic/core/utils:mmap",
         "//mvsic/core/utils:parse_command_line",
-        "//mvsic/core/utils:top_neighbors",
+        "@parlaylib//parlay:primitives",
     ],
 )
 

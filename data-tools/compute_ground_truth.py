@@ -53,6 +53,7 @@ Notes on the .pcs format (see mvsic/core/types/point_cloud_set.h):
 """
 
 import argparse
+import datetime as _dt
 import os
 import sys
 import time
@@ -301,10 +302,58 @@ def _merge_topk_chunk(topk_dists: np.ndarray, topk_ids: np.ndarray,
 # ---------------------------------------------------------------------------
 
 
+def _fmt_dur(secs: float) -> str:
+    """Format a positive duration as H:MM:SS (or D-H:MM:SS if >= 1 day)."""
+    secs = max(0, int(secs))
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d{h:02d}:{m:02d}:{s:02d}"
+    return f"{h:d}:{m:02d}:{s:02d}"
+
+
+def _emit_progress_line(chunks_done: int, n_db_chunks: int,
+                        clouds_done: int, n_db: int,
+                        t_loop_start: float, prefix: str = "progress",
+                        timings: dict | None = None):
+    """Print a single timestamped progress line to stdout (newline-terminated,
+    so it survives log redirection).
+
+    If `timings` is provided, also print a cumulative breakdown across the
+    chunk loop: gemm / reduce / merge / chunk_copy seconds and their share
+    of the loop wallclock.  Lets you tell GEMM-bound from reduce-bound runs
+    without waiting for the job to finish.
+    """
+    elapsed = time.perf_counter() - t_loop_start
+    pct = (100.0 * chunks_done / n_db_chunks) if n_db_chunks else 100.0
+    rate_chunks = chunks_done / elapsed if elapsed > 0 else 0.0
+    rate_clouds = clouds_done / elapsed if elapsed > 0 else 0.0
+    if chunks_done > 0 and chunks_done < n_db_chunks:
+        eta = elapsed * (n_db_chunks - chunks_done) / chunks_done
+        eta_str = _fmt_dur(eta)
+    else:
+        eta_str = "0:00:00"
+    ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{prefix} {ts}] {chunks_done}/{n_db_chunks} chunks ({pct:5.1f}%)  "
+          f"clouds={clouds_done}/{n_db}  elapsed={_fmt_dur(elapsed)}  "
+          f"eta={eta_str}  rate={rate_chunks:.2f} chunks/s "
+          f"({rate_clouds:.0f} clouds/s)", flush=True)
+    if timings is not None and elapsed > 0:
+        def pct_of(x: float) -> float:
+            return 100.0 * x / elapsed
+        print(f"    timing: gemm={timings['gemm']:.1f}s ({pct_of(timings['gemm']):.0f}%)  "
+              f"reduce={timings['reduce']:.1f}s ({pct_of(timings['reduce']):.0f}%)  "
+              f"merge={timings['merge']:.1f}s ({pct_of(timings['merge']):.0f}%)  "
+              f"chunk_copy={timings['io']:.1f}s ({pct_of(timings['io']):.0f}%)",
+              flush=True)
+
+
 def compute_ground_truth(db_file: str, query_file: str, out_file: str,
                          k: int, dist_func: str,
                          chunk_clouds: int, batch_queries: int,
-                         verbose: bool = True):
+                         verbose: bool = True,
+                         progress_interval: float = 60.0):
     if dist_func not in ("IP", "L2"):
         raise ValueError(f"dist_func must be 'IP' or 'L2', got {dist_func!r}")
 
@@ -385,6 +434,18 @@ def compute_ground_truth(db_file: str, query_file: str, out_file: str,
     n_db_chunks = (n_db + chunk_clouds - 1) // chunk_clouds
     pbar = tqdm(total=n_db_chunks, desc="DB chunks", disable=not verbose)
 
+    # Wall-clock-based periodic progress reports, in addition to tqdm.  These
+    # are timestamped and print on their own line, so they survive being
+    # redirected to a log file / tail-followed under nohup.
+    log_progress = verbose and progress_interval > 0
+    t_loop_start = time.perf_counter()
+    last_log_t = t_loop_start
+    chunks_done = 0
+    if log_progress:
+        ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[progress {ts}] starting: 0/{n_db_chunks} chunks "
+              f"(0/{n_db} clouds)", flush=True)
+
     for db_start in range(0, n_db, chunk_clouds):
         db_end = min(db_start + chunk_clouds, n_db)
         chunk_vec_start = int(d_offs[db_start])
@@ -394,6 +455,13 @@ def compute_ground_truth(db_file: str, query_file: str, out_file: str,
         if n_vec_chunk == 0:
             # All clouds in this chunk are empty.  Nothing to do.
             pbar.update(1)
+            chunks_done += 1
+            if log_progress and (time.perf_counter() - last_log_t) >= progress_interval:
+                _emit_progress_line(
+                    chunks_done, n_db_chunks, db_end, n_db, t_loop_start,
+                    timings={"gemm": t_gemm, "reduce": t_reduce,
+                             "merge": t_merge, "io": t_io})
+                last_log_t = time.perf_counter()
             continue
 
         # Materialize a contiguous float32 chunk of db vectors.  This is where
@@ -505,14 +573,30 @@ def compute_ground_truth(db_file: str, query_file: str, out_file: str,
         t_merge += time.perf_counter() - t0
 
         pbar.update(1)
+        chunks_done += 1
+        if log_progress and (time.perf_counter() - last_log_t) >= progress_interval:
+            _emit_progress_line(chunks_done, n_db_chunks, db_end, n_db,
+                                t_loop_start)
+            last_log_t = time.perf_counter()
     pbar.close()
+
+    if log_progress:
+        _emit_progress_line(
+            chunks_done, n_db_chunks, n_db, n_db, t_loop_start,
+            prefix="finished",
+            timings={"gemm": t_gemm, "reduce": t_reduce,
+                     "merge": t_merge, "io": t_io})
 
     if verbose:
         print(f"[timing] gemm={t_gemm:.2f}s  reduce={t_reduce:.2f}s  "
               f"merge={t_merge:.2f}s  chunk_copy={t_io:.2f}s", flush=True)
 
-    # ---- Final per-row sort of the top-k tables (ascending by distance) ----
-    sort_idx = np.argsort(topk_dists, axis=1, kind="stable")
+    # ---- Final per-row sort: lexicographic (distance, id) ----
+    # Ties on distance are broken by id ascending so the output is bit-identical
+    # to the C++ tool (data-tools/compute_ground_truth.cpp).  np.lexsort takes
+    # keys in *secondary-first* order, so the last key (`topk_dists`) is the
+    # primary sort key.
+    sort_idx = np.lexsort((topk_ids, topk_dists), axis=-1)
     topk_dists = np.take_along_axis(topk_dists, sort_idx, axis=1)
     topk_ids = np.take_along_axis(topk_ids, sort_idx, axis=1)
 
@@ -588,6 +672,10 @@ def main():
                     help="BLAS/OpenMP threads (0 = leave default, typically all cores).")
     ap.add_argument("--quiet", action="store_true",
                     help="Suppress progress output.")
+    ap.add_argument("--progress_interval", type=float, default=60.0,
+                    help="Seconds between timestamped progress reports "
+                         "printed alongside the tqdm bar (default 60). "
+                         "Set <= 0 to disable.")
     args = ap.parse_args()
 
     _configure_threads(args.threads)
@@ -601,6 +689,7 @@ def main():
         chunk_clouds=args.chunk_clouds,
         batch_queries=args.batch_queries,
         verbose=not args.quiet,
+        progress_interval=args.progress_interval,
     )
 
 
