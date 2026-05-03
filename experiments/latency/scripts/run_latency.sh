@@ -119,3 +119,6 @@ python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
 
 sync || true
 echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+
+echo "=== Plots: $DATASET ==="
+python3 "$REPO_ROOT/experiments/latency/scripts/plot.py" --datasets "$DATASET" || true

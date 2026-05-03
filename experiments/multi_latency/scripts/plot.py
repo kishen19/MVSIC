@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Multi-latency-stage plots. Thin wrapper around builds/scripts/plot_stage.py."""
+"""Multi-latency-stage plots. Thin wrapper around builds/scripts/plot_stage.py.
+
+Side-by-side Recall (1@k) / Recall (k@k) vs QPS under experiments/multi_latency/results/_plots/.
+"""
 from __future__ import annotations
 
 import argparse

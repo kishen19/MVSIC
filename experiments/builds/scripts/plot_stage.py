@@ -8,7 +8,8 @@ Reads CSVs under
 (prefix = `latency_` / `multi_latency_` / `batch_`) and emits two PDFs per
 dataset:
 
-    <out_dir>/<dataset>_pareto.pdf      recall_k_k  vs.  QPS (one curve per method x variant)
+    <out_dir>/<dataset>_pareto.pdf      side-by-side Recall (1@k) and Recall (k@k)
+                                         vs. QPS (matches svh_graph_ablation style)
     <out_dir>/<dataset>_breakdown.pdf   stacked bar of timer labels at the
                                          best-recall sweep point per method x variant
 
@@ -26,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-import re
 import sys
 from typing import Optional
 
@@ -178,28 +178,46 @@ def _pareto_curve(xs: np.ndarray, ys: np.ndarray,
     return fx[keep_idx], fy[keep_idx]
 
 
-def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
-                 out_path: pathlib.Path) -> None:
-    qps = _qps_column(stage)
-    if qps not in df.columns or "recall_k_k" not in df.columns:
-        print(f"  [skip pareto for {dataset}: missing {qps} or recall_k_k]")
-        return
+def _pareto_panel_xlim(ax, df: pd.DataFrame, methods_present: list[str],
+                       x_col: str, qps: str) -> None:
+    xs_parts: list[np.ndarray] = []
+    for method in methods_present:
+        sub_m = df[df["method"] == method]
+        for variant in sorted(sub_m["variant"].unique()):
+            sub = sub_m[sub_m["variant"] == variant].dropna(subset=[x_col, qps])
+            if not sub.empty:
+                xs_parts.append(sub[x_col].to_numpy(dtype=float))
+    if xs_parts:
+        lo = float(np.min(np.concatenate(xs_parts)))
+        ax.set_xlim(max(0.0, lo - 0.02), 1.0)
+    else:
+        ax.set_xlim(0.0, 1.0)
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+
+def _plot_pareto_panel(
+    ax,
+    df: pd.DataFrame,
+    stage: str,
+    qps: str,
+    x_col: str,
+    xlabel: str,
+    *,
+    show_ylabel: bool,
+    show_legend: bool,
+) -> None:
     methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
     color_for = {m: cmap(i % 10) for i, m in enumerate(methods_present)}
+    y_label = "QPS (batch)" if stage == "batch" else "QPS (per-query)"
+
     for method in methods_present:
         sub_m = df[df["method"] == method]
         for vi, variant in enumerate(sorted(sub_m["variant"].unique())):
-            sub = sub_m[sub_m["variant"] == variant].dropna(
-                subset=["recall_k_k", qps]
-            )
+            sub = sub_m[sub_m["variant"] == variant].dropna(subset=[x_col, qps])
             if sub.empty:
                 continue
-            xs = sub["recall_k_k"].to_numpy(dtype=float)
+            xs = sub[x_col].to_numpy(dtype=float)
             ys = sub[qps].to_numpy(dtype=float)
-            # Keep all raw sweep points visible but subdued behind the Pareto line.
             ax.scatter(xs, ys, s=18, color=color_for[method], alpha=0.22, zorder=1)
             fx, fy = _pareto_curve(xs, ys)
             if fx.size == 0:
@@ -209,23 +227,98 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
                 label += f" / {variant}"
             ls = "-" if vi == 0 else "--"
             ax.plot(
-                fx, fy,
+                fx,
+                fy,
                 marker="o",
                 markersize=4.5,
                 linewidth=1.9,
                 linestyle=ls,
                 color=color_for[method],
-                label=label,
+                label=label if show_legend else None,
                 zorder=3,
             )
 
-    ax.set_xlabel("Recall@k")
-    ax.set_ylabel("QPS (batch)" if stage == "batch" else "QPS (per-query)")
+    ax.set_xlabel(xlabel)
+    if show_ylabel:
+        ax.set_ylabel(y_label)
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="best", fontsize=8)
-    ax.set_title(f"{dataset}: recall vs QPS [{stage}]")
-    fig.tight_layout()
+    if show_legend:
+        ax.legend(loc="best", fontsize=8)
+    _pareto_panel_xlim(ax, df, methods_present, x_col, qps)
+
+
+def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
+                 out_path: pathlib.Path) -> None:
+    qps = _qps_column(stage)
+    if qps not in df.columns:
+        print(f"  [skip pareto for {dataset}: missing {qps}]")
+        return
+
+    has_left = "recall_1_k" in df.columns and not df.dropna(
+        subset=["recall_1_k", qps]
+    ).empty
+    has_right = "recall_k_k" in df.columns and not df.dropna(
+        subset=["recall_k_k", qps]
+    ).empty
+
+    if not has_left and not has_right:
+        print(
+            f"  [skip pareto for {dataset}: no rows with recall_1_k/recall_k_k "
+            f"and {qps}]"
+        )
+        return
+
+    if has_left and has_right:
+        fig, (ax_left, ax_right) = plt.subplots(
+            1, 2, figsize=(12, 5), sharey=True, layout="constrained"
+        )
+        _plot_pareto_panel(
+            ax_left,
+            df,
+            stage,
+            qps,
+            "recall_1_k",
+            "Recall (1@k)",
+            show_ylabel=True,
+            show_legend=False,
+        )
+        _plot_pareto_panel(
+            ax_right,
+            df,
+            stage,
+            qps,
+            "recall_k_k",
+            "Recall (k@k)",
+            show_ylabel=False,
+            show_legend=True,
+        )
+    elif has_left:
+        fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+        _plot_pareto_panel(
+            ax_one,
+            df,
+            stage,
+            qps,
+            "recall_1_k",
+            "Recall (1@k)",
+            show_ylabel=True,
+            show_legend=True,
+        )
+    else:
+        fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+        _plot_pareto_panel(
+            ax_one,
+            df,
+            stage,
+            qps,
+            "recall_k_k",
+            "Recall (k@k)",
+            show_ylabel=True,
+            show_legend=True,
+        )
+
+    fig.suptitle(f"{dataset}: recall vs QPS [{stage}]", fontsize=11)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Latency-stage plots. Thin wrapper around builds/scripts/plot_stage.py.
 
+Emits side-by-side Recall (1@k) and Recall (k@k) vs QPS Pareto PDFs (see
+plot_stage.py), plus timer breakdown PDFs, under experiments/latency/results/_plots/.
+
 Usage:
     experiments/latency/scripts/plot.py
     experiments/latency/scripts/plot.py --datasets nfcorpus,arguana
