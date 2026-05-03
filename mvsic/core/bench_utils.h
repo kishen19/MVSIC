@@ -165,10 +165,12 @@ inline void parse_compression_opts(SearchParams& sp, commandLine& P) {
       static_cast<float>(P.getOptionDoubleValue("-compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
   sp.tq8_rerank = P.getOption("-tq8_rerank");
+  sp.root_m2m = P.getOption("-root_m2m");
 }
 
 inline void print_compression_info(const SearchParams& sp) {
   if (sp.tq8_rerank) std::cout << "tq8_rerank=1" << std::endl;
+  if (sp.root_m2m) std::cout << "root_m2m=1" << std::endl;
   if (sp.query_compression == SearchParams::QueryCompression::None) return;
   const char* mname = (sp.query_compression == SearchParams::QueryCompression::Carve)
                           ? "carve" : "wards";
@@ -387,6 +389,37 @@ void run_search_all_sweep(Index& index,
                           const std::string& csv_path = "") {
   size_t k = 0;
   constexpr size_t reps = 3;
+
+  // Pre-warm the TQ8 rerank DB if any of the requested settings will use it,
+  // so the first timed rep doesn't pay the one-time encode (~8 s on NQ).
+  // The min-of-reps below would already exclude that cost from the reported
+  // QPS, but pre-warming keeps the first rep representative — useful when
+  // anyone is reading the per-rep stderr output for debugging.  Idempotent
+  // via call_once.
+  if (!variable_values.empty()) {
+    SearchParams probe_sp = make_sp(variable_values.front());
+    if (probe_sp.tq8_rerank) {
+      parlay::internal::timer t_warm;
+      t_warm.start();
+      index.ensure_tq8_rerank_db_(points);
+      t_warm.stop();
+      std::cout << "  [warmup] TQ8 DB encode: " << t_warm.total_time() << " sec (excluded)"
+                << std::endl;
+    }
+    // One discarded search_all to fault in encoded leaf data and warm CPU
+    // caches.  Without this, rep 0 always pays a cold-page penalty
+    // (~1-2 s on NQ on top of the encode).  We use the first nprobes value;
+    // larger values touch a superset of leaves so warming the smallest one
+    // is safe and slightly cheaper.
+    parlay::internal::timer t_pre;
+    t_pre.start();
+    auto warmup_pair = index.search_all(queries, points, probe_sp);
+    (void)warmup_pair;
+    t_pre.stop();
+    std::cout << "  [warmup] search_all (discarded): " << t_pre.total_time()
+              << " sec (excluded)" << std::endl;
+  }
+
   for (size_t val : variable_values) {
     SearchParams sp = make_sp(val);
     k = sp.k;

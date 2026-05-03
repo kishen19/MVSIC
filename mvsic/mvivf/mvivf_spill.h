@@ -1257,6 +1257,17 @@ class IndexMVIVFSpill : public Index<metric> {
     return std::make_pair(std::move(final_results), bytes_accessed);
   }
 
+  // Route the virtual `search_all` to the batched, leaf-grouped path so
+  // every caller (including run_search_all_sweep in core/bench_utils.h, and
+  // anything else going through the base Index<metric> interface) gets the
+  // optimized path instead of falling through to the per-query parallel
+  // loop in Index<metric>::search_all.  Mirrors IndexMVIVF::search_all.
+  std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t> search_all(
+      const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
+      const SearchParams& search_params) override {
+    return search_all_new(query_points, points, search_params);
+  }
+
   // ---------------------------------------------------------------------------
   // Tree-introspection helpers (carried over unchanged from the legacy class).
   // ---------------------------------------------------------------------------
