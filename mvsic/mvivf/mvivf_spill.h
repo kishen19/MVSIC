@@ -24,10 +24,12 @@
 // =============================================================================
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <set>
 #include <type_traits>
 #include <unordered_map>
@@ -390,8 +392,9 @@ class IndexMVIVFSpill : public Index<metric> {
     std::vector<double> stats = {};
   };
 
-  GreedySearchResult greedy_search(const ChPoint& query, const CenterQuery& q_center,
-                                   size_t nprobes) const {
+  GreedySearchResult greedy_search(
+      const ChPoint& query, const CenterQuery& q_center, size_t nprobes,
+      const std::pair<uint32_t, float>* precomputed_root_dists = nullptr) const {
     using score_node = std::pair<float, node_t*>;
     const size_t beam_length = 2 * nprobes;
     parlay::internal::timer t;
@@ -421,7 +424,13 @@ class IndexMVIVFSpill : public Index<metric> {
       auto& children = current_node->children;
       child_dists.resize(children.size());
       dist_cmps += children.size();
-      if constexpr (kHasCenterQuant) {
+      if (precomputed_root_dists != nullptr && current_node == root) {
+        // Root child distances were already computed by the caller's fused
+        // many-to-many scoring pass; just memcpy them in.  Root bytes are
+        // accounted for once at the caller's M2M step, not here.
+        std::memcpy(child_dists.data(), precomputed_root_dists,
+                    children.size() * sizeof(std::pair<uint32_t, float>));
+      } else if constexpr (kHasCenterQuant) {
         (void)query;
         current_node->compressed_centers.distances_all(q_center, child_dists.data());
         bytes_accessed += current_node->compressed_centers.num_bytes();
@@ -656,6 +665,343 @@ class IndexMVIVFSpill : public Index<metric> {
     stats.push_back(t_rerank);
 
     return std::make_tuple(std::move(final_results), bytes_accessed, std::move(stats));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Many-query cache-efficient search (search_all_new).
+  //
+  // Mirrors IndexMVIVF::search_all_new (mvivf.h): for LeafModel types that
+  // expose `ManyToMany::TopKIntoUninitialized` (FastScan / SPQTQ / 1-bit TQ),
+  // we group probed leaves and run the batched M2M kernel per leaf.  Other
+  // quantizers fall through to parallel 1-to-N scoring.
+  //
+  // Spill differs from the regular MVIVF only in step 4: a point id may
+  // appear in multiple probed leaves (root spill = a, level-1 spill = b),
+  // so per-query candidate lists must be deduplicated before rerank.  The
+  // dedup uses `deduplicate_and_topC` which sorts by (value, key) and drops
+  // duplicates in one pass, then trims to `num_rerank`.
+  // ---------------------------------------------------------------------------
+ private:
+  template<class M>
+  struct has_many_to_many_ : std::false_type {};
+  template<>
+  struct has_many_to_many_<fastscan_mv::Model<metric>> : std::true_type {
+    using type = fastscan_mv::ManyToMany<LeafSet>;
+  };
+  template<>
+  struct has_many_to_many_<pqtq_mv::Model<metric>> : std::true_type {
+    using type = pqtq_mv::ManyToMany<LeafSet>;
+  };
+  template<>
+  struct has_many_to_many_<turboquant_1bit_mv::Model<metric>> : std::true_type {
+    using type = turboquant_1bit_mv::ManyToMany<LeafSet>;
+  };
+  static constexpr bool kUseM2M = has_many_to_many_<LeafModel>::value;
+
+ public:
+  std::pair<parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>, size_t> search_all_new(
+      const PointCloudSet<ChPoint>& query_points, const PointCloudSet<ChPoint>& points,
+      const SearchParams& search_params) {
+    if (search_params.nprobes <= 2) {
+      return Index<metric>::search_all(query_points, points, search_params);
+    }
+    parlay::internal::timer t;
+    const size_t num_q = query_points.size();
+    const size_t num_leaves = leaves_flat.size();
+    const size_t k = search_params.k;
+    size_t nprobes = std::min(num_leaves, search_params.nprobes);
+    size_t bytes_accessed = 0;
+    size_t dist_cmps = 0;
+
+    // Step -1: optional query compression.
+    PointCloudSet<ChPoint> compressed_storage;
+    const PointCloudSet<ChPoint>* eff_ptr = &query_points;
+    if (search_params.query_compression != SearchParams::QueryCompression::None) {
+      t.start();
+      uint32_t ba = 1;
+      if constexpr (kHasLeafQuant) ba = LeafModel::kBatchAlignment;
+      compressed_storage =
+          compress_point_cloud_set<ChPoint>(query_points, search_params.query_compression,
+                                            search_params.query_compression_threshold, ba);
+      eff_ptr = &compressed_storage;
+      t.stop();
+      std::cout << "[MVIVF-Spill] Query Compression: " << t.total_time() << " sec" << std::endl;
+      t.reset();
+    }
+    const auto& eff_queries = *eff_ptr;
+    const auto& rerank_queries = search_params.compress_rerank ? eff_queries : query_points;
+
+    // Step 0: pre-quantize queries.
+    t.start();
+    parlay::sequence<LeafQuery> q_leaves(num_q);
+    if constexpr (kHasLeafQuant) {
+      parlay::parallel_for(
+          0, num_q, [&](size_t i) { q_leaves[i] = leaf_model_.quantize_query(eff_queries[i]); });
+    }
+    t.stop();
+    std::cout << "[MVIVF-Spill] Query Quantization: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+
+    // Step 0b (optional): root-level many-to-many.
+    //
+    // When enabled, share root-child distance work across all queries: pre-
+    // quantize every q_center, fuse them, score against
+    // root->compressed_centers once. Each per-query greedy_search seeds its
+    // first iteration from the corresponding row. Only fires when
+    // CompressCenters=true (so root->compressed_centers exists) and the root
+    // has internal children (i.e. flat_leaf_search isn't taken).
+    parlay::sequence<CenterQuery> q_centers;
+    parlay::sequence<std::pair<uint32_t, float>> root_dists;
+    size_t num_root_children = 0;
+    bool use_root_m2m = false;
+    if constexpr (kHasCenterQuant) {
+      if (search_params.root_m2m && root != nullptr) {
+        num_root_children = root->compressed_centers.num_clouds();
+        if (num_root_children > 0) {
+          use_root_m2m = true;
+          t.start();
+          q_centers = parlay::sequence<CenterQuery>(num_q);
+          parlay::parallel_for(0, num_q, [&](size_t i) {
+            q_centers[i] = center_model_.quantize_query(eff_queries[i]);
+          });
+          t.stop();
+          std::cout << "[MVIVF-Spill] Root M2M Quantize: " << t.total_time() << " sec" << std::endl;
+          t.reset();
+
+          t.start();
+          turboquant_mv::FusedQueryBatch<metric> fq;
+          std::vector<const CenterQuery*> q_ptrs(num_q);
+          for (size_t i = 0; i < num_q; ++i) q_ptrs[i] = &q_centers[i];
+          fq.Build(q_ptrs);
+          root_dists = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+              num_q * num_root_children);
+          turboquant_mv::chamfer_score_all_fused(fq, root->compressed_centers, root_dists.data());
+          t.stop();
+          std::cout << "[MVIVF-Spill] Root M2M Score (" << num_q << "Q x " << num_root_children
+                    << "C): " << t.total_time() << " sec" << std::endl;
+          t.reset();
+          bytes_accessed += root->compressed_centers.num_bytes();
+        }
+      }
+    }
+
+    // Step 1: parallel greedy search.  When root_m2m is on, hand each
+    // greedy_search the precomputed row of root-child distances so it can
+    // skip the per-query top-level scoring (which dominates greedy CPU when
+    // the root has a large fan-out).
+    t.start();
+    auto leaf_query_pairs =
+        parlay::sequence<std::pair<node_t*, std::pair<uint32_t, uint32_t>>>::uninitialized(
+            nprobes * num_q);
+    auto dist_cmps_gs = parlay::sequence<size_t>::uninitialized(num_q);
+    auto bytes_gs = parlay::sequence<size_t>::uninitialized(num_q);
+    auto probe_counts = parlay::sequence<uint32_t>::uninitialized(num_q);
+    parlay::parallel_for(0, num_q, [&](uint32_t i) {
+      CenterQuery q_center{};
+      if constexpr (kHasCenterQuant) {
+        if (use_root_m2m) {
+          q_center = std::move(q_centers[i]);
+        } else {
+          q_center = center_model_.quantize_query(eff_queries[i]);
+        }
+      }
+      const double alpha = 1.0;
+      bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+      const std::pair<uint32_t, float>* root_row =
+          (use_root_m2m && !use_flat) ? root_dists.data() + i * num_root_children : nullptr;
+      GreedySearchResult gs = use_flat
+                                  ? flat_leaf_search(eff_queries[i], q_center, nprobes)
+                                  : greedy_search(eff_queries[i], q_center, nprobes, root_row);
+      dist_cmps_gs[i] = static_cast<size_t>(gs.stats.empty() ? 0.0 : gs.stats[0]);
+      bytes_gs[i] = gs.bytes_accessed;
+      const uint32_t np = static_cast<uint32_t>(std::min(nprobes, gs.probe_list.size()));
+      probe_counts[i] = np;
+      // Pad the unused tail with nullptr so group_by_key_inplace can drop them.
+      parlay::parallel_for(0, nprobes, [&](uint32_t j) {
+        leaf_query_pairs[i * nprobes + j] =
+            (j < np) ? std::make_pair(gs.probe_list[j].second, std::make_pair(i, j))
+                     : std::make_pair(static_cast<node_t*>(nullptr), std::make_pair(i, j));
+      });
+    });
+    t.stop();
+    std::cout << "[MVIVF-Spill] Greedy Search: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+    bytes_accessed += parlay::reduce(bytes_gs);
+    dist_cmps += parlay::reduce(dist_cmps_gs);
+
+    // Step 2: group by leaf.
+    //
+    // group_by_key_inplace sorts by leaf pointer; nullptr pads sort to a
+    // single trailing group which we ignore in step 3.
+    t.start();
+    auto grouped = mvsic::group_by_key_inplace(leaf_query_pairs);
+    t.stop();
+    std::cout << "[MVIVF-Spill] Grouping: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+
+    // Step 3: probe each leaf in parallel.
+    t.start();
+    const size_t num_rerank = std::max(search_params.num_rerank, k);
+    const size_t max_cands = nprobes * num_rerank;
+    auto all_candidates =
+        parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_q * max_cands);
+    auto cand_counts = std::unique_ptr<std::atomic<size_t>[]>(new std::atomic<size_t>[num_q] {});
+    auto leaf_bytes = parlay::sequence<size_t>::uninitialized(grouped.size());
+    auto leaf_cmps = parlay::sequence<size_t>::uninitialized(grouped.size());
+
+    auto safe_scatter = [&](uint32_t q_id, const std::pair<uint32_t, float>* src, size_t count) {
+      size_t slot = cand_counts[q_id].fetch_add(count, std::memory_order_relaxed);
+      if (slot + count > max_cands) return;
+      size_t base_idx = q_id * max_cands + slot;
+      for (size_t c = 0; c < count; ++c) all_candidates[base_idx + c] = src[c];
+    };
+
+    parlay::parallel_for(0, grouped.size(), [&](size_t i) {
+      auto& group = grouped[i];
+      node_t* leaf = group[0].first;
+      leaf_bytes[i] = 0;
+      leaf_cmps[i] = 0;
+      if (leaf == nullptr) return;  // padded entries from queries with fewer probes
+      size_t C = std::min<size_t>(num_rerank, leaf->get_size());
+      size_t nq_grp = group.size();
+      leaf_cmps[i] = leaf->get_size() * nq_grp;
+      if constexpr (!kHasLeafQuant) {
+        auto query_ids = parlay::delayed_tabulate(
+            nq_grp, [&](size_t j) { return group[j].second.first; });
+        PointCloudSet<ChPoint> batched(eff_queries.filter(query_ids), d);
+        auto leaf_results = leaf->data.distances(batched, num_rerank);
+        parlay::parallel_for(0, nq_grp, [&](size_t j) {
+          uint32_t q_id = group[j].second.first;
+          safe_scatter(q_id, leaf_results.begin() + j * num_rerank, C);
+        });
+      } else if constexpr (kUseM2M) {
+        using M2M = typename has_many_to_many_<LeafModel>::type;
+        std::vector<const LeafQuery*> typed(nq_grp);
+        for (size_t j = 0; j < nq_grp; ++j) typed[j] = &q_leaves[group[j].second.first];
+        std::vector<std::pair<uint32_t, float>> batch_results(nq_grp * num_rerank);
+        M2M::TopKIntoUninitialized(typed, leaf->encoded_leaf, num_rerank, batch_results.data(),
+                                   /*q_block=*/8, /*parallel_query_blocks=*/true);
+        for (size_t j = 0; j < nq_grp; ++j) {
+          uint32_t q_id = group[j].second.first;
+          safe_scatter(q_id, batch_results.data() + j * num_rerank, C);
+        }
+      } else {
+        parlay::parallel_for(0, nq_grp, [&](size_t j) {
+          uint32_t q_id = group[j].second.first;
+          auto all_dists =
+              parlay::sequence<std::pair<uint32_t, float>>::uninitialized(leaf->get_size());
+          leaf->encoded_leaf.distances_all(q_leaves[q_id], all_dists.data());
+          if (C < all_dists.size()) {
+            std::nth_element(all_dists.begin(), all_dists.begin() + C, all_dists.end(),
+                             [](const auto& a, const auto& b) { return a.second < b.second; });
+          }
+          safe_scatter(q_id, all_dists.data(), C);
+        });
+      }
+    });
+    t.stop();
+    std::cout << "[MVIVF-Spill] Probing & Scattering: " << t.total_time() << " sec" << std::endl;
+    t.reset();
+    bytes_accessed += parlay::reduce(leaf_bytes);
+    dist_cmps += parlay::reduce(leaf_cmps);
+
+    // Step 4: per-query dedup + aggregate + rerank.
+    //
+    // Dedup is required because spill replicates points across leaves (root
+    // spill = a, level-1 spill = b), so a single point id can show up in
+    // multiple per-leaf scatter buffers.  We do dedup *sequentially* per
+    // query: the outer parlay::parallel_for already saturates cores, and
+    // calling parallelized routines (deduplicate_and_topC) per query nests
+    // parallel_for blocks and tanks aggregation throughput.  Steps:
+    //   (1) compact sentinels in place
+    //   (2) std::sort by id, collapse adjacent duplicates keeping min value
+    //   (3) std::nth_element by value to obtain the top num_rerank
+    //   (4) rerank as in the regular MVIVF path
+    if (search_params.tq8_rerank && search_params.num_rerank > 0) {
+      parlay::internal::timer t_db;
+      t_db.start();
+      this->ensure_tq8_rerank_db_(points);
+      t_db.stop();
+      std::cout << "[MVIVF-Spill] TQ8 DB Encode (one-time): " << t_db.total_time() << " sec"
+                << std::endl;
+    }
+    t.start();
+    auto final_results = parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>(num_q);
+    auto bytes_accessed_rerank = parlay::sequence<size_t>::uninitialized(num_q);
+    parlay::parallel_for(0, num_q, [&](size_t q_id) {
+      size_t base_idx = q_id * max_cands;
+      size_t num_scattered = std::min(cand_counts[q_id].load(std::memory_order_relaxed), max_cands);
+      auto* cands = all_candidates.begin() + base_idx;
+
+      // (1) Compact: drop UINT32_MAX sentinels written by TopKIntoUninitialized
+      // padding when a leaf had fewer than num_rerank points.
+      size_t num_valid = 0;
+      for (size_t c = 0; c < num_scattered; ++c) {
+        if (cands[c].first != UINT32_MAX) {
+          if (num_valid != c) cands[num_valid] = cands[c];
+          ++num_valid;
+        }
+      }
+
+      // (2) Sequential dedup: sort by id, collapse adjacent duplicates
+      // keeping the smallest distance.  Writing back into `cands` in place
+      // avoids any allocation.
+      std::sort(cands, cands + num_valid,
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+      size_t deduped = 0;
+      for (size_t c = 0; c < num_valid;) {
+        const uint32_t id = cands[c].first;
+        float min_v = cands[c].second;
+        size_t j = c + 1;
+        while (j < num_valid && cands[j].first == id) {
+          if (cands[j].second < min_v) min_v = cands[j].second;
+          ++j;
+        }
+        cands[deduped++] = {id, min_v};
+        c = j;
+      }
+
+      // (3) Top num_rerank by distance.
+      size_t take = std::min(num_rerank, deduped);
+      if (take > 0 && take < deduped) {
+        std::nth_element(cands, cands + take, cands + deduped,
+                         [](const auto& a, const auto& b) { return a.second < b.second; });
+      }
+
+      parlay::sequence<std::pair<uint32_t, float>> top_cands;
+      top_cands.reserve(take);
+      for (size_t c = 0; c < take; ++c) top_cands.push_back(cands[c]);
+
+      auto q_final = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(
+          std::min(k, top_cands.size()));
+      bytes_accessed_rerank[q_id] = 0;
+
+      // (4) Rerank.
+      if (search_params.num_rerank > 0) {
+        size_t actual_rerank = std::min(num_rerank, top_cands.size());
+        if (search_params.tq8_rerank) {
+          bytes_accessed_rerank[q_id] =
+              this->rerank_tq8_(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+        } else {
+          bytes_accessed_rerank[q_id] =
+              this->rerank(rerank_queries[q_id], points, top_cands, actual_rerank, q_final);
+        }
+      } else {
+        for (size_t c = 0; c < q_final.size(); ++c) q_final[c] = top_cands[c];
+      }
+
+      final_results[q_id] = std::move(q_final);
+    });
+    t.stop();
+    std::cout << "[MVIVF-Spill] Aggregation and Re-ranking: " << t.total_time() << " sec"
+              << std::endl;
+    t.reset();
+    bytes_accessed += parlay::reduce(bytes_accessed_rerank);
+
+    std::cout << "[MVIVF-Spill] Bytes Accessed: " << bytes_accessed << std::endl;
+    std::cout << "[MVIVF-Spill] Dist Cmps: " << dist_cmps << std::endl;
+
+    return std::make_pair(std::move(final_results), bytes_accessed);
   }
 
   // ---------------------------------------------------------------------------
