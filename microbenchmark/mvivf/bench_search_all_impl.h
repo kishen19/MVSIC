@@ -53,8 +53,45 @@ void run_one(MicroSearchAllCtx<ChPoint>& ctx) {
             << " ..." << std::endl;
   index.load(ctx.index_path, *ctx.points);
 
+  // Pre-warm the TQ8 rerank DB outside the timed region.  search_all{,_new}
+  // call ensure_tq8_rerank_db_ lazily on the first query that needs it
+  // (~8 s on NQ); without this, that encode dominates the very first
+  // reported `search_all_new time` and you only see steady-state on a second
+  // iteration.  Idempotent: subsequent calls are a no-op via call_once.
+  if (ctx.tq8_rerank) {
+    parlay::internal::timer t_warm;
+    t_warm.start();
+    index.ensure_tq8_rerank_db_(*ctx.points);
+    t_warm.stop();
+    std::cout << "[MVIVF] TQ8 DB Encode (pre-warm, excluded from search time): "
+              << t_warm.total_time() << " sec" << std::endl;
+  }
+
   const bool run_old = (ctx.mode == "both" || ctx.mode == "old");
   const bool run_new = (ctx.mode == "both" || ctx.mode == "new");
+
+  // Pre-warm index data pages with a discarded search_all_new (see
+  // mvivf_spill bench_search_all_impl.h for the rationale: the first search
+  // after load() pays ~1-2 s of cold-page / cold-cache cost on top of the
+  // encode that we already excluded above).  One discarded warmup makes the
+  // very first reported timing reflect steady state.
+  if (run_new || run_old) {
+    parlay::internal::timer t_pre;
+    t_pre.start();
+    SearchParams warmup_sp =
+        SearchParams::mvivf(ctx.k, ctx.nprobes_list.front(), ctx.num_rerank);
+    warmup_sp.query_compression =
+        static_cast<SearchParams::QueryCompression>(ctx.query_compression);
+    warmup_sp.query_compression_threshold = ctx.query_compression_threshold;
+    warmup_sp.compress_rerank = ctx.compress_rerank;
+    warmup_sp.tq8_rerank = ctx.tq8_rerank;
+    warmup_sp.root_m2m = ctx.root_m2m;
+    auto warmup_pair = index.search_all_new(*ctx.queries, *ctx.points, warmup_sp);
+    (void)warmup_pair;
+    t_pre.stop();
+    std::cout << "[MVIVF] Page warmup search (discarded, excluded from search time): "
+              << t_pre.total_time() << " sec" << std::endl;
+  }
 
   for (std::size_t nprobes : ctx.nprobes_list) {
     std::cout << "\n############################################" << std::endl;
