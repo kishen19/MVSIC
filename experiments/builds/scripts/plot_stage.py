@@ -54,11 +54,108 @@ _METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph", "fastplaid"]
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
     "mvivf": "MVIVF",
+    "mvivf_spill": "MVIVF Spill",
+    "mvivf_flat": "MVIVF Flat",
     "muvera": "MUVERA",
+    "mpool": "Mean-Pool",
     "vamana": "MV-Vamana",
+    "svh_ivf": "SVH IVF",
     "svh_graph": "SVH Graph",
     "fastplaid": "FastPlaid",
 }
+
+# Logical breakdown buckets per method: collapse the raw timer columns coming
+# out of methods.yaml into 3-4 named segments so the per-dataset breakdown
+# plot stays readable. Each value is an ordered list of CSV columns to sum
+# (missing columns are ignored). The bucket order also drives stack order
+# (bottom -> top) and legend order. Stays in sync with methods.yaml::labels
+# and the search_with_stats implementations.
+_BREAKDOWN_BUCKETS = {
+    "mvivf": {
+        "encode":     ["t_compress", "t_quant"],
+        "greedy":     ["t_search_dists", "t_search_beam", "t_search_rest", "t_search_top_level"],
+        "leaf_probe": ["t_leaf_dists", "t_leaf_rest"],
+        "rerank":     ["t_rerank"],
+    },
+    "mvivf_spill": {
+        "encode":     ["t_compress", "t_quant"],
+        "greedy":     ["t_search_dists", "t_search_beam", "t_search_rest", "t_search_top_level"],
+        "leaf_probe": ["t_leaf_dists", "t_leaf_dedup", "t_leaf_rest"],
+        "rerank":     ["t_rerank"],
+    },
+    "mvivf_flat": {
+        "encode":     ["t_compress"],
+        "greedy":     ["t_search"],
+        "leaf_probe": ["t_leaf_dists", "t_leaf_rest"],
+        "rerank":     ["t_rerank"],
+    },
+    "muvera": {
+        "encode":     ["t_compress", "t_fde", "t_quant"],
+        "search":     ["t_search"],
+        "rerank":     ["t_rerank"],
+    },
+    "mpool": {
+        "encode":     ["t_compress", "t_mean_pooling", "t_quant"],
+        "search":     ["t_search"],
+        "rerank":     ["t_rerank"],
+    },
+    "vamana": {
+        "encode":     ["t_compress", "t_quant"],
+        "search":     ["t_search"],
+        "rerank":     ["t_rerank"],
+    },
+    "svh_ivf": {
+        "encode":     ["t_compress"],
+        "search":     ["t_search_each_total"],
+        "merge":      ["t_merge_dedup"],
+        "rerank":     ["t_rerank"],
+    },
+    "svh_graph": {
+        "encode":     ["t_compress"],
+        "search":     ["t_graph_search"],
+        "aggregate":  ["t_aggregate"],
+        "rerank":     ["t_rerank"],
+    },
+    "fastplaid": {
+        "search":     ["t_batch_search"],
+    },
+}
+
+# Stable color per bucket (shared across methods so the legend is consistent
+# across plots).
+_BUCKET_COLORS = {
+    "encode":     "#4C72B0",
+    "greedy":     "#DD8452",
+    "search":     "#DD8452",
+    "leaf_probe": "#55A467",
+    "merge":      "#A7B85A",
+    "aggregate":  "#A7B85A",
+    "rerank":     "#C44E52",
+}
+
+
+def _bucketize(row: pd.Series, method: str) -> dict:
+    """Sum the per-row raw timer columns into the logical buckets defined for
+    ``method``. Returns ``{bucket: seconds}`` (only buckets with non-zero
+    contributions are included).
+    """
+    spec = _BREAKDOWN_BUCKETS.get(method)
+    if not spec:
+        return {}
+    out = {}
+    for bucket, cols in spec.items():
+        total = 0.0
+        any_present = False
+        for c in cols:
+            if c in row.index and pd.notna(row[c]):
+                try:
+                    total += float(row[c])
+                    any_present = True
+                except (TypeError, ValueError):
+                    pass
+        if any_present:
+            out[bucket] = total
+    return out
 
 # Main experiment Pareto x-axis: zoom into high-recall region [left, right].
 _XLIM_LEFT_RECALL_1_K = 0.88
@@ -530,13 +627,6 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
     print(f"  wrote {out_path}")
 
 
-def _label_columns(df: pd.DataFrame, labels: list) -> list:
-    # Search columns in df that match any of the per-method timer labels.
-    # benchmark_search.py expands `avg_timings` into columns whose names match
-    # the labels in methods.yaml directly.
-    return [lab for lab in labels if lab in df.columns]
-
-
 def _best_per_group(df: pd.DataFrame, recall_col: str = "recall_k_k") -> pd.DataFrame:
     if recall_col not in df.columns:
         return pd.DataFrame()
@@ -544,8 +634,46 @@ def _best_per_group(df: pd.DataFrame, recall_col: str = "recall_k_k") -> pd.Data
     return df.loc[df.groupby(["method", "variant"])[recall_col].idxmax()]
 
 
-def _plot_breakdown(df: pd.DataFrame, methods_yaml: dict, stage: str,
+def _row_total_seconds(row: pd.Series, method: str) -> float:
+    """Sum every timer column the method exposes (across all buckets) for the
+    purposes of estimating the per-query normalisation factor.
+    """
+    spec = _BREAKDOWN_BUCKETS.get(method) or {}
+    total = 0.0
+    for cols in spec.values():
+        for c in cols:
+            if c in row.index and pd.notna(row[c]):
+                try:
+                    total += float(row[c])
+                except (TypeError, ValueError):
+                    pass
+    return total
+
+
+def _per_query_factor(row: pd.Series, method: str) -> float:
+    """Per-query normalisation: latency CSVs sum ``avg_timings`` across all
+    queries in one repetition, so dividing by ``QPS_seq * total_time`` yields
+    the per-query seconds. If we can't recover the query count (e.g. batch
+    rows have empty avg_timings), fall back to 1.0 (=> raw summed seconds).
+    """
+    qps = float(row.get("QPS_seq", 0.0) or 0.0)
+    if qps <= 0:
+        return 1.0
+    total = _row_total_seconds(row, method)
+    if total <= 0:
+        return 1.0
+    n_q = qps * total
+    return n_q if n_q > 0 else 1.0
+
+
+def _plot_breakdown(df: pd.DataFrame, stage: str,
                     dataset: str, out_path: pathlib.Path) -> None:
+    """Per-method, per-row breakdown bars at best recall for one dataset.
+
+    Each bar collapses the raw timer columns into the 3-4 logical buckets
+    declared in ``_BREAKDOWN_BUCKETS`` so the plot stays readable across
+    methods that otherwise expose 5-12 timer columns.
+    """
     best = _best_per_group(df)
     if best.empty:
         print(f"  [skip breakdown for {dataset}: no recall_k_k rows]")
@@ -554,46 +682,63 @@ def _plot_breakdown(df: pd.DataFrame, methods_yaml: dict, stage: str,
     fig, ax = plt.subplots(figsize=(8, 5))
     bar_x = []
     bar_labels = []
-    bar_data = []  # list of dicts {label: value} for each bar
-    for _, row in best.iterrows():
-        method = row["method"]
-        variant = row["variant"]
-        meta = methods_yaml.get(method, {})
-        labels = meta.get("labels", []) or []
-        cols = _label_columns(pd.DataFrame([row]), labels)
-        if not cols:
-            continue
-        bar_data.append({lab: float(row[lab]) for lab in cols})
-        bar_x.append(len(bar_x))
-        nice = _PRETTY_METHOD.get(method, method)
-        if variant and variant != "raw":
-            nice += f"\n{variant}"
-        bar_labels.append(nice)
+    bar_data = []  # list of dicts {bucket: per-query seconds} for each bar
+
+    # Method order matches _METHOD_ORDER so plots are visually consistent
+    # across datasets even when only a subset of methods has CSVs.
+    methods_in_order = [m for m in _METHOD_ORDER if m in best["method"].unique()]
+    extras = sorted(set(best["method"]) - set(methods_in_order))
+    methods_in_order += extras
+
+    for method in methods_in_order:
+        for _, row in best[best["method"] == method].iterrows():
+            seg = _bucketize(row, method)
+            if not seg:
+                continue
+            # Normalise to per-query seconds so bars are comparable to the
+            # cross-dataset mvivf-only breakdown.
+            factor = _per_query_factor(row, method)
+            seg = {k: v / factor for k, v in seg.items()}
+            bar_data.append(seg)
+            variant = row.get("variant", "")
+            nice = _PRETTY_METHOD.get(method, method)
+            if variant and variant != "raw":
+                nice += f"\n{variant}"
+            bar_labels.append(nice)
+            bar_x.append(len(bar_x))
 
     if not bar_data:
         print(f"  [skip breakdown for {dataset}: no timer columns matched]")
         plt.close(fig)
         return
 
-    all_segments = []
+    all_segments: list[str] = []
     for d in bar_data:
         for k in d:
             if k not in all_segments:
                 all_segments.append(k)
-    cmap = plt.colormaps.get_cmap("tab20")
-    color_for = {seg: cmap(i % 20) for i, seg in enumerate(all_segments)}
+    # Stable, semantic colors when possible; fall back to tab10 for unknown.
+    cmap = plt.colormaps.get_cmap("tab10")
+    color_for = {}
+    palette_idx = 0
+    for seg in all_segments:
+        if seg in _BUCKET_COLORS:
+            color_for[seg] = _BUCKET_COLORS[seg]
+        else:
+            color_for[seg] = cmap(palette_idx % 10)
+            palette_idx += 1
     bottoms = np.zeros(len(bar_data), dtype=float)
     for seg in all_segments:
         heights = np.array([d.get(seg, 0.0) for d in bar_data], dtype=float)
         ax.bar(bar_x, heights, bottom=bottoms, label=seg,
-               color=color_for[seg], width=0.6)
+               color=color_for[seg], width=0.6, edgecolor="white", linewidth=0.5)
         bottoms += heights
 
     ax.set_xticks(bar_x)
-    ax.set_xticklabels(bar_labels, rotation=20, ha="right", fontsize=8)
-    ax.set_ylabel("Time (s, summed across queries)")
-    ax.set_title(f"{dataset}: per-stage timer breakdown @ best recall [{stage}]")
-    ax.legend(loc="best", fontsize=7, ncol=2)
+    ax.set_xticklabels(bar_labels, rotation=15, ha="right", fontsize=9)
+    ax.set_ylabel("Per-query time (s) @ best recall")
+    ax.set_title(f"{dataset}: timer breakdown [{stage}]")
+    ax.legend(loc="best", fontsize=8, ncol=1)
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -648,7 +793,7 @@ def main() -> int:
             _plot_pareto_latency_ms(
                 df, args.stage, ds, out_dir / f"{ds}_pareto_latency_ms.pdf"
             )
-        _plot_breakdown(df, methods_yaml, args.stage, ds, out_dir / f"{ds}_breakdown.pdf")
+        _plot_breakdown(df, args.stage, ds, out_dir / f"{ds}_breakdown.pdf")
     return 0
 
 

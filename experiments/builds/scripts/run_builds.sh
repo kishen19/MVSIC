@@ -19,12 +19,16 @@
 # resolved config (after --method / --dataset filtering and FastPlaid scoping).
 # It does not affect the FastPlaid opt-in path.
 #
-# ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
-# resolved config (after --method / --dataset filtering and FastPlaid scoping).
-# It does not affect the FastPlaid opt-in path.
-#
 # Index binaries land at  results/indexes/<dataset>/<method>/<build_name>/index.bin .
 # The configs reference that path; you may symlink results/indexes to scratch.
+#
+# After the build finishes successfully, this script ALSO:
+#   1. Copies (no delete) results/indexes/<shard>/ -> experiments/builds/
+#      results/indexes/<shard>/ so a non-symlinked copy of the index tree
+#      lives under experiments/ alongside the rest of the build artifacts.
+#   2. Runs experiments/builds/scripts/build_report.py over the mirrored copy
+#      to emit experiments/builds/results/{build_report.md, build_time.pdf,
+#      index_size.pdf}.
 
 set -euo pipefail
 
@@ -156,6 +160,22 @@ drop_caches_tail() {
   echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
 }
 
+# Determine the on-disk shards we just built so we can mirror them into
+# experiments/builds/results/indexes/ and run the per-shard report. Mirrors
+# the dispatch logic above: the alias 'beir5' covers BEIR5_DATASETS, etc.
+shards_for_dataset() {
+  local d="$1"
+  if [[ "$d" == "beir5" ]]; then
+    printf '%s\n' "${BEIR5_DATASETS[@]}"
+    return
+  fi
+  if [[ "$d" == "beirbig" ]]; then
+    printf '%s\n' "${BEIRBIG_DATASETS[@]}"
+    return
+  fi
+  printf '%s\n' "$d"
+}
+
 case "$TASK" in
   build)
     echo "=== Build: $CONFIG_PATH ==="
@@ -168,5 +188,43 @@ case "$TASK" in
     exit 2
     ;;
 esac
+
+# Mirror results/indexes/<shard>/ -> experiments/builds/results/indexes/<shard>/
+# so the build artifacts always have a copy under experiments/. We *copy* (no
+# --delete) so previously built shards are preserved if the user only built
+# one; the source under results/indexes stays intact.
+INDEX_SRC_ROOT="$REPO_ROOT/results/indexes"
+INDEX_DST_ROOT="$REPO_ROOT/experiments/builds/results/indexes"
+shards_to_mirror=()
+if [[ -n "${FILTER_DATASET}" ]]; then
+  shards_to_mirror=("${FILTER_DATASET}")
+else
+  while IFS= read -r s; do shards_to_mirror+=("$s"); done < <(shards_for_dataset "$DATASET")
+fi
+mkdir -p "$INDEX_DST_ROOT"
+for shard in "${shards_to_mirror[@]}"; do
+  src="$INDEX_SRC_ROOT/$shard"
+  dst="$INDEX_DST_ROOT/$shard"
+  if [[ ! -d "$src" ]]; then
+    echo "[mirror] skip $shard: $src not found"
+    continue
+  fi
+  echo "[mirror] $src -> $dst"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a "$src/" "$dst/"
+  else
+    mkdir -p "$dst"
+    cp -a "$src/." "$dst/"
+  fi
+done
+
+# Build report (markdown + bar plots) over the mirrored copy under
+# experiments/. Keeping the report next to the artifacts also means the file
+# is committed-friendly without bringing the binaries with it.
+echo "=== Build report (writes to experiments/builds/results/) ==="
+python3 "$REPO_ROOT/experiments/builds/scripts/build_report.py" \
+    --indexes "$INDEX_DST_ROOT" \
+    --out-dir "$REPO_ROOT/experiments/builds/results" \
+  || echo "[warn] build_report.py failed; continuing"
 
 drop_caches_tail

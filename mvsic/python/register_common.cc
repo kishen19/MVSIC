@@ -175,6 +175,11 @@ void register_common(py::module_& m) {
       .def_readwrite("query_compression_threshold",
                      &mvsic::SearchParams::query_compression_threshold)
       .def_readwrite("compress_rerank", &mvsic::SearchParams::compress_rerank)
+      // Gated MVIVF / MVIVF Spill knob: share root-level distance work across
+      // queries via fused many-to-many chamfer (see SearchParams::root_m2m
+      // doc in search_params.h). Default true; exposed read/write so the
+      // python harness can flip it from YAML without touching the factory.
+      .def_readwrite("root_m2m", &mvsic::SearchParams::root_m2m)
       .def_static("mvivf", &mvsic::SearchParams::mvivf, py::arg("k"), py::arg("nprobes"),
                       py::arg("num_rerank") = 0, py::arg("tq8_rerank") = true,
                       py::arg("query_compression") =

@@ -64,15 +64,26 @@ collapsed.
 import argparse
 import os
 import signal
+import struct
 import sys
+import tempfile
 import traceback
 from itertools import product
 
+import numpy as np
 import pandas as pd
 import yaml
 from framework_utils import StatsExtended, load_dataset
 
 import mvsic
+
+# Default query-subsampling cap. When the queries file has more than this many
+# point clouds, we deterministically sample down to this size with the seed
+# below so latency / batch / multi_latency runs cost a fixed amount per
+# parameter combo regardless of dataset size.  Both the cap and the seed are
+# tunable via the `--query_subsample` / `--query_subsample_seed` CLI flags.
+_DEFAULT_QUERY_SUBSAMPLE = 1000
+_DEFAULT_QUERY_SUBSAMPLE_SEED = 42
 
 # FastPlaid is an optional baseline; only imported when the config asks for it.
 _FastPlaidWrapper = None
@@ -86,6 +97,152 @@ def _ensure_fastplaid_imports():
         from utils import load_point_clouds as _lpc  # type: ignore
         _FastPlaidWrapper = _FPW
         _load_point_clouds = _lpc
+
+
+def _read_pcs_buffers(path):
+    """Read a `.pcs` query file into raw numpy buffers.
+
+    File layout (matches benchmarks/utils.py::load_point_clouds):
+
+        uint64 dim, uint64 n, uint64 num_vectors,
+        float32[num_vectors * dim] data,
+        uint64 num_offsets,
+        uint64[num_offsets] offsets,                # offsets are in floats
+                                                    # (so cloud i has cloud_size = (offsets[i+1]-offsets[i]) // dim points)
+
+    Some pcs writers append `n` per-cloud `uint32_t` ids after the offsets;
+    others don't. We try to read them when present and fall back to
+    ``arange(n)`` otherwise.
+    """
+    with open(path, 'rb') as f:
+        dim = struct.unpack('Q', f.read(8))[0]
+        n = struct.unpack('Q', f.read(8))[0]
+        num_vectors = struct.unpack('Q', f.read(8))[0]
+        data = np.fromfile(f, dtype=np.float32, count=num_vectors * dim)
+        num_offsets = struct.unpack('Q', f.read(8))[0]
+        offsets = np.fromfile(f, dtype=np.uint64, count=num_offsets)
+        ids_buf = np.fromfile(f, dtype=np.uint32, count=n)
+        if ids_buf.size != n:
+            ids_buf = np.arange(n, dtype=np.uint32)
+    return int(dim), int(n), data, offsets, ids_buf
+
+
+def _subsample_pcs_buffers(dim, n, data, offsets, ids_buf, indices):
+    """Select rows from a flat-pcs buffer by ``indices`` and return new
+    ``(data, offsets, ids)`` arrays suitable for the
+    ``mvsic.PointCloudSetIP(data, offsets, ids, dim)`` constructor.
+
+    Offsets in the original file are float-element offsets; we preserve that
+    convention in the rebuilt buffers.
+    """
+    indices = np.asarray(indices, dtype=np.int64)
+    new_n = int(indices.size)
+    # Cloud i in the original file occupies floats [offsets[i], offsets[i+1]).
+    # Build the new flat data by gathering each selected slice in order.
+    starts = offsets[indices].astype(np.int64)
+    ends = offsets[indices + 1].astype(np.int64)
+    sizes = ends - starts
+    total = int(sizes.sum())
+    new_data = np.empty(total, dtype=np.float32)
+    new_offsets = np.empty(new_n + 1, dtype=np.uint64)
+    new_offsets[0] = 0
+    cursor = 0
+    for i in range(new_n):
+        s, e = int(starts[i]), int(ends[i])
+        sz = e - s
+        new_data[cursor:cursor + sz] = data[s:e]
+        cursor += sz
+        new_offsets[i + 1] = cursor
+    new_ids = ids_buf[indices].astype(np.uint32)
+    return new_data, new_offsets, new_ids
+
+
+def _subsample_gt_via_temp(gt_path, indices, gt_loader=None):
+    if gt_loader is None:
+        gt_loader = mvsic.ReadGT
+    """Slice rows out of a `.gt` file by ``indices``, write a temporary `.gt`
+    file with the selected rows, and let ``gt_loader`` (default the C++
+    ``mvsic.ReadGT``) parse it.
+
+    GT file layout (matches mvsic/core/stats.h::ReadGT):
+
+        int32 num_neighbors,
+        for each query: num_neighbors * (float32 dist, uint32 docid)
+
+    This avoids touching the C++ side of GT parsing.
+    """
+    indices = np.asarray(indices, dtype=np.int64)
+    rec_size = 8  # (float, uint32) = 4 + 4 = 8 bytes
+    with open(gt_path, 'rb') as f:
+        header = f.read(4)
+        num_neighbors = struct.unpack('i', header)[0]
+        row_size = num_neighbors * rec_size
+        # Read all rows into a flat byte buffer; per-row slicing is cheaper
+        # than seeking many small times for the typical 7k-12k query files.
+        body = f.read()
+    rows = memoryview(body)
+    out_path = tempfile.NamedTemporaryFile(
+        prefix="mvsic_subgt_", suffix=".gt", delete=False
+    ).name
+    with open(out_path, 'wb') as f:
+        f.write(header)
+        for i in indices:
+            base = int(i) * row_size
+            f.write(rows[base:base + row_size])
+    try:
+        return gt_loader(out_path, int(indices.size))
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+
+
+def _maybe_subsample_queries(ds, points, queries, gt, n_max, seed,
+                             *, fastplaid=False):
+    """If ``queries`` has more than ``n_max`` clouds, deterministically sample
+    ``n_max`` of them (seeded with ``seed``) and rebuild ``queries`` and
+    ``gt`` to match.  ``points`` is left untouched (the GT doc-ids index into
+    points, which is unchanged by query subsampling).
+
+    Returns ``(queries, gt)`` ready to be passed to the per-mode entry
+    points.  When subsampling is disabled (``n_max <= 0``) or the queries
+    are already at or below the cap, returns the inputs verbatim.
+    """
+    if n_max is None or n_max <= 0:
+        return queries, gt
+    n_q = len(queries) if fastplaid else queries.size()
+    if n_q <= n_max:
+        return queries, gt
+
+    rng = np.random.default_rng(int(seed))
+    indices = np.sort(rng.choice(n_q, size=int(n_max), replace=False))
+
+    ds_path = ds["path"]
+    ds_name = ds["name"]
+    queries_path = os.path.join(ds_path, f"{ds_name}_queries.pcs")
+    gt_path = os.path.join(ds_path, f"{ds_name}_chamfer_neighbors.gt")
+
+    if fastplaid:
+        # FastPlaid stores queries as a python list of torch tensors, so we
+        # can slice directly without re-reading the pcs file.
+        new_queries = [queries[int(i)] for i in indices]
+    else:
+        dim, _n, data, offsets, ids_buf = _read_pcs_buffers(queries_path)
+        new_data, new_offsets, new_ids = _subsample_pcs_buffers(
+            dim, _n, data, offsets, ids_buf, indices
+        )
+        new_queries = mvsic.PointCloudSetIP(
+            data=new_data, offsets=new_offsets, ids=new_ids, dim=dim,
+        )
+
+    new_gt = _subsample_gt_via_temp(gt_path, indices)
+    print(
+        f"  [subsample] {ds_name}: queries {n_q} -> {int(n_max)} "
+        f"(seed={int(seed)})",
+        flush=True,
+    )
+    return new_queries, new_gt
 
 
 def _signal_handler(sig, frame):
@@ -307,6 +464,11 @@ def _build_search_params(method_name: str, p: dict):
     qc_thr = p.pop('query_compression_threshold', None)
     qc_rerank = p.pop('compress_rerank', None)
     tq8_rerank = p.pop('tq8_rerank', None)
+    # `root_m2m` is the gated MVIVF / MVIVF Spill knob that fuses root-level
+    # distance work across queries (see SearchParams::root_m2m). Default true
+    # in C++; we accept it from YAML so configs can opt out for ablations.
+    # Pop it pre-factory so the (k, nprobes, ...) signature isn't broken.
+    root_m2m = p.pop('root_m2m', None)
 
     f = _search_factory(method_name)
     sp = f(**p)
@@ -326,10 +488,13 @@ def _build_search_params(method_name: str, p: dict):
         sp.compress_rerank = bool(qc_rerank)
     if tq8_rerank is not None:
         sp.tq8_rerank = bool(tq8_rerank)
+    if root_m2m is not None:
+        sp.root_m2m = bool(root_m2m)
     return sp
 
 
-def _run_fastplaid(ds, index_details, method_info, mode):
+def _run_fastplaid(ds, index_details, method_info, mode, qps_thresh=None,
+                   subsample_n=None, subsample_seed=None):
     """Run search-only sweeps for the FastPlaid baseline (BEIR5 only).
 
     Supports `--mode latency` and `--mode batch`. The `multi_latency` mode is
@@ -375,6 +540,10 @@ def _run_fastplaid(ds, index_details, method_info, mode):
         if queries is None:
             queries = _load_point_clouds(queries_path)
             gt = mvsic.ReadGT(gt_path, len(queries))
+            queries, gt = _maybe_subsample_queries(
+                ds, None, queries, gt, subsample_n, subsample_seed,
+                fastplaid=True,
+            )
         # Points only matter if compute_scores needs them; FastPlaidWrapper
         # doesn't, but we still load them lazily in case the wrapper API
         # changes upstream.
@@ -432,18 +601,71 @@ def _run_fastplaid(ds, index_details, method_info, mode):
                 if variable_param:
                     params_list.sort(key=lambda p: p.get(variable_param, 0))
 
+                # Resume-aware QPS-thresh check: if the last row in the
+                # cached CSV (sorted by variable_param) is already below
+                # qps_thresh, skip the rest of the sweep.
+                if (
+                    qps_thresh is not None
+                    and os.path.exists(results_path)
+                    and append
+                ):
+                    try:
+                        prev_df = pd.read_csv(results_path)
+                    except pd.errors.EmptyDataError:
+                        prev_df = None
+                    if prev_df is not None and not prev_df.empty:
+                        qps_col = _qps_attr_for_mode(mode)
+                        if qps_col in prev_df.columns:
+                            sort_col = (
+                                variable_param
+                                if variable_param
+                                and variable_param in prev_df.columns
+                                else None
+                            )
+                            ex = (
+                                prev_df.sort_values(by=sort_col)
+                                if sort_col
+                                else prev_df
+                            )
+                            try:
+                                last_qps = float(ex.iloc[-1][qps_col])
+                            except (TypeError, ValueError):
+                                last_qps = None
+                            if (
+                                last_qps is not None
+                                and last_qps > 0
+                                and last_qps < qps_thresh
+                            ):
+                                print(
+                                    f"      [fastplaid] cached {qps_col}={last_qps:.2f} "
+                                    f"< qps_thresh={qps_thresh}; "
+                                    "skipping remaining sweep",
+                                    flush=True,
+                                )
+                                params_list = []
+
                 rows = []
+                qps_attr = _qps_attr_for_mode(mode)
+                qps_label = _qps_label_for_mode(mode)
+                stop_sweep = False
                 for params in params_list:
+                    if stop_sweep:
+                        break
                     try:
                         if mode == "latency":
                             res = index.compute_stats_latency(queries, gt, params)
                         else:
                             res = index.compute_stats_batch(queries, gt, params)
+                        qps_val = getattr(res, qps_attr, None)
+                        qps_str = (
+                            f"{qps_val:.1f}"
+                            if qps_val is not None
+                            else "N/A"
+                        )
                         print(
                             f"      {params} | "
                             f"R@{params['k']}={res.recall_k_k:.3f} "
-                            f"QPS_seq={res.QPS_seq if res.QPS_seq is not None else 0:.1f} "
-                            f"QPS_par={res.QPS_par if res.QPS_par is not None else 0:.1f}",
+                            f"{qps_label}={qps_str}",
                             flush=True,
                         )
                         row = {
@@ -456,6 +678,18 @@ def _run_fastplaid(ds, index_details, method_info, mode):
                         }
                         row.update(params)
                         rows.append(row)
+                        if (
+                            qps_thresh is not None
+                            and qps_val is not None
+                            and qps_val > 0
+                            and qps_val < qps_thresh
+                        ):
+                            print(
+                                f"      [fastplaid] {qps_attr}={qps_val:.2f} "
+                                f"< qps_thresh={qps_thresh}; stopping sweep",
+                                flush=True,
+                            )
+                            stop_sweep = True
                     except Exception as e:
                         jid = f"{ds_name}/fastplaid/{build_name}/{search_name}/{sv_name}"
                         print(
@@ -486,6 +720,32 @@ def _csv_prefix_for(mode):
     }.get(mode, '')
 
 
+# The "QPS that matters" for each mode -- used by both the log line and the
+# QPS_thresh early-exit. compute_stats_latency populates QPS_seq (single-thread
+# per-query latency, so we report 1-thread QPS); compute_stats_multi_latency
+# populates QPS_par (per-query latency at full parallelism); compute_stats_batch
+# also reports QPS_par (single batched search_all). The legacy
+# compute_stats_extended[_p_threaded] paths report QPS_seq.
+def _qps_attr_for_mode(mode, num_threads=None):
+    if mode == 'latency':
+        return 'QPS_seq'
+    if mode == 'multi_latency':
+        return 'QPS_par'
+    if mode == 'batch':
+        return 'QPS_par'
+    return 'QPS_seq'  # legacy compute_stats_extended path
+
+
+def _qps_label_for_mode(mode, num_threads=None):
+    if mode == 'latency':
+        return 'QPS (1-thrd)'
+    if mode == 'multi_latency':
+        return 'QPS (all-thrd)'
+    if mode == 'batch':
+        return 'QPS (batch)'
+    return 'QPS_seq'  # legacy
+
+
 
 def run_search(
     config: dict,
@@ -494,6 +754,9 @@ def run_search(
     mode=None,
     *,
     fail_fast: bool = False,
+    qps_thresh: float | None = None,
+    subsample_n: int | None = None,
+    subsample_seed: int | None = None,
 ) -> int:
     """Return the number of failed jobs / parameter evaluations."""
     failures: list[tuple[str, str]] = []
@@ -522,7 +785,12 @@ def run_search(
 
             if index_name == "fastplaid":
                 try:
-                    _run_fastplaid(ds, index_details, method_info, mode)
+                    _run_fastplaid(
+                        ds, index_details, method_info, mode,
+                        qps_thresh=qps_thresh,
+                        subsample_n=subsample_n,
+                        subsample_seed=subsample_seed,
+                    )
                 except Exception as e:
                     jid = f"{ds_name}/fastplaid"
                     print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
@@ -556,6 +824,10 @@ def run_search(
                 if points is None or queries is None or gt is None:
                     points, queries, gt = load_dataset(
                         ds_path, ds_name, is_mmap=bool(ds.get("is_mmap", False))
+                    )
+                    queries, gt = _maybe_subsample_queries(
+                        ds, points, queries, gt, subsample_n, subsample_seed,
+                        fastplaid=False,
                     )
                 dim = queries[0].get_dims()
 
@@ -636,7 +908,54 @@ def run_search(
                                         key=lambda p: p.get(variable_param, 0)
                                     )
 
+                                # If the resumed CSV already shows the latest
+                                # cached value falling below ``qps_thresh``,
+                                # skip computing the next sweep step entirely.
+                                # The check uses the per-mode "QPS that matters"
+                                # (see _qps_attr_for_mode) and the same
+                                # variable_param ordering as the live sweep.
+                                cached_below_thresh = False
+                                if (
+                                    qps_thresh is not None
+                                    and existing is not None
+                                    and not existing.empty
+                                ):
+                                    qps_col = _qps_attr_for_mode(mode, num_threads)
+                                    if qps_col in existing.columns:
+                                        sort_col = (
+                                            variable_param
+                                            if variable_param
+                                            and variable_param in existing.columns
+                                            else None
+                                        )
+                                        ex = (
+                                            existing.sort_values(by=sort_col)
+                                            if sort_col
+                                            else existing
+                                        )
+                                        try:
+                                            last_qps = float(
+                                                ex.iloc[-1][qps_col]
+                                            )
+                                        except (TypeError, ValueError):
+                                            last_qps = None
+                                        if (
+                                            last_qps is not None
+                                            and last_qps > 0
+                                            and last_qps < qps_thresh
+                                        ):
+                                            cached_below_thresh = True
+                                            print(
+                                                f"      cached {qps_col}={last_qps:.2f} "
+                                                f"< qps_thresh={qps_thresh}; "
+                                                "skipping remaining sweep",
+                                                flush=True,
+                                            )
+
                                 all_results = []
+                                if cached_below_thresh:
+                                    params_list = []
+
                                 for params in params_list:
                                     skip = False
                                     recall_from_cache = None
@@ -718,10 +1037,24 @@ def run_search(
                                                     avg_cmps=res[0].avg_cmps,
                                                     avg_timings=res[0].avg_timings,
                                                 )
+                                            qps_attr = _qps_attr_for_mode(
+                                                mode, num_threads
+                                            )
+                                            qps_label = _qps_label_for_mode(
+                                                mode, num_threads
+                                            )
+                                            qps_val = getattr(
+                                                current, qps_attr, None
+                                            )
+                                            qps_str = (
+                                                f"{qps_val:.1f}"
+                                                if qps_val is not None
+                                                else "N/A"
+                                            )
                                             print(
                                                 f"      {params} | "
                                                 f"R@{params['k']}={current.recall_k_k:.3f} "
-                                                f"QPS_seq={current.QPS_seq:.1f}",
+                                                f"{qps_label}={qps_str}",
                                                 flush=True,
                                             )
                                             df = pd.concat(
@@ -794,6 +1127,32 @@ def run_search(
                                             flush=True,
                                         )
                                         break
+
+                                    # QPS-threshold early exit. Use the per-mode
+                                    # "QPS that matters" (see _qps_attr_for_mode)
+                                    # so latency stops on QPS_seq while
+                                    # multi_latency / batch stop on QPS_par.
+                                    # Cached / mocked rows lack QPS attrs; only
+                                    # check freshly-computed rows.
+                                    if qps_thresh is not None and not skip:
+                                        qps_attr = _qps_attr_for_mode(
+                                            mode, num_threads
+                                        )
+                                        qps_val = getattr(
+                                            current, qps_attr, None
+                                        )
+                                        if (
+                                            qps_val is not None
+                                            and qps_val > 0
+                                            and qps_val < qps_thresh
+                                        ):
+                                            print(
+                                                f"      {qps_attr}={qps_val:.2f} "
+                                                f"< qps_thresh={qps_thresh}; "
+                                                "stopping sweep",
+                                                flush=True,
+                                            )
+                                            break
                     except Exception as e:
                         print(
                             f"  [FAIL {job_id}] {type(e).__name__}: {e}",
@@ -858,6 +1217,42 @@ def main():
         action="store_true",
         help="Stop after the first failed job or parameter evaluation.",
     )
+    ap.add_argument(
+        "--QPS_thresh",
+        type=float,
+        default=10.0,
+        dest="qps_thresh",
+        help=(
+            "Stop a sweep once the per-mode QPS falls below this threshold "
+            "(latency: QPS_seq, multi_latency/batch: QPS_par). Also applies "
+            "to resumed sweeps: if the last cached row already sits below "
+            "the threshold, the next param is skipped. Set <=0 to disable. "
+            "Default: 10."
+        ),
+    )
+    ap.add_argument(
+        "--query_subsample",
+        type=int,
+        default=_DEFAULT_QUERY_SUBSAMPLE,
+        dest="subsample_n",
+        help=(
+            "If the queries file has more than this many point clouds, "
+            "deterministically sample down to this size before running any "
+            "sweep, so the time per parameter combo is fixed across "
+            "datasets. Set <=0 to disable subsampling. Default: 1000."
+        ),
+    )
+    ap.add_argument(
+        "--query_subsample_seed",
+        type=int,
+        default=_DEFAULT_QUERY_SUBSAMPLE_SEED,
+        dest="subsample_seed",
+        help=(
+            "Seed for --query_subsample. Same seed -> same indices across "
+            "runs and across modes, so latency/multi_latency/batch all see "
+            "the same subset for a given dataset. Default: 42."
+        ),
+    )
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -870,12 +1265,19 @@ def main():
     if args.latency and mode is None and num_threads is None:
         mode = 'latency'
 
+    qps_thresh = args.qps_thresh if args.qps_thresh and args.qps_thresh > 0 else None
+    subsample_n = (
+        args.subsample_n if args.subsample_n and args.subsample_n > 0 else None
+    )
     n_fail = run_search(
         config,
         methods,
         num_threads=num_threads,
         mode=mode,
         fail_fast=args.fail_fast,
+        qps_thresh=qps_thresh,
+        subsample_n=subsample_n,
+        subsample_seed=args.subsample_seed,
     )
     raise SystemExit(1 if n_fail else 0)
 

@@ -966,9 +966,12 @@ class IndexMVIVF : public Index<metric> {
 
     // Step 1: greedy / flat search for probe list.
     t.start();
-    const size_t num_leaves = leaves_flat.size();
-    const double alpha = 1.0;
-    bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+    [[maybe_unused]] const size_t num_leaves = leaves_flat.size();
+    // Flat-leaf fast path (use when nprobes >= num_leaves) is intentionally
+    // disabled: on small datasets it produces a misleading QPS plateau in the
+    // tail of the sweep because t_search_top_level eats all the time and the
+    // greedy tree-walk is bypassed. Force greedy search throughout.
+    constexpr bool use_flat = false;
     GreedySearchResult gs = use_flat ? flat_leaf_search(effective_query, q_center, nprobes)
                                      : greedy_search(effective_query, q_center, nprobes);
     double t_greedy = t.stop();
@@ -1165,8 +1168,10 @@ class IndexMVIVF : public Index<metric> {
           q_center = center_model_.quantize_query(eff_queries[i]);
         }
       }
-      const double alpha = 1.0;
-      bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+      // Flat-leaf fast path is disabled (see search_with_stats); always go
+      // through greedy_search so the per-row timing trend stays monotonic.
+      constexpr bool use_flat = false;
+      [[maybe_unused]] const size_t _num_leaves_for_flat = num_leaves;
       const std::pair<uint32_t, float>* root_row =
           (use_root_m2m && !use_flat) ? root_dists.data() + i * num_root_children : nullptr;
       GreedySearchResult gs = use_flat ? flat_leaf_search(eff_queries[i], q_center, nprobes)

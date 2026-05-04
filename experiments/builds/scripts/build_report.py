@@ -43,9 +43,19 @@ def _walk_stats(indexes_root: pathlib.Path,
     if datasets is None:
         if not indexes_root.exists():
             return pd.DataFrame()
-        datasets = sorted([
-            p.name for p in indexes_root.iterdir() if p.is_dir()
-        ])
+        # Discover shards. ViDoRe puts its shards one level deeper
+        # (results/indexes/vidore/<sub>) so expand that container into its
+        # children rather than treating "vidore" itself as a shard.
+        datasets = []
+        for p in sorted(indexes_root.iterdir()):
+            if not p.is_dir():
+                continue
+            if p.name == "vidore":
+                for sub in sorted(p.iterdir()):
+                    if sub.is_dir():
+                        datasets.append(sub.name)
+            else:
+                datasets.append(p.name)
     for ds in datasets:
         ds_dir = indexes_root / ds
         # vidore puts datasets one level deeper.
@@ -161,6 +171,7 @@ def main() -> int:
         print(f"[warn] no build_stats.json under {args.indexes}; nothing to report.")
         return 0
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     _markdown_table(df, out_dir / "build_report.md")
     _bar_plot(df, "build_time_sec", "Build time (s)",
               out_dir / "build_time.pdf", log=True)

@@ -599,12 +599,13 @@ class IndexMVIVFSpill : public Index<metric> {
     if constexpr (kHasCenterQuant) q_center = center_model_.quantize_query(effective_query);
     t_quantize = t.stop(); t.reset();
 
-    // Step 1: greedy or flat-leaf search.
+    // Step 1: greedy search. Flat-leaf fast path (use when nprobes >=
+    // num_leaves) is intentionally disabled; on small datasets it produces
+    // a misleading QPS plateau in the tail of the sweep because the entire
+    // greedy tree-walk is bypassed.  Force greedy search throughout.
     GreedySearchResult gs;
-    const size_t num_leaves_count = leaves_flat.size();
-    const double alpha = 1.0;  // heuristic threshold
-    bool use_flat = (num_leaves_count > 0 &&
-                     nprobes >= static_cast<size_t>(alpha * num_leaves_count));
+    [[maybe_unused]] const size_t num_leaves_count = leaves_flat.size();
+    constexpr bool use_flat = false;
     if (use_flat) {
       gs = flat_leaf_search(effective_query, q_center, nprobes);
     } else {
@@ -800,8 +801,10 @@ class IndexMVIVFSpill : public Index<metric> {
           q_center = center_model_.quantize_query(eff_queries[i]);
         }
       }
-      const double alpha = 1.0;
-      bool use_flat = (num_leaves > 0 && nprobes >= static_cast<size_t>(alpha * num_leaves));
+      // Flat-leaf fast path is disabled (see search_with_stats); always
+      // route through greedy_search.
+      constexpr bool use_flat = false;
+      [[maybe_unused]] const size_t _num_leaves_for_flat = num_leaves;
       const std::pair<uint32_t, float>* root_row =
           (use_root_m2m && !use_flat) ? root_dists.data() + i * num_root_children : nullptr;
       GreedySearchResult gs = use_flat
