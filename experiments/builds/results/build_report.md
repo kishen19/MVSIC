@@ -21,6 +21,12 @@
 | nfcorpus | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 2.1 | 16.08 |
 | nfcorpus | svh_graph | svh_graph_R64_L128_a1.0 | 6.0 | 484.12 |
 | nfcorpus | vamana | vamana_R64_L128_a1.0 | 35.0 | 0.31 |
+| nq | muvera | muvera_10240_R200_L600_a1.0 | 12900.4 | 104991.64 |
+| nq | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 422.6 | 4940.13 |
+| nq | mvivf | mvivf_k0_l500_d0_nit5_s0_mpcc100 | 359.3 | 1166.77 |
+| nq | mvivf_spill | mvivf_k0_l500_d0_nit5_s0_mpcc100_spill_2_1 | 573.8 | 2176.81 |
+| nq | svh_graph | svh_graph_R64_L128_a1.0 | 3051.3 | 133213.90 |
+| nq | vamana | vamana_R64_L128_a1.0 | 7043.8 | 289.33 |
 | scidocs | muvera | muvera_10240_R200_L600_a1.0 | 55.3 | 1005.23 |
 | scidocs | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 7.6 | 99.51 |
 | scidocs | svh_graph | svh_graph_R64_L128_a1.0 | 31.1 | 2147.86 |
