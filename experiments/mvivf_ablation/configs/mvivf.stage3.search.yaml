@@ -5,38 +5,47 @@ datasets:
     path: data/beir/arguana
     index_dir: results/mvivf_ablation/indices/arguana
     results_dir: experiments/mvivf_ablation/results/arguana/stage3
+    is_mmap: true
   - name: fiqa
     path: data/beir/fiqa
     index_dir:   results/mvivf_ablation/indices/fiqa
     results_dir: experiments/mvivf_ablation/results/fiqa/stage3
+    is_mmap: true
   - name: hotpotqa
     path: data/beir/hotpotqa
     index_dir:   results/mvivf_ablation/indices/hotpotqa
     results_dir: experiments/mvivf_ablation/results/hotpotqa/stage3
+    is_mmap: true
   - name: nfcorpus
     path: data/beir/nfcorpus
     index_dir:   results/mvivf_ablation/indices/nfcorpus
     results_dir: experiments/mvivf_ablation/results/nfcorpus/stage3
+    is_mmap: true
   - name: nq
     path: data/beir/nq
     index_dir:   results/mvivf_ablation/indices/nq
     results_dir: experiments/mvivf_ablation/results/nq/stage3
+    is_mmap: true
   - name: nq500k
     path: data/beir/nq500k
     index_dir:   results/mvivf_ablation/indices/nq500k
     results_dir: experiments/mvivf_ablation/results/nq500k/stage3
+    is_mmap: true
   - name: quora
     path: data/beir/quora
     index_dir:   results/mvivf_ablation/indices/quora
     results_dir: experiments/mvivf_ablation/results/quora/stage3
+    is_mmap: true
   - name: scidocs
     path: data/beir/scidocs
     index_dir:   results/mvivf_ablation/indices/scidocs
     results_dir: experiments/mvivf_ablation/results/scidocs/stage3
+    is_mmap: true
   - name: scifact
     path: data/beir/scifact
     index_dir:   results/mvivf_ablation/indices/scifact
     results_dir: experiments/mvivf_ablation/results/scifact/stage3
+    is_mmap: true
 
 indices:
   - name: mvivf
@@ -55,7 +64,7 @@ indices:
           - name: k=10
             params:
               tq8_rerank: [true]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
               k: [10]
               config:
                 - {name: "", num_rerank: 0}

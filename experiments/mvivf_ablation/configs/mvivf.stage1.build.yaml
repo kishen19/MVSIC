@@ -4,30 +4,39 @@ datasets:
   - name: arguana
     path: data/beir/arguana
     index_dir: results/mvivf_ablation/indices/arguana
+    is_mmap: true
   - name: fiqa
     path: data/beir/fiqa
     index_dir: results/mvivf_ablation/indices/fiqa
+    is_mmap: true
   - name: hotpotqa
     path: data/beir/hotpotqa
     index_dir: results/mvivf_ablation/indices/hotpotqa
+    is_mmap: true
   - name: nfcorpus
     path: data/beir/nfcorpus
     index_dir: results/mvivf_ablation/indices/nfcorpus
+    is_mmap: true
   - name: nq
     path: data/beir/nq
     index_dir: results/mvivf_ablation/indices/nq
+    is_mmap: true
   - name: nq500k
     path: data/beir/nq500k
     index_dir: results/mvivf_ablation/indices/nq500k
+    is_mmap: true
   - name: quora
     path: data/beir/quora
     index_dir: results/mvivf_ablation/indices/quora
+    is_mmap: true
   - name: scidocs
     path: data/beir/scidocs
     index_dir: results/mvivf_ablation/indices/scidocs
+    is_mmap: true
   - name: scifact
     path: data/beir/scifact
     index_dir: results/mvivf_ablation/indices/scifact
+    is_mmap: true
 
 indices:
   - name: mvivf
@@ -51,21 +60,3 @@ indices:
         params: { <<: *stage1_defaults, k_per_level: 16 }
       - name: mvivf_k32_l500
         params: { <<: *stage1_defaults, k_per_level: 32 }
-
-      # ---------- Stage 2: max_depth (update k_per_level to stage-1 winner) ----------
-      # - name: mvivf_k16_d3
-      #   params: { <<: *stage1_defaults, k_per_level: 16, max_depth: 3 }
-      # - name: mvivf_k16_d4
-      #   params: { <<: *stage1_defaults, k_per_level: 16, max_depth: 4 }
-
-      # ---------- Stage 3: max_leaf_size ----------
-      # (enable after Stage 2)
-
-      # ---------- Stage 4: niters ----------
-      # (enable after Stage 3)
-
-      # ---------- Stage 5: mpcc / mpcik ----------
-      # (enable after Stage 4)
-
-      # ---------- Stage 6: s ----------
-      # (enable after Stage 5)
