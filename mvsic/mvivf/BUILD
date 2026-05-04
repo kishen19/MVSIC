@@ -154,11 +154,34 @@ cc_binary(
     ],
 )
 
+# bench_search_seq is split across per-cell translation units under
+# bench_search_seq_inst/ (one .cc per metric × variant × quantizer; each TU
+# instantiates compress=true and compress=false). Bazel compiles them in
+# parallel; the dispatch TU only sees `extern template` declarations.
+cc_library(
+    name = "bench_search_seq_inst",
+    srcs = glob(["bench_search_seq_inst/*.cc"]),
+    hdrs = [
+        "bench_search_seq_impl.h",
+        "bench_search_seq_inst.h",
+    ],
+    deps = [
+        ":mvivf",
+        ":mvivf_flat",
+        ":mvivf_spill",
+        "//mvsic/core:bench_utils",
+    ],
+)
+
 cc_binary(
     name = "bench_search_seq",
     srcs = ["bench_search_seq.cpp"],
-    defines = ["PARLAY_SEQUENTIAL"],
+    # Loading runs with full parlay parallelism; the per-query timed loop is
+    # pinned to 1 worker by compute_stats_extended_p_threaded's
+    # parlay::execute_with_scheduler(1, ...) wrapper, so QPS_seq still measures
+    # single-threaded search.
     deps = [
+        ":bench_search_seq_inst",
         ":mvivf",
         ":mvivf_flat",
         ":mvivf_spill",

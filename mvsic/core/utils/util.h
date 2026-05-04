@@ -271,13 +271,20 @@ parlay::sequence<std::pair<K, V>> deduplicate(parlay::sequence<std::pair<K, V>> 
   return out;
 }
 
-// Sort a sequence of (uint32_t, float) pairs by (value, key), choosing the
-// fastest method based on size: VQSort for small n, Parlay sort for large n.
+// Sort a sequence of (uint32_t, float) pairs by (value, key). Picks the fastest
+// path based on size *and* the active scheduler:
+//   - small n: VQSort on packed (value,key) doubles.
+//   - large n with >1 parlay worker: parlay's parallel sample sort.
+//   - large n with 1 parlay worker (e.g. seq benches pinned via
+//     execute_with_scheduler(1, ...)): VQSort. Parlay sort under a single
+//     worker is dominated by its own scheduling overhead and loses to a
+//     well-vectorized serial sort.
 inline void sort_inplace_kv(parlay::sequence<std::pair<uint32_t, float>>& seq) {
   const size_t n = seq.size();
   if (n == 0) return;
   constexpr size_t kSortHybridThresholdN = 32000;
-  if (n <= kSortHybridThresholdN) {
+  const bool use_vqsort = n <= kSortHybridThresholdN || parlay::num_workers() <= 1;
+  if (use_vqsort) {
     parlay::sequence<double> packed = parlay::sequence<double>::uninitialized(n);
     parlay::parallel_for(
         0, n, [&](size_t i) { packed[i] = packFloatAndInt(seq[i].second, seq[i].first); });

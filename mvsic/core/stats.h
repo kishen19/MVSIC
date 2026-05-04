@@ -451,7 +451,8 @@ template<typename Index, typename PC>
 parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
     Index& index, const PC& points, const PC& query_points,
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
-    const parlay::sequence<mvsic::SearchParams>& params, size_t num_threads = 1) {
+    const parlay::sequence<mvsic::SearchParams>& params, size_t num_threads = 1,
+    size_t num_warmup = 10) {
   // Single-Threaded Version
   auto results = parlay::sequence<mvsic::StatsExtended>(params.size());
   auto func = [&]() {
@@ -463,8 +464,9 @@ parlay::sequence<mvsic::StatsExtended> compute_stats_extended_p_threaded(
       auto cmps = parlay::sequence<size_t>::uninitialized(query_points.size());
       auto timings = parlay::sequence<std::vector<double>>(query_points.size());
 
-      // Warmup
-      for (size_t j = 0; j < std::min(static_cast<size_t>(10), query_points.size()); j++) {
+      // Warmup. Callers that already warmed up at the sweep level (e.g.
+      // run_search_sweep_seq) pass num_warmup=0 to skip.
+      for (size_t j = 0; j < std::min(num_warmup, query_points.size()); j++) {
         auto [p, c] = index.search(query_points[j], points, params[i]);
       }
       double query_time_seq = 0.0;
@@ -528,10 +530,11 @@ template<typename Index, typename PC>
 mvsic::StatsExtended compute_stats_extended_p_threaded(
     Index& index, const PC& points, const PC& query_points,
     const parlay::sequence<parlay::sequence<std::pair<uint32_t, float>>>& gt,
-    const mvsic::SearchParams& params, size_t num_threads = 1) {
+    const mvsic::SearchParams& params, size_t num_threads = 1,
+    size_t num_warmup = 10) {
   return compute_stats_extended_p_threaded(index, points, query_points, gt,
                                            parlay::sequence<mvsic::SearchParams>{params},
-                                           num_threads)[0];
+                                           num_threads, num_warmup)[0];
 }
 
 template<typename Index, typename PC>

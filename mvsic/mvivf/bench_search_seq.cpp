@@ -1,13 +1,17 @@
 #include "mvsic/core/bench_utils.h"
-#include "mvivf.h"
-#include "mvivf_flat.h"
-#include "mvivf_spill.h"
+#include "mvsic/mvivf/bench_search_seq_inst.h"
 
 using namespace mvsic;
+using namespace mvsic::bench_seq;
 
 // ----- CLI -> compile-time IndexMVIVF<metric, CompressCenters, LeafModel> dispatch. -----
+//
+// All heavy template specializations of run_one_seq are instantiated in
+// separate translation units under bench_search_seq_inst/ — one .cc per
+// (metric, variant, quantizer) cell, each instantiating both compress=false
+// and compress=true. Bazel compiles those TUs in parallel; this dispatch TU
+// only sees `extern template` declarations and stays cheap.
 namespace {
-enum class MVIVFVariant { Regular, Flat, Spill };
 
 inline MVIVFVariant parse_mvivf_variant(bool is_flat, bool is_spill) {
   if (is_flat && is_spill) {
@@ -17,12 +21,6 @@ inline MVIVFVariant parse_mvivf_variant(bool is_flat, bool is_spill) {
   return is_flat ? MVIVFVariant::Flat
        : is_spill ? MVIVFVariant::Spill
                   : MVIVFVariant::Regular;
-}
-
-inline const char* variant_name(MVIVFVariant v) {
-  return v == MVIVFVariant::Flat  ? "MVIVF_Flat"
-       : v == MVIVFVariant::Spill ? "MVIVF_Spill"
-                                  : "MVIVF";
 }
 
 #define MVIVF_DISPATCH_LM(Fam, metric, C, qm, fn)                                                 \
@@ -41,11 +39,13 @@ inline const char* variant_name(MVIVFVariant v) {
       fn.template operator()<Fam<metric, C, pqtq_mv::Model<metric>>>();                           \
     else if (qm == "1BTQ"  || qm == "1btq")                                                       \
       fn.template operator()<Fam<metric, C, turboquant_1bit_mv::Model<metric>>>();                \
+    else if (qm == "1BTQA" || qm == "1btqa")                                                      \
+      fn.template operator()<Fam<metric, C, turboquant_1bit_asym_mv::Model<metric>>>();           \
     else if (qm == "8BTQ"  || qm == "8btq")                                                       \
       fn.template operator()<Fam<metric, C, turboquant_8bit_mv::Model<metric>>>();                \
     else {                                                                                        \
       std::cerr << "Unknown -quant_method: " << qm                                                \
-                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ, 8BTQ)" << std::endl;                 \
+                << " (use None, PQ, FS, RQ, TQ, SPQTQ, 1BTQ, 1BTQA, 8BTQ)" << std::endl;          \
       std::exit(1);                                                                               \
     }                                                                                             \
   } while (0)
@@ -84,8 +84,6 @@ void run(commandLine& P) {
   uint32_t k_per_level = P.getOptionIntValue("-k_per_level", 0);
   uint32_t max_leaf_size = P.getOptionIntValue("-max_leaf_size", 500);
   uint32_t max_depth = P.getOptionIntValue("-max_depth", 0);
-  // Defaults mirror IndexParams::mvivf*.  Integer-valued bool flags use
-  // `<flag> 0|1` form to preserve factory defaults of `true`.
   bool compress_centers = P.getOptionIntValue("-qc", 0) != 0;
   uint32_t niters = P.getOptionIntValue("-niters", 5);
   uint32_t mpcc = P.getOptionIntValue("-mpcc", 100);
@@ -100,11 +98,19 @@ void run(commandLine& P) {
 
   size_t k = P.getOptionLongValue("-k", 10);
   size_t num_rerank = P.getOptionLongValue("-num_rerank", 0);
+  size_t num_queries = P.getOptionLongValue("-num_queries", 0);
+  uint64_t query_sample_seed = static_cast<uint64_t>(
+      P.getOptionLongValue("-query_sample_seed", 42));
+  bool skip_warmup = P.getOption("-no_warmup");
   std::string nprobes_str = P.getOptionValue("-nprobes", "1,2,4,8,16,32,64,128,256,512,1024");
   auto nprobes_list = bench::parse_csv_ints(nprobes_str);
 
   SearchParams sp_base;
   bench::parse_compression_opts(sp_base, P);
+  // Override parse_compression_opts's presence-flag parse of -tq8_rerank with
+  // an int-style 0|1 so the default stays on (matching SearchParams::mvivf's
+  // default) and -tq8_rerank 0 can disable it.
+  sp_base.tq8_rerank = P.getOptionIntValue("-tq8_rerank", 1) != 0;
   bench::print_compression_info(sp_base);
 
   auto points = PC(ds.points.c_str(), io.is_mmap);
@@ -122,56 +128,29 @@ void run(commandLine& P) {
                             mpcc, mpcik, "Random", 0, wgh_kmeans, s, max_depth);
   }
 
+  RunOneCtxSeq<ChPoint> ctx{
+      .points = &points,
+      .ip = ip,
+      .sp_base = sp_base,
+      .ds = ds,
+      .io = io,
+      .variant = variant,
+      .k = k,
+      .num_rerank = num_rerank,
+      .nprobes_list = nprobes_list,
+      .num_queries = num_queries,
+      .query_sample_seed = query_sample_seed,
+      .skip_warmup = skip_warmup,
+  };
+
   dispatch_mvivf<metric>(variant, compress_centers, quant_method,
-      [&]<class IndexT>() {
-        IndexT index(points.get_dims(), ip);
-        bench::build_or_load(index, points, io.index_path);
-
-        if (ds.queries.empty() || ds.gt.empty()) {
-          std::cout << "No queries/GT specified. Done." << std::endl;
-          return;
-        }
-        auto queries = PC(ds.queries.c_str());
-        auto gt = ReadGT(ds.gt, queries.size());
-        bench::print_header(std::string(variant_name(variant)) + " (seq)",
-                            ds.name, points.size(), queries.size());
-        bench::print_compression_stats<ChPoint>(queries, sp_base, index.quantization_mode);
-
-        auto make_sp = [&](size_t np) {
-          SearchParams sp;
-          if (variant == MVIVFVariant::Flat)
-            sp = SearchParams::mvivf_flat(k, np, num_rerank);
-          else if (variant == MVIVFVariant::Spill)
-            sp = SearchParams::mvivf_spill(k, np, num_rerank);
-          else
-            sp = SearchParams::mvivf(k, np, num_rerank);
-          sp.query_compression = sp_base.query_compression;
-          sp.query_compression_threshold = sp_base.query_compression_threshold;
-          sp.compress_rerank = sp_base.compress_rerank;
-          return sp;
-        };
-
-        std::vector<std::string> labels;
-        if (variant == MVIVFVariant::Flat) {
-          labels = {"n_centers", "probe_cmps", "t_compress", "t_search", "t_leaf_dists",
-                    "t_leaf_rest", "t_rerank"};
-        } else if (variant == MVIVFVariant::Spill) {
-          labels = {"search_cmps", "probe_cmps", "t_search_dists", "t_search_beam",
-                    "t_search_rest", "t_compress", "t_quant", "t_leaf_dists", "t_dedup",
-                    "t_leaf_rest", "t_rerank"};
-        } else {
-          labels = {"search_cmps", "probe_cmps", "t_search_dists", "t_search_beam",
-                    "t_search_rest", "t_compress", "t_quant", "t_leaf_dists", "t_leaf_rest",
-                    "t_rerank", "t_greedy"};
-        }
-        bench::run_search_sweep_seq(index, points, queries, gt, "nprobes", nprobes_list, make_sp,
-                                    io.csv_path, labels);
-      });
+      [&]<class IndexT>() { run_one_seq<ChPoint, metric, IndexT>(ctx); });
 }
 
 PARSE_DIST_FUNC_AND_RUN(run,
-    "MVIVF sequential search benchmark (single-threaded; PARLAY_SEQUENTIAL). "
-    "Useful for latency measurement.\n\n"
+    "MVIVF sequential search benchmark (search_with_stats path; per-query "
+    "loop pinned to 1 worker via parlay::execute_with_scheduler). "
+    "Index loading runs with full parlay parallelism.\n\n"
     "Dataset / I/O:\n"
     "  -d <name> | -i <points> -q <queries> -gt <gt>\n"
     "  -index <path>                  Pre-built index to load\n"
@@ -187,12 +166,18 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "  -wgh_kmeans 0|1 (1)   -s <N> (0)\n\n"
     "Quantization (picks the concrete templated class):\n"
     "  -qc 0|1                        CompressCenters; default 0\n"
-    "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|8BTQ    (default None)\n"
+    "  -quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|1BTQA|8BTQ    (default None)\n"
     "  -m <N> (8)   -num_clusters_per_block <N> (16)\n"
     "  -num_points_per_cluster <N> (100)   -rbits <N> (4)\n\n"
     "Search sweep:\n"
     "  -k <N>                         Top-k to retrieve (default 10)\n"
     "  -nprobes <csv>                 nprobes values to sweep\n"
-    "  -num_rerank <N>                Rerank width\n\n"
+    "  -num_rerank <N>                Rerank width\n"
+    "  -num_queries <N>               If <N> < #queries, randomly subsample (0 = use all)\n"
+    "  -query_sample_seed <N>         RNG seed for -num_queries subsampling (default 42)\n"
+    "  -no_warmup                     Skip the sweep-level warmup pass\n\n"
     "Query compression:\n"
-    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n")
+    "  -compress none|carve|wards  -compress_threshold <tau>  -compress_rerank\n\n"
+    "Rerank:\n"
+    "  -tq8_rerank 0|1                Score rerank candidates with 8-bit TQ kernel\n"
+    "                                 instead of float chamfer (default 1)\n")

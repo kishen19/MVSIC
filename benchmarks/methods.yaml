@@ -60,6 +60,8 @@ mvivf_spill:
   supports_compress: true
   quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ, EightBitTQ]
   # Order matches IndexMVIVFSpill::search_with_stats (mvivf_spill.h).
+  # Spill's greedy returns 4-element gs.stats (no t_top_level), so this list
+  # has 11 entries — one fewer than the regular mvivf block above.
   labels:
     [
       "search_cmps",
@@ -67,7 +69,6 @@ mvivf_spill:
       "t_search_dists",
       "t_search_beam",
       "t_search_rest",
-      "t_search_top_level",
       "t_compress",
       "t_quant",
       "t_leaf_dists",

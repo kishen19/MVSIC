@@ -354,7 +354,35 @@ void run_search_sweep_seq(Index& index,
                           const std::vector<size_t>& variable_values,
                           MakeSearchParams make_sp,
                           const std::string& csv_path = "",
-                          const std::vector<std::string>& timing_labels = {}) {
+                          const std::vector<std::string>& timing_labels = {},
+                          bool skip_warmup = false) {
+  // Sweep-level warmup: run every query once at the first sweep value to fault
+  // in mmap pages (raw points touched by rerank) and prime caches before any
+  // timed measurement. Replaces the 10-query warmup that
+  // compute_stats_extended_p_threaded used to do on every sweep value, which
+  // dominated wall time at large nprobes.
+  //
+  // Runs under the *ambient* parlay scheduler (all cores), not pinned to one
+  // worker like the timed loop. The warmup's only job is to prime pages as
+  // fast as possible; running it serially would force mmap page faults to
+  // happen one-at-a-time and dominate sweep wall time. The printed number is
+  // therefore not directly comparable to the timed-regime QPS.
+  if (!skip_warmup && !variable_values.empty() && queries.size() > 0) {
+    SearchParams probe_sp = make_sp(variable_values.front());
+    parlay::internal::timer t_warm;
+    t_warm.start();
+    for (size_t j = 0; j < queries.size(); ++j) {
+      auto pair = index.search(queries[j], points, probe_sp);
+      (void)pair;
+    }
+    t_warm.stop();
+    std::cout << "[warmup] " << queries.size() << " queries at "
+              << variable_param_name << "=" << variable_values.front()
+              << " (parallel; not comparable to timed run): "
+              << std::fixed << std::setprecision(3) << t_warm.total_time()
+              << " s (excluded)" << std::endl;
+  }
+
   size_t k = 0;
   for (size_t val : variable_values) {
     SearchParams sp = make_sp(val);
@@ -362,8 +390,14 @@ void run_search_sweep_seq(Index& index,
 
     std::cout << "\n--- " << variable_param_name << " = " << val << " ---" << std::endl;
 
-    StatsExtended result = compute_stats_extended_p_threaded(index, points, queries, gt, sp, 1);
+    parlay::internal::timer t_sweep;
+    t_sweep.start();
+    StatsExtended result = compute_stats_extended_p_threaded(
+        index, points, queries, gt, sp, /*num_threads=*/1, /*num_warmup=*/0);
+    t_sweep.stop();
     print_result_extended(result, k, timing_labels);
+    std::cout << "  Total time:     " << std::fixed << std::setprecision(4)
+              << t_sweep.total_time() << " s" << std::endl;
 
     if (!csv_path.empty()) {
       write_csv_row(csv_path, Stats(result.QPS_seq, result.QPS_par, result.avg_cmps,
