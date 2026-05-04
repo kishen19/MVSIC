@@ -885,25 +885,47 @@ class Quantized_Point_Cloud_Set {
       }
     }
 
-    parlay::parallel_for(0, nc, [&](size_t c) {
-      MVSIC_1BTQ_PROF_TIMER(per_cloud_cy, n_clouds);
-      if (cloud_sizes[c] == 0) {
-        results[c] = {get_id(c), std::numeric_limits<float>::max()};
-        return;
+    if (parlay::num_workers() > 1) {
+      parlay::parallel_for(0, nc, [&](size_t c) {
+        MVSIC_1BTQ_PROF_TIMER(per_cloud_cy, n_clouds);
+        if (cloud_sizes[c] == 0) {
+          results[c] = {get_id(c), std::numeric_limits<float>::max()};
+          return;
+        }
+        const uint8_t* panel_ptr = panel_data.data() + panel_offsets[c];
+        const size_t cs = cloud_sizes[c];
+        const size_t full_np_c = cs / internal::kPanelPoints;
+        const size_t tail_v = cs - full_np_c * internal::kPanelPoints;
+        const size_t total_np = full_np_c + (tail_v > 0 ? 1 : 0);
+        MVSIC_1BTQ_PROF_ADD(total_panel_bytes, total_np * panel_bytes);
+        MVSIC_1BTQ_PROF_ADD(total_hammings, num_q * cs);
+        MVSIC_1BTQ_PROF_ADD(total_vpopcntd, num_q * total_np * num_hamming_tiles);
+        const float dist_sum = internal::chamfer_panels_qbuf<Metric>(
+            qbuf, qbuf_tile_stride, num_q, panel_ptr, panel_bytes, num_hamming_tiles, cs,
+            padded_dim);
+        results[c] = {get_id(c), dist_sum / static_cast<float>(num_q)};
+      });
+    } else {
+      for (size_t c=0; c  < nc; ++c) {
+        MVSIC_1BTQ_PROF_TIMER(per_cloud_cy, n_clouds);
+        if (cloud_sizes[c] == 0) {
+          results[c] = {get_id(c), std::numeric_limits<float>::max()};
+          return;
+        }
+        const uint8_t* panel_ptr = panel_data.data() + panel_offsets[c];
+        const size_t cs = cloud_sizes[c];
+        const size_t full_np_c = cs / internal::kPanelPoints;
+        const size_t tail_v = cs - full_np_c * internal::kPanelPoints;
+        const size_t total_np = full_np_c + (tail_v > 0 ? 1 : 0);
+        MVSIC_1BTQ_PROF_ADD(total_panel_bytes, total_np * panel_bytes);
+        MVSIC_1BTQ_PROF_ADD(total_hammings, num_q * cs);
+        MVSIC_1BTQ_PROF_ADD(total_vpopcntd, num_q * total_np * num_hamming_tiles);
+        const float dist_sum = internal::chamfer_panels_qbuf<Metric>(
+            qbuf, qbuf_tile_stride, num_q, panel_ptr, panel_bytes, num_hamming_tiles, cs,
+            padded_dim);
+        results[c] = {get_id(c), dist_sum / static_cast<float>(num_q)};
       }
-      const uint8_t* panel_ptr = panel_data.data() + panel_offsets[c];
-      const size_t cs = cloud_sizes[c];
-      const size_t full_np_c = cs / internal::kPanelPoints;
-      const size_t tail_v = cs - full_np_c * internal::kPanelPoints;
-      const size_t total_np = full_np_c + (tail_v > 0 ? 1 : 0);
-      MVSIC_1BTQ_PROF_ADD(total_panel_bytes, total_np * panel_bytes);
-      MVSIC_1BTQ_PROF_ADD(total_hammings, num_q * cs);
-      MVSIC_1BTQ_PROF_ADD(total_vpopcntd, num_q * total_np * num_hamming_tiles);
-      const float dist_sum = internal::chamfer_panels_qbuf<Metric>(
-          qbuf, qbuf_tile_stride, num_q, panel_ptr, panel_bytes, num_hamming_tiles, cs,
-          padded_dim);
-      results[c] = {get_id(c), dist_sum / static_cast<float>(num_q)};
-    });
+    }
 #else
     parlay::parallel_for(0, nc, [&](size_t c) {
       if (cloud_sizes[c] == 0) {

@@ -210,6 +210,6 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "  -compress_threshold <tau>      Compression threshold (default 0.7)\n"
     "  -compress_rerank               Rerank with uncompressed query after compressed scoring\n"
     "  -query_alignment <N>           Force compressed query size to a multiple of N (Wards only;\n"
-    "                                 0 = use kernel SIMD batch alignment)\n"
+    "                                 default 4 for wards, 0 otherwise; 0 = use kernel SIMD batch alignment)\n"
     "  -query_alignment_strict        With -query_alignment, force every query to exactly N\n"
     "                                 (ignores threshold; rigid alignment)\n")

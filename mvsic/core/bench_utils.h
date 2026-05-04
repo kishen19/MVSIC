@@ -164,8 +164,16 @@ inline void parse_compression_opts(SearchParams& sp, commandLine& P) {
   sp.query_compression_threshold =
       static_cast<float>(P.getOptionDoubleValue("-compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
-  sp.query_alignment =
-      static_cast<uint32_t>(P.getOptionIntValue("-query_alignment", 0));
+  // Sentinel of -1 lets us distinguish "user didn't pass the flag" from
+  // "user passed 0". When unset, default to 4 for Wards (which benefits from
+  // dynamic alignment) and 0 (kernel-default) for everything else.
+  int qa_raw = P.getOptionIntValue("-query_alignment", -1);
+  if (qa_raw < 0) {
+    sp.query_alignment =
+        (sp.query_compression == SearchParams::QueryCompression::Wards) ? 4u : 0u;
+  } else {
+    sp.query_alignment = static_cast<uint32_t>(qa_raw);
+  }
   sp.query_alignment_strict = P.getOption("-query_alignment_strict");
   sp.tq8_rerank = P.getOption("-tq8_rerank");
   sp.root_m2m = P.getOption("-root_m2m");
