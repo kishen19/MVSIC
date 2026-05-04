@@ -1,0 +1,13 @@
+{
+  "built_at": "2026-05-03 18:21:55 UTC",
+  "build_time_sec": 8.698849439620972,
+  "index_size_mb": 690.217098236084,
+  "build_params": {
+    "verbose": 1,
+    "R": 64,
+    "L": 128,
+    "alpha": 1.0
+  },
+  "git_sha": "9aff0834941fe8e3c4c94312656caa5dc3706cad",
+  "git_dirty": true
+}

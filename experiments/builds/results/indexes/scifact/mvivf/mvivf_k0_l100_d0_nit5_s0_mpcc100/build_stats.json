@@ -1,0 +1,24 @@
+{
+  "built_at": "2026-05-03 18:20:48 UTC",
+  "build_time_sec": 2.943148612976074,
+  "index_size_mb": 28.31634521484375,
+  "build_params": {
+    "verbose": 1,
+    "k_per_level": 0,
+    "max_leaf_size": 100,
+    "max_depth": 0,
+    "niters": 5,
+    "s": 0,
+    "max_point_clouds_per_cluster": 100,
+    "build_with_8btq": true
+  },
+  "git_sha": "9aff0834941fe8e3c4c94312656caa5dc3706cad",
+  "git_dirty": true,
+  "kmeans_tree_height": 3,
+  "num_internal_nodes": 19,
+  "num_leaves": 225,
+  "avg_leaf_size": 23.035555555555554,
+  "avg_internal_node_size": 12.789473684210526,
+  "total_point_clouds_internal": 243,
+  "height": 3
+}

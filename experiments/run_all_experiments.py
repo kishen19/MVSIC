@@ -8,7 +8,8 @@ import time
 from pathlib import Path
 
 DATASETS = [
-    "arguana",
+#    "arguana", "scidocs", "scifact", "fiqa",
+    "nfcorpus",
 ]
 
 STEPS = [
