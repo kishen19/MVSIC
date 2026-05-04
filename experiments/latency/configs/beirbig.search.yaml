@@ -32,7 +32,7 @@ indices:
               tq8_rerank: [true]
               query_compression: ["Wards"]
               query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
               k: [10]
               config:
                 - { name: nr20,   num_rerank: 20 }
@@ -62,7 +62,7 @@ indices:
               tq8_rerank: [true]
               query_compression: ["Wards"]
               query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
               k: [10]
               config:
                 - { name: nr20,   num_rerank: 20 }
@@ -91,6 +91,7 @@ indices:
                 - { name: nr500,   num_rerank: 500 }
                 - { name: nr1000,   num_rerank: 1000 }
                 - { name: nr5000,   num_rerank: 5000 }
+                - { name: nr10000,   num_rerank: 10000 }
 
   - name: vamana
     metric: ip

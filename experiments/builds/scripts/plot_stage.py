@@ -49,7 +49,7 @@ _PREFIX_FOR_STAGE = {
 
 # Methods we expect to show up under <results>/<dataset>/. Order also drives
 # legend ordering in the plot.
-_METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph", "fastplaid"]
+_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph", "fastplaid"]
 
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
@@ -377,7 +377,9 @@ def _plot_pareto_panel(
 ) -> None:
     methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
-    color_for = {m: cmap(i % 10) for i, m in enumerate(methods_present)}
+    # Key color by position in the full _METHOD_ORDER so colors are stable
+    # across datasets even when some methods are absent.
+    color_for = {m: cmap(_METHOD_ORDER.index(m) % 10) for m in methods_present}
     y_label = "QPS (batch)" if stage == "batch" else "QPS (per-query)"
 
     for method in methods_present:
@@ -431,7 +433,9 @@ def _plot_pareto_latency_ms_panel(
 ) -> None:
     methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
-    color_for = {m: cmap(i % 10) for i, m in enumerate(methods_present)}
+    # Key color by position in the full _METHOD_ORDER so colors are stable
+    # across datasets even when some methods are absent.
+    color_for = {m: cmap(_METHOD_ORDER.index(m) % 10) for m in methods_present}
     y_label = "Latency (ms)"
 
     for method in methods_present:
