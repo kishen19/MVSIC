@@ -11,6 +11,7 @@
 #   experiments/batch/scripts/run_batch.sh --dataset nq500k            # standalone
 #   experiments/batch/scripts/run_batch.sh --dataset arguana           # one BEIR-5 shard
 #   experiments/batch/scripts/run_batch.sh --dataset nq --method mvivf
+#   experiments/batch/scripts/run_batch.sh --dataset arguana --method mvivf_spill
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --exclude mvivf
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --task plot
 #

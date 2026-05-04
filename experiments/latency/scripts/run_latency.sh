@@ -7,6 +7,7 @@
 #   experiments/latency/scripts/run_latency.sh --dataset nq500k        # standalone (nq500k.search.yaml)
 #   experiments/latency/scripts/run_latency.sh --dataset arguana       # one shard from beir5.search.yaml
 #   experiments/latency/scripts/run_latency.sh --dataset nq --method mvivf
+#   experiments/latency/scripts/run_latency.sh --dataset arguana --method mvivf_spill
 #   experiments/latency/scripts/run_latency.sh --dataset vidore --method muvera
 #   experiments/latency/scripts/run_latency.sh --dataset arguana --exclude mvivf
 #   experiments/latency/scripts/run_latency.sh --dataset arguana --task plot   # only re-render plots

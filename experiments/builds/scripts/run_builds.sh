@@ -7,6 +7,7 @@
 #   experiments/builds/scripts/run_builds.sh --dataset nq500k           # standalone (nq500k.build.yaml)
 #   experiments/builds/scripts/run_builds.sh --dataset arguana          # one shard from beir5.build.yaml
 #   experiments/builds/scripts/run_builds.sh --dataset nq --method mvivf
+#   experiments/builds/scripts/run_builds.sh --dataset arguana --method mvivf_spill
 #   experiments/builds/scripts/run_builds.sh --dataset vidore --method muvera
 #   experiments/builds/scripts/run_builds.sh --dataset nfcorpus --method fastplaid
 #   experiments/builds/scripts/run_builds.sh --dataset arguana --exclude mvivf,muvera
@@ -49,7 +50,7 @@ source "$REPO_ROOT/experiments/builds/scripts/fastplaid_scope.sh"
 cd "$REPO_ROOT"
 
 DATASET=""
-METHOD=""        # empty | all | mvivf | muvera | vamana | svh_graph | fastplaid
+METHOD=""        # empty | all | mvivf | mvivf_spill | muvera | vamana | svh_graph | fastplaid
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
 # build = run benchmark_build only; plot = mirror+report only (no build);

@@ -11,6 +11,7 @@
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset nq500k        # standalone
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana       # one BEIR-5 shard
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset nq --method mvivf
+#   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --method mvivf_spill
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --exclude mvivf
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --task plot
 #
