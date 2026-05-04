@@ -150,7 +150,9 @@ class IndexSVHGraph : public Index<metric> {
     ChPoint effective_query = query;
     if (search_params.query_compression != SearchParams::QueryCompression::None) {
       compressed_storage = compress_query<ChPoint>(query, search_params.query_compression,
-                                                   search_params.query_compression_threshold);
+                                                   search_params.query_compression_threshold, 1,
+                                                   search_params.query_alignment,
+                                                   search_params.query_alignment_strict);
       effective_query = compressed_storage.view();
     }
     timings.push_back(t.stop());  // t_compress

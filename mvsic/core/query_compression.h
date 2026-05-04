@@ -232,9 +232,19 @@ CompressedPointCloud<ChPoint> ball_carving(const ChPoint& query, float threshold
 //   Internal centroids are weighted means for correct Lance–Williams updates.
 //   Output representatives are (mean * cluster_size) = vector sum over the cluster (MUVERA-style).
 // Uses the Lance-Williams recurrence for O(n^2) total update cost.
+//
+// dynamic: if true, the threshold and alignment phases are fused into a single
+// loop. Easy queries (where threshold allows many merges) collapse all the way
+// down to batch_align; harder queries stop at the smallest multiple of
+// batch_align reachable. Worst case forced merges past threshold per query is
+// at most batch_align - 1.
+// strict: if true, ignore threshold entirely and force-merge until num_active
+// equals batch_align. Every query lands at exactly batch_align (when n >
+// batch_align). Takes precedence over dynamic.
 template<typename ChPoint>
 CompressedPointCloud<ChPoint> wards_compress(const ChPoint& query, float threshold,
-                                             uint32_t batch_align = 1) {
+                                             uint32_t batch_align = 1, bool dynamic = false,
+                                             bool strict = false) {
   const uint32_t n = query.size();
   const uint32_t d = query.get_dims();
 
@@ -335,19 +345,37 @@ CompressedPointCloud<ChPoint> wards_compress(const ChPoint& query, float thresho
     }
   };
 
-  // Phase 1: threshold-based merging.
-  while (num_active > 1) {
-    auto [best, bi, bj] = find_min();
-    if (best > threshold) break;
-    do_merge(bi, bj);
-  }
-
-  // Phase 2: align to batch size.
-  if (batch_align > 1) {
-    uint32_t aligned_target = qc_internal::align_down(num_active, batch_align);
-    while (num_active > aligned_target && num_active > 1) {
+  if (strict && batch_align > 1) {
+    // Strict alignment: ignore threshold, force-merge to exactly batch_align.
+    while (num_active > batch_align) {
       auto [best, bi, bj] = find_min();
       do_merge(bi, bj);
+    }
+  } else if (dynamic && batch_align > 1) {
+    // Fused loop. Stop when the count is a multiple of batch_align AND the
+    // next merge would exceed threshold — i.e. the alignment is "stable" and
+    // there are no free merges left to push to a smaller multiple of N.
+    // Floor at batch_align so we never collapse below the requested alignment.
+    while (num_active > batch_align) {
+      auto [best, bi, bj] = find_min();
+      if (best > threshold && (num_active % batch_align == 0)) break;
+      do_merge(bi, bj);
+    }
+  } else {
+    // Phase 1: threshold-based merging.
+    while (num_active > 1) {
+      auto [best, bi, bj] = find_min();
+      if (best > threshold) break;
+      do_merge(bi, bj);
+    }
+
+    // Phase 2: align to batch size.
+    if (batch_align > 1) {
+      uint32_t aligned_target = qc_internal::align_down(num_active, batch_align);
+      while (num_active > aligned_target && num_active > 1) {
+        auto [best, bi, bj] = find_min();
+        do_merge(bi, bj);
+      }
     }
   }
 
@@ -370,15 +398,27 @@ CompressedPointCloud<ChPoint> wards_compress(const ChPoint& query, float thresho
 // ============================================================================
 // Dispatcher
 // ============================================================================
+// query_alignment, if non-zero, overrides batch_align for Wards only — letting
+// the user force the compressed query size to a multiple of an explicit value
+// (e.g. 4 or 8) regardless of the kernel's SIMD batch width. When set, Wards
+// runs in dynamic mode (threshold/alignment fused) by default, or strict mode
+// (force-merge to exactly query_alignment, ignoring threshold) if requested.
+// Carve ignores all of these knobs.
 template<typename ChPoint>
 CompressedPointCloud<ChPoint> compress_query(const ChPoint& query,
                                              SearchParams::QueryCompression method, float threshold,
-                                             uint32_t batch_align = 1) {
+                                             uint32_t batch_align = 1,
+                                             uint32_t query_alignment = 0,
+                                             bool query_alignment_strict = false) {
   switch (method) {
     case SearchParams::QueryCompression::Carve:
       return ball_carving(query, threshold, batch_align);
-    case SearchParams::QueryCompression::Wards:
-      return wards_compress(query, threshold, batch_align);
+    case SearchParams::QueryCompression::Wards: {
+      const bool strict = (query_alignment > 0) && query_alignment_strict;
+      const bool dynamic = (query_alignment > 0) && !strict;
+      uint32_t ba = (query_alignment > 0) ? query_alignment : batch_align;
+      return wards_compress(query, threshold, ba, dynamic, strict);
+    }
     default: return {};
   }
 }
@@ -389,7 +429,9 @@ CompressedPointCloud<ChPoint> compress_query(const ChPoint& query,
 template<typename ChPoint>
 PointCloudSet<ChPoint> compress_point_cloud_set(const PointCloudSet<ChPoint>& queries,
                                                 SearchParams::QueryCompression method,
-                                                float threshold, uint32_t batch_align = 1) {
+                                                float threshold, uint32_t batch_align = 1,
+                                                uint32_t query_alignment = 0,
+                                                bool query_alignment_strict = false) {
   const size_t nq = queries.size();
   const uint32_t d = queries.get_dims();
 
@@ -397,7 +439,8 @@ PointCloudSet<ChPoint> compress_point_cloud_set(const PointCloudSet<ChPoint>& qu
       nq, [](size_t) { return CompressedPointCloud<ChPoint>{}; });
 
   parlay::parallel_for(0, nq, [&](size_t i) {
-    compressed[i] = compress_query(queries[i], method, threshold, batch_align);
+    compressed[i] = compress_query(queries[i], method, threshold, batch_align, query_alignment,
+                                   query_alignment_strict);
   });
 
   // Pack into a contiguous buffer and build PointCloudSet.

@@ -120,6 +120,7 @@ cc_library(
     name = "turboquant_1bit_mv",
     hdrs = [
         "turboquant_1bit_mv.h",
+        "turboquant_1bit_mv_prof.h",
         "turboquant_utils.h",
     ],
     deps = [

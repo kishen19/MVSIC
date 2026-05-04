@@ -52,6 +52,8 @@ void run(commandLine& P) {
   sp.query_compression = sp_base.query_compression;
   sp.query_compression_threshold = sp_base.query_compression_threshold;
   sp.compress_rerank = sp_base.compress_rerank;
+  sp.query_alignment = sp_base.query_alignment;
+  sp.query_alignment_strict = sp_base.query_alignment_strict;
 
   auto [pred, cmps] = index.search_all(queries, points, sp);
   auto [r1, rk] = compute_scores(pred, gt, k);

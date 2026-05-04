@@ -322,7 +322,9 @@ class IndexVamana : public Index<metric> {
       uint32_t ba = 1;
       if constexpr (kHasLeafQuant) ba = LeafModel::kBatchAlignment;
       compressed_storage = compress_query<ChPoint>(query, search_params.query_compression,
-                                                   search_params.query_compression_threshold, ba);
+                                                   search_params.query_compression_threshold, ba,
+                                                   search_params.query_alignment,
+                                                   search_params.query_alignment_strict);
       effective_query = compressed_storage.view();
     }
     t_compress = t.stop();

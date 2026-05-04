@@ -115,7 +115,9 @@ class IndexFlat : public Index<metric> {
       t.start();
       compressed_storage =
           compress_query<ChPoint>(query, search_params.query_compression,
-                                  search_params.query_compression_threshold, ba);
+                                  search_params.query_compression_threshold, ba,
+                                  search_params.query_alignment,
+                                  search_params.query_alignment_strict);
       effective_query = compressed_storage.view();
       t_compress = t.stop();
       t.reset();

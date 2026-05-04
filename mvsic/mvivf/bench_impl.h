@@ -58,7 +58,9 @@ void bench_run_one(BenchRunOneCtx<ChPoint>& ctx) {
     for (size_t j = 0; j < queries.size(); ++j) {
       sum_orig += static_cast<double>(queries[j].size());
       auto c = compress_query<ChPoint>(queries[j], ctx.search_params.query_compression,
-                                       ctx.search_params.query_compression_threshold, ba);
+                                       ctx.search_params.query_compression_threshold, ba,
+                                       ctx.search_params.query_alignment,
+                                       ctx.search_params.query_alignment_strict);
       sum_comp += static_cast<double>(c.n);
     }
     const double nq = static_cast<double>(queries.size());

@@ -88,6 +88,8 @@ void run_one_seq(RunOneCtxSeq<ChPoint>& ctx) {
     sp.query_compression = sp_base.query_compression;
     sp.query_compression_threshold = sp_base.query_compression_threshold;
     sp.compress_rerank = sp_base.compress_rerank;
+    sp.query_alignment = sp_base.query_alignment;
+    sp.query_alignment_strict = sp_base.query_alignment_strict;
     sp.tq8_rerank = sp_base.tq8_rerank;
     return sp;
   };

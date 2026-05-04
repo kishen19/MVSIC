@@ -64,6 +64,7 @@
 #include "parlay/parallel.h"
 #include "parlay/sequence.h"
 #include "mvsic/core/quantization/turboquant_utils.h"
+#include "mvsic/core/quantization/turboquant_1bit_mv_prof.h"
 
 namespace mvsic {
 namespace turboquant_1bit_mv {
@@ -378,9 +379,10 @@ inline int32_t reduce8_min_sum_epi32(const __m512i (&min_h)[8]) {
 //
 // Returns sum_{q} min_{point} dist(q, point); caller divides by num_q.
 template<bool Metric>
-inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride, size_t num_q,
-                                 const uint8_t* panel_data, size_t panel_bytes,
-                                 size_t num_hamming_tiles, size_t cloud_size, size_t padded_dim) {
+__attribute__((always_inline)) inline float chamfer_panels_qbuf(
+    const uint8_t* qbuf, size_t qbuf_tile_stride, size_t num_q,
+    const uint8_t* panel_data, size_t panel_bytes,
+    size_t num_hamming_tiles, size_t cloud_size, size_t padded_dim) {
   if (num_q == 0 || cloud_size == 0) return 0.0f;
 
   // Affine map from integer Hamming -> float distance under the unit-norm
@@ -431,10 +433,13 @@ inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride, s
     size_t p = 0;
     for (; p + 4 <= full_np; p += 4) {
       __m512i a0[kMq1bit], a1[kMq1bit], a2[kMq1bit], a3[kMq1bit];
-      hamming_micro_kernel_4panel<kMq1bit>(
-          qbuf_local, qbuf_tile_stride, panel_data + p * panel_bytes,
-          panel_data + (p + 1) * panel_bytes, panel_data + (p + 2) * panel_bytes,
-          panel_data + (p + 3) * panel_bytes, num_hamming_tiles, a0, a1, a2, a3);
+      {
+        MVSIC_1BTQ_PROF_TIMER(kernel_4p_cy, n_4panel_calls);
+        hamming_micro_kernel_4panel<kMq1bit>(
+            qbuf_local, qbuf_tile_stride, panel_data + p * panel_bytes,
+            panel_data + (p + 1) * panel_bytes, panel_data + (p + 2) * panel_bytes,
+            panel_data + (p + 3) * panel_bytes, num_hamming_tiles, a0, a1, a2, a3);
+      }
       for (size_t q = 0; q < kMq1bit; ++q) {
         min_h[q] = _mm512_min_epi32(min_h[q], a0[q]);
         min_h[q] = _mm512_min_epi32(min_h[q], a1[q]);
@@ -444,8 +449,11 @@ inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride, s
     }
     for (; p < full_np; ++p) {
       __m512i acc[kMq1bit];
-      hamming_micro_kernel_1panel<kMq1bit>(qbuf_local, qbuf_tile_stride,
-                                           panel_data + p * panel_bytes, num_hamming_tiles, acc);
+      {
+        MVSIC_1BTQ_PROF_TIMER(kernel_1p_cy, n_1panel_calls);
+        hamming_micro_kernel_1panel<kMq1bit>(qbuf_local, qbuf_tile_stride,
+                                             panel_data + p * panel_bytes, num_hamming_tiles, acc);
+      }
       for (size_t q = 0; q < kMq1bit; ++q) {
         min_h[q] = _mm512_min_epi32(min_h[q], acc[q]);
       }
@@ -454,8 +462,11 @@ inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride, s
     // Optional partial trailing panel: only `tail_valid` lanes are real.
     if (tail_valid > 0) {
       __m512i acc[kMq1bit];
-      hamming_micro_kernel_1panel<kMq1bit>(
-          qbuf_local, qbuf_tile_stride, panel_data + full_np * panel_bytes, num_hamming_tiles, acc);
+      {
+        MVSIC_1BTQ_PROF_TIMER(kernel_1p_cy, n_1panel_calls);
+        hamming_micro_kernel_1panel<kMq1bit>(
+            qbuf_local, qbuf_tile_stride, panel_data + full_np * panel_bytes, num_hamming_tiles, acc);
+      }
       for (size_t q = 0; q < kMq1bit; ++q) {
         min_h[q] = _mm512_mask_min_epi32(min_h[q], tail_mask, min_h[q], acc[q]);
       }
@@ -465,14 +476,17 @@ inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride, s
     // common Mq=4 case use the parallel bulk reducer that shares the final
     // 4x4 transpose+min across all four queries. For other Mq values we
     // fall back to 4 independent reduces.
-    if constexpr (kMq1bit == 4) {
-      h_sum += reduce4_min_sum_epi32(min_h);
-    } else {
-      int32_t mq_sum = 0;
-      for (size_t q = 0; q < kMq1bit; ++q) {
-        mq_sum += _mm512_reduce_min_epi32(min_h[q]);
+    {
+      MVSIC_1BTQ_PROF_TIMER(reduce_cy, n_reduce_calls);
+      if constexpr (kMq1bit == 4) {
+        h_sum += reduce4_min_sum_epi32(min_h);
+      } else {
+        int32_t mq_sum = 0;
+        for (size_t q = 0; q < kMq1bit; ++q) {
+          mq_sum += _mm512_reduce_min_epi32(min_h[q]);
+        }
+        h_sum += mq_sum;
       }
-      h_sum += mq_sum;
     }
   }
 
@@ -482,17 +496,26 @@ inline float chamfer_panels_qbuf(const uint8_t* qbuf, size_t qbuf_tile_stride, s
     __m512i min_h_one = kIntMaxV;
     for (size_t p = 0; p < full_np; ++p) {
       __m512i acc;
-      hamming_micro_kernel_1panel<1>(qbuf_local, qbuf_tile_stride, panel_data + p * panel_bytes,
-                                     num_hamming_tiles, &acc);
+      {
+        MVSIC_1BTQ_PROF_TIMER(kernel_1p_cy, n_1panel_calls);
+        hamming_micro_kernel_1panel<1>(qbuf_local, qbuf_tile_stride, panel_data + p * panel_bytes,
+                                       num_hamming_tiles, &acc);
+      }
       min_h_one = _mm512_min_epi32(min_h_one, acc);
     }
     if (tail_valid > 0) {
       __m512i acc;
-      hamming_micro_kernel_1panel<1>(qbuf_local, qbuf_tile_stride,
-                                     panel_data + full_np * panel_bytes, num_hamming_tiles, &acc);
+      {
+        MVSIC_1BTQ_PROF_TIMER(kernel_1p_cy, n_1panel_calls);
+        hamming_micro_kernel_1panel<1>(qbuf_local, qbuf_tile_stride,
+                                       panel_data + full_np * panel_bytes, num_hamming_tiles, &acc);
+      }
       min_h_one = _mm512_mask_min_epi32(min_h_one, tail_mask, min_h_one, acc);
     }
-    h_sum += _mm512_reduce_min_epi32(min_h_one);
+    {
+      MVSIC_1BTQ_PROF_TIMER(reduce_cy, n_reduce_calls);
+      h_sum += _mm512_reduce_min_epi32(min_h_one);
+    }
   }
 
   // Single affine map at the very end of the cloud:
@@ -824,6 +847,7 @@ class Quantized_Point_Cloud_Set {
 
   void distances_all(const Quantized_Query_Point_Cloud<Metric>& q,
                      std::pair<uint32_t, float>* results) const {
+    MVSIC_1BTQ_PROF_TIMER(distances_all_cy, n_distances_all);
     const size_t num_q = q.num_queries;
     const size_t nc = num_clouds();
     if (num_q == 0 || nc == 0) return;
@@ -853,19 +877,30 @@ class Quantized_Point_Cloud_Set {
     }
     const uint8_t* q_codes = q.flat_query_codes.data();
     const size_t q_stride = num_bytes_per_datapoint;
-    for (size_t qi = 0; qi < num_q; ++qi) {
-      internal::pre_broadcast_query(q_codes + qi * q_stride, q_stride, num_hamming_tiles,
-                                    qbuf + qi * qbuf_tile_stride);
+    {
+      MVSIC_1BTQ_PROF_TIMER_NO_COUNT(qbuf_build_cy);
+      for (size_t qi = 0; qi < num_q; ++qi) {
+        internal::pre_broadcast_query(q_codes + qi * q_stride, q_stride, num_hamming_tiles,
+                                      qbuf + qi * qbuf_tile_stride);
+      }
     }
 
     parlay::parallel_for(0, nc, [&](size_t c) {
+      MVSIC_1BTQ_PROF_TIMER(per_cloud_cy, n_clouds);
       if (cloud_sizes[c] == 0) {
         results[c] = {get_id(c), std::numeric_limits<float>::max()};
         return;
       }
       const uint8_t* panel_ptr = panel_data.data() + panel_offsets[c];
+      const size_t cs = cloud_sizes[c];
+      const size_t full_np_c = cs / internal::kPanelPoints;
+      const size_t tail_v = cs - full_np_c * internal::kPanelPoints;
+      const size_t total_np = full_np_c + (tail_v > 0 ? 1 : 0);
+      MVSIC_1BTQ_PROF_ADD(total_panel_bytes, total_np * panel_bytes);
+      MVSIC_1BTQ_PROF_ADD(total_hammings, num_q * cs);
+      MVSIC_1BTQ_PROF_ADD(total_vpopcntd, num_q * total_np * num_hamming_tiles);
       const float dist_sum = internal::chamfer_panels_qbuf<Metric>(
-          qbuf, qbuf_tile_stride, num_q, panel_ptr, panel_bytes, num_hamming_tiles, cloud_sizes[c],
+          qbuf, qbuf_tile_stride, num_q, panel_ptr, panel_bytes, num_hamming_tiles, cs,
           padded_dim);
       results[c] = {get_id(c), dist_sum / static_cast<float>(num_q)};
     });

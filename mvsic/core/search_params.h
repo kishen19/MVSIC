@@ -33,6 +33,16 @@ struct SearchParams {
   float query_compression_threshold = 0.7f;
   bool compress_rerank = false;  // If true, use compressed query for reranking too
 
+  // If non-zero, force the compressed query size to be a multiple of this
+  // value (overrides the kernel's SIMD batch alignment). Only applied to the
+  // Wards compression path; ignored for Carve / None.
+  uint32_t query_alignment = 0;
+  // If true, force every query down to exactly `query_alignment` regardless of
+  // threshold (overrides dynamic mode). Useful when a uniform compressed size
+  // is more important than preserving Ward-distance fidelity. No effect when
+  // query_alignment == 0.
+  bool query_alignment_strict = false;
+
   // If true, MVIVF rerank scores candidates with the 8-bit TurboQuant
   // many-to-many chamfer kernel (over a pre-encoded full-points DB held by
   // the index) instead of the raw float chamfer.  Exact-float fallback is the

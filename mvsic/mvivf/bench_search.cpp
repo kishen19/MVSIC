@@ -150,6 +150,8 @@ void run(commandLine& P) {
           sp.query_compression = sp_base.query_compression;
           sp.query_compression_threshold = sp_base.query_compression_threshold;
           sp.compress_rerank = sp_base.compress_rerank;
+          sp.query_alignment = sp_base.query_alignment;
+          sp.query_alignment_strict = sp_base.query_alignment_strict;
           return sp;
         };
 
@@ -206,4 +208,8 @@ PARSE_DIST_FUNC_AND_RUN(run,
     "Query compression (optional, only for -quant_method != None):\n"
     "  -compress none|carve|wards     Query-cloud compression method\n"
     "  -compress_threshold <tau>      Compression threshold (default 0.7)\n"
-    "  -compress_rerank               Rerank with uncompressed query after compressed scoring\n")
+    "  -compress_rerank               Rerank with uncompressed query after compressed scoring\n"
+    "  -query_alignment <N>           Force compressed query size to a multiple of N (Wards only;\n"
+    "                                 0 = use kernel SIMD batch alignment)\n"
+    "  -query_alignment_strict        With -query_alignment, force every query to exactly N\n"
+    "                                 (ignores threshold; rigid alignment)\n")

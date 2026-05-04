@@ -164,6 +164,9 @@ inline void parse_compression_opts(SearchParams& sp, commandLine& P) {
   sp.query_compression_threshold =
       static_cast<float>(P.getOptionDoubleValue("-compress_threshold", 0.7));
   sp.compress_rerank = P.getOption("-compress_rerank");
+  sp.query_alignment =
+      static_cast<uint32_t>(P.getOptionIntValue("-query_alignment", 0));
+  sp.query_alignment_strict = P.getOption("-query_alignment_strict");
   sp.tq8_rerank = P.getOption("-tq8_rerank");
   sp.root_m2m = P.getOption("-root_m2m");
 }
@@ -176,7 +179,9 @@ inline void print_compression_info(const SearchParams& sp) {
                           ? "carve" : "wards";
   std::cout << "Query compression: " << mname
             << " threshold=" << sp.query_compression_threshold
-            << " compress_rerank=" << (sp.compress_rerank ? 1 : 0) << std::endl;
+            << " compress_rerank=" << (sp.compress_rerank ? 1 : 0)
+            << " query_alignment=" << sp.query_alignment
+            << " query_alignment_strict=" << (sp.query_alignment_strict ? 1 : 0) << std::endl;
 }
 
 // Compute and print average query point-cloud size pre/post compression.
@@ -197,7 +202,8 @@ inline void print_compression_stats(const Queries& queries, const SearchParams& 
     const ChPoint q = queries[i];
     sum_orig += static_cast<double>(q.size());
     auto c = compress_query<ChPoint>(q, sp.query_compression,
-                                     sp.query_compression_threshold, ba);
+                                     sp.query_compression_threshold, ba,
+                                     sp.query_alignment, sp.query_alignment_strict);
     sum_comp += static_cast<double>(c.n);
   }
   std::cout << std::fixed << std::setprecision(2)
