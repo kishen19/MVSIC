@@ -8,8 +8,7 @@ import time
 from pathlib import Path
 
 DATASETS = [
-#    "arguana", "scidocs", "scifact", "fiqa",
-    "nfcorpus",
+    "arguana", "scidocs", "scifact", "fiqa", "nfcorpus",
 ]
 
 STEPS = [
@@ -25,7 +24,7 @@ def run_step(repo_root: Path, script_rel: str, dataset: str) -> int:
     if not script_path.exists():
         print(f"  ERROR: script not found: {script_path}", flush=True)
         return 127
-    cmd = [str(script_path), "--dataset", dataset]
+    cmd = [str(script_path), "--dataset", dataset, "--method", "muvera"]
     print(f"  $ {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=repo_root)
     return proc.returncode
