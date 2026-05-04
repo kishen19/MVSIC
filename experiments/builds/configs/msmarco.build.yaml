@@ -11,16 +11,32 @@ indices:
   - name: mvivf
     metric: ip
     build_configs:
-      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+      - name: mvivf_k0_l500_d0_nit5_s0_mpcc100
         params:
           verbose: 1
           k_per_level: 0
-          max_leaf_size: 100
+          max_leaf_size: 500
           max_depth: 0
           niters: 5
           s: 0
           max_point_clouds_per_cluster: 100
           build_with_8btq: true
+
+  - name: mvivf_spill
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l500_d0_nit5_s0_mpcc100_spill_2_1
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 500
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+          num_spill: 2
+          num_spill_l2: 1
 
   - name: muvera
     metric: ip

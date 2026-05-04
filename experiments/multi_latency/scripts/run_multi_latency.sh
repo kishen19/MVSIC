@@ -12,11 +12,17 @@
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana       # one BEIR-5 shard
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset nq --method mvivf
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --exclude mvivf
+#   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --task plot
 #
 # FastPlaid does not support this mode and is stripped from the config automatically.
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
 # resolved config (after FastPlaid stripping and --method / --dataset filters).
+#
+# ``--task <run|plot|all>`` (default ``all``):
+#   run  = run benchmark_search only, no plotting.
+#   plot = re-render plots from existing CSVs (no search).
+#   all  = run, then plot (the previous default).
 
 set -euo pipefail
 
@@ -29,6 +35,7 @@ cd "$REPO_ROOT"
 DATASET=""
 METHOD=""
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
+TASK="all"       # run | plot | all
 EXTRA_ARGS=()
 
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
@@ -49,9 +56,15 @@ while [[ $# -gt 0 ]]; do
     --dataset) DATASET="$2"; shift 2;;
     --method)  METHOD="$2";  shift 2;;
     --exclude) EXCLUDE="$2"; shift 2;;
+    --task)    TASK="$2";    shift 2;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
+
+case "$TASK" in
+  run|plot|all) ;;
+  *) echo "Unknown --task '$TASK' (use run|plot|all)" >&2; exit 2;;
+esac
 
 if [[ -z "$DATASET" ]]; then
   echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
@@ -128,14 +141,18 @@ if [[ -n "$EXCLUDE" ]]; then
   CONFIG_PATH="$excl_tmp"
 fi
 
-echo "=== Multi-latency: $CONFIG_PATH ==="
-python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
-    --config "$CONFIG_PATH" \
-    --mode multi_latency \
-    "${EXTRA_ARGS[@]}"
+if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
+  echo "=== Multi-latency: $CONFIG_PATH ==="
+  python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
+      --config "$CONFIG_PATH" \
+      --mode multi_latency \
+      "${EXTRA_ARGS[@]}"
 
-sync || true
-echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+  sync || true
+  echo 3 | sudo -n tee /proc/sys/vm/drop_caches >/dev/null 2>&1 || true
+fi
 
-echo "=== Plots: $DATASET ==="
-python3 "$REPO_ROOT/experiments/multi_latency/scripts/plot.py" --datasets "$DATASET" || true
+if [[ "$TASK" == "plot" || "$TASK" == "all" ]]; then
+  echo "=== Plots: $DATASET ==="
+  python3 "$REPO_ROOT/experiments/multi_latency/scripts/plot.py" --datasets "$DATASET" || true
+fi

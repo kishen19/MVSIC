@@ -43,13 +43,44 @@ indices:
               tq8_rerank: [true]
               query_compression: ["Wards"]
               query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
               k: [10]
               config:
                 - { name: nr20,   num_rerank: 20 }
                 - { name: nr50,   num_rerank: 50 }
                 - { name: nr100,   num_rerank: 100 }
                 - { name: nr500,   num_rerank: 500 }
+
+  # -------------------- MVIVF Spill --------------------
+  - name: mvivf_spill
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l100_d0_nit5_s0_mpcc100_spill_2_1
+        build_params:
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+          num_spill: 2
+          num_spill_l2: 1
+        variants:
+          - { name: tq1, compress: true, quantizer: OneBitTQ }
+        search_configs:
+          - name: k=10
+            params:
+              tq8_rerank: [true]
+              query_compression: ["Wards"]
+              query_compression_threshold: [0.5]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+              k: [10]
+              config:
+                - { name: nr20,   num_rerank: 20 }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr100,  num_rerank: 100 }
+                - { name: nr500,  num_rerank: 500 }
 
   # -------------------- MUVERA --------------------
   - name: muvera
@@ -65,13 +96,19 @@ indices:
           - { name: tq4, quantizer: TQ }
         search_configs:
           - name: k=10
+            # On nfcorpus / scifact / fiqa muvera tops out around recall ~0.94
+            # at L=4096 with QPS still 38-85. Extra L steps + larger num_rerank
+            # buckets push recall closer to vamana / mvivf. The QPS=10 floor
+            # set by --QPS_thresh in benchmark_search.py will trim the long
+            # tail per shard automatically.
             params:
               tq8_rerank: [true]
-              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
               k: [10]
               config:
                 - { name: nr500,   num_rerank: 500 }
-                - { name: nr1000,   num_rerank: 1000 }
+                - { name: nr1000,  num_rerank: 1000 }
+                - { name: nr5000,  num_rerank: 5000 }
 
   # -------------------- MV-Vamana --------------------
   - name: vamana

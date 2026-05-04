@@ -10,6 +10,15 @@
 #   experiments/builds/scripts/run_builds.sh --dataset vidore --method muvera
 #   experiments/builds/scripts/run_builds.sh --dataset nfcorpus --method fastplaid
 #   experiments/builds/scripts/run_builds.sh --dataset arguana --exclude mvivf,muvera
+#   experiments/builds/scripts/run_builds.sh --dataset beir5 --task plot   # rebuild stats/plots only, no build
+#
+# ``--task <build|plot|all>`` (default ``all``):
+#   build = run benchmark_build only (no mirror, no report).
+#   plot  = mirror results/indexes/<shard>/ into experiments/builds/results/
+#           indexes/<shard>/ and refresh build_report.md / build_time.pdf /
+#           index_size.pdf -- handy when you've added a build out-of-band
+#           or just want to regenerate the report.
+#   all   = build, then mirror, then report (the previous default).
 #
 # FastPlaid is opt-in for builds too: omitted by default / ``--method all``. Use
 # ``--method fastplaid`` or ``--with-fastplaid`` (see fastplaid_scope.sh). It is
@@ -43,7 +52,10 @@ DATASET=""
 METHOD=""        # empty | all | mvivf | muvera | vamana | svh_graph | fastplaid
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
-TASK="build"     # build (only)
+# build = run benchmark_build only; plot = mirror+report only (no build);
+# all   = build, then mirror, then report. Default = all so existing
+# scripted runs keep behaving the same.
+TASK="all"
 EXTRA_ARGS=()
 
 # Per-shard dataset names, grouped by the YAML they share. Keep in sync with
@@ -177,54 +189,60 @@ shards_for_dataset() {
 }
 
 case "$TASK" in
-  build)
-    echo "=== Build: $CONFIG_PATH ==="
-    python3 "$REPO_ROOT/benchmarks/benchmark_build.py" \
-        --config "$CONFIG_PATH" \
-        "${EXTRA_ARGS[@]}"
-    ;;
+  build|plot|all) ;;
   *)
-    echo "Unknown --task '$TASK' (only 'build' is supported here; use the per-stage runners for search)." >&2
+    echo "Unknown --task '$TASK' (use build|plot|all)." >&2
     exit 2
     ;;
 esac
 
-# Mirror results/indexes/<shard>/ -> experiments/builds/results/indexes/<shard>/
-# so the build artifacts always have a copy under experiments/. We *copy* (no
-# --delete) so previously built shards are preserved if the user only built
-# one; the source under results/indexes stays intact.
-INDEX_SRC_ROOT="$REPO_ROOT/results/indexes"
-INDEX_DST_ROOT="$REPO_ROOT/experiments/builds/results/indexes"
-shards_to_mirror=()
-if [[ -n "${FILTER_DATASET}" ]]; then
-  shards_to_mirror=("${FILTER_DATASET}")
-else
-  while IFS= read -r s; do shards_to_mirror+=("$s"); done < <(shards_for_dataset "$DATASET")
+if [[ "$TASK" == "build" || "$TASK" == "all" ]]; then
+  echo "=== Build: $CONFIG_PATH ==="
+  python3 "$REPO_ROOT/benchmarks/benchmark_build.py" \
+      --config "$CONFIG_PATH" \
+      "${EXTRA_ARGS[@]}"
 fi
-mkdir -p "$INDEX_DST_ROOT"
-for shard in "${shards_to_mirror[@]}"; do
-  src="$INDEX_SRC_ROOT/$shard"
-  dst="$INDEX_DST_ROOT/$shard"
-  if [[ ! -d "$src" ]]; then
-    echo "[mirror] skip $shard: $src not found"
-    continue
-  fi
-  echo "[mirror] $src -> $dst"
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a "$src/" "$dst/"
-  else
-    mkdir -p "$dst"
-    cp -a "$src/." "$dst/"
-  fi
-done
 
-# Build report (markdown + bar plots) over the mirrored copy under
-# experiments/. Keeping the report next to the artifacts also means the file
-# is committed-friendly without bringing the binaries with it.
-echo "=== Build report (writes to experiments/builds/results/) ==="
-python3 "$REPO_ROOT/experiments/builds/scripts/build_report.py" \
-    --indexes "$INDEX_DST_ROOT" \
-    --out-dir "$REPO_ROOT/experiments/builds/results" \
-  || echo "[warn] build_report.py failed; continuing"
+# Mirror + report runs for both --task all and --task plot. The mirror
+# step is a no-op if results/indexes/<shard>/ doesn't exist yet.
+if [[ "$TASK" == "all" || "$TASK" == "plot" ]]; then
+  # Mirror results/indexes/<shard>/ -> experiments/builds/results/indexes/<shard>/
+  # so the build artifacts always have a copy under experiments/. We *copy* (no
+  # --delete) so previously built shards are preserved if the user only built
+  # one; the source under results/indexes stays intact.
+  INDEX_SRC_ROOT="$REPO_ROOT/results/indexes"
+  INDEX_DST_ROOT="$REPO_ROOT/experiments/builds/results/indexes"
+  shards_to_mirror=()
+  if [[ -n "${FILTER_DATASET}" ]]; then
+    shards_to_mirror=("${FILTER_DATASET}")
+  else
+    while IFS= read -r s; do shards_to_mirror+=("$s"); done < <(shards_for_dataset "$DATASET")
+  fi
+  mkdir -p "$INDEX_DST_ROOT"
+  for shard in "${shards_to_mirror[@]}"; do
+    src="$INDEX_SRC_ROOT/$shard"
+    dst="$INDEX_DST_ROOT/$shard"
+    if [[ ! -d "$src" ]]; then
+      echo "[mirror] skip $shard: $src not found"
+      continue
+    fi
+    echo "[mirror] $src -> $dst"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a "$src/" "$dst/"
+    else
+      mkdir -p "$dst"
+      cp -a "$src/." "$dst/"
+    fi
+  done
+
+  # Build report (markdown + bar plots) over the mirrored copy under
+  # experiments/. Keeping the report next to the artifacts also means the file
+  # is committed-friendly without bringing the binaries with it.
+  echo "=== Build report (writes to experiments/builds/results/) ==="
+  python3 "$REPO_ROOT/experiments/builds/scripts/build_report.py" \
+      --indexes "$INDEX_DST_ROOT" \
+      --out-dir "$REPO_ROOT/experiments/builds/results" \
+    || echo "[warn] build_report.py failed; continuing"
+fi
 
 drop_caches_tail
