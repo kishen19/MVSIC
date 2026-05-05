@@ -8,8 +8,10 @@ import time
 from pathlib import Path
 
 DATASETS = [
-    "arguana", "scidocs", "scifact", "fiqa", "nfcorpus",
+    "hotpotqa",
 ]
+
+METHODS = ["mvivf", "muvera", "vamana", "svh_graph"]
 
 STEPS = [
     ("builds", "experiments/builds/scripts/run_builds.sh"),
@@ -19,12 +21,12 @@ STEPS = [
 ]
 
 
-def run_step(repo_root: Path, script_rel: str, dataset: str) -> int:
+def run_step(repo_root: Path, script_rel: str, dataset: str, method: str) -> int:
     script_path = repo_root / script_rel
     if not script_path.exists():
         print(f"  ERROR: script not found: {script_path}", flush=True)
         return 127
-    cmd = [str(script_path), "--dataset", dataset, "--method", "muvera"]
+    cmd = [str(script_path), "--dataset", dataset, "--method", method]
     print(f"  $ {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=repo_root)
     return proc.returncode
@@ -55,29 +57,35 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     selected_steps = [(n, s) for n, s in STEPS if n in args.steps]
 
-    failures: list[tuple[str, str, int]] = []
+    failures: list[tuple[str, str, str, int]] = []
     overall_start = time.time()
 
     for dataset in args.datasets:
         print(f"\n=== dataset: {dataset} ===", flush=True)
-        for name, script in selected_steps:
-            print(f"\n[{dataset}] step: {name}", flush=True)
-            step_start = time.time()
-            rc = run_step(repo_root, script, dataset)
-            elapsed = time.time() - step_start
-            print(f"[{dataset}] {name} -> rc={rc} ({elapsed:.1f}s)", flush=True)
-            if rc != 0:
-                failures.append((dataset, name, rc))
-                if not args.continue_on_error:
-                    print(f"[{dataset}] stopping further steps for this dataset", flush=True)
-                    break
+        stop_dataset = False
+        for method in METHODS:
+            if stop_dataset:
+                break
+            print(f"\n--- method: {method} ---", flush=True)
+            for name, script in selected_steps:
+                print(f"\n[{dataset}/{method}] step: {name}", flush=True)
+                step_start = time.time()
+                rc = run_step(repo_root, script, dataset, method)
+                elapsed = time.time() - step_start
+                print(f"[{dataset}/{method}] {name} -> rc={rc} ({elapsed:.1f}s)", flush=True)
+                if rc != 0:
+                    failures.append((dataset, method, name, rc))
+                    if not args.continue_on_error:
+                        print(f"[{dataset}/{method}] stopping further steps for this dataset", flush=True)
+                        stop_dataset = True
+                        break
 
     total = time.time() - overall_start
     print(f"\n=== done in {total:.1f}s ===", flush=True)
     if failures:
         print("Failures:", flush=True)
-        for dataset, name, rc in failures:
-            print(f"  - {dataset}/{name}: rc={rc}", flush=True)
+        for dataset, method, name, rc in failures:
+            print(f"  - {dataset}/{method}/{name}: rc={rc}", flush=True)
         return 1
     print("All steps succeeded.", flush=True)
     return 0
