@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Build-side reporting for the main experiments.
 
-Walks `results/indexes/<dataset>/<method>/<build>/build_stats.json` and emits
+Walks the mirrored build-stats tree at
+``experiments/builds/results/indexes/<dataset>/<method>/<build>/build_stats.json``
+(populated by ``experiments/builds/scripts/run_builds.sh`` from the per-machine
+``results/indexes/`` tree) and emits
 
     <out_dir>/build_report.md            per-(dataset, method, build) markdown
                                          table -- the canonical build-stats md
@@ -12,9 +15,15 @@ The PDFs share the canonical experiments/<stage>/results/_plots/ tree used by
 latency / batch / multi_latency / ... ; the build-stats markdown stays at the
 results root.
 
+Pointing ``--indexes`` at the mirrored tree (instead of the local
+``results/indexes/``) means the report always covers every dataset that's
+tracked in the repo, not just the ones whose binaries happen to live on the
+current machine.
+
 Usage:
     experiments/builds/scripts/build_report.py
-    experiments/builds/scripts/build_report.py --indexes results/indexes \
+    experiments/builds/scripts/build_report.py \
+        --indexes experiments/builds/results/indexes \
         --datasets nfcorpus,scifact,arguana,scidocs,fiqa
 """
 from __future__ import annotations
@@ -159,8 +168,15 @@ def _markdown_table(df: pd.DataFrame, out_path: pathlib.Path) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--indexes", type=pathlib.Path, default=pathlib.Path("results/indexes"),
-                   help="Root of the index tree (default: results/indexes).")
+    p.add_argument(
+        "--indexes",
+        type=pathlib.Path,
+        default=pathlib.Path("experiments/builds/results/indexes"),
+        help="Root of the build-stats tree. Default points at the mirrored, "
+             "tracked tree under experiments/builds/results/indexes/ (covers "
+             "every dataset). Pass results/indexes/ to use the per-machine "
+             "real-binary tree instead.",
+    )
     p.add_argument("--datasets", default=None,
                    help="Comma-separated dataset names; default: all.")
     p.add_argument("--out-dir", type=pathlib.Path, default=None,
