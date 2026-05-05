@@ -35,10 +35,10 @@
 # The configs reference that path; you may symlink results/indexes to scratch.
 #
 # After the build finishes successfully, this script ALSO:
-#   1. Copies (no delete) results/indexes/<shard>/ -> experiments/builds/
-#      results/indexes/<shard>/ so a non-symlinked copy of the index tree
-#      lives under experiments/ alongside the rest of the build artifacts.
-#   2. Runs experiments/builds/scripts/build_report.py over the mirrored copy
+#   1. Mirrors only the minimal metadata needed for build reporting:
+#      results/indexes/<shard>/**/build_stats.json -> experiments/builds/
+#      results/indexes/<shard>/**/build_stats.json (no binaries copied).
+#   2. Runs experiments/builds/scripts/build_report.py over that mirrored view
 #      to emit experiments/builds/results/{build_report.md, build_time.pdf,
 #      index_size.pdf}.
 
@@ -224,10 +224,11 @@ fi
 # Mirror + report runs for both --task all and --task plot. The mirror
 # step is a no-op if results/indexes/<shard>/ doesn't exist yet.
 if [[ "$TASK" == "all" || "$TASK" == "plot" ]]; then
-  # Mirror results/indexes/<shard>/ -> experiments/builds/results/indexes/<shard>/
-  # so the build artifacts always have a copy under experiments/. We *copy* (no
-  # --delete) so previously built shards are preserved if the user only built
-  # one; the source under results/indexes stays intact.
+  # Mirror only build_stats.json files from
+  # results/indexes/<shard>/**/build_stats.json into
+  # experiments/builds/results/indexes/<shard>/**/build_stats.json.
+  # This keeps the committed experiments tree lightweight (no index binaries)
+  # while still providing everything build_report.py needs.
   INDEX_SRC_ROOT="$REPO_ROOT/results/indexes"
   INDEX_DST_ROOT="$REPO_ROOT/experiments/builds/results/indexes"
   shards_to_mirror=()
@@ -236,21 +237,40 @@ if [[ "$TASK" == "all" || "$TASK" == "plot" ]]; then
   else
     while IFS= read -r s; do shards_to_mirror+=("$s"); done < <(shards_for_dataset "$DATASET")
   fi
+  mirror_build_stats_only() {
+    local src_root="$1"
+    local dst_root="$2"
+    local shard="$3"
+    python3 - "$src_root" "$dst_root" "$shard" << 'PY'
+import pathlib
+import shutil
+import sys
+
+src_root = pathlib.Path(sys.argv[1])
+dst_root = pathlib.Path(sys.argv[2])
+shard = sys.argv[3]
+
+src = src_root / shard
+dst = dst_root / shard
+if not src.exists():
+    print(f"[mirror] skip {shard}: {src} not found")
+    raise SystemExit(0)
+
+count = 0
+for p in src.rglob("build_stats.json"):
+    rel = p.relative_to(src)
+    q = dst / rel
+    q.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p, q)
+    count += 1
+
+print(f"[mirror] {shard}: copied {count} build_stats.json file(s)")
+PY
+  }
+
   mkdir -p "$INDEX_DST_ROOT"
   for shard in "${shards_to_mirror[@]}"; do
-    src="$INDEX_SRC_ROOT/$shard"
-    dst="$INDEX_DST_ROOT/$shard"
-    if [[ ! -d "$src" ]]; then
-      echo "[mirror] skip $shard: $src not found"
-      continue
-    fi
-    echo "[mirror] $src -> $dst"
-    if command -v rsync >/dev/null 2>&1; then
-      rsync -a "$src/" "$dst/"
-    else
-      mkdir -p "$dst"
-      cp -a "$src/." "$dst/"
-    fi
+    mirror_build_stats_only "$INDEX_SRC_ROOT" "$INDEX_DST_ROOT" "$shard"
   done
 
   # Build report (markdown + bar plots) over the mirrored copy under

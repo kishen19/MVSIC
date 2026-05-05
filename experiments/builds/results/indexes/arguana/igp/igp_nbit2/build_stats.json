@@ -1,0 +1,17 @@
+{
+  "built_at": "2026-05-04 20:05:51 EDT",
+  "build_time_sec": 52.533036947250366,
+  "index_size_mb": 49.50786304473877,
+  "build_params": {
+    "n_bit": 2,
+    "n_centroid_factor": 16,
+    "kmeans_niter": 20,
+    "kmeans_seed": 123,
+    "kmeans_sample_max_vectors": 500000,
+    "assign_batch_size": 100000,
+    "residual_batch_size": 100000,
+    "kmeans_gpu": false
+  },
+  "git_sha": "0f0639fe8a312aff05eac91acec25ba1f48c8faf",
+  "git_dirty": true
+}
