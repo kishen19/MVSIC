@@ -69,9 +69,9 @@ indices:
   - name: muvera
     metric: ip
     builds:
-      - build_name: muvera_10240_R200_L600_a1.0
+      - build_name: muvera_2560_R200_L600_a1.0
         build_params:
-          d_fde: 10240
+          d_fde: 2560
           R: 200
           L: 600
           alpha: 1.0
