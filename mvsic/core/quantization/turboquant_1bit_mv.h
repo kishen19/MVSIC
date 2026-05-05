@@ -86,15 +86,17 @@ static constexpr size_t kMaxSafeAccumTiles = 31;
 // (~157 vs 161 QPS) — see 1BTQ-Optimization-Ideas.md "Idea C" for analysis.
 static constexpr size_t kMq1bit = 4;
 
-// Maximum supported top-k bucket capacity. 128 covers common num_rerank
-// values (up to 128) without heap allocation. Bounded by a constant so the
-// bucket can live in stack-allocated SoA arrays.
+// Maximum supported top-k bucket capacity. 512 covers num_rerank values up
+// to typical max_leaf_size (~500) so the bucket path absorbs the full leaf
+// without falling back to the heap. Bounded by a constant so the bucket can
+// live in stack-allocated SoA arrays (4KB dists + 4KB ids per bucket;
+// thread_local q_block buckets ~ 64KB / worker).
 //
 // Why this matters: the slow path (k > kMaxBucketK) replaces the bucket
 // with std::priority_queue, which costs O(log k) cache-missing pointer
 // chases per insert. With nprobes=2048 probes * ~500 leaf points * O(num_q)
 // queries, exceeding this limit by even one is a multi-second penalty.
-static constexpr size_t kMaxBucketK = 128;
+static constexpr size_t kMaxBucketK = 512;
 
 // Compute number of tiles required to cover `nbytes` bytes per point. Each
 // tile holds 4 bytes per point.
@@ -613,7 +615,7 @@ inline float reduce_sum_ps_n(const float* __restrict p, size_t n) {
 //   BoundedTopKBucket bucket; bucket.init(k);
 //   for each db cloud c:
 //     bucket.try_insert(chamfer_dist, id);
-//   bucket.finalize_sorted(out);  // writes k entries, padded with sentinel
+//   bucket.finalize_sorted(out);  // writes k entries: [0,size) sorted, [size,k) sentinel
 struct BoundedTopKBucket {
   alignas(64) float dists[kMaxBucketK];
   alignas(64) uint32_t ids[kMaxBucketK];
@@ -627,20 +629,23 @@ struct BoundedTopKBucket {
     size = 0;
     current_max = std::numeric_limits<float>::infinity();
     max_lane = 0;
-    // Initialize all lanes to sentinel values so padding never wins the
-    // max-refresh scan and finalize_sorted produces correct output when the
-    // bucket is under-filled (size < k).
-    for (size_t i = 0; i < kMaxBucketK; ++i) {
-      dists[i] = std::numeric_limits<float>::infinity();
-      ids[i] = UINT32_MAX;
-    }
+    // No lane pre-zero. Slots [0, k) get fully populated by try_insert before
+    // refresh_max ever reads them (refresh_max only fires when size==k).
+    // Slots [k, kMaxBucketK) are never read: refresh_max iterates [0, k) and
+    // mask-blends the partial last block to -inf, and finalize_sorted only
+    // reads [0, size) (writing sentinels directly to `out[size..k)`). Skipping
+    // the 8KB-per-bucket zero is a measurable win at kMaxBucketK=512: with
+    // q_block=8 buckets and ~1.5M leaf calls in a typical NQ search this is
+    // tens of GB of write traffic that would otherwise dominate Probing &
+    // Scattering.
   }
 
   // Refresh current_max and max_lane via a vectorized max-reduce over the
   // `k` real entries (padding lanes stay at +inf, which is fine because
   // we're looking for the LARGEST stored distance and +inf always wins —
   // so we restrict the vectorized reduce to the first k lanes and then
-  // find the argmax with a scalar scan (k <= 64, cheap).
+  // find the argmax with a scalar scan (k <= kMaxBucketK = 512, cheap
+  // relative to the cache-missing heap pop+push it replaces).
   void refresh_max() {
 #ifdef __AVX512F__
     __m512 vmax = _mm512_loadu_ps(dists);
@@ -676,7 +681,8 @@ struct BoundedTopKBucket {
       if (dists[i] > mx) mx = dists[i];
 #endif
     current_max = mx;
-    // Scalar argmax — k <= 64, so this is ~trivial compared to any heap op.
+    // Scalar argmax — k <= kMaxBucketK (512), still cheap compared to a
+    // cache-missing heap pop+push per displacement.
     for (size_t i = 0; i < k; ++i) {
       if (dists[i] == mx) {
         max_lane = i;
@@ -701,9 +707,13 @@ struct BoundedTopKBucket {
     refresh_max();
   }
 
-  // Drain into `out` in ascending-distance order. Unfilled slots become
-  // {UINT32_MAX, FLT_MAX} sentinel so downstream (mvivf.h candidate
-  // compaction) can strip them the same way it did for the heap path.
+  // Drain into `out` in ascending-distance order. Unfilled slots [size, k)
+  // are written as {UINT32_MAX, FLT_MAX} sentinel so downstream (mvivf.h
+  // candidate compaction) can strip them the same way it did for the heap
+  // path. With kMaxBucketK now at 512 the padding loop dominates per-leaf
+  // cost at large num_rerank, so we vectorize it via AVX-512 stores: each
+  // 64-byte store writes 8 sentinel pairs (8 * sizeof(pair<uint32_t,float>)
+  // = 64 bytes) at a time, an 8x speedup over the scalar version.
   void finalize_sorted(std::pair<uint32_t, float>* out) const {
     std::pair<float, uint32_t> tmp[kMaxBucketK];
     for (size_t i = 0; i < size; ++i)
@@ -714,9 +724,33 @@ struct BoundedTopKBucket {
               });
     for (size_t i = 0; i < size; ++i)
       out[i] = {tmp[i].second, tmp[i].first};
+#ifdef __AVX512F__
+    static_assert(sizeof(std::pair<uint32_t, float>) == 8,
+                  "sentinel SIMD store assumes packed {uint32_t, float} pair");
+    // Build a 512-bit vector of 8 sentinel pairs: each 64-bit lane is
+    // [bits 0..31  = id   = UINT32_MAX (0xFFFFFFFF)]
+    // [bits 32..63 = dist = FLT_MAX    (0x7F7FFFFF)].
+    constexpr uint64_t kSentinelPair =
+        (static_cast<uint64_t>(0x7F7FFFFFu) << 32) | static_cast<uint64_t>(0xFFFFFFFFu);
+    const __m512i v = _mm512_set1_epi64(static_cast<long long>(kSentinelPair));
+    auto* p = reinterpret_cast<uint8_t*>(out + size);
+    auto* q_end = reinterpret_cast<uint8_t*>(out + k);
+    constexpr size_t kStride = 64;  // 8 pairs per AVX-512 store
+    while (p + kStride <= q_end) {
+      _mm512_storeu_si512(reinterpret_cast<__m512i*>(p), v);
+      p += kStride;
+    }
+    // Tail: at most 7 pairs remaining; scalar finishes them.
+    auto* tail = reinterpret_cast<std::pair<uint32_t, float>*>(p);
+    auto* tail_end = reinterpret_cast<std::pair<uint32_t, float>*>(q_end);
+    for (; tail < tail_end; ++tail) {
+      *tail = {UINT32_MAX, std::numeric_limits<float>::max()};
+    }
+#else
     for (size_t i = size; i < k; ++i) {
       out[i] = {UINT32_MAX, std::numeric_limits<float>::max()};
     }
+#endif
   }
 };
 

@@ -1444,7 +1444,13 @@ class IndexMVIVF : public Index<metric> {
         std::vector<const LeafQuery*> typed(nq_grp);
         for (size_t j = 0; j < nq_grp; ++j)
           typed[j] = &q_leaves[group[j].second.first];
-        std::vector<std::pair<uint32_t, float>> batch_results(nq_grp * num_rerank);
+        // Avoid std::vector's value-init: TopKIntoUninitialized writes every
+        // slot it cares about ([0, k) per row, real or sentinel), so the
+        // ~nq_grp * num_rerank * 8 bytes of zero-init the std::vector ctor
+        // would do is pure write traffic. At num_rerank=500 with ~1.5M leaf
+        // calls that's ~24 GB.
+        auto batch_results =
+            parlay::sequence<std::pair<uint32_t, float>>::uninitialized(nq_grp * num_rerank);
         M2M::TopKIntoUninitialized(typed, leaf->encoded_leaf, num_rerank, batch_results.data(),
                                    /*q_block=*/8, /*parallel_query_blocks=*/true);
         for (size_t j = 0; j < nq_grp; ++j) {
