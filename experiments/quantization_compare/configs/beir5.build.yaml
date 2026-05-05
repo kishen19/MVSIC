@@ -1,0 +1,24 @@
+name: "Quantization compare build (BEIR-5: nfcorpus, scifact, arguana, scidocs, fiqa)"
+
+
+datasets:
+  - { name: nfcorpus, path: data/beir/nfcorpus, index_dir: results/indexes/nfcorpus, is_mmap: true }
+  - { name: scifact,  path: data/beir/scifact,  index_dir: results/indexes/scifact,  is_mmap: true }
+  - { name: arguana,  path: data/beir/arguana,  index_dir: results/indexes/arguana,  is_mmap: true }
+  - { name: scidocs,  path: data/beir/scidocs,  index_dir: results/indexes/scidocs,  is_mmap: true }
+  - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa,     is_mmap: true }
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100_d0_nit5_s0_mpcc100
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 100
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true

@@ -180,7 +180,17 @@ def main() -> int:
     ap.add_argument("--metric", choices=("ip", "l2"), default="ip")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--out-dir", type=pathlib.Path, default=None,
-                    help="Output directory for stage tables/plots (default: --results)")
+                    help="Output directory for stage tables (winners CSV/MD); "
+                         "default: --results.")
+    ap.add_argument("--plots-out-dir", type=pathlib.Path, default=None,
+                    help="Output directory for stage PDFs. Default: "
+                         "experiments/mvivf_ablation/results/_plots/ "
+                         "(canonical _plots/ pattern shared with latency, batch, "
+                         "multi_latency, ...). Filenames use --plots-prefix.")
+    ap.add_argument("--plots-prefix", default=None,
+                    help="Filename prefix for the stage PDFs "
+                         "(default: --stage-label). Use a dataset/variant/stage "
+                         "compound prefix when many runs share --plots-out-dir.")
     ap.add_argument("--plot-script", type=pathlib.Path, default=HERE / "plot.py")
     ap.add_argument("--tree-quality-script", type=pathlib.Path, default=HERE / "tree_quality.py")
     ap.add_argument("--skip-tree-quality", action="store_true",
@@ -199,11 +209,21 @@ def main() -> int:
     out_dir = args.out_dir if args.out_dir is not None else args.results
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Plots land in the canonical experiments/<stage>/results/_plots/ tree so
+    # mvivf_ablation matches latency / batch / multi_latency / ... rather than
+    # burying PDFs deep in the per-(dataset, stage, variant) results subtree.
+    if args.plots_out_dir is not None:
+        plots_out_dir = args.plots_out_dir
+    else:
+        plots_out_dir = HERE.parent / "results" / "_plots"
+    plots_out_dir.mkdir(parents=True, exist_ok=True)
+    plots_prefix = args.plots_prefix if args.plots_prefix else args.stage_label
+
     # 1) Build plots + load merged dataframe through plot.py.
     plot_mod = _load_plot_module()
     df = plot_mod.load_csvs(args.results)
-    # plot_mod.plot() handles group-column synthesis and writes <stage-label>_*.pdf.
-    plot_mod.plot(df, args.group_by, out_dir, prefix=args.stage_label,
+    # plot_mod.plot() handles group-column synthesis and writes <prefix>_*.pdf.
+    plot_mod.plot(df, args.group_by, plots_out_dir, prefix=plots_prefix,
                   extra_label_col=args.label_by)
 
     # Recompute latency here so winner selection has explicit numeric field.
@@ -284,8 +304,8 @@ def main() -> int:
         print(f"Wrote {winners_csv}")
         print(f"Wrote {winners_md}")
 
-    print(f"Plots: {out_dir / (args.stage_label + '_latency.pdf')}")
-    print(f"Plots: {out_dir / (args.stage_label + '_cmps.pdf')}")
+    print(f"Plots: {plots_out_dir / (plots_prefix + '_latency.pdf')}")
+    print(f"Plots: {plots_out_dir / (plots_prefix + '_cmps.pdf')}")
     return 0
 
 

@@ -226,6 +226,10 @@ evaluate_one() {
       results_root="$REPO_ROOT/${results_root_rel}/results/${ds}/stage${STAGE}/${name}"
     fi
     local indices_root="$REPO_ROOT/${indices_root_rel}/indices/${ds}/${name}"
+    # Stage PDFs go to the canonical _plots/ tree; we tag them with
+    # (dataset, variant, stage) so runs share the directory cleanly.
+    local plots_out_dir="$REPO_ROOT/${results_root_rel}/results/_plots"
+    local plots_prefix="${ds}_${name}_${stage_label}"
     echo "=== Evaluate: ${name} (${ds}) stage${STAGE} ==="
     local cmd=(
       python3 "$summary_py"
@@ -236,6 +240,8 @@ evaluate_one() {
       --gt "$REPO_ROOT/${base}_chamfer_neighbors.gt"
       --group-by "$group"
       --stage-label "$stage_label"
+      --plots-out-dir "$plots_out_dir"
+      --plots-prefix "$plots_prefix"
     )
     if [[ -n "$label_by" ]]; then
       cmd+=(--label-by "$label_by")

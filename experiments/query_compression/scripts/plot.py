@@ -4,10 +4,18 @@
 Expected columns (k=10 example):
   tau, recall_1_10, recall_10_10, avg_compressed_vectors
 
+Outputs go to the shared experiments/query_compression/results/_plots/
+directory (matching the latency / batch / multi_latency / ... convention).
+File names embed the dataset, e.g. recall_wards_<ds>.pdf and
+recall_ball_carving_<ds>.pdf.
+
 Usage:
   scripts/plot.py --dataset arguana \\
+    --results-dir experiments/query_compression/results/arguana
+  # or override the destination explicitly:
+  scripts/plot.py --dataset arguana \\
     --results-dir experiments/query_compression/results/arguana \\
-    --out-dir experiments/query_compression/results/arguana/plots
+    --out-dir experiments/query_compression/results/_plots
 """
 
 from __future__ import annotations
@@ -23,28 +31,7 @@ except ImportError:
     sys.exit("pip install pandas matplotlib")
 
 
-def _apply_plot_style() -> None:
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": ["DejaVu Sans", "Helvetica Neue", "Arial"],
-            "axes.facecolor": "#fafaf8",
-            "axes.edgecolor": "#d6d3cd",
-            "axes.linewidth": 1.0,
-            "axes.labelcolor": "#292524",
-            "axes.titlecolor": "#1c1917",
-            "xtick.color": "#57534e",
-            "ytick.color": "#57534e",
-            "grid.color": "#e7e5e4",
-            "grid.linewidth": 0.8,
-            "legend.framealpha": 0.95,
-            "legend.edgecolor": "#e7e5e4",
-        }
-    )
-
-
 def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None:
-    _apply_plot_style()
     df = pd.read_csv(csv_path)
     if "tau" not in df.columns:
         raise SystemExit(f"{csv_path}: missing 'tau' column")
@@ -55,105 +42,65 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
     recall_cols = [c for c in df.columns if c.startswith("recall_")]
     has_avg = "avg_compressed_vectors" in df.columns
 
-    fig = plt.figure(figsize=(9.2, 5.4))
-    fig.patch.set_facecolor("#f4f2ef")
-    ax_r = fig.add_subplot(111, facecolor="#fafaf8")
+    fig, ax_r = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
     ax_q = ax_r.twinx() if has_avg else None
 
-    recall_colors = ("#1d4ed8", "#7c3aed")
-    recall_markers = ("o", "s")
+    cmap = plt.colormaps.get_cmap("tab10")
 
     for i, col in enumerate(recall_cols):
         ax_r.plot(
             tau,
             df[col],
-            marker=recall_markers[i % len(recall_markers)],
-            color=recall_colors[i % len(recall_colors)],
-            lw=2.35,
-            ms=6,
-            markeredgewidth=1.0,
-            markeredgecolor="white",
+            color=cmap(i % 10),
+            lw=1.9,
             zorder=4,
             label=col.replace("_", " "),
         )
 
-    ax_r.set_xlabel(r"Threshold $\tau$", fontsize=11.5, labelpad=8)
-    ax_r.set_ylabel("Recall", fontsize=11.5, color="#1c1917", labelpad=10)
-    ax_r.tick_params(axis="y", colors="#44403c")
-    ax_r.grid(True, alpha=0.85, linestyle="-", linewidth=0.7)
+    ax_r.set_xlabel(r"Threshold $\tau$")
+    ax_r.set_ylabel("Recall")
+    ax_r.set_ylim(0.0, 1.02)
+    ax_r.grid(True, which="both", alpha=0.3)
     ax_r.set_axisbelow(True)
+    ax_r.spines["top"].set_visible(False)
 
     lines_r, labels_r = ax_r.get_legend_handles_labels()
 
     if has_avg and ax_q is not None:
-        qcol = "#c2410c"
+        qcol = cmap(min(len(recall_cols), 9))
         ax_q.plot(
             tau,
             df["avg_compressed_vectors"],
             color=qcol,
-            lw=2.5,
-            linestyle=(0, (6, 4)),
-            marker="D",
-            ms=5.5,
-            markeredgewidth=1.0,
-            markeredgecolor="white",
+            lw=1.9,
+            linestyle="--",
             zorder=3,
             label="Avg compressed size",
         )
-        ax_q.fill_between(
-            tau,
-            df["avg_compressed_vectors"],
-            alpha=0.12,
-            color=qcol,
-            zorder=1,
-        )
-        ax_q.set_ylabel(
-            "Avg vectors per query\n(after compression)",
-            fontsize=11,
-            color=qcol,
-            labelpad=12,
-        )
+        ax_q.set_ylabel("Avg vectors/query")
         ax_q.tick_params(axis="y", colors=qcol)
         ax_q.spines["top"].set_visible(False)
-        ax_q.spines["right"].set_color(qcol)
-        ax_q.spines["right"].set_linewidth(1.2)
 
         lines_q, labels_q = ax_q.get_legend_handles_labels()
         ax_r.legend(
             lines_r + lines_q,
             labels_r + labels_q,
-            loc="lower center",
-            bbox_to_anchor=(0.5, -0.34),
-            ncol=min(3, len(lines_r) + len(lines_q)),
-            fontsize=9,
-            frameon=True,
-            fancybox=False,
-            shadow=False,
+            loc="best",
+            ncol=2 if len(lines_r) + len(lines_q) > 5 else 1,
+            fontsize=8,
         )
     else:
         ax_r.legend(
             lines_r,
             labels_r,
-            loc="lower center",
-            bbox_to_anchor=(0.5, -0.28),
-            ncol=min(2, len(lines_r)),
-            fontsize=9,
-            frameon=True,
+            loc="best",
+            ncol=2 if len(lines_r) > 5 else 1,
+            fontsize=8,
         )
 
-    ax_r.spines["top"].set_visible(False)
-
-    fig.suptitle(
-        title,
-        fontsize=13.5,
-        fontweight="600",
-        y=1.02,
-        color="#1c1917",
-    )
-
-    fig.subplots_adjust(left=0.1, right=0.88, top=0.88, bottom=0.28 if has_avg else 0.22)
+    ax_r.set_title(title, fontsize=11)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_pdf, dpi=160, bbox_inches="tight", facecolor=fig.get_facecolor())
+    fig.savefig(out_pdf)
     plt.close(fig)
     print(f"Wrote {out_pdf}")
 
@@ -161,13 +108,17 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", required=True)
-    ap.add_argument("--results-dir", type=pathlib.Path, required=True)
-    ap.add_argument("--out-dir", type=pathlib.Path, required=True)
+    ap.add_argument("--results-dir", type=pathlib.Path, required=True,
+                    help="Per-dataset results dir, e.g. "
+                         "experiments/query_compression/results/<ds>/.")
+    ap.add_argument("--out-dir", type=pathlib.Path, default=None,
+                    help="Default: <results-dir>/../_plots (canonical _plots/ "
+                         "tree shared across experiments).")
     args = ap.parse_args()
 
     ds = args.dataset
     rd = args.results_dir
-    od = args.out_dir
+    od = args.out_dir if args.out_dir is not None else rd.parent / "_plots"
     od.mkdir(parents=True, exist_ok=True)
 
     pairs = [

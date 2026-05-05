@@ -3,9 +3,14 @@
 
 Walks `results/indexes/<dataset>/<method>/<build>/build_stats.json` and emits
 
-    <out_dir>/build_report.md    per-(dataset, method, build) markdown table
-    <out_dir>/build_time.pdf     bar plot of build time
-    <out_dir>/index_size.pdf     bar plot of on-disk index size (MB)
+    <out_dir>/build_report.md            per-(dataset, method, build) markdown
+                                         table -- the canonical build-stats md
+    <out_dir>/_plots/build_time.pdf      bar plot of build time
+    <out_dir>/_plots/index_size.pdf      bar plot of on-disk index size (MB)
+
+The PDFs share the canonical experiments/<stage>/results/_plots/ tree used by
+latency / batch / multi_latency / ... ; the build-stats markdown stays at the
+results root.
 
 Usage:
     experiments/builds/scripts/build_report.py
@@ -173,11 +178,13 @@ def main() -> int:
         return 0
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = out_dir / "_plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
     _markdown_table(df, out_dir / "build_report.md")
     _bar_plot(df, "build_time_sec", "Build time (s)",
-              out_dir / "build_time.pdf", log=True)
+              plots_dir / "build_time.pdf", log=True)
     _bar_plot(df, "index_size_mb", "Index size on disk (MB)",
-              out_dir / "index_size.pdf", log=True)
+              plots_dir / "index_size.pdf", log=True)
     return 0
 
 
