@@ -1,0 +1,19 @@
+{
+  "build_with_8btq": true,
+  "compress_input": false,
+  "k_per_level": 0,
+  "max_depth": 0,
+  "max_leaf_size": 500,
+  "method": "mvivf",
+  "mvclus": {
+    "init": "Random",
+    "max_point_clouds_per_cluster": 100,
+    "max_points_per_centroid_inner_kmeans": 20,
+    "niters": 5,
+    "seed": 0,
+    "use_weighted_inner_kmeans": true
+  },
+  "num_spill": 2,
+  "num_spill_l2": 1,
+  "s": 0
+}

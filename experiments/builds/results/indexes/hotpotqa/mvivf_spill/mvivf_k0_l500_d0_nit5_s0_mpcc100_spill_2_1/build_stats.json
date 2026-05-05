@@ -1,0 +1,19 @@
+{
+  "built_at": "2026-05-04 07:29:49 UTC",
+  "build_time_sec": 627.3016963005066,
+  "index_size_mb": 2802.188522338867,
+  "build_params": {
+    "verbose": 1,
+    "k_per_level": 0,
+    "max_leaf_size": 500,
+    "max_depth": 0,
+    "niters": 5,
+    "s": 0,
+    "max_point_clouds_per_cluster": 100,
+    "build_with_8btq": true,
+    "num_spill": 2,
+    "num_spill_l2": 1
+  },
+  "git_sha": "9144b37700d51f4c3c44a03fb9b4388b7d8f0f09",
+  "git_dirty": true
+}
