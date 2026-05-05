@@ -34,6 +34,7 @@
 #include "mvsic/core/quantization/turboquant_1bit.h"
 #include "mvsic/core/quantization/turboquant_1bit_mv.h"
 #include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
+#include "mvsic/core/quantization/turboquant_8bit.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 
 // Params
@@ -164,6 +165,10 @@ template<bool M>
 struct quantizer_method_of<turboquant_8bit_mv::Model<M>, M> {
   static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::EightBitTQ;
 };
+template<bool M>
+struct quantizer_method_of<turboquant_8bit::Model<M>, M> {
+  static constexpr IndexParams::QuantizerType value = IndexParams::QuantizerType::EightBitTQ;
+};
 }  // namespace detail
 
 template<class M, bool Metric>
@@ -186,6 +191,7 @@ struct QuantTypes {
   using TQ_Range = turboquant::Quantized_Point_Range<Range, metric>;
   using PQTQ_Range = pqtq::Quantized_Point_Range<Range, metric>;
   using OBTQ_Range = turboquant_1bit::Quantized_Point_Range<Range, metric>;
+  using EBTQ_Range = turboquant_8bit::Quantized_Point_Range<Range, metric>;
   // Query Vector
   using PQ_Query = pq::Quantized_Query<metric>;
   using RQ_Query = rabitq::Quantized_Query<metric>;
@@ -193,6 +199,7 @@ struct QuantTypes {
   using TQ_Query = turboquant::Quantized_Query<metric>;
   using PQTQ_Query = pqtq::Quantized_Query<metric>;
   using OBTQ_Query = turboquant_1bit::Quantized_Query<metric>;
+  using EBTQ_Query = turboquant_8bit::Quantized_Query<metric>;
   // Main Model Object
   using PQ_Model = pq::Model<metric>;
   using RQ_Model = rabitq::Model<metric>;
@@ -200,13 +207,14 @@ struct QuantTypes {
   using TQ_Model = turboquant::Model<metric>;
   using PQTQ_Model = pqtq::Model<metric>;
   using OBTQ_Model = turboquant_1bit::Model<metric>;
+  using EBTQ_Model = turboquant_8bit::Model<metric>;
   // Unified Objects
-  using QuantModel =
-      std::variant<std::monostate, PQ_Model, RQ_Model, FS_Model, TQ_Model, PQTQ_Model, OBTQ_Model>;
-  using QuantQuery =
-      std::variant<std::monostate, PQ_Query, RQ_Query, FS_Query, TQ_Query, PQTQ_Query, OBTQ_Query>;
-  using QuantRange =
-      std::variant<std::monostate, PQ_Range, RQ_Range, FS_Range, TQ_Range, PQTQ_Range, OBTQ_Range>;
+  using QuantModel = std::variant<std::monostate, PQ_Model, RQ_Model, FS_Model, TQ_Model,
+                                  PQTQ_Model, OBTQ_Model, EBTQ_Model>;
+  using QuantQuery = std::variant<std::monostate, PQ_Query, RQ_Query, FS_Query, TQ_Query,
+                                  PQTQ_Query, OBTQ_Query, EBTQ_Query>;
+  using QuantRange = std::variant<std::monostate, PQ_Range, RQ_Range, FS_Range, TQ_Range,
+                                  PQTQ_Range, OBTQ_Range, EBTQ_Range>;
 };
 
 template<bool metric, typename ChPoint>
@@ -498,6 +506,11 @@ class Index {
         std::get<typename SVTraits::OBTQ_Model>(Model).train(points);
         break;
       }
+      case QT::EightBitTQ: {
+        Model.template emplace<typename SVTraits::EBTQ_Model>();
+        std::get<typename SVTraits::EBTQ_Model>(Model).train(points);
+        break;
+      }
       default: Model = std::monostate{}; break;
     }
   }
@@ -528,6 +541,7 @@ class Index {
       case QT::TurboQuant: return std::get<typename SVTraits::TQ_Model>(Model).encode(points);
       case QT::SPQTQ: return std::get<typename SVTraits::PQTQ_Model>(Model).encode(points);
       case QT::OneBitTQ: return std::get<typename SVTraits::OBTQ_Model>(Model).encode(points);
+      case QT::EightBitTQ: return std::get<typename SVTraits::EBTQ_Model>(Model).encode(points);
       case QT::None:
       default: return std::monostate{};
     }
@@ -563,6 +577,8 @@ class Index {
       case QT::SPQTQ: return std::get<typename SVTraits::PQTQ_Model>(Model).quantize_query(query);
       case QT::OneBitTQ:
         return std::get<typename SVTraits::OBTQ_Model>(Model).quantize_query(query);
+      case QT::EightBitTQ:
+        return std::get<typename SVTraits::EBTQ_Model>(Model).quantize_query(query);
       case QT::None:
       default: return std::monostate{};
     }
@@ -680,6 +696,17 @@ class Index {
         dist_cmps = cmps;
         bytes_accessed +=
             cmps * std::get<typename SVQT::OBTQ_Range>(quantized_points).num_bytes_per_point();
+        break;
+      }
+      case QT::EightBitTQ: {
+        auto [result, cmps] =
+            parlayANN::beam_search<typename SVQT::EBTQ_Query, typename SVQT::EBTQ_Range, uint32_t>(
+                std::get<typename SVQT::EBTQ_Query>(q_query), G,
+                std::get<typename SVQT::EBTQ_Range>(quantized_points), start_point, QP);
+        visited = result.second;
+        dist_cmps = cmps;
+        bytes_accessed +=
+            cmps * std::get<typename SVQT::EBTQ_Range>(quantized_points).num_bytes_per_point();
         break;
       }
       case QT::None: {

@@ -11,6 +11,7 @@ void register_muvera_l2(py::module_& m) {
   BIND_INDEX(IndexMUVERAFastScanL2, ChamferL2_Point, "IndexMUVERAFastScanL2")
   BIND_INDEX(IndexMUVERARaBitQL2, ChamferL2_Point, "IndexMUVERARaBitQL2")
   BIND_INDEX(IndexMUVERATQL2, ChamferL2_Point, "IndexMUVERATQL2")
+  BIND_INDEX(IndexMUVERATQ8L2, ChamferL2_Point, "IndexMUVERATQ8L2")
   BIND_INDEX(IndexMUVERASPQTQL2, ChamferL2_Point, "IndexMUVERASPQTQL2")
   BIND_INDEX(IndexMUVERAOneBitTQL2, ChamferL2_Point, "IndexMUVERAOneBitTQL2")
 
@@ -19,6 +20,7 @@ void register_muvera_l2(py::module_& m) {
   BIND_COMPUTE_STATS(IndexMUVERAFastScanL2, ChamferL2_Point, "MUVERAFastScanL2")
   BIND_COMPUTE_STATS(IndexMUVERARaBitQL2, ChamferL2_Point, "MUVERARaBitQL2")
   BIND_COMPUTE_STATS(IndexMUVERATQL2, ChamferL2_Point, "MUVERATQL2")
+  BIND_COMPUTE_STATS(IndexMUVERATQ8L2, ChamferL2_Point, "MUVERATQ8L2")
   BIND_COMPUTE_STATS(IndexMUVERASPQTQL2, ChamferL2_Point, "MUVERASPQTQL2")
   BIND_COMPUTE_STATS(IndexMUVERAOneBitTQL2, ChamferL2_Point, "MUVERAOneBitTQL2")
 }

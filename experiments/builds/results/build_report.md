@@ -18,7 +18,7 @@
 | hotpotqa | mvivf_spill | mvivf_k0_l500_d0_nit5_s0_mpcc100_spill_2_1 | 627.3 | 2802.19 |
 | hotpotqa | svh_graph | svh_graph_R64_L128_a1.0 | 2996.4 | 175150.55 |
 | hotpotqa | vamana | vamana_R64_L128_a1.0 | 5040.3 | 543.30 |
-| msmarco | mvivf | mvivf_k0_l500_d0_nit5_s0_mpcc100 | 1943.7 | 3288.18 |
+| msmarco | mvivf | mvivf_k0_l500_d0_nit5_s0_mpcc100 | 942.4 | 3293.89 |
 | nfcorpus | muvera | muvera_10240_R200_L600_a1.0 | 6.1 | 142.23 |
 | nfcorpus | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 2.1 | 16.08 |
 | nfcorpus | svh_graph | svh_graph_R64_L128_a1.0 | 6.0 | 484.12 |

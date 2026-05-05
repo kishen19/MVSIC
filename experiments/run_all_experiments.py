@@ -11,7 +11,7 @@ DATASETS = [
     "msmarco",
 ]
 
-METHODS = ["mvivf", "muvera"]
+METHODS = ["muvera"]
 
 STEPS = [
     ("builds", "experiments/builds/scripts/run_builds.sh"),

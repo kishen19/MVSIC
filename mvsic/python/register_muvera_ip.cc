@@ -11,6 +11,7 @@ void register_muvera_ip(py::module_& m) {
   BIND_INDEX(IndexMUVERAFastScanIP, ChamferIP_Point, "IndexMUVERAFastScanIP")
   BIND_INDEX(IndexMUVERARaBitQIP, ChamferIP_Point, "IndexMUVERARaBitQIP")
   BIND_INDEX(IndexMUVERATQIP, ChamferIP_Point, "IndexMUVERATQIP")
+  BIND_INDEX(IndexMUVERATQ8IP, ChamferIP_Point, "IndexMUVERATQ8IP")
   BIND_INDEX(IndexMUVERASPQTQIP, ChamferIP_Point, "IndexMUVERASPQTQIP")
   BIND_INDEX(IndexMUVERAOneBitTQIP, ChamferIP_Point, "IndexMUVERAOneBitTQIP")
 
@@ -19,6 +20,7 @@ void register_muvera_ip(py::module_& m) {
   BIND_COMPUTE_STATS(IndexMUVERAFastScanIP, ChamferIP_Point, "MUVERAFastScanIP")
   BIND_COMPUTE_STATS(IndexMUVERARaBitQIP, ChamferIP_Point, "MUVERARaBitQIP")
   BIND_COMPUTE_STATS(IndexMUVERATQIP, ChamferIP_Point, "MUVERATQIP")
+  BIND_COMPUTE_STATS(IndexMUVERATQ8IP, ChamferIP_Point, "MUVERATQ8IP")
   BIND_COMPUTE_STATS(IndexMUVERASPQTQIP, ChamferIP_Point, "MUVERASPQTQIP")
   BIND_COMPUTE_STATS(IndexMUVERAOneBitTQIP, ChamferIP_Point, "MUVERAOneBitTQIP")
 }

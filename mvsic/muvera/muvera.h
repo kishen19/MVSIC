@@ -325,6 +325,8 @@ using IndexMUVERAFastScanIP  = IndexMUVERA<false, fastscan::Model<false>>;
 using IndexMUVERAFastScanL2  = IndexMUVERA<true,  fastscan::Model<true>>;
 using IndexMUVERATQIP        = IndexMUVERA<false, turboquant::Model<false>>;
 using IndexMUVERATQL2        = IndexMUVERA<true,  turboquant::Model<true>>;
+using IndexMUVERATQ8IP       = IndexMUVERA<false, turboquant_8bit::Model<false>>;
+using IndexMUVERATQ8L2       = IndexMUVERA<true,  turboquant_8bit::Model<true>>;
 using IndexMUVERASPQTQIP     = IndexMUVERA<false, pqtq::Model<false>>;
 using IndexMUVERASPQTQL2     = IndexMUVERA<true,  pqtq::Model<true>>;
 
