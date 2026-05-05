@@ -1,0 +1,97 @@
+name: "NQ study search (NQ only, k=100)"
+
+datasets:
+  - { name: nq, path: data/beir/nq, index_dir: results/indexes/nq, results_dir: experiments/nq_study/results/latency/nq, is_mmap: true }
+
+indices:
+  - name: mvivf
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l500_d0_nit5_s0_mpcc100
+        build_params:
+          k_per_level: 0
+          max_leaf_size: 500
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+        variants:
+          - { name: tq1, compress: true, quantizer: OneBitTQ }
+        search_configs:
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              query_compression: ["Wards"]
+              query_compression_threshold: [0.5]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [100]
+              config:
+                - { name: nr200,   num_rerank: 200 }
+                - { name: nr500,   num_rerank: 500 }
+                - { name: nr1000,  num_rerank: 1000 }
+                - { name: nr5000,  num_rerank: 5000 }
+
+
+  - name: muvera
+    metric: ip
+    builds:
+      - build_name: muvera_10240_R200_L600_a1.0
+        build_params:
+          d_fde: 10240
+          R: 200
+          L: 600
+          alpha: 1.0
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs:
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [100]
+              config:
+                - { name: nr500,   num_rerank: 500 }
+                - { name: nr1000,  num_rerank: 1000 }
+                - { name: nr5000,  num_rerank: 5000 }
+                - { name: nr10000, num_rerank: 10000 }
+
+  - name: vamana
+    metric: ip
+    builds:
+      - build_name: vamana_R64_L128_a1.0
+        build_params:
+          R: 64
+          L: 128
+          alpha: 1.0
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs:
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [100]
+              config:
+                - { name: nr200, num_rerank: 200 }
+                - { name: nr500, num_rerank: 500 }
+
+  - name: svh_graph
+    metric: ip
+    builds:
+      - build_name: svh_graph_R64_L128_a1.0
+        build_params:
+          R: 64
+          L: 128
+          alpha: 1.0
+        variants:
+          - { name: tq4, quantizer: TQ }
+        search_configs:
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+              k: [100]
+              config:
+                - { name: nr500,  num_rerank: 500 }
+                - { name: nr1000, num_rerank: 1000 }

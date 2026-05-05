@@ -1,0 +1,50 @@
+name: "NQ study build (NQ only)"
+
+datasets:
+  - { name: nq, path: data/beir/nq, index_dir: results/indexes/nq, is_mmap: true }
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l500_d0_nit5_s0_mpcc100
+        params:
+          verbose: 1
+          k_per_level: 0
+          max_leaf_size: 500
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+
+  - name: muvera
+    metric: ip
+    build_configs:
+      - name: muvera_10240_R200_L600_a1.0
+        params:
+          verbose: 1
+          d_fde: 10240
+          R: 200
+          L: 600
+          alpha: 1.0
+
+  - name: vamana
+    metric: ip
+    build_configs:
+      - name: vamana_R64_L128_a1.0
+        params:
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
+
+  - name: svh_graph
+    metric: ip
+    build_configs:
+      - name: svh_graph_R64_L128_a1.0
+        params:
+          verbose: 1
+          R: 64
+          L: 128
+          alpha: 1.0
