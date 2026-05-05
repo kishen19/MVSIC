@@ -34,6 +34,10 @@
 | infovqa | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 3.1 | 11.57 |
 | infovqa | svh_graph | svh_graph_R64_L128_a1.0 | 2.8 | 291.25 |
 | infovqa | vamana | vamana_R64_L128_a1.0 | 196.3 | 0.03 |
+<<<<<<< Updated upstream
+=======
+| msmarco | muvera | muvera_2560_R200_L600_a1.0 | 5940.6 | 87759.72 |
+>>>>>>> Stashed changes
 | msmarco | mvivf | mvivf_k0_l500_d0_nit5_s0_mpcc100 | 942.4 | 3293.89 |
 | nfcorpus | muvera | muvera_10240_R200_L600_a1.0 | 6.1 | 142.23 |
 | nfcorpus | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 2.1 | 16.08 |

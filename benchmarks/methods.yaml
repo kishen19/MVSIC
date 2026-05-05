@@ -79,9 +79,9 @@ mvivf_spill:
 
 muvera:
   variable_param: L
-  class: "MUVERATQ8"
+  class: "MUVERA"
   supports_compress: false
-  quantizers: [EightBitTQ]
+  quantizers: [None, PQ, FastScan, RaBitQ, TQ, SPQTQ, OneBitTQ]
   # Order matches IndexMUVERA::search_with_stats (muvera.h).
   labels: ["search_cmps", "t_compress", "t_fde", "t_quant", "t_search", "t_rerank"]
 

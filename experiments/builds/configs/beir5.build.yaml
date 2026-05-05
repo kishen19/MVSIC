@@ -17,7 +17,7 @@ datasets:
   - { name: scifact,  path: data/beir/scifact,  index_dir: results/indexes/scifact,  is_mmap: true }
   - { name: arguana,  path: data/beir/arguana,  index_dir: results/indexes/arguana,  is_mmap: true }
   - { name: scidocs,  path: data/beir/scidocs,  index_dir: results/indexes/scidocs,  is_mmap: true }
-  - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa,     is_mmap: true }
+  - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/indexes/fiqa_new,     is_mmap: true }
 
 indices:
   # ----- MVIVF. TQ4/TQ1/TQ8 are search-time variants; build `build_with_8btq` uses
@@ -59,7 +59,7 @@ indices:
     build_configs:
       - name: muvera_10240_R200_L600_a1.0
         params:
-          verbose: 1
+          verbose: 2
           d_fde: 10240
           R: 200
           L: 600

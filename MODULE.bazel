@@ -113,9 +113,15 @@ git_repository(
     # Add `inline` to header-defined free functions so they can be included
     # from multiple translation units without violating ODR. Required when
     # bench_search_all instantiations are split across many TUs.
+    #
+    # Also unconditionally enable the "Pass X% complete" Vamana build
+    # progress prints — upstream has them commented out, but we want them
+    # so MUVERA / Vamana builds aren't silent during the long graph phase.
     patch_cmds = [
         "sed -i 's|^float euclidian_distance|inline float euclidian_distance|g' algorithms/utils/euclidian_point.h",
         "sed -i 's|^float mips_distance|inline float mips_distance|g' algorithms/utils/mips_point.h",
+        "sed -i 's|// std::cout << \"Pass \" << 100 \\* frac << \"% complete\"|std::cout << \"Pass \" << 100 * frac << \"% complete\"|' algorithms/vamana/index.h",
+        "sed -i 's|//           << std::endl;|          << std::endl;|' algorithms/vamana/index.h",
     ],
     # remote = "https://github.com/cmuparlay/parlayann.git",
     remote = "https://github.com/kishen19/ParlayANN.git",
