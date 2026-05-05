@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 
 DATASETS = [
-    "hotpotqa",
+    "msmarco",
 ]
 
-METHODS = ["mvivf", "muvera", "vamana", "svh_graph"]
+METHODS = ["mvivf", "muvera"]
 
 STEPS = [
     ("builds", "experiments/builds/scripts/run_builds.sh"),
