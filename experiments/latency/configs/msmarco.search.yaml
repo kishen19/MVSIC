@@ -31,25 +31,18 @@ indices:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
               k: [10]
               config:
-                - { name: nr20,   num_rerank: 20 }
-                - { name: nr50,   num_rerank: 50 }
                 - { name: nr100,  num_rerank: 100 }
                 - { name: nr500,  num_rerank: 500 }
-
-  - name: mvivf_spill
-    metric: ip
-    builds:
-      - build_name: mvivf_k0_l500_d0_nit5_s0_mpcc100_spill_2_1
+                - { name: nr5000,  num_rerank: 5000 }
+      - build_name: mvivf_k0_l1000_d0_nit5_s0_mpcc100
         build_params:
           k_per_level: 0
-          max_leaf_size: 500
+          max_leaf_size: 1000
           max_depth: 0
           niters: 5
           s: 0
           max_point_clouds_per_cluster: 100
           build_with_8btq: true
-          num_spill: 2
-          num_spill_l2: 1
         variants:
           - { name: tq1, compress: true, quantizer: OneBitTQ }
         search_configs:
@@ -61,10 +54,9 @@ indices:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
               k: [10]
               config:
-                - { name: nr20,   num_rerank: 20 }
-                - { name: nr50,   num_rerank: 50 }
                 - { name: nr100,  num_rerank: 100 }
                 - { name: nr500,  num_rerank: 500 }
+                - { name: nr5000,  num_rerank: 5000 }
 
   - name: muvera
     metric: ip
