@@ -49,7 +49,7 @@ _PREFIX_FOR_STAGE = {
 
 # Methods we expect to show up under <results>/<dataset>/. Order also drives
 # legend ordering in the plot.
-_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph", "fastplaid"]
+_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph", "fastplaid", "igp"]
 
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
@@ -62,6 +62,7 @@ _PRETTY_METHOD = {
     "svh_ivf": "SVH IVF",
     "svh_graph": "SVH Graph",
     "fastplaid": "FastPlaid",
+    "igp": "IGP",
 }
 
 # Logical breakdown buckets per method: collapse the raw timer columns coming
@@ -119,6 +120,12 @@ _BREAKDOWN_BUCKETS = {
     "fastplaid": {
         "search":     ["t_batch_search"],
     },
+    "igp": {
+        "search":     ["t_retrieval"],
+        "filter":     ["t_filter"],
+        "decode":     ["t_decode"],
+        "rerank":     ["t_refine"],
+    },
 }
 
 # Stable color per bucket (shared across methods so the legend is consistent
@@ -130,6 +137,8 @@ _BUCKET_COLORS = {
     "leaf_probe": "#55A467",
     "merge":      "#A7B85A",
     "aggregate":  "#A7B85A",
+    "filter":     "#55A467",
+    "decode":     "#A7B85A",
     "rerank":     "#C44E52",
 }
 

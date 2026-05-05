@@ -138,3 +138,10 @@ fastplaid:
   supports_compress: false
   quantizers: [None]
   labels: ["t_batch_search"]
+
+igp:
+  variable_param: nprobe
+  class: "IGP"
+  supports_compress: false
+  quantizers: [None]
+  labels: ["t_retrieval", "t_filter", "t_decode", "t_refine"]

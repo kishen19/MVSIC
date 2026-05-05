@@ -5,6 +5,13 @@
 #   scripts/run_query_compression.sh --dataset arguana --method all --task all
 #   scripts/run_query_compression.sh --datasets arguana,nfcorpus --method ball --task sweep --tau_steps 24
 #   scripts/run_query_compression.sh --dataset fiqa --task plot
+#   scripts/run_query_compression.sh --dataset fiqa -query_subsample 0  # disable subsample
+#
+# Query subsampling: matches the latency / multi_latency / batch defaults
+# plumbed through benchmarks/benchmark_search.py — the C++ sweep binaries
+# default to ``-query_subsample 1000 -query_subsample_seed 42``. Pass
+# ``-query_subsample 0`` to run on all queries (legacy behavior), or any
+# other positive cap to override.
 #
 # Forward sweep binary flags after a lone '--', or pass known extras via EXTRA_ARGS.
 # Environment:

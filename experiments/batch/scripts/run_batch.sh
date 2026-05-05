@@ -15,8 +15,9 @@
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --exclude mvivf
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --task plot
 #
-# FastPlaid is opt-in: omit by default and for ``--method all``. Use ``--method fastplaid``
-# or ``--with-fastplaid`` to include it (BEIR-5 only; see fastplaid_scope.sh).
+# FastPlaid + IGP are opt-in: omit by default and for ``--method all``. Use
+# ``--method fastplaid`` / ``--method igp`` or ``--with-fastplaid`` /
+# ``--with-igp`` to include them (BEIR-5 + vidore only; see fastplaid_scope.sh).
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries after the
 # --method / --dataset filters and FastPlaid scoping. It does not affect the
@@ -41,6 +42,7 @@ DATASET=""
 METHOD=""
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
+WITH_IGP=0
 TASK="all"       # run | plot | all
 EXTRA_ARGS=()
 
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --exclude) EXCLUDE="$2"; shift 2;;
     --task)    TASK="$2";    shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
+    --with-igp) WITH_IGP=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -86,6 +89,10 @@ is_in() {
 
 if fastplaid_skip_fastplaid_method "$DATASET" "${METHOD:-}"; then
   echo "[warn] FastPlaid batch search only runs on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
+  exit 0
+fi
+if igp_skip_igp_method "$DATASET" "${METHOD:-}"; then
+  echo "[warn] IGP batch search only runs on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
   exit 0
 fi
 
@@ -138,6 +145,15 @@ if fastplaid_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_FASTPLAID
   TEMP_YAMLS+=("$strip_tmp")
   if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices fastplaid; then
     echo "[error] filter_config.py --strip-indices failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$strip_tmp"
+fi
+if igp_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_IGP"; then
+  strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_stripigp.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$strip_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices igp; then
+    echo "[error] filter_config.py --strip-indices igp failed" >&2
     exit 2
   fi
   CONFIG_PATH="$strip_tmp"

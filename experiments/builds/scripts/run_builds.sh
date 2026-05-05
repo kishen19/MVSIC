@@ -10,6 +10,7 @@
 #   experiments/builds/scripts/run_builds.sh --dataset arguana --method mvivf_spill
 #   experiments/builds/scripts/run_builds.sh --dataset vidore --method muvera
 #   experiments/builds/scripts/run_builds.sh --dataset nfcorpus --method fastplaid
+#   experiments/builds/scripts/run_builds.sh --dataset nfcorpus --method igp
 #   experiments/builds/scripts/run_builds.sh --dataset arguana --exclude mvivf,muvera
 #   experiments/builds/scripts/run_builds.sh --dataset beir5 --task plot   # rebuild stats/plots only, no build
 #
@@ -21,9 +22,10 @@
 #           or just want to regenerate the report.
 #   all   = build, then mirror, then report (the previous default).
 #
-# FastPlaid is opt-in for builds too: omitted by default / ``--method all``. Use
-# ``--method fastplaid`` or ``--with-fastplaid`` (see fastplaid_scope.sh). It is
-# never built on beirbig / nq500k / msmarco even with --with-fastplaid.
+# FastPlaid + IGP are opt-in for builds too: omitted by default / ``--method all``.
+# Use ``--method fastplaid`` / ``--method igp`` or the corresponding
+# ``--with-fastplaid`` / ``--with-igp`` flags (see fastplaid_scope.sh). Both are
+# never built on beirbig / nq500k / msmarco even with opt-in flags.
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
 # resolved config (after --method / --dataset filtering and FastPlaid scoping).
@@ -50,9 +52,10 @@ source "$REPO_ROOT/experiments/builds/scripts/fastplaid_scope.sh"
 cd "$REPO_ROOT"
 
 DATASET=""
-METHOD=""        # empty | all | mvivf | mvivf_spill | muvera | vamana | svh_graph | fastplaid
+METHOD=""        # empty | all | mvivf | mvivf_spill | muvera | vamana | svh_graph | fastplaid | igp
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
+WITH_IGP=0
 # build = run benchmark_build only; plot = mirror+report only (no build);
 # all   = build, then mirror, then report. Default = all so existing
 # scripted runs keep behaving the same.
@@ -85,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --exclude) EXCLUDE="$2"; shift 2;;
     --task)    TASK="$2";    shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
+    --with-igp) WITH_IGP=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -124,6 +128,10 @@ if fastplaid_skip_fastplaid_method "$DATASET" "${METHOD:-}"; then
   echo "[warn] FastPlaid builds only run on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
   exit 0
 fi
+if igp_skip_igp_method "$DATASET" "${METHOD:-}"; then
+  echo "[warn] IGP builds only run on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
+  exit 0
+fi
 
 NEED_FILTER=0
 [[ -n "$FILTER_DATASET" ]] && NEED_FILTER=1
@@ -153,6 +161,15 @@ if fastplaid_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_FASTPLAID
   TEMP_YAMLS+=("$strip_tmp")
   if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices fastplaid; then
     echo "[error] filter_config.py --strip-indices failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$strip_tmp"
+fi
+if igp_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_IGP"; then
+  strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_build_stripigp.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$strip_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices igp; then
+    echo "[error] filter_config.py --strip-indices igp failed" >&2
     exit 2
   fi
   CONFIG_PATH="$strip_tmp"

@@ -63,6 +63,7 @@ import mvsic
 
 # FastPlaid is an optional baseline; only imported when the config asks for it.
 _FastPlaidWrapper = None
+_IGPWrapper = None
 _load_point_clouds = None
 
 
@@ -73,6 +74,23 @@ def _ensure_fastplaid_imports():
         from utils import load_point_clouds as _lpc  # type: ignore
 
         _FastPlaidWrapper = _FPW
+        _load_point_clouds = _lpc
+
+
+def _ensure_igp_imports():
+    global _IGPWrapper, _load_point_clouds
+    if _IGPWrapper is None:
+        try:
+            from framework_utils import IGPWrapper as _IWP  # type: ignore
+            from utils import load_point_clouds as _lpc  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "IGP support is optional and only needed when running `index.name: igp`.\n"
+                "If you want IGP, run `bash setup_igp.sh` in the repo root, then retry.\n"
+                f"Original error: {e}"
+            ) from e
+
+        _IGPWrapper = _IWP
         _load_point_clouds = _lpc
 
 
@@ -182,13 +200,13 @@ def run_build(
             metric = index_details.get("metric", "ip")
             method_info = methods[index_name]
 
-            if index_name == "fastplaid":
+            if index_name in {"fastplaid", "igp"}:
                 for bc in index_details["build_configs"]:
                     build_name = bc["name"]
                     build_params = bc.get("params") or {}
-                    job_id = f"{ds_name}/fastplaid/{build_name}"
+                    job_id = f"{ds_name}/{index_name}/{build_name}"
 
-                    out_dir = os.path.join(index_dir, "fastplaid", build_name)
+                    out_dir = os.path.join(index_dir, index_name, build_name)
                     os.makedirs(out_dir, exist_ok=True)
                     done_marker = os.path.join(out_dir, "_BUILD_OK")
                     stats_path = os.path.join(out_dir, "build_stats.json")
@@ -197,13 +215,16 @@ def run_build(
                         rebuild_all or bc.get("rebuild", False)
                     ):
                         print(
-                            f"  [fastplaid/{build_name}] exists at {out_dir}; skip.",
+                            f"  [{index_name}/{build_name}] exists at {out_dir}; skip.",
                             flush=True,
                         )
                         continue
 
                     try:
-                        _ensure_fastplaid_imports()
+                        if index_name == "fastplaid":
+                            _ensure_fastplaid_imports()
+                        else:
+                            _ensure_igp_imports()
                         if points_tensors is None:
                             points_path = os.path.join(
                                 ds_path, f"{ds_name}_points.pcs"
@@ -212,12 +233,13 @@ def run_build(
                         dim = points_tensors[0].shape[1]
 
                         print(
-                            f"  [fastplaid/{build_name}] building (IP) -> {out_dir}",
+                            f"  [{index_name}/{build_name}] building (IP) -> {out_dir}",
                             flush=True,
                         )
-                        wrapper = _FastPlaidWrapper(
-                            dim, build_params, index_path=out_dir
-                        )
+                        if index_name == "fastplaid":
+                            wrapper = _FastPlaidWrapper(dim, build_params, index_path=out_dir)
+                        else:
+                            wrapper = _IGPWrapper(dim, build_params, index_path=out_dir)
                         t0 = time.time()
                         wrapper.build(points_tensors)
                         build_time = time.time() - t0

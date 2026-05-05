@@ -17,6 +17,12 @@
 #   scripts/run_ablation.sh --variant mvivf --task search  # search only
 #   scripts/run_ablation.sh --variant mvivf --task evaluate
 #
+# Query subsampling: search runs delegate to benchmarks/benchmark_search.py,
+# which defaults to --query_subsample 1000 --query_subsample_seed 42 (so for
+# any dataset with >1000 queries, the same 1000 are used across runs and
+# modes). Override per call by appending e.g. ``--query_subsample 0`` (all
+# queries) or ``--query_subsample 5000`` to the runner command.
+#
 # Assumes the repo root is $PWD (or cd into it before running).
 
 set -euo pipefail

@@ -21,4 +21,6 @@ PARSE_DIST_FUNC_AND_RUN(
     "    use -tau_max to raise ceiling. Ball-carving IP defaults unchanged (1→0 cosine/dot).\n"
     "  -tau_spacing linear|geom (default geom)\n"
     "  -tau_geom_gamma <g> (default 3)\n"
+    "  -query_subsample <N> (default 1000; cap on queries; <=0 disables)\n"
+    "  -query_subsample_seed <S> (default 42)\n"
     "  -dist_func IP|L2\n")

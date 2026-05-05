@@ -12,6 +12,11 @@
 #   alpha in {1.0, 1.2} (R=200, L=600 fixed)
 # Search:
 #   TQ4 variant, L sweep, num_rerank sweep.
+#
+# Query subsampling: search delegates to benchmarks/benchmark_search.py, which
+# defaults to --query_subsample 1000 --query_subsample_seed 42 (cap on
+# queries; same subset across runs / modes). Append e.g. --query_subsample 0
+# to run on all queries, or --query_subsample 5000 to use a different cap.
 
 set -euo pipefail
 

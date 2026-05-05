@@ -87,6 +87,7 @@ _DEFAULT_QUERY_SUBSAMPLE_SEED = 42
 
 # FastPlaid is an optional baseline; only imported when the config asks for it.
 _FastPlaidWrapper = None
+_IGPWrapper = None
 _load_point_clouds = None
 
 
@@ -96,6 +97,22 @@ def _ensure_fastplaid_imports():
         from framework_utils import FastPlaidWrapper as _FPW  # type: ignore
         from utils import load_point_clouds as _lpc  # type: ignore
         _FastPlaidWrapper = _FPW
+        _load_point_clouds = _lpc
+
+
+def _ensure_igp_imports():
+    global _IGPWrapper, _load_point_clouds
+    if _IGPWrapper is None:
+        try:
+            from framework_utils import IGPWrapper as _IWP  # type: ignore
+            from utils import load_point_clouds as _lpc  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "IGP support is optional and only needed when running `index.name: igp`.\n"
+                "If you want IGP, run `bash setup_igp.sh` in the repo root, then retry.\n"
+                f"Original error: {e}"
+            ) from e
+        _IGPWrapper = _IWP
         _load_point_clouds = _lpc
 
 
@@ -710,6 +727,186 @@ def _run_fastplaid(ds, index_details, method_info, mode, qps_thresh=None,
                 df.to_csv(results_path, index=False)
 
 
+def _run_igp(ds, index_details, method_info, mode, qps_thresh=None,
+             subsample_n=None, subsample_seed=None):
+    """Run search-only sweeps for the external IGP baseline.
+
+    Supports `--mode latency` and `--mode batch`.
+    `multi_latency` is intentionally skipped for now because the current wrapper
+    does not expose a dedicated per-query multi-thread path.
+    """
+    if mode == "multi_latency":
+        print("  [igp] multi-latency unsupported; skipping.", flush=True)
+        return
+
+    _ensure_igp_imports()
+
+    ds_name = ds['name']
+    ds_path = ds['path']
+    index_dir = ds['index_dir']
+    results_dir = ds['results_dir']
+
+    variable_param = method_info.get('variable_param')
+
+    queries_path = os.path.join(ds_path, f"{ds_name}_queries.pcs")
+    gt_path = os.path.join(ds_path, f"{ds_name}_chamfer_neighbors.gt")
+
+    queries = None
+    gt = None
+
+    for build in index_details['builds']:
+        build_name = build['build_name']
+        build_params = build.get('build_params') or {}
+
+        index_root = os.path.join(index_dir, "igp", build_name)
+        if not (os.path.isdir(index_root) and os.listdir(index_root)):
+            print(
+                f"  [igp/{build_name}] MISSING {index_root} -- "
+                "run benchmark_build.py first (or copy your prebuilt index here).",
+                flush=True,
+            )
+            continue
+
+        if queries is None:
+            queries = _load_point_clouds(queries_path)
+            gt = mvsic.ReadGT(gt_path, len(queries))
+            queries, gt = _maybe_subsample_queries(
+                ds, None, queries, gt, subsample_n, subsample_seed,
+                fastplaid=True,
+            )
+
+        dim = queries[0].shape[1]
+        index = _IGPWrapper(dim, build_params, index_path=index_root)
+        # API parity with other wrappers: load from artifact directory.
+        index.load(index_root, None)
+
+        variant_results_dir = os.path.join(results_dir, "igp", build_name)
+        os.makedirs(variant_results_dir, exist_ok=True)
+
+        for search_config in build.get('search_configs', []):
+            search_name = search_config['name']
+            search_out_dir = os.path.join(variant_results_dir, search_name)
+            os.makedirs(search_out_dir, exist_ok=True)
+
+            combos = _expand_search_params(search_config, variable_param)
+            sv_buckets = {}
+            for p in combos:
+                vn = p.pop('_variant_name')
+                sv_buckets.setdefault(vn, []).append(p)
+
+            for sv_name, params_list in sv_buckets.items():
+                prefix = _csv_prefix_for(mode) if mode else ""
+                suffix = f"_{sv_name}" if sv_name else ""
+                results_path = os.path.join(search_out_dir, f"{prefix}results{suffix}.csv")
+
+                append = search_config.get('append', True)
+                if os.path.exists(results_path) and not append:
+                    os.remove(results_path)
+
+                if variable_param:
+                    params_list.sort(key=lambda p: p.get(variable_param, 0))
+
+                if (
+                    qps_thresh is not None
+                    and os.path.exists(results_path)
+                    and append
+                ):
+                    try:
+                        prev_df = pd.read_csv(results_path)
+                    except pd.errors.EmptyDataError:
+                        prev_df = None
+                    if prev_df is not None and not prev_df.empty:
+                        qps_col = _qps_attr_for_mode(mode)
+                        if qps_col in prev_df.columns:
+                            sort_col = (
+                                variable_param
+                                if variable_param and variable_param in prev_df.columns
+                                else None
+                            )
+                            ex = prev_df.sort_values(by=sort_col) if sort_col else prev_df
+                            try:
+                                last_qps = float(ex.iloc[-1][qps_col])
+                            except (TypeError, ValueError):
+                                last_qps = None
+                            if (
+                                last_qps is not None
+                                and last_qps > 0
+                                and last_qps < qps_thresh
+                            ):
+                                print(
+                                    f"      [igp] cached {qps_col}={last_qps:.2f} "
+                                    f"< qps_thresh={qps_thresh}; "
+                                    "skipping remaining sweep",
+                                    flush=True,
+                                )
+                                params_list = []
+
+                rows = []
+                qps_attr = _qps_attr_for_mode(mode)
+                qps_label = _qps_label_for_mode(mode)
+                stop_sweep = False
+                for params in params_list:
+                    if stop_sweep:
+                        break
+                    try:
+                        if mode == "latency":
+                            res = index.compute_stats_latency(queries, gt, params)
+                        else:
+                            res = index.compute_stats_batch(queries, gt, params)
+                        qps_val = getattr(res, qps_attr, None)
+                        qps_str = f"{qps_val:.1f}" if qps_val is not None else "N/A"
+                        print(
+                            f"      {params} | "
+                            f"R@{params['k']}={res.recall_k_k:.3f} "
+                            f"{qps_label}={qps_str}",
+                            flush=True,
+                        )
+                        row = {
+                            "k": res.k,
+                            "recall_1_k": res.recall_1_k,
+                            "recall_k_k": res.recall_k_k,
+                            "QPS_seq": res.QPS_seq if res.QPS_seq is not None else 0.0,
+                            "QPS_par": res.QPS_par if res.QPS_par is not None else 0.0,
+                            "avg_cmps": res.avg_cmps,
+                            "avg_timings": res.avg_timings,
+                        }
+                        row.update(params)
+                        rows.append(row)
+                        if (
+                            qps_thresh is not None
+                            and qps_val is not None
+                            and qps_val > 0
+                            and qps_val < qps_thresh
+                        ):
+                            print(
+                                f"      [igp] {qps_attr}={qps_val:.2f} "
+                                f"< qps_thresh={qps_thresh}; stopping sweep",
+                                flush=True,
+                            )
+                            stop_sweep = True
+                    except Exception as e:
+                        jid = f"{ds_name}/igp/{build_name}/{search_name}/{sv_name}"
+                        print(
+                            f"  [FAIL {jid}] {type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        traceback.print_exc()
+
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df = _expand_timings(df, method_info.get('labels') or [])
+                    df = _reorder_columns(df, variable_param, method_info.get('labels') or [])
+                if os.path.exists(results_path):
+                    try:
+                        prev = pd.read_csv(results_path)
+                        df = pd.concat([prev, df], ignore_index=True)
+                    except pd.errors.EmptyDataError:
+                        pass
+                if variable_param and variable_param in df.columns:
+                    df = df.sort_values(by=variable_param)
+                df.to_csv(results_path, index=False)
+
+
 def _csv_prefix_for(mode):
     # Pick a per-mode CSV prefix so latency/multi_latency/batch coexist in the same dir.
     return {
@@ -793,6 +990,22 @@ def run_search(
                     )
                 except Exception as e:
                     jid = f"{ds_name}/fastplaid"
+                    print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
+                    traceback.print_exc()
+                    failures.append((jid, str(e)))
+                    if fail_fast:
+                        abort = True
+                continue
+            if index_name == "igp":
+                try:
+                    _run_igp(
+                        ds, index_details, method_info, mode,
+                        qps_thresh=qps_thresh,
+                        subsample_n=subsample_n,
+                        subsample_seed=subsample_seed,
+                    )
+                except Exception as e:
+                    jid = f"{ds_name}/igp"
                     print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
                     traceback.print_exc()
                     failures.append((jid, str(e)))

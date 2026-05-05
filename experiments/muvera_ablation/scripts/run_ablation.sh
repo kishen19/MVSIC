@@ -11,6 +11,11 @@
 # This sweep varies only d_fde over:
 #   2560, 5120, 10240
 # while keeping R=200, L=600 for build and using TQ4 search variants.
+#
+# Query subsampling: search delegates to benchmarks/benchmark_search.py, which
+# defaults to --query_subsample 1000 --query_subsample_seed 42 (cap on
+# queries; same subset across runs / modes). Append e.g. --query_subsample 0
+# to run on all queries, or --query_subsample 5000 to use a different cap.
 
 set -euo pipefail
 

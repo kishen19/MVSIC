@@ -94,3 +94,18 @@ indices:
       - name: fastplaid_nbits4
         params:
           nbits: 4
+
+  # ----- IGP (BEIR-5 only). Build via IGPWrapper.create. -----
+  - name: igp
+    metric: ip
+    build_configs:
+      - name: igp_nbit2
+        params:
+          n_bit: 2
+          n_centroid_factor: 16
+          kmeans_niter: 20
+          kmeans_seed: 123
+          kmeans_sample_max_vectors: 500000
+          assign_batch_size: 100000
+          residual_batch_size: 100000
+          kmeans_gpu: false

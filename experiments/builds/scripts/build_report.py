@@ -27,13 +27,14 @@ except ImportError:
     sys.exit("pip install pandas matplotlib numpy to use this script")
 
 
-_METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph", "fastplaid"]
+_METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph", "fastplaid", "igp"]
 _PRETTY = {
     "mvivf": "MVIVF",
     "muvera": "MUVERA",
     "vamana": "MV-Vamana",
     "svh_graph": "SVH Graph",
     "fastplaid": "FastPlaid",
+    "igp": "IGP",
 }
 
 

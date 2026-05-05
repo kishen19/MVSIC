@@ -15,10 +15,10 @@
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --exclude mvivf
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --task plot
 #
-# FastPlaid does not support this mode and is stripped from the config automatically.
+# FastPlaid and IGP do not support this mode and are stripped from the config automatically.
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
-# resolved config (after FastPlaid stripping and --method / --dataset filters).
+# resolved config (after FastPlaid/IGP stripping and --method / --dataset filters).
 #
 # ``--task <run|plot|all>`` (default ``all``):
 #   run  = run benchmark_search only, no plotting.
@@ -78,8 +78,8 @@ is_in() {
   return 1
 }
 
-if [[ "${METHOD:-}" == "fastplaid" ]]; then
-  echo "[warn] FastPlaid does not support multi-latency; skipping." >&2
+if [[ "${METHOD:-}" == "fastplaid" || "${METHOD:-}" == "igp" ]]; then
+  echo "[warn] FastPlaid/IGP do not support multi-latency; skipping." >&2
   exit 0
 fi
 
@@ -104,13 +104,16 @@ TEMP_YAMLS+=("$REWRITTEN")
 python3 "$REWRITE_PY" --in "$SRC_YAML" --out "$REWRITTEN" \
     --from-stage latency --to-stage multi_latency
 
-NO_FASTPLAID="$(mktemp "${TMPDIR:-/tmp}/main_mlat_nofp.XXXXXX.yaml")"
-TEMP_YAMLS+=("$NO_FASTPLAID")
-python3 - "$REWRITTEN" "$NO_FASTPLAID" << 'PY'
+NO_EXTERNAL="$(mktemp "${TMPDIR:-/tmp}/main_mlat_noexternal.XXXXXX.yaml")"
+TEMP_YAMLS+=("$NO_EXTERNAL")
+python3 - "$REWRITTEN" "$NO_EXTERNAL" << 'PY'
 import sys, yaml
 src, dst = sys.argv[1], sys.argv[2]
 with open(src) as f: cfg = yaml.safe_load(f)
-cfg["indices"] = [i for i in cfg.get("indices") or [] if i.get("name") != "fastplaid"]
+cfg["indices"] = [
+    i for i in cfg.get("indices") or []
+    if i.get("name") not in {"fastplaid", "igp"}
+]
 with open(dst, "w") as f: yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
 PY
 
@@ -118,11 +121,11 @@ NEED_FILTER=0
 [[ -n "$FILTER_DATASET" ]] && NEED_FILTER=1
 [[ -n "${METHOD:-}" && "$METHOD" != "all" ]] && NEED_FILTER=1
 
-CONFIG_PATH="$NO_FASTPLAID"
+CONFIG_PATH="$NO_EXTERNAL"
 if [[ "$NEED_FILTER" -eq 1 ]]; then
   TMP="$(mktemp "${TMPDIR:-/tmp}/main_mlat_filt.XXXXXX.yaml")"
   TEMP_YAMLS+=("$TMP")
-  args=(python3 "$FILTER_PY" --in "$NO_FASTPLAID" --out "$TMP")
+  args=(python3 "$FILTER_PY" --in "$NO_EXTERNAL" --out "$TMP")
   [[ -n "$FILTER_DATASET" ]] && args+=(--dataset "$FILTER_DATASET")
   [[ -n "${METHOD:-}" && "$METHOD" != "all" ]] && args+=(--method "$METHOD")
   if ! "${args[@]}"; then
