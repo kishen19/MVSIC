@@ -1,0 +1,36 @@
+name: "Overretrieve Multi-Vector Benchmark — datasets"
+
+# Root for BEIR chamfer .pcs datasets.
+# Override with DATA_ROOT or --data-root in scripts/run_benchmark.sh.
+data_root: data/beir
+
+defaults:
+  metric: IP
+  k: 10
+  num_query: 1000
+  query_subsample_seed: 42
+  max_k_prime: 1000
+  k_growth: 1.1
+  # Optional extra flags for bench_chamfer_overretrieve:
+  # pq: false
+  # rabitq: false
+  # pq_block: 8
+  # pq_k: 16
+  # fs_block: 8
+  # rbits: 2
+
+# Same dataset set as overretrieve_singlevector_benchmark chamfer runs.
+# Expected files per dataset:
+#   <data_root>/<name>/<name>_points.pcs
+#   <data_root>/<name>/<name>_queries.pcs
+#   <data_root>/<name>/<name>_chamfer_neighbors.gt   (optional but recommended)
+datasets:
+  - name: arguana
+  - name: fiqa
+  - name: hotpotqa
+  - name: nfcorpus
+  - name: nq
+  - name: nq500k
+  - name: quora
+  - name: scidocs
+  - name: scifact

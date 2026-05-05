@@ -8,6 +8,8 @@ _MV_BASE = [
     "//mvsic/core/quantization:rabitq_mv",
     "//mvsic/core/quantization:turboquant_mv",
     "//mvsic/core/quantization:turboquant_8bit_mv",
+    "//mvsic/core/quantization:turboquant_1bit_mv",
+    "//mvsic/core/quantization:turboquant_1bit_asym_mv",
     "@eigen",
     "@parlaylib//parlay:primitives",
 ]

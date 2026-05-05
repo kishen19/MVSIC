@@ -15,10 +15,9 @@ points; ``Recall@k`` at budget ``k'`` is the average fraction of the k true neig
 among the first ``k'`` positions of that approximate ranking. So the x-axis is over-retrieval
 depth ``k'``, not the evaluation cutoff ``k``.
 
-Visual style matches latency / ablation QPS–recall PDFs (``experiments/builds/scripts/plot_stage.py``
-and ``experiments/mvivf_ablation/scripts/plot.py``): default white figure, light grid, ``tab10``
-curves. Legend uses short labels (TQ-4bit, FS-b8, RQ-4bit, …). Curves are plain lines (no
-markers), unlike the Pareto plots which also draw scatter + ``marker='o'``.
+Visual style matches latency/multi-latency Pareto PDFs
+(``experiments/builds/scripts/plot_stage.py``): white figure, light grid,
+``tab10`` colors, and compact legend labels.
 
 Usage::
 
@@ -179,23 +178,19 @@ def plot_dataset(
         )
 
     ax.set_xscale("log")
-    ax.set_xlabel(r"Candidate budget $k'$ (approximate rank depth)")
+    ax.set_xlabel(r"Candidate budget $k'$")
     ax.set_ylabel(f"Recall@{k_str}")
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
 
-    ax.set_title(
-        f"{dataset_title}: Recall@{k_str} vs $k'$ (single-vector overretrieve)",
-        fontsize=11,
-    )
+    ax.set_title(f"{dataset_title}: Recall@{k_str} vs $k'$", fontsize=11)
 
     ncol = 2 if len(labels) > 5 else 1
     ax.legend(loc="best", ncol=ncol, fontsize=8)
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)
-    plt.close(fig)
     plt.close(fig)
     print(f"Wrote {out_pdf}")
 
