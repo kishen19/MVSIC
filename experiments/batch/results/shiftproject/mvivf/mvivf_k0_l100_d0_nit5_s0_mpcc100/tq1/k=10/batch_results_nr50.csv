@@ -1,0 +1,7 @@
+k,recall_1_k,recall_k_k,QPS_seq,QPS_par,nprobes,num_rerank,avg_cmps,tq8_rerank,query_compression,query_compression_threshold,search_cmps,probe_cmps,t_search_dists,t_search_beam,t_search_rest,t_search_top_level,t_compress,t_quant,t_leaf_dists,t_leaf_rest,t_rerank,t_greedy
+10,0.69,0.397,28089.888,28089.888,1,50,9397357.2,True,Wards,0.5,,,,,,,,,,,,
+10,0.79,0.606,20729.685,20729.685,2,50,12230374.8,True,Wards,0.5,,,,,,,,,,,,
+10,0.92,0.815,10209.29,10209.29,4,50,7409020.8,True,Wards,0.5,,,,,,,,,,,,
+10,0.99,0.92,9528.347,9528.347,8,50,7805052.8,True,Wards,0.5,,,,,,,,,,,,
+10,1.0,0.965,9566.632,9566.632,16,50,8517910.4,True,Wards,0.5,,,,,,,,,,,,
+10,1.0,0.963,8811.349,8811.349,32,50,9106300.8,True,Wards,0.5,,,,,,,,,,,,
