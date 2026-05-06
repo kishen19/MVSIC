@@ -38,6 +38,17 @@ def main() -> int:
             "(used by run scripts to scope FastPlaid without editing checked-in YAML)."
         ),
     )
+    ap.add_argument(
+        "--search",
+        default=None,
+        help=(
+            "Match a single search_configs[].name (e.g. ``k=10`` / ``k=100``). "
+            "Drops every other search_configs entry; builds with no search_configs "
+            "left, and indices with no builds left, are dropped too. Pass-through "
+            "if not given. Used by run scripts to route per-k results into "
+            "sibling subdirs without editing checked-in YAML."
+        ),
+    )
     args = ap.parse_args()
 
     with open(args.in_path, encoding="utf-8") as f:
@@ -73,6 +84,39 @@ def main() -> int:
             for i in indices
             if isinstance(i, dict) and str(i.get("name")) not in drop
         ]
+
+    if args.search:
+        target = args.search
+        # search_configs lives at indices[].builds[].search_configs[]; the
+        # variant level is sibling to it, not a parent. So the filter only
+        # touches builds[].search_configs.
+        kept_indices: list[dict] = []
+        for idx in cfg.get("indices") or []:
+            if not isinstance(idx, dict):
+                continue
+            kept_builds: list[dict] = []
+            for b in idx.get("builds") or []:
+                if not isinstance(b, dict):
+                    continue
+                scs = b.get("search_configs") or []
+                kept_scs = [
+                    s for s in scs
+                    if isinstance(s, dict) and str(s.get("name")) == target
+                ]
+                if not kept_scs:
+                    # No matching search_config in this build; drop the build.
+                    continue
+                b = dict(b)
+                b["search_configs"] = kept_scs
+                kept_builds.append(b)
+            if not kept_builds:
+                # No build still has the requested search_config; drop the
+                # index entirely so benchmark_search has nothing to do.
+                continue
+            idx = dict(idx)
+            idx["builds"] = kept_builds
+            kept_indices.append(idx)
+        cfg["indices"] = kept_indices
 
     with open(args.out, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

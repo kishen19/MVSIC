@@ -16,6 +16,7 @@
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --method mvivf_spill
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --exclude mvivf
 #   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --task plot
+#   experiments/multi_latency/scripts/run_multi_latency.sh --dataset arguana --k 100
 #
 # FastPlaid and IGP do not support this mode and are stripped from the config automatically.
 #
@@ -26,6 +27,10 @@
 #   run  = run benchmark_search only, no plotting.
 #   plot = re-render plots from existing CSVs (no search).
 #   all  = run, then plot (the previous default).
+#
+# ``--k <int>`` (default ``10``): pick which ``search_configs[].name == k=<int>``
+# block to run. Currently only ``10`` and ``100`` are configured per method;
+# results land under ``.../k=<int>/`` and plots under ``_plots/k=<int>/``.
 
 set -euo pipefail
 
@@ -39,6 +44,7 @@ DATASET=""
 METHOD=""
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 TASK="all"       # run | plot | all
+K_VALUE=10       # search_config name `k=<K_VALUE>`; only 10 / 100 configured
 EXTRA_ARGS=()
 
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
@@ -60,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --method)  METHOD="$2";  shift 2;;
     --exclude) EXCLUDE="$2"; shift 2;;
     --task)    TASK="$2";    shift 2;;
+    --k)       K_VALUE="$2"; shift 2;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -68,6 +75,12 @@ case "$TASK" in
   run|plot|all) ;;
   *) echo "Unknown --task '$TASK' (use run|plot|all)" >&2; exit 2;;
 esac
+
+case "$K_VALUE" in
+  10|100) ;;
+  *) echo "Unknown --k '$K_VALUE' (configured values: 10, 100)" >&2; exit 2;;
+esac
+SEARCH_NAME="k=$K_VALUE"
 
 if [[ -z "$DATASET" ]]; then
   echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
@@ -147,8 +160,18 @@ if [[ -n "$EXCLUDE" ]]; then
   CONFIG_PATH="$excl_tmp"
 fi
 
+# Always pin to the requested search_config (k=10 / k=100) last in the
+# pipeline so prior filters have already pruned the YAML.
+search_tmp="$(mktemp "${TMPDIR:-/tmp}/main_mlat_search.XXXXXX.yaml")"
+TEMP_YAMLS+=("$search_tmp")
+if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$search_tmp" --search "$SEARCH_NAME"; then
+  echo "[error] filter_config.py --search $SEARCH_NAME failed" >&2
+  exit 2
+fi
+CONFIG_PATH="$search_tmp"
+
 if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
-  echo "=== Multi-latency: $CONFIG_PATH ==="
+  echo "=== Multi-latency ($SEARCH_NAME): $CONFIG_PATH ==="
   python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
       --config "$CONFIG_PATH" \
       --mode multi_latency \
@@ -159,6 +182,7 @@ if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
 fi
 
 if [[ "$TASK" == "plot" || "$TASK" == "all" ]]; then
-  echo "=== Plots: $DATASET ==="
-  python3 "$REPO_ROOT/experiments/multi_latency/scripts/plot.py" --datasets "$DATASET" || true
+  echo "=== Plots ($SEARCH_NAME): $DATASET ==="
+  python3 "$REPO_ROOT/experiments/multi_latency/scripts/plot.py" \
+      --datasets "$DATASET" --k "$K_VALUE" || true
 fi

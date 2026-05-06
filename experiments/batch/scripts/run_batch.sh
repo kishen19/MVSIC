@@ -16,6 +16,7 @@
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --method mvivf_spill
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --exclude mvivf
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --task plot
+#   experiments/batch/scripts/run_batch.sh --dataset arguana --k 100
 #
 # FastPlaid + IGP are opt-in: omit by default and for ``--method all``. Use
 # ``--method fastplaid`` / ``--method igp`` or ``--with-fastplaid`` /
@@ -29,6 +30,10 @@
 #   run  = run benchmark_search only, no plotting.
 #   plot = re-render plots from existing CSVs (no search).
 #   all  = run, then plot (the previous default).
+#
+# ``--k <int>`` (default ``10``): pick which ``search_configs[].name == k=<int>``
+# block to run. Currently only ``10`` and ``100`` are configured per method;
+# results land under ``.../k=<int>/`` and plots under ``_plots/k=<int>/``.
 
 set -euo pipefail
 
@@ -46,6 +51,7 @@ EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
 WITH_IGP=0
 TASK="all"       # run | plot | all
+K_VALUE=10       # search_config name `k=<K_VALUE>`; only 10 / 100 configured
 EXTRA_ARGS=()
 
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
@@ -67,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --method)  METHOD="$2";  shift 2;;
     --exclude) EXCLUDE="$2"; shift 2;;
     --task)    TASK="$2";    shift 2;;
+    --k)       K_VALUE="$2"; shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
     --with-igp) WITH_IGP=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
@@ -77,6 +84,12 @@ case "$TASK" in
   run|plot|all) ;;
   *) echo "Unknown --task '$TASK' (use run|plot|all)" >&2; exit 2;;
 esac
+
+case "$K_VALUE" in
+  10|100) ;;
+  *) echo "Unknown --k '$K_VALUE' (configured values: 10, 100)" >&2; exit 2;;
+esac
+SEARCH_NAME="k=$K_VALUE"
 
 if [[ -z "$DATASET" ]]; then
   echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
@@ -171,8 +184,18 @@ if [[ -n "$EXCLUDE" ]]; then
   CONFIG_PATH="$excl_tmp"
 fi
 
+# Always pin to the requested search_config (k=10 / k=100) last in the
+# pipeline so prior filters have already pruned the YAML.
+search_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_search.XXXXXX.yaml")"
+TEMP_YAMLS+=("$search_tmp")
+if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$search_tmp" --search "$SEARCH_NAME"; then
+  echo "[error] filter_config.py --search $SEARCH_NAME failed" >&2
+  exit 2
+fi
+CONFIG_PATH="$search_tmp"
+
 if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
-  echo "=== Batch: $CONFIG_PATH ==="
+  echo "=== Batch ($SEARCH_NAME): $CONFIG_PATH ==="
   python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
       --config "$CONFIG_PATH" \
       --mode batch \
@@ -183,6 +206,7 @@ if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
 fi
 
 if [[ "$TASK" == "plot" || "$TASK" == "all" ]]; then
-  echo "=== Plots: $DATASET ==="
-  python3 "$REPO_ROOT/experiments/batch/scripts/plot.py" --datasets "$DATASET" || true
+  echo "=== Plots ($SEARCH_NAME): $DATASET ==="
+  python3 "$REPO_ROOT/experiments/batch/scripts/plot.py" \
+      --datasets "$DATASET" --k "$K_VALUE" || true
 fi

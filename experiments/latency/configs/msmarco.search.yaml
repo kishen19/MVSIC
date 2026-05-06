@@ -33,29 +33,49 @@ indices:
               config:
                 - { name: nr100,  num_rerank: 100 }
                 - { name: nr500,  num_rerank: 500 }
-
-      - build_name: mvivf_k0_l1000_d0_nit5_s0_mpcc100
-        build_params:
-          k_per_level: 0
-          max_leaf_size: 1000
-          max_depth: 0
-          niters: 5
-          s: 0
-          max_point_clouds_per_cluster: 100
-          build_with_8btq: true
-        variants:
-          - { name: tq1, compress: true, quantizer: OneBitTQ }
-        search_configs:
-          - name: k=10
+          - name: k=100
             params:
               tq8_rerank: [true]
               query_compression: ["Wards"]
               query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-              k: [10]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+              k: [100]
               config:
-                - { name: nr100,  num_rerank: 100 }
-                - { name: nr500,  num_rerank: 500 }
+                - { name: nr1000,  num_rerank: 1000 }
+                - { name: nr5000,  num_rerank: 5000 }
+
+      # - build_name: mvivf_k0_l1000_d0_nit5_s0_mpcc100
+      #   build_params:
+      #     k_per_level: 0
+      #     max_leaf_size: 1000
+      #     max_depth: 0
+      #     niters: 5
+      #     s: 0
+      #     max_point_clouds_per_cluster: 100
+      #     build_with_8btq: true
+      #   variants:
+      #     - { name: tq1, compress: true, quantizer: OneBitTQ }
+      #   search_configs:
+      #     - name: k=10
+      #       params:
+      #         tq8_rerank: [true]
+      #         query_compression: ["Wards"]
+      #         query_compression_threshold: [0.5]
+      #         nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+      #         k: [10]
+      #         config:
+      #           - { name: nr100,  num_rerank: 100 }
+      #           - { name: nr500,  num_rerank: 500 }
+      #     - name: k=100
+      #       params:
+      #         tq8_rerank: [true]
+      #         query_compression: ["Wards"]
+      #         query_compression_threshold: [0.5]
+      #         nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+      #         k: [100]
+      #         config:
+      #           - { name: nr1000,  num_rerank: 1000 }
+      #           - { name: nr5000,  num_rerank: 5000 }
 
   - name: muvera
     metric: ip
@@ -79,6 +99,14 @@ indices:
                 - { name: nr1000,   num_rerank: 1000 }
                 - { name: nr5000,   num_rerank: 5000 }
                 - { name: nr10000,   num_rerank: 10000 }
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+              k: [100]
+              config:
+                - { name: nr5000,   num_rerank: 5000 }
+                - { name: nr10000,   num_rerank: 10000 }
 
   - name: vamana
     metric: ip
@@ -98,7 +126,15 @@ indices:
               k: [10]
               config:
                 - { name: nr20, num_rerank: 20 }
-                - { name: nr50, num_rerank: 40 }
+                - { name: nr50, num_rerank: 50 }
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+              k: [100]
+              config:
+                - { name: nr200, num_rerank: 200 }
+                - { name: nr500, num_rerank: 500 }
 
   - name: svh_graph
     metric: ip
@@ -120,3 +156,12 @@ indices:
                 - { name: nr50,    num_rerank: 50 }
                 - { name: nr100,   num_rerank: 100 }
                 - { name: nr500,   num_rerank: 500 }
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+              k: [100]
+              config:
+                - { name: nr500,    num_rerank: 500 }
+                - { name: nr1000,   num_rerank: 1000 }
+                - { name: nr5000,   num_rerank: 5000 }

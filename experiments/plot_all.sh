@@ -176,11 +176,39 @@ fi
 
 # -----------------------------------------------------------------------------
 # 2) Latency / batch / multi_latency: thin wrappers around plot_stage.py.
+#
+#    Per-search-config (k=10 / k=100) results sit in sibling
+#    ``<results>/<ds>/<method>/<build>/<variant>/k=<N>/`` directories. We
+#    discover which `k=<N>` values actually exist on disk and loop the plot
+#    wrapper once per value, so PDFs land under
+#    ``<results>/_plots/k=<N>/<ds>_*.pdf`` and never mix Pareto fronts
+#    across k. If no k=* dirs are present (legacy data) we fall back to a
+#    single mixed render at ``<results>/_plots/``.
 # -----------------------------------------------------------------------------
+discover_k_values() {
+  # Echo space-separated, sorted k values (just the integer) found under
+  # any depth of the given results root. Empty output => no k=* dirs.
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  find "$root" -type d -name 'k=*' 2>/dev/null \
+    | sed 's|.*/k=||' \
+    | grep -E '^[0-9]+$' \
+    | sort -u -n
+}
+
 for stage in latency batch multi_latency; do
   if want_stage "$stage"; then
     echo "=== plot: ${stage} ==="
-    run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py"
+    stage_results="$REPO_ROOT/experiments/${stage}/results"
+    mapfile -t K_VALUES < <(discover_k_values "$stage_results")
+    if (( ${#K_VALUES[@]} == 0 )); then
+      run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py"
+    else
+      for k in "${K_VALUES[@]}"; do
+        echo "    --- k=$k ---"
+        run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" --k "$k"
+      done
+    fi
     if [[ -f "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py" ]]; then
       run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py"
     fi

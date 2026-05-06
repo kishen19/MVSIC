@@ -776,13 +776,29 @@ def main() -> int:
                    help="experiments/<stage>/results/")
     p.add_argument("--methods", default="benchmarks/methods.yaml", type=pathlib.Path)
     p.add_argument("--out-dir", type=pathlib.Path, default=None,
-                   help="default: <results>/_plots")
+                   help=("default: <results>/_plots, or <results>/_plots/<search> "
+                         "when --search is given so different k values stay in "
+                         "sibling subfolders."))
     p.add_argument("--datasets", default=None,
                    help="comma-separated dataset names; default: all directories under --results")
+    p.add_argument(
+        "--search", default=None,
+        help=(
+            "Filter rows to a single search-config name (the leaf directory "
+            "under <variant>/, e.g. ``k=10`` or ``k=100``). When set and "
+            "--out-dir is not given, plots land under <results>/_plots/<search>/ "
+            "so per-k PDFs do not collide."
+        ),
+    )
     args = p.parse_args()
 
     prefix = _PREFIX_FOR_STAGE[args.stage]
-    out_dir = args.out_dir if args.out_dir else args.results / "_plots"
+    if args.out_dir is not None:
+        out_dir = args.out_dir
+    elif args.search:
+        out_dir = args.results / "_plots" / args.search
+    else:
+        out_dir = args.results / "_plots"
     with open(args.methods, encoding="utf-8") as f:
         methods_yaml = yaml.safe_load(f) or {}
 
@@ -800,7 +816,15 @@ def main() -> int:
         except SystemExit as e:
             print(f"[skip {ds}] {e}")
             continue
-        print(f"[{ds}] {len(df)} rows from {df['method'].nunique()} methods")
+        if args.search:
+            available = sorted(df["search"].dropna().unique().tolist())
+            df = df[df["search"] == args.search]
+            if df.empty:
+                print(f"[skip {ds}] no rows with search={args.search!r} "
+                      f"(available under {ds}: {available or 'n/a'})")
+                continue
+        print(f"[{ds}] {len(df)} rows from {df['method'].nunique()} methods"
+              + (f" (search={args.search})" if args.search else ""))
         _plot_pareto(df, args.stage, ds, out_dir / f"{ds}_pareto.pdf")
         if args.stage in ("latency", "multi_latency"):
             _plot_pareto_latency_ms(

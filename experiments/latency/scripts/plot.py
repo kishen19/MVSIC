@@ -3,12 +3,18 @@
 
 Emits side-by-side Recall (1@k) and Recall (k@k) vs QPS Pareto PDFs (see
 plot_stage.py), the same recall vs latency-ms variant (``1000 / QPS_seq`` as
-``{dataset}_pareto_latency_ms.pdf``), plus timer breakdown PDFs, under
-experiments/latency/results/_plots/.
+``{dataset}_pareto_latency_ms.pdf``), plus timer breakdown PDFs.
+
+By default reads every CSV under ``experiments/latency/results/<ds>/`` and
+writes to ``experiments/latency/results/_plots/``. Pass ``--k 10`` (or
+``--k 100``) to filter to a single ``k=<N>`` search-config and route the
+PDFs into the matching ``_plots/k=<N>/`` subfolder so per-k plots stay
+isolated.
 
 Usage:
-    experiments/latency/scripts/plot.py
-    experiments/latency/scripts/plot.py --datasets nfcorpus,arguana
+    experiments/latency/scripts/plot.py                        # all rows -> _plots/
+    experiments/latency/scripts/plot.py --k 10                 # k=10 only -> _plots/k=10/
+    experiments/latency/scripts/plot.py --k 100 --datasets nq  # k=100 nq -> _plots/k=100/
 """
 from __future__ import annotations
 
@@ -31,6 +37,13 @@ def main() -> int:
     p.add_argument("--out-dir", type=pathlib.Path, default=None)
     p.add_argument("--methods", type=pathlib.Path,
                    default=REPO_ROOT / "benchmarks" / "methods.yaml")
+    p.add_argument(
+        "--k", type=int, default=None,
+        help=("Filter to the search_config named ``k=<value>``. When set and "
+              "--out-dir is unset, plots land under "
+              "<results>/_plots/k=<value>/. Without --k, all rows are mixed "
+              "into one set of PDFs at <results>/_plots/."),
+    )
     args = p.parse_args()
 
     cmd = [
@@ -43,6 +56,8 @@ def main() -> int:
         cmd += ["--datasets", args.datasets]
     if args.out_dir:
         cmd += ["--out-dir", str(args.out_dir)]
+    if args.k is not None:
+        cmd += ["--search", f"k={args.k}"]
     return subprocess.call(cmd)
 
 

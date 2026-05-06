@@ -13,11 +13,17 @@
 #   experiments/latency/scripts/run_latency.sh --dataset vidore --method muvera
 #   experiments/latency/scripts/run_latency.sh --dataset arguana --exclude mvivf
 #   experiments/latency/scripts/run_latency.sh --dataset arguana --task plot   # only re-render plots
+#   experiments/latency/scripts/run_latency.sh --dataset arguana --k 100         # search_config k=100
 #
 # ``--task <run|plot|all>`` (default ``all``):
 #   run  = run benchmark_search only, no plotting.
 #   plot = re-render plots from existing CSVs (no search).
 #   all  = run, then plot (the previous default).
+#
+# ``--k <int>`` (default ``10``): pick which ``search_configs[].name == k=<int>``
+# block to run. Currently only ``10`` and ``100`` are configured per method.
+# Results land under ``<results>/<dataset>/<method>/<build>/<variant>/k=<int>/``
+# (already isolated by directory) and plots under ``_plots/k=<int>/``.
 #
 # FastPlaid + IGP are opt-in: omit by default and for ``--method all``. Use
 # ``--method fastplaid`` / ``--method igp`` or ``--with-fastplaid`` /
@@ -50,6 +56,7 @@ EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
 WITH_IGP=0
 TASK="all"       # run | plot | all
+K_VALUE=10       # search_config name `k=<K_VALUE>`; only 10 / 100 configured
 EXTRA_ARGS=()
 
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
@@ -71,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --method)  METHOD="$2";  shift 2;;
     --exclude) EXCLUDE="$2"; shift 2;;
     --task)    TASK="$2";    shift 2;;
+    --k)       K_VALUE="$2"; shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
     --with-igp) WITH_IGP=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
@@ -81,6 +89,12 @@ case "$TASK" in
   run|plot|all) ;;
   *) echo "Unknown --task '$TASK' (use run|plot|all)" >&2; exit 2;;
 esac
+
+case "$K_VALUE" in
+  10|100) ;;
+  *) echo "Unknown --k '$K_VALUE' (configured values: 10, 100)" >&2; exit 2;;
+esac
+SEARCH_NAME="k=$K_VALUE"
 
 if [[ -z "$DATASET" ]]; then
   echo "Specify --dataset <name>. Aliases: ${DATASET_ALIASES[*]}; BEIR-5 shards: ${BEIR5_DATASETS[*]}; BEIR-big shards: ${BEIRBIG_DATASETS[*]}." >&2
@@ -171,8 +185,20 @@ if [[ -n "$EXCLUDE" ]]; then
   CONFIG_PATH="$excl_tmp"
 fi
 
+# Always pin to the requested search_config (k=10 / k=100). Done last so
+# every prior filter (--method, --dataset, FastPlaid scope, --exclude) has
+# already shrunk the YAML; if the requested k is missing in this dataset we
+# end up with an empty `indices:` and benchmark_search will report no work.
+search_tmp="$(mktemp "${TMPDIR:-/tmp}/main_latency_search.XXXXXX.yaml")"
+TEMP_YAMLS+=("$search_tmp")
+if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$search_tmp" --search "$SEARCH_NAME"; then
+  echo "[error] filter_config.py --search $SEARCH_NAME failed" >&2
+  exit 2
+fi
+CONFIG_PATH="$search_tmp"
+
 if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
-  echo "=== Latency: $CONFIG_PATH ==="
+  echo "=== Latency ($SEARCH_NAME): $CONFIG_PATH ==="
   python3 "$REPO_ROOT/benchmarks/benchmark_search.py" \
       --config "$CONFIG_PATH" \
       --mode latency \
@@ -183,6 +209,7 @@ if [[ "$TASK" == "run" || "$TASK" == "all" ]]; then
 fi
 
 if [[ "$TASK" == "plot" || "$TASK" == "all" ]]; then
-  echo "=== Plots: $DATASET ==="
-  python3 "$REPO_ROOT/experiments/latency/scripts/plot.py" --datasets "$DATASET" || true
+  echo "=== Plots ($SEARCH_NAME): $DATASET ==="
+  python3 "$REPO_ROOT/experiments/latency/scripts/plot.py" \
+      --datasets "$DATASET" --k "$K_VALUE" || true
 fi

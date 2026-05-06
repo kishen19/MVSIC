@@ -51,6 +51,19 @@ indices:
                 - { name: nr100,   num_rerank: 100 }
                 - { name: nr500,   num_rerank: 500 }
 
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              query_compression: ["Wards"]
+              query_compression_threshold: [0.5]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [100]
+              config:
+                - { name: nr200,   num_rerank: 200 }
+                - { name: nr500,   num_rerank: 500 }
+                - { name: nr1000,   num_rerank: 1000 }
+                - { name: nr5000,   num_rerank: 5000 }
+
   # -------------------- MVIVF Spill --------------------
   - name: mvivf_spill
     metric: ip
@@ -109,6 +122,19 @@ indices:
                 - { name: nr500,   num_rerank: 500 }
                 - { name: nr1000,  num_rerank: 1000 }
                 - { name: nr5000,  num_rerank: 5000 }
+          - name: k=100
+            # On nfcorpus / scifact / fiqa muvera tops out around recall ~0.94
+            # at L=4096 with QPS still 38-85. Extra L steps + larger num_rerank
+            # buckets push recall closer to vamana / mvivf. The QPS=10 floor
+            # set by --QPS_thresh in benchmark_search.py will trim the long
+            # tail per shard automatically.
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+              k: [100]
+              config:
+                - { name: nr5000,   num_rerank: 5000 }
+                - { name: nr10000,  num_rerank: 10000 }
 
   # -------------------- MV-Vamana --------------------
   - name: vamana
@@ -130,6 +156,14 @@ indices:
               config:
                 - { name: nr20, num_rerank: 20 }
                 - { name: nr50, num_rerank: 50 }
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [100]
+              config:
+                - { name: nr200, num_rerank: 200 }
+                - { name: nr500, num_rerank: 500 }
 
   # -------------------- SVH Graph --------------------
   - name: svh_graph
@@ -151,6 +185,14 @@ indices:
               config:
                 - { name: nr50,    num_rerank: 50 }
                 - { name: nr100,   num_rerank: 100 }
+          - name: k=100
+            params:
+              tq8_rerank: [true]
+              L: [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [100]
+              config:
+                - { name: nr500,    num_rerank: 500 }
+                - { name: nr1000,   num_rerank: 1000 }
 
   # -------------------- FastPlaid (BEIR-5 only) --------------------
   - name: fastplaid
