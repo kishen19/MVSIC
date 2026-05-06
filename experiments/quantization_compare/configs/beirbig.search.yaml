@@ -54,3 +54,25 @@ indices:
               config:
                 - { name: nr500,   num_rerank: 500 }
                 - { name: nr1000,   num_rerank: 1000 }
+      - build_name: mvivf_k0_l500_d0_nit5_s0_mpcc100
+        build_params:
+          k_per_level: 0
+          max_leaf_size: 500
+          max_depth: 0
+          niters: 5
+          s: 0
+          max_point_clouds_per_cluster: 100
+          build_with_8btq: true
+        variants:
+          - { name: tq4, compress: true, quantizer: TurboQuant }
+        search_configs:
+          - name: k=10
+            params:
+              tq8_rerank: [true]
+              query_compression: ["Wards"]
+              query_compression_threshold: [0.5]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+              k: [10]
+              config:
+                - { name: nr100,   num_rerank: 100 }
+                - { name: nr500,   num_rerank: 500 }

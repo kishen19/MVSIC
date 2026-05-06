@@ -27,10 +27,11 @@ tracked in the repo, not just the ones whose binaries happen to live on the
 current machine.
 
 Usage:
-    experiments/builds/scripts/build_report.py                   # all datasets
+    experiments/builds/scripts/build_report.py                   # all (excl. vidore by default)
     experiments/builds/scripts/build_report.py --suite beir      # BEIR only
     experiments/builds/scripts/build_report.py --suite vidore    # ViDoRe only
     experiments/builds/scripts/build_report.py --suite lotte     # LoTTE only
+    experiments/builds/scripts/build_report.py --exclude-suites '' # literally every dataset
     experiments/builds/scripts/build_report.py \
         --datasets nfcorpus,scifact,arguana,scidocs,fiqa
 """
@@ -79,25 +80,35 @@ _PRETTY = {
 }
 
 
+def _discover_datasets(indexes_root: pathlib.Path) -> list[str]:
+    """List every dataset shard under ``indexes_root``.
+
+    ViDoRe puts its shards one level deeper (``indexes/vidore/<sub>``) so
+    expand that container into its children rather than treating ``vidore``
+    itself as a shard.
+    """
+    if not indexes_root.exists():
+        return []
+    out: list[str] = []
+    for p in sorted(indexes_root.iterdir()):
+        if not p.is_dir():
+            continue
+        if p.name == "vidore":
+            for sub in sorted(p.iterdir()):
+                if sub.is_dir():
+                    out.append(sub.name)
+        else:
+            out.append(p.name)
+    return out
+
+
 def _walk_stats(indexes_root: pathlib.Path,
                 datasets: list[str] | None) -> pd.DataFrame:
     rows = []
     if datasets is None:
-        if not indexes_root.exists():
+        datasets = _discover_datasets(indexes_root)
+        if not datasets:
             return pd.DataFrame()
-        # Discover shards. ViDoRe puts its shards one level deeper
-        # (results/indexes/vidore/<sub>) so expand that container into its
-        # children rather than treating "vidore" itself as a shard.
-        datasets = []
-        for p in sorted(indexes_root.iterdir()):
-            if not p.is_dir():
-                continue
-            if p.name == "vidore":
-                for sub in sorted(p.iterdir()):
-                    if sub.is_dir():
-                        datasets.append(sub.name)
-            else:
-                datasets.append(p.name)
     for ds in datasets:
         ds_dir = indexes_root / ds
         # vidore puts datasets one level deeper.
@@ -209,12 +220,21 @@ def main() -> int:
         choices=("all", *_SUITES.keys()),
         default="all",
         help="Dataset suite preset (mutually exclusive with --datasets). "
-             "'all' = every dataset under --indexes; 'beir' = nfcorpus, "
-             "scifact, arguana, scidocs, fiqa, quora, nq, hotpotqa, nq500k, "
-             "msmarco; 'vidore' = the ColPali ViDoRe shards; 'lotte' = the "
-             "LoTTE corpus. Output filenames are tagged with the suite (e.g. "
-             "build_time_beir.pdf) so multiple suites coexist in the same "
-             "_plots/ directory.",
+             "'all' = every dataset under --indexes minus --exclude-suites; "
+             "'beir' = nfcorpus, scifact, arguana, scidocs, fiqa, quora, nq, "
+             "hotpotqa, nq500k, msmarco; 'vidore' = the ColPali ViDoRe shards; "
+             "'lotte' = the LoTTE corpus. Output filenames are tagged with the "
+             "suite (e.g. build_time_beir.pdf) so multiple suites coexist in "
+             "the same _plots/ directory.",
+    )
+    p.add_argument(
+        "--exclude-suites",
+        default="vidore",
+        help="Comma-separated list of suites to drop from the --suite all "
+             "view (does nothing for --suite <name> or --datasets). Default: "
+             "'vidore' so the all-datasets bar chart stays legible. Pass "
+             "'' (empty) to keep every dataset, or e.g. 'vidore,lotte' to "
+             "drop both. Use --suite vidore to plot just vidore.",
     )
     p.add_argument("--datasets", default=None,
                    help="Comma-separated dataset names; overrides --suite.")
@@ -234,7 +254,32 @@ def main() -> int:
     elif args.suite != "all":
         datasets = list(_SUITES[args.suite])
     else:
-        datasets = None  # walk everything under args.indexes
+        # --suite all: discover everything under --indexes, then subtract any
+        # datasets belonging to suites named in --exclude-suites. ViDoRe is
+        # excluded by default to keep the bar chart legible; --suite vidore
+        # remains available for an explicit vidore-only plot.
+        datasets = _discover_datasets(args.indexes)
+        excluded: set[str] = set()
+        for s in (args.exclude_suites or "").split(","):
+            s = s.strip()
+            if not s:
+                continue
+            if s not in _SUITES:
+                print(f"[warn] --exclude-suites: unknown suite '{s}' "
+                      f"(known: {sorted(_SUITES)}); ignoring.",
+                      file=sys.stderr)
+                continue
+            excluded.update(_SUITES[s])
+        if excluded:
+            kept = [d for d in datasets if d not in excluded]
+            dropped = [d for d in datasets if d in excluded]
+            if dropped:
+                print(f"[info] --suite all: dropping {len(dropped)} dataset(s) "
+                      f"via --exclude-suites='{args.exclude_suites}': "
+                      f"{', '.join(dropped)}")
+            datasets = kept
+        if not datasets:
+            datasets = None  # nothing to filter; let _walk_stats discover
 
     df = _walk_stats(args.indexes, datasets)
     if df.empty:

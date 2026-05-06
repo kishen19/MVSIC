@@ -22,9 +22,6 @@ bazel-*
 # VSCode files
 .vscode
 
-# # Stats files
-# *.csv
-
 # Plot PDFs (generated; regenerate via experiments/plot_all.sh).
 experiments/**/_plots/*.pdf
 

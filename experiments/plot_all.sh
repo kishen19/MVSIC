@@ -11,12 +11,19 @@
 #   experiments/plot_all.sh                  # everything
 #   experiments/plot_all.sh --skip mvivf_ablation,query_compression
 #   experiments/plot_all.sh --only latency,batch,multi_latency
+#   experiments/plot_all.sh --only builds    # just the build report
+#   experiments/plot_all.sh --suites all,beir   # which build-report suites to emit
+#   experiments/plot_all.sh --suites beir       # BEIR-only build report
 #   experiments/plot_all.sh --dry-run        # print commands, do not run
+#   experiments/plot_all.sh --list-stages    # print the names accepted by --only / --skip
 #
 # Notes:
 # - Scripts that have no data simply print a warning and skip cleanly; this
 #   wrapper keeps going (we use `|| true` per stage so one missing dataset
 #   does not abort the rest).
+# - --suites only affects shared-across-datasets plots (currently the build
+#   report); per-dataset PDFs always get one file per dataset, so suite
+#   filtering would just be a no-op.
 # - mvivf_ablation needs (variant, stage) tuples; we discover them from the
 #   results tree and dispatch through scripts/run_ablation.sh --task evaluate.
 # - query_compression needs --dataset; we iterate over every per-dataset
@@ -48,14 +55,23 @@ ALL_STAGES=(
 SKIP=""
 ONLY=""
 DRY_RUN=0
+LIST_STAGES=0
+# Default: emit the all-datasets, BEIR-only and LoTTE-only build reports.
+# Use --suites to scope to just one (e.g. --suites beir).
+SUITES="all,beir,lotte"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip)    SKIP="$2"; shift 2;;
-    --only)    ONLY="$2"; shift 2;;
-    --dry-run) DRY_RUN=1; shift;;
+    --skip)        SKIP="$2"; shift 2;;
+    --only)        ONLY="$2"; shift 2;;
+    --suites)      SUITES="$2"; shift 2;;
+    --dry-run)     DRY_RUN=1; shift;;
+    --list-stages) LIST_STAGES=1; shift;;
     -h|--help)
-      sed -n '2,25p' "$0"
+      sed -n '2,30p' "$0"
+      echo
+      echo "Available stages (for --only / --skip):"
+      printf '  %s\n' "${ALL_STAGES[@]}"
       exit 0
       ;;
     *)
@@ -64,6 +80,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$LIST_STAGES" -eq 1 ]]; then
+  printf '%s\n' "${ALL_STAGES[@]}"
+  exit 0
+fi
 
 is_in_csv() {
   # is_in_csv <needle> <comma_separated_haystack>
@@ -74,6 +95,31 @@ is_in_csv() {
   done
   return 1
 }
+
+# Validate --only / --skip values against ALL_STAGES so a typo fails loudly
+# instead of silently running everything (--skip) or nothing (--only).
+validate_stage_csv() {
+  local label="$1" csv="$2"
+  [[ -z "$csv" ]] && return 0
+  local bad=()
+  IFS=',' read -ra parts <<< "$csv"
+  for p in "${parts[@]}"; do
+    p="$(echo "$p" | xargs)"
+    [[ -z "$p" ]] && continue
+    local found=0
+    for s in "${ALL_STAGES[@]}"; do
+      [[ "$s" == "$p" ]] && { found=1; break; }
+    done
+    [[ "$found" -eq 0 ]] && bad+=("$p")
+  done
+  if (( ${#bad[@]} > 0 )); then
+    echo "[plot_all] $label: unknown stage(s): ${bad[*]}" >&2
+    echo "[plot_all] known stages: ${ALL_STAGES[*]}" >&2
+    exit 2
+  fi
+}
+validate_stage_csv "--only" "$ONLY"
+validate_stage_csv "--skip" "$SKIP"
 
 want_stage() {
   local s="$1"
@@ -107,11 +153,25 @@ run_or_warn() {
 #    experiments/builds/results/indexes/, which is what's tracked in the repo
 #    and covers every dataset; the local results/indexes/ tree may only have
 #    a subset of datasets actually built on this machine.
+#
+#    The build report is the only "shared across datasets" plot in the repo
+#    (single bar chart with one bar group per dataset), so the --suites flag
+#    is consumed here. Each suite emits its own tagged outputs:
+#      build_report.md         build_time.pdf         index_size.pdf
+#      build_report_beir.md    build_time_beir.pdf    index_size_beir.pdf
+#      build_report_vidore.md  build_time_vidore.pdf  index_size_vidore.pdf
+#      build_report_lotte.md   build_time_lotte.pdf   index_size_lotte.pdf
 # -----------------------------------------------------------------------------
 if want_stage builds; then
   echo "=== plot: builds ==="
-  run_or_warn python3 "$REPO_ROOT/experiments/builds/scripts/build_report.py" \
-    --indexes "$REPO_ROOT/experiments/builds/results/indexes"
+  IFS=',' read -ra SUITE_ARR <<< "$SUITES"
+  for suite in "${SUITE_ARR[@]}"; do
+    suite="$(echo "$suite" | xargs)"
+    [[ -z "$suite" ]] && continue
+    run_or_warn python3 "$REPO_ROOT/experiments/builds/scripts/build_report.py" \
+      --indexes "$REPO_ROOT/experiments/builds/results/indexes" \
+      --suite "$suite"
+  done
 fi
 
 # -----------------------------------------------------------------------------
