@@ -46,6 +46,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <queue>
 #include <random>
 #include <string>
 #include <unordered_set>
@@ -515,63 +516,143 @@ static int run_from_sets(const PointCloudSet<ChPoint>& db, const PointCloudSet<C
     tq1a_qs.push_back(tq1a_model.quantize_query(queries[qi]));
 
   // ---------------------------------------------------------------------
-  // Phase 3: Serial outer loop over queries. Each MV `distances_all` is
-  // already internally parallelized over Nclouds (Nclouds=8674 >> Qclouds
-  // for typical BEIR datasets, so the DB-axis is the better parallelism
-  // boundary anyway). Nesting our own parallel_for here on top of those
-  // inner parallel_fors causes parlay scheduler trouble (heavy worker
-  // stack pressure -> heap corruption / SIGSEGV at large Q). Mirrors the
-  // way `bench_singlevector_overretrieve` calls into kernels that own
-  // their own parallelism.
+  // Phase 3: Method-major, chunk-mid, query-inner sweep. The naive shape
+  // (for each query: distances_all over all Nclouds, sort, walk) restreams
+  // the entire encoded DB once per query — for hotpotqa that's 1000 sweeps
+  // over a multi-GB encoded DB, which is DRAM-bandwidth-bound and dominated
+  // by L3 misses on every method.
+  //
+  // Mirroring `bench_singlevector_overretrieve::recall_curve`, we instead
+  // tile the DB into chunks sized to fit in L3 and pin all queries against
+  // each chunk before moving on. Within a chunk, parlay::parallel_for
+  // distributes queries across threads — every thread streams the same
+  // L3-resident chunk simultaneously, so the chunk stays hot across
+  // Qclouds reuses without per-thread duplication.
+  //
+  // Per-query state is a top-lim max-heap (lim = kprime_grid.back()), the
+  // same trick the singlevector bench uses to avoid an Nclouds-sized
+  // scratch buffer + sort per query. After the heap fills, the inner loop
+  // is dominated by `d < heap.top()` early-exits, so heap maintenance is
+  // not on the hot path.
   // ---------------------------------------------------------------------
-  std::vector<std::pair<uint32_t, float>> approx(Nclouds);
-  std::cout << "Outer iterations: " << Qclouds << " (serial; inner kernels are parallel)"
-            << std::endl;
+  const size_t lim =
+      kprime_grid.empty() ? 0 : static_cast<size_t>(kprime_grid.back());
 
-  auto eval_method = [&](Method meth, size_t qi) {
-    std::sort(approx.begin(), approx.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-    // distances_all() stores logical cloud ids (same as db.get_id(cid)) in .first.
-    const auto& exact_set = exact_sets[qi];
-    for (size_t i = 0; i < kprime_grid.size(); ++i) {
-      const size_t kp = static_cast<size_t>(kprime_grid[i]);
-      size_t hits = 0;
-      const size_t limit = std::min(kp, approx.size());
-      for (size_t j = 0; j < limit; ++j) {
-        if (exact_set.find(approx[j].first) != exact_set.end()) ++hits;
+  // Target chunk size in bytes for the encoded DB. Sized to fit comfortably
+  // inside a typical server L3 (30–100 MB) alongside per-thread query state
+  // and heap buffers. Configurable from CLI via -chunk_bytes if needed; the
+  // default is conservative for ~30 MB L3 machines.
+  const size_t target_chunk_bytes = 16ull * 1024ull * 1024ull;
+
+  // `nc` is captured from the source PointCloudSet (Nclouds) — every encoded
+  // MV set is constructed 1:1 from the source, so the per-encoded-class
+  // num_clouds()/offsets distinction doesn't matter for index-by-index access
+  // through `enc_db[c]`.
+  auto eval_chunked = [&](Method meth, const auto& enc_db, const auto& qs) {
+    const size_t nc = Nclouds;
+    if (nc == 0 || lim == 0 || Qclouds == 0) return;
+
+    const size_t total_bytes = enc_db.num_bytes();
+    const size_t bytes_per_cloud =
+        total_bytes > 0 ? std::max<size_t>(1, total_bytes / nc) : size_t{64};
+    const size_t chunk_clouds = std::max<size_t>(
+        size_t{256}, std::min<size_t>(nc, target_chunk_bytes / bytes_per_cloud));
+    const size_t num_chunks = (nc + chunk_clouds - 1) / chunk_clouds;
+
+    using Pair = std::pair<float, uint32_t>;  // (distance, logical id), max-heap by distance
+    std::vector<std::priority_queue<Pair>> heaps(Qclouds);
+
+    std::cout << "  " << method_names[meth] << ": starting (chunks=" << num_chunks
+              << ", chunk_clouds=" << chunk_clouds << ", bytes_per_cloud=" << bytes_per_cloud
+              << ")" << std::endl;
+    // Progress cadence: ~10 updates per method, but at least every chunk for
+    // datasets where each chunk is slow on its own. log_every == 0 disables.
+    const size_t log_every =
+        num_chunks <= 10 ? 1 : std::max<size_t>(1, num_chunks / 10);
+    parlay::internal::timer t;
+    t.start();
+    parlay::internal::timer chunk_t;
+    chunk_t.start();
+    for (size_t cb = 0; cb < num_chunks; ++cb) {
+      const size_t c_start = cb * chunk_clouds;
+      const size_t c_end = std::min(c_start + chunk_clouds, nc);
+      parlay::parallel_for(0, Qclouds, [&](size_t qi) {
+        auto& h = heaps[qi];
+        const auto& q = qs[qi];
+        for (size_t c = c_start; c < c_end; ++c) {
+          const auto cloud_view = enc_db[c];
+          const float d = q.distance(cloud_view);
+          const uint32_t id = enc_db.get_id(c);
+          if (h.size() < lim) {
+            h.emplace(d, id);
+          } else if (d < h.top().first) {
+            h.pop();
+            h.emplace(d, id);
+          }
+        }
+      });
+      if (log_every > 0 && ((cb + 1) % log_every == 0 || cb + 1 == num_chunks)) {
+        const double elapsed = t.total_time();
+        const double chunk_dt = chunk_t.stop();
+        chunk_t.start();
+        std::cout << "    [" << method_names[meth] << "] chunk " << (cb + 1) << "/"
+                  << num_chunks << "  +" << std::fixed << std::setprecision(2) << chunk_dt
+                  << "s  (cumulative " << elapsed << "s)" << std::endl;
       }
-      sum_recall[idx2(meth, i)] += static_cast<double>(hits) / static_cast<double>(k);
     }
+
+    // Drain heaps in parallel into ascending-by-distance id arrays.
+    std::vector<std::vector<uint32_t>> sorted_ids(Qclouds);
+    parlay::parallel_for(0, Qclouds, [&](size_t qi) {
+      auto& h = heaps[qi];
+      const size_t hsz = h.size();
+      sorted_ids[qi].assign(hsz, 0u);
+      for (size_t r = 0; r < hsz; ++r) {
+        sorted_ids[qi][hsz - 1 - r] = h.top().second;
+        h.pop();
+      }
+    });
+
+    // Recall accumulation: serial single sweep per query, snapshotting the
+    // running hit count at each k' boundary. Tracks the same logic the
+    // single-vector bench uses (and is cheap relative to the sweep above).
+    for (size_t qi = 0; qi < Qclouds; ++qi) {
+      const auto& ids = sorted_ids[qi];
+      const auto& exact_set = exact_sets[qi];
+      size_t cc = 0;
+      size_t ki = 0;
+      for (size_t r = 0; r < ids.size() && ki < kprime_grid.size(); ++r) {
+        if (exact_set.find(ids[r]) != exact_set.end()) ++cc;
+        while (ki < kprime_grid.size() && r + 1 == static_cast<size_t>(kprime_grid[ki])) {
+          sum_recall[idx2(meth, ki)] += static_cast<double>(cc) / static_cast<double>(k);
+          ++ki;
+        }
+      }
+      // If kp_grid extends past the heap (e.g., lim < kp_grid.back()), pad
+      // remaining boundaries with the saturated hit count. With lim ==
+      // kprime_grid.back() this loop is empty.
+      for (; ki < kprime_grid.size(); ++ki) {
+        sum_recall[idx2(meth, ki)] += static_cast<double>(cc) / static_cast<double>(k);
+      }
+    }
+    std::cout << "  " << method_names[meth] << ": chunks=" << num_chunks
+              << " chunk_clouds=" << chunk_clouds << " bytes_per_cloud=" << bytes_per_cloud
+              << " sweep+recall=" << std::fixed << std::setprecision(2) << t.stop() << "s"
+              << std::endl;
   };
 
-  for (size_t qi = 0; qi < Qclouds; ++qi) {
-    if (has_fs2) {
-      fs2_db.distances_all(fs2_qs[qi], approx.data());
-      eval_method(FASTSCAN_B2, qi);
-    }
-    if (has_fs4) {
-      fs4_db.distances_all(fs4_qs[qi], approx.data());
-      eval_method(FASTSCAN_B4, qi);
-    }
-    if (has_fs8) {
-      fs8_db.distances_all(fs8_qs[qi], approx.data());
-      eval_method(FASTSCAN_B8, qi);
-    }
-    tq_db.distances_all(tq_qs[qi], approx.data());
-    eval_method(TURBOQUANT_MV, qi);
-    tq8_db.distances_all(tq8_qs[qi], approx.data());
-    eval_method(TURBOQUANT_8BIT_MV, qi);
-    rq1_db.distances_all(rq1_qs[qi], approx.data());
-    eval_method(RABITQ_B1, qi);
-    rq4_db.distances_all(rq4_qs[qi], approx.data());
-    eval_method(RABITQ_B4, qi);
-    rq8_db.distances_all(rq8_qs[qi], approx.data());
-    eval_method(RABITQ_B8, qi);
-    tq1_db.distances_all(tq1_qs[qi], approx.data());
-    eval_method(ONEBITTQ_MV, qi);
-    tq1a_db.distances_all(tq1a_qs[qi], approx.data());
-    eval_method(ONEBITTQ_ASYM_MV, qi);
-  }
+  std::cout << "Phase 3: chunked sweep (target_chunk_bytes=" << target_chunk_bytes
+            << ", lim=" << lim << ")" << std::endl;
+  if (has_fs2) eval_chunked(FASTSCAN_B2, fs2_db, fs2_qs);
+  if (has_fs4) eval_chunked(FASTSCAN_B4, fs4_db, fs4_qs);
+  if (has_fs8) eval_chunked(FASTSCAN_B8, fs8_db, fs8_qs);
+  eval_chunked(TURBOQUANT_MV, tq_db, tq_qs);
+  eval_chunked(TURBOQUANT_8BIT_MV, tq8_db, tq8_qs);
+  eval_chunked(RABITQ_B1, rq1_db, rq1_qs);
+  eval_chunked(RABITQ_B4, rq4_db, rq4_qs);
+  eval_chunked(RABITQ_B8, rq8_db, rq8_qs);
+  eval_chunked(ONEBITTQ_MV, tq1_db, tq1_qs);
+  eval_chunked(ONEBITTQ_ASYM_MV, tq1a_db, tq1a_qs);
 
   std::cout << "\n=== Recall@" << k << " vs candidate budget k' ===\n";
   std::cout << "Averages over Q=" << Qclouds << " query clouds.\n\n";

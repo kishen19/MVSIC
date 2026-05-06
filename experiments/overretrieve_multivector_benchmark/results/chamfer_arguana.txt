@@ -1,0 +1,268 @@
+# command: /home/laxmand_google_com/MVSIC/bazel-bin/microbenchmark/quantization/bench_chamfer_overretrieve -dist_func IP -i /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_points.pcs -q /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_queries.pcs -gt /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_chamfer_neighbors.gt -k 10 -num_query 1000 -query_subsample_seed 42 -max_k_prime 1000 -k_growth 1.1
+# host:    ann-exps-2.us-central1-b.c.quantize-2-sandbox-331536.internal
+# date:    2026-05-05T21:30:21Z
+
+filename = /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_points.pcs
+Detected 8674 point clouds with embedding dimension 128
+Aligned dims = 128
+filename = /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_queries.pcs
+Detected 1406 point clouds with embedding dimension 128
+Aligned dims = 128
+Mode: file
+  db=/home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_points.pcs
+  q =/home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_queries.pcs
+  [subsample] queries 1406 -> 1000 (seed=42)
+DB: clouds=8674 dims=128 total_vecs=1208012 avg_k=139.27
+Q : clouds=1000 dims=128 total_vecs=32000 avg_k=32.00
+dist=IP
+k=10  max_k_prime=1000  k_growth=1.10  k' grid: 10 11 12 13 14 16 17 19 21 23 25 28 31 34 37 41 45 50 55 61 67 74 81 89 98 108 119 131 144 158 174 191 211 232 255 281 309 340 374 411 452 497 547 602 662 728 801 881 970 1000 
+Ground truth: /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_chamfer_neighbors.gt
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+64Aligning bytes to 64
+
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64Aligning bytes to 64
+
+64Aligning bytes to 64
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+Aligning bytes to Aligning bytes to 64
+Aligning bytes to 6464
+
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+64Aligning bytes to 
+64
+Aligning bytes to Aligning bytes to 64
+Aligning bytes to 64
+64Aligning bytes to 
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+64Aligning bytes to 
+64
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 64
+64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 6464
+
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64Aligning bytes to 
+64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+Loaded ground truth subset from /home/laxmand_google_com/MVSIC/data/beir/arguana/arguana_chamfer_neighbors.gt (k_gt=2000, queries=1000)
+Outer iterations: 1000 (serial; inner kernels are parallel)
+
+=== Recall@10 vs candidate budget k' ===
+Averages over Q=1000 query clouds.
+
+Method                       k'=10     k'=11     k'=12     k'=13     k'=14     k'=16     k'=17     k'=19     k'=21     k'=23     k'=25     k'=28     k'=31     k'=34     k'=37     k'=41     k'=45     k'=50     k'=55     k'=61     k'=67     k'=74     k'=81     k'=89     k'=98    k'=108    k'=119    k'=131    k'=144    k'=158    k'=174    k'=191    k'=211    k'=232    k'=255    k'=281    k'=309    k'=340    k'=374    k'=411    k'=452    k'=497    k'=547    k'=602    k'=662    k'=728    k'=801    k'=881    k'=970   k'=1000
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+TurboQuant_mv (4bit)          0.98      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+TurboQuant_mv (8bit)          1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+FastScan-b2                   0.81      0.85      0.88      0.90      0.91      0.93      0.94      0.95      0.96      0.97      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+FastScan-b4                   0.73      0.77      0.79      0.81      0.83      0.86      0.87      0.88      0.90      0.91      0.92      0.93      0.94      0.94      0.95      0.96      0.96      0.97      0.97      0.98      0.98      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+FastScan-b8                   0.49      0.51      0.53      0.54      0.56      0.58      0.59      0.61      0.63      0.64      0.66      0.67      0.69      0.70      0.71      0.72      0.74      0.75      0.76      0.78      0.79      0.80      0.80      0.81      0.82      0.83      0.84      0.85      0.86      0.87      0.88      0.88      0.89      0.90      0.91      0.91      0.92      0.93      0.93      0.94      0.94      0.95      0.95      0.96      0.96      0.96      0.97      0.97      0.98      0.98
+RaBitQ-1bit                   0.84      0.88      0.91      0.93      0.94      0.96      0.97      0.98      0.98      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+RaBitQ-4bit                   0.97      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+RaBitQ-8bit                   0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+1BTQ-mv                       0.80      0.84      0.87      0.89      0.90      0.92      0.93      0.95      0.96      0.97      0.97      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+1BTQAsym-mv                   0.83      0.87      0.90      0.92      0.93      0.95      0.96      0.97      0.98      0.98      0.98      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00

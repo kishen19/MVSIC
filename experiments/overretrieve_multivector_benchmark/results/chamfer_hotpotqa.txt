@@ -1,0 +1,398 @@
+# command: /home/laxmand_google_com/MVSIC/bazel-bin/microbenchmark/quantization/bench_chamfer_overretrieve -dist_func IP -i /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_points.pcs -q /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_queries.pcs -gt /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_chamfer_neighbors.gt -k 10 -num_query 1000 -query_subsample_seed 42 -max_k_prime 1000 -k_growth 1.1
+# host:    ann-exps-2.us-central1-b.c.quantize-2-sandbox-331536.internal
+# date:    2026-05-05T23:56:05Z
+
+filename = /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_points.pcs
+Detected 5233329 point clouds with embedding dimension 128
+Aligned dims = 128
+filename = /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_queries.pcs
+Detected 7405 point clouds with embedding dimension 128
+Aligned dims = 128
+Mode: file
+  db=/home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_points.pcs
+  q =/home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_queries.pcs
+  [subsample] queries 7405 -> 1000 (seed=42)
+DB: clouds=5233329 dims=128 total_vecs=306600502 avg_k=58.59
+Q : clouds=1000 dims=128 total_vecs=32000 avg_k=32.00
+dist=IP
+k=10  max_k_prime=1000  k_growth=1.10  k' grid: 10 11 12 13 14 16 17 19 21 23 25 28 31 34 37 41 45 50 55 61 67 74 81 89 98 108 119 131 144 158 174 191 211 232 255 281 309 340 374 411 452 497 547 602 662 728 801 881 970 1000 
+Ground truth: /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_chamfer_neighbors.gt
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to Aligning bytes to 6464
+
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+Loaded ground truth subset from /home/laxmand_google_com/MVSIC/data/beir/hotpotqa/hotpotqa_chamfer_neighbors.gt (k_gt=2000, queries=1000)
+Phase 3: chunked sweep (target_chunk_bytes=16777216, lim=1000)
+  FastScan-b2: starting (chunks=891, chunk_clouds=5876, bytes_per_cloud=2855)
+    [FastScan-b2] chunk 89/891  +12.07s  (cumulative 12.07s)
+    [FastScan-b2] chunk 178/891  +11.99s  (cumulative 24.07s)
+    [FastScan-b2] chunk 267/891  +12.05s  (cumulative 36.12s)
+    [FastScan-b2] chunk 356/891  +11.93s  (cumulative 48.05s)
+    [FastScan-b2] chunk 445/891  +11.94s  (cumulative 60.00s)
+    [FastScan-b2] chunk 534/891  +11.97s  (cumulative 71.97s)
+    [FastScan-b2] chunk 623/891  +11.97s  (cumulative 83.94s)
+    [FastScan-b2] chunk 712/891  +11.99s  (cumulative 95.93s)
+    [FastScan-b2] chunk 801/891  +12.01s  (cumulative 107.94s)
+    [FastScan-b2] chunk 890/891  +12.03s  (cumulative 119.96s)
+    [FastScan-b2] chunk 891/891  +0.09s  (cumulative 120.05s)
+  FastScan-b2: chunks=891 chunk_clouds=5876 bytes_per_cloud=2855 sweep+recall=120.06s
+  FastScan-b4: starting (chunks=446, chunk_clouds=11756, bytes_per_cloud=1427)
+    [FastScan-b4] chunk 44/446  +6.53s  (cumulative 6.53s)
+    [FastScan-b4] chunk 88/446  +6.44s  (cumulative 12.97s)
+    [FastScan-b4] chunk 132/446  +6.43s  (cumulative 19.39s)
+    [FastScan-b4] chunk 176/446  +6.63s  (cumulative 26.02s)
+    [FastScan-b4] chunk 220/446  +7.08s  (cumulative 33.10s)
+    [FastScan-b4] chunk 264/446  +7.11s  (cumulative 40.21s)
+    [FastScan-b4] chunk 308/446  +7.32s  (cumulative 47.53s)
+    [FastScan-b4] chunk 352/446  +7.04s  (cumulative 54.58s)
+    [FastScan-b4] chunk 396/446  +7.08s  (cumulative 61.66s)
+    [FastScan-b4] chunk 440/446  +6.81s  (cumulative 68.47s)
+    [FastScan-b4] chunk 446/446  +0.78s  (cumulative 69.25s)
+  FastScan-b4: chunks=446 chunk_clouds=11756 bytes_per_cloud=1427 sweep+recall=69.27s
+  FastScan-b8: starting (chunks=223, chunk_clouds=23530, bytes_per_cloud=713)
+    [FastScan-b8] chunk 22/223  +3.89s  (cumulative 3.89s)
+    [FastScan-b8] chunk 44/223  +3.98s  (cumulative 7.87s)
+    [FastScan-b8] chunk 66/223  +4.06s  (cumulative 11.93s)
+    [FastScan-b8] chunk 88/223  +4.04s  (cumulative 15.97s)
+    [FastScan-b8] chunk 110/223  +4.03s  (cumulative 20.00s)
+    [FastScan-b8] chunk 132/223  +4.03s  (cumulative 24.03s)
+    [FastScan-b8] chunk 154/223  +3.98s  (cumulative 28.01s)
+    [FastScan-b8] chunk 176/223  +3.93s  (cumulative 31.95s)
+    [FastScan-b8] chunk 198/223  +3.97s  (cumulative 35.92s)
+    [FastScan-b8] chunk 220/223  +3.93s  (cumulative 39.85s)
+    [FastScan-b8] chunk 223/223  +0.44s  (cumulative 40.29s)
+  FastScan-b8: chunks=223 chunk_clouds=23530 bytes_per_cloud=713 sweep+recall=40.31s
+  TurboQuant_mv (4bit): starting (chunks=2808, chunk_clouds=1864, bytes_per_cloud=8998)
+    [TurboQuant_mv (4bit)] chunk 280/2808  +23.48s  (cumulative 23.48s)
+    [TurboQuant_mv (4bit)] chunk 560/2808  +22.56s  (cumulative 46.03s)
+    [TurboQuant_mv (4bit)] chunk 840/2808  +23.39s  (cumulative 69.42s)
+    [TurboQuant_mv (4bit)] chunk 1120/2808  +24.27s  (cumulative 93.69s)
+    [TurboQuant_mv (4bit)] chunk 1400/2808  +23.05s  (cumulative 116.74s)
+    [TurboQuant_mv (4bit)] chunk 1680/2808  +23.08s  (cumulative 139.82s)
+    [TurboQuant_mv (4bit)] chunk 1960/2808  +22.82s  (cumulative 162.64s)
+    [TurboQuant_mv (4bit)] chunk 2240/2808  +22.89s  (cumulative 185.53s)
+    [TurboQuant_mv (4bit)] chunk 2520/2808  +22.25s  (cumulative 207.79s)
+    [TurboQuant_mv (4bit)] chunk 2800/2808  +22.99s  (cumulative 230.78s)
+    [TurboQuant_mv (4bit)] chunk 2808/2808  +0.66s  (cumulative 231.44s)
+  TurboQuant_mv (4bit): chunks=2808 chunk_clouds=1864 bytes_per_cloud=8998 sweep+recall=231.46s
+  TurboQuant_mv (8bit): starting (chunks=2808, chunk_clouds=1864, bytes_per_cloud=8998)
+    [TurboQuant_mv (8bit)] chunk 280/2808  +23.55s  (cumulative 23.55s)
+    [TurboQuant_mv (8bit)] chunk 560/2808  +21.87s  (cumulative 45.42s)
+    [TurboQuant_mv (8bit)] chunk 840/2808  +13.58s  (cumulative 59.00s)
+    [TurboQuant_mv (8bit)] chunk 1120/2808  +13.26s  (cumulative 72.26s)
+    [TurboQuant_mv (8bit)] chunk 1400/2808  +13.71s  (cumulative 85.97s)
+    [TurboQuant_mv (8bit)] chunk 1680/2808  +13.21s  (cumulative 99.18s)
+    [TurboQuant_mv (8bit)] chunk 1960/2808  +13.27s  (cumulative 112.45s)
+    [TurboQuant_mv (8bit)] chunk 2240/2808  +13.58s  (cumulative 126.03s)
+    [TurboQuant_mv (8bit)] chunk 2520/2808  +13.71s  (cumulative 139.74s)
+    [TurboQuant_mv (8bit)] chunk 2800/2808  +13.27s  (cumulative 153.01s)
+    [TurboQuant_mv (8bit)] chunk 2808/2808  +0.35s  (cumulative 153.36s)
+  TurboQuant_mv (8bit): chunks=2808 chunk_clouds=1864 bytes_per_cloud=8998 sweep+recall=153.38s
+  RaBitQ-1bit: starting (chunks=512, chunk_clouds=10230, bytes_per_cloud=1640)
+    [RaBitQ-1bit] chunk 51/512  +98.54s  (cumulative 98.54s)
+    [RaBitQ-1bit] chunk 102/512  +98.46s  (cumulative 197.00s)
+    [RaBitQ-1bit] chunk 153/512  +98.41s  (cumulative 295.41s)
+    [RaBitQ-1bit] chunk 204/512  +98.60s  (cumulative 394.01s)
+    [RaBitQ-1bit] chunk 255/512  +98.85s  (cumulative 492.85s)
+    [RaBitQ-1bit] chunk 306/512  +98.61s  (cumulative 591.46s)
+    [RaBitQ-1bit] chunk 357/512  +98.42s  (cumulative 689.88s)
+    [RaBitQ-1bit] chunk 408/512  +98.45s  (cumulative 788.32s)
+    [RaBitQ-1bit] chunk 459/512  +98.83s  (cumulative 887.15s)
+    [RaBitQ-1bit] chunk 510/512  +98.54s  (cumulative 985.69s)
+    [RaBitQ-1bit] chunk 512/512  +3.02s  (cumulative 988.71s)
+  RaBitQ-1bit: chunks=512 chunk_clouds=10230 bytes_per_cloud=1640 sweep+recall=988.72s
+  RaBitQ-4bit: starting (chunks=1536, chunk_clouds=3409, bytes_per_cloud=4921)
+    [RaBitQ-4bit] chunk 153/1536  +282.86s  (cumulative 282.86s)
+    [RaBitQ-4bit] chunk 306/1536  +282.74s  (cumulative 565.60s)
+    [RaBitQ-4bit] chunk 459/1536  +282.40s  (cumulative 848.01s)
+    [RaBitQ-4bit] chunk 612/1536  +283.30s  (cumulative 1131.31s)
+    [RaBitQ-4bit] chunk 765/1536  +283.06s  (cumulative 1414.37s)
+    [RaBitQ-4bit] chunk 918/1536  +283.19s  (cumulative 1697.56s)
+    [RaBitQ-4bit] chunk 1071/1536  +282.65s  (cumulative 1980.22s)
+    [RaBitQ-4bit] chunk 1224/1536  +282.60s  (cumulative 2262.82s)
+    [RaBitQ-4bit] chunk 1377/1536  +283.06s  (cumulative 2545.88s)
+    [RaBitQ-4bit] chunk 1530/1536  +284.33s  (cumulative 2830.21s)
+    [RaBitQ-4bit] chunk 1536/1536  +9.58s  (cumulative 2839.78s)
+  RaBitQ-4bit: chunks=1536 chunk_clouds=3409 bytes_per_cloud=4921 sweep+recall=2839.80s
+  RaBitQ-8bit: starting (chunks=2705, chunk_clouds=1935, bytes_per_cloud=8670)
+    [RaBitQ-8bit] chunk 270/2705  +304.89s  (cumulative 304.89s)
+    [RaBitQ-8bit] chunk 540/2705  +304.78s  (cumulative 609.67s)
+    [RaBitQ-8bit] chunk 810/2705  +304.09s  (cumulative 913.76s)
+    [RaBitQ-8bit] chunk 1080/2705  +304.71s  (cumulative 1218.47s)
+    [RaBitQ-8bit] chunk 1350/2705  +304.77s  (cumulative 1523.24s)
+    [RaBitQ-8bit] chunk 1620/2705  +307.43s  (cumulative 1830.66s)
+    [RaBitQ-8bit] chunk 1890/2705  +304.42s  (cumulative 2135.09s)
+    [RaBitQ-8bit] chunk 2160/2705  +304.86s  (cumulative 2439.95s)
+    [RaBitQ-8bit] chunk 2430/2705  +305.33s  (cumulative 2745.28s)
+    [RaBitQ-8bit] chunk 2700/2705  +304.24s  (cumulative 3049.52s)
+    [RaBitQ-8bit] chunk 2705/2705  +5.12s  (cumulative 3054.64s)
+  RaBitQ-8bit: chunks=2705 chunk_clouds=1935 bytes_per_cloud=8670 sweep+recall=3054.66s
+  1BTQ-mv: starting (chunks=331, chunk_clouds=15857, bytes_per_cloud=1058)
+    [1BTQ-mv] chunk 33/331  +4.60s  (cumulative 4.60s)
+    [1BTQ-mv] chunk 66/331  +4.48s  (cumulative 9.08s)
+    [1BTQ-mv] chunk 99/331  +4.37s  (cumulative 13.45s)
+    [1BTQ-mv] chunk 132/331  +4.31s  (cumulative 17.76s)
+    [1BTQ-mv] chunk 165/331  +4.30s  (cumulative 22.06s)
+    [1BTQ-mv] chunk 198/331  +4.18s  (cumulative 26.24s)
+    [1BTQ-mv] chunk 231/331  +4.14s  (cumulative 30.38s)
+    [1BTQ-mv] chunk 264/331  +4.14s  (cumulative 34.52s)
+    [1BTQ-mv] chunk 297/331  +4.13s  (cumulative 38.65s)
+    [1BTQ-mv] chunk 330/331  +4.30s  (cumulative 42.96s)
+    [1BTQ-mv] chunk 331/331  +0.00s  (cumulative 42.96s)
+  1BTQ-mv: chunks=331 chunk_clouds=15857 bytes_per_cloud=1058 sweep+recall=42.98s
+  1BTQAsym-mv: starting (chunks=446, chunk_clouds=11756, bytes_per_cloud=1427)
+    [1BTQAsym-mv] chunk 44/446  +6.83s  (cumulative 6.83s)
+    [1BTQAsym-mv] chunk 88/446  +6.72s  (cumulative 13.55s)
+    [1BTQAsym-mv] chunk 132/446  +6.77s  (cumulative 20.32s)
+    [1BTQAsym-mv] chunk 176/446  +6.68s  (cumulative 27.00s)
+    [1BTQAsym-mv] chunk 220/446  +6.69s  (cumulative 33.69s)
+    [1BTQAsym-mv] chunk 264/446  +6.88s  (cumulative 40.57s)
+    [1BTQAsym-mv] chunk 308/446  +6.75s  (cumulative 47.32s)
+    [1BTQAsym-mv] chunk 352/446  +6.66s  (cumulative 53.98s)
+    [1BTQAsym-mv] chunk 396/446  +6.77s  (cumulative 60.75s)
+    [1BTQAsym-mv] chunk 440/446  +6.86s  (cumulative 67.61s)
+    [1BTQAsym-mv] chunk 446/446  +0.81s  (cumulative 68.42s)
+  1BTQAsym-mv: chunks=446 chunk_clouds=11756 bytes_per_cloud=1427 sweep+recall=68.43s
+
+=== Recall@10 vs candidate budget k' ===
+Averages over Q=1000 query clouds.
+
+Method                       k'=10     k'=11     k'=12     k'=13     k'=14     k'=16     k'=17     k'=19     k'=21     k'=23     k'=25     k'=28     k'=31     k'=34     k'=37     k'=41     k'=45     k'=50     k'=55     k'=61     k'=67     k'=74     k'=81     k'=89     k'=98    k'=108    k'=119    k'=131    k'=144    k'=158    k'=174    k'=191    k'=211    k'=232    k'=255    k'=281    k'=309    k'=340    k'=374    k'=411    k'=452    k'=497    k'=547    k'=602    k'=662    k'=728    k'=801    k'=881    k'=970   k'=1000
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+TurboQuant_mv (4bit)          0.95      0.98      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+TurboQuant_mv (8bit)          1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+FastScan-b2                   0.69      0.71      0.74      0.76      0.78      0.81      0.83      0.85      0.87      0.88      0.89      0.91      0.92      0.93      0.94      0.94      0.95      0.96      0.96      0.97      0.97      0.98      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+FastScan-b4                   0.55      0.58      0.60      0.62      0.64      0.66      0.68      0.70      0.72      0.74      0.76      0.77      0.79      0.80      0.82      0.83      0.84      0.85      0.86      0.87      0.88      0.89      0.90      0.91      0.92      0.92      0.93      0.93      0.94      0.95      0.95      0.96      0.96      0.96      0.96      0.97      0.97      0.97      0.98      0.98      0.98      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      0.99
+FastScan-b8                   0.22      0.23      0.24      0.24      0.25      0.26      0.26      0.27      0.28      0.29      0.29      0.31      0.32      0.33      0.33      0.34      0.35      0.36      0.37      0.38      0.39      0.40      0.41      0.42      0.42      0.43      0.44      0.45      0.46      0.47      0.48      0.49      0.50      0.51      0.52      0.53      0.54      0.55      0.56      0.56      0.57      0.58      0.59      0.60      0.61      0.62      0.63      0.64      0.65      0.65
+RaBitQ-1bit                   0.70      0.74      0.77      0.79      0.81      0.84      0.85      0.87      0.89      0.91      0.92      0.93      0.94      0.95      0.96      0.96      0.97      0.97      0.98      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+RaBitQ-4bit                   0.94      0.97      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+RaBitQ-8bit                   0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+1BTQ-mv                       0.65      0.68      0.71      0.73      0.74      0.78      0.79      0.81      0.83      0.84      0.86      0.87      0.88      0.90      0.91      0.92      0.93      0.94      0.94      0.95      0.95      0.96      0.96      0.97      0.97      0.98      0.98      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
+1BTQAsym-mv                   0.72      0.75      0.78      0.80      0.82      0.85      0.86      0.89      0.90      0.91      0.92      0.94      0.95      0.95      0.96      0.97      0.97      0.98      0.98      0.98      0.99      0.99      0.99      0.99      0.99      0.99      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00      1.00
