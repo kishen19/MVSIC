@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 
 DATASETS = [
-    "msmarco",
+    "hotpotqa"
 ]
 
-METHODS = ["muvera"]
+METHODS = ["mvivf", "muvera", "vamana", "svh_graph"]
 
 STEPS = [
     ("builds", "experiments/builds/scripts/run_builds.sh"),
@@ -19,14 +19,17 @@ STEPS = [
     ("batch", "experiments/batch/scripts/run_batch.sh"),
     ("multi_latency", "experiments/multi_latency/scripts/run_multi_latency.sh"),
 ]
+#    (multi_latency", "experiments/multi_latency/scripts/run_multi_latency.sh"),
 
 
-def run_step(repo_root: Path, script_rel: str, dataset: str, method: str) -> int:
+def run_step(repo_root: Path, name: str, script_rel: str, dataset: str, method: str) -> int:
     script_path = repo_root / script_rel
     if not script_path.exists():
         print(f"  ERROR: script not found: {script_path}", flush=True)
         return 127
     cmd = [str(script_path), "--dataset", dataset, "--method", method]
+    if name != "builds":
+        cmd += ["--k", "100"]
     print(f"  $ {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=repo_root)
     return proc.returncode
@@ -70,7 +73,7 @@ def main() -> int:
             for name, script in selected_steps:
                 print(f"\n[{dataset}/{method}] step: {name}", flush=True)
                 step_start = time.time()
-                rc = run_step(repo_root, script, dataset, method)
+                rc = run_step(repo_root, name, script, dataset, method)
                 elapsed = time.time() - step_start
                 print(f"[{dataset}/{method}] {name} -> rc={rc} ({elapsed:.1f}s)", flush=True)
                 if rc != 0:
