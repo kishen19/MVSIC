@@ -51,22 +51,16 @@ indices:
   - name: mvivf
     metric: ip
     builds:
-      - build_name: mvivf_k0_l500
+      - build_name: mvivf_k0_l500_d0_nit5_s0_mpcc100
         build_params: &stage1_defaults
           k_per_level: 0
           max_leaf_size: 500
           max_depth: 0
           niters: 5
+          s: 0
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
           build_with_8btq: true
-        # variants omitted => single raw variant (IndexMVIVFIP).
-        # To ablate center-compression / leaf-quantization, add e.g.:
-        # variants:
-        #   - {name: "",         compress: false, quantizer: None}
-        #   - {name: compress,   compress: true,  quantizer: None}
-        #   - {name: pq,         compress: false, quantizer: PQ}
-        #   - {name: compress_pq, compress: true, quantizer: PQ}
         search_configs: &ivf_k10
           - name: k=10
             params:
@@ -75,15 +69,9 @@ indices:
               k: [10]
               config:
                 - {name: "", num_rerank: 0}
-      - build_name: mvivf_k4_l500
-        build_params: { <<: *stage1_defaults, k_per_level: 4 }
+      - build_name: mvivf_k10_l500_d0_nit5_s0_mpcc100
+        build_params: { <<: *stage1_defaults, k_per_level: 10 }
         search_configs: *ivf_k10
-      - build_name: mvivf_k8_l500
-        build_params: { <<: *stage1_defaults, k_per_level: 8 }
-        search_configs: *ivf_k10
-      - build_name: mvivf_k16_l500
-        build_params: { <<: *stage1_defaults, k_per_level: 16 }
-        search_configs: *ivf_k10
-      - build_name: mvivf_k32_l500
-        build_params: { <<: *stage1_defaults, k_per_level: 32 }
+      - build_name: mvivf_k50_l500_d0_nit5_s0_mpcc100
+        build_params: { <<: *stage1_defaults, k_per_level: 50 }
         search_configs: *ivf_k10

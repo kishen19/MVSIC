@@ -51,12 +51,13 @@ indices:
   - name: mvivf
     metric: ip
     builds:
-      - build_name: mvivf_k0_l50_d0
+      - build_name: mvivf_k0_l100_d0_nit5_s0_mpcc100
         build_params: &stage2_defaults
           k_per_level: 0
-          max_leaf_size: 50
+          max_leaf_size: 100
           max_depth: 0
           niters: 5
+          s: 0
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
           build_with_8btq: true
@@ -68,13 +69,11 @@ indices:
               k: [10]
               config:
                 - {name: "", num_rerank: 0}
-      - build_name: mvivf_k0_l100_d0
-        build_params: { <<: *stage2_defaults, max_leaf_size: 100 }
         search_configs: *ivf_k10
-      - build_name: mvivf_k0_l500_d0
+      - build_name: mvivf_k0_l500_d0_nit5_s0_mpcc100
         build_params: { <<: *stage2_defaults, max_leaf_size: 500 }
         search_configs: *ivf_k10
-      - build_name: mvivf_k0_l1000_d0
+      - build_name: mvivf_k0_l1000_d0_nit5_s0_mpcc100
         build_params: { <<: *stage2_defaults, max_leaf_size: 1000 }
         search_configs: *ivf_k10
 
