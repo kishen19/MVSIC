@@ -63,8 +63,61 @@ _LEGEND_ABBREV: dict[str, str] = {
 }
 
 
+# Canonical "method family" for cross-experiment color sharing. The MV plot in
+# experiments/overretrieve_multivector_benchmark/scripts/plot.py uses the same
+# family -> color map so corresponding rows (TQ-4bit / TQ-MV-4bit, FS-b8 /
+# FS-b8, 1BTQ / 1BTQ-MV, ...) share a color across the SV and MV PDFs.
+_SECTION_TO_FAMILY: dict[str, str] = {
+    "TurboQuant":      "TQ-4bit",
+    "TurboQuant-8bit": "TQ-8bit",
+    "FastScan-b2":     "FS-b2",
+    "FastScan-b4":     "FS-b4",
+    "FastScan-b8":     "FS-b8",
+    "RaBitQ-1bit":     "RQ-1bit",
+    "RaBitQ-4bit":     "RQ-4bit",
+    "RaBitQ-8bit":     "RQ-8bit",
+    "1BTQ":            "1BTQ",
+    "1BTQAsym":        "1BTQAsym",
+    # SV-only Reference rows; not in MV. Given distinct (non-tab10) colors so
+    # they don't overlap any MV-shared family.
+    "Ref1BTQSym":      "Ref-1BTQSym",
+    "Ref1BTQAsym":     "Ref-1BTQAsym",
+}
+
+_FAMILY_COLORS: dict[str, str] = {
+    "TQ-4bit":       "tab:blue",
+    "TQ-8bit":       "tab:orange",
+    "FS-b2":         "tab:green",
+    "FS-b4":         "tab:red",
+    "FS-b8":         "tab:purple",
+    "RQ-1bit":       "tab:brown",
+    "RQ-4bit":       "tab:pink",
+    "RQ-8bit":       "tab:gray",
+    "1BTQ":          "tab:olive",
+    "1BTQAsym":      "tab:cyan",
+    # SV-only fallbacks.
+    "Ref-1BTQSym":   "#17becf",  # darker cyan
+    "Ref-1BTQAsym":  "#bcbd22",  # mustard
+}
+
+
 def _legend_label(canonical: str) -> str:
     return _LEGEND_ABBREV.get(canonical, canonical)
+
+
+def _color_for(canonical: str, fallback_idx: int):
+    """Map a section label to its shared cross-experiment color.
+
+    Anything we don't recognise falls back to tab10 cycling at ``fallback_idx``
+    so a new method auto-gets a distinct color rather than colliding silently.
+    """
+    fam = _SECTION_TO_FAMILY.get(canonical)
+    if fam is not None:
+        c = _FAMILY_COLORS.get(fam)
+        if c is not None:
+            return c
+    cmap = plt.colormaps.get_cmap("tab10")
+    return cmap(fallback_idx % 10)
 
 
 def parse_benchmark_txt(text: str) -> tuple[int | None, dict[str, np.ndarray]]:
@@ -126,21 +179,41 @@ def parse_benchmark_txt(text: str) -> tuple[int | None, dict[str, np.ndarray]]:
 
 
 def _default_method_order() -> list[str]:
-    """Stable legend order when present (matches ``All`` sweep in the binary)."""
+    """Stable plot/legend order. Mirrors the MV benchmark's _ORDER so
+    corresponding methods sit at the same legend position across the SV and
+    MV PDFs.
+
+    Top-to-bottom: TQ (1bit, 1bit-asym, 4bit, 8bit) -> RQ -> FS, so in the
+    default single-column legend the four TQ rows form a contiguous block at
+    the top and the FS rows sit at the bottom. SV-only reference baselines
+    trail at the very end so they don't interleave with the methods that
+    have an MV counterpart.
+    """
     return [
-        "TurboQuant",
-        "TurboQuant-8bit",
-        "FastScan-b2",
-        "FastScan-b4",
-        "FastScan-b8",
+        # TurboQuant family (TQ-1bit, TQ-1bit-asym, TQ-4bit, TQ-8bit)
         "1BTQ",
         "1BTQAsym",
-        "Ref1BTQAsym",
-        "Ref1BTQSym",
+        "TurboQuant",
+        "TurboQuant-8bit",
+        # RaBitQ family (RQ-1bit, RQ-4bit, RQ-8bit)
         "RaBitQ-1bit",
         "RaBitQ-4bit",
         "RaBitQ-8bit",
+        # FastScan family (FS-b2, FS-b4, FS-b8)
+        "FastScan-b2",
+        "FastScan-b4",
+        "FastScan-b8",
+        # SV-only reference baselines.
+        "Ref1BTQSym",
+        "Ref1BTQAsym",
     ]
+
+
+# SV-only reference baselines (1BTQ implementations from the original 1BTQ
+# paper). They live in the source tree for cross-checking against our 1BTQ
+# port but clutter the headline plot, so they're hidden by default. Pass
+# ``--include-ref`` to bring them back.
+_REF_SECTIONS: tuple[str, ...] = ("Ref1BTQSym", "Ref1BTQAsym")
 
 
 def plot_dataset(
@@ -148,16 +221,23 @@ def plot_dataset(
     k_eval: int | None,
     series: dict[str, np.ndarray],
     out_pdf: pathlib.Path,
+    *,
+    include_ref: bool = False,
 ) -> None:
     if not series:
         print(f"  [skip {dataset_title}] no parsed curves")
         return
 
+    if not include_ref:
+        series = {k: v for k, v in series.items() if k not in _REF_SECTIONS}
+        if not series:
+            print(f"  [skip {dataset_title}] only Ref* methods present and "
+                  f"--include-ref not passed")
+            return
+
     order = _default_method_order()
     labels = [lbl for lbl in order if lbl in series]
     labels += sorted(lbl for lbl in series if lbl not in labels)
-
-    cmap = plt.colormaps.get_cmap("tab10")
 
     fig, ax = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
 
@@ -167,11 +247,10 @@ def plot_dataset(
         arr = series[lbl]
         kp = arr[:, 0]
         rec = arr[:, 1]
-        color = cmap(i % 10)
         ax.plot(
             kp,
             rec,
-            color=color,
+            color=_color_for(lbl, i),
             linewidth=1.9,
             label=_legend_label(lbl),
             zorder=3,
@@ -231,6 +310,13 @@ def main() -> int:
         default=None,
         help="comma-separated dataset keys (e.g. arguana,nfcorpus); default: all chamfer_*.txt",
     )
+    ap.add_argument(
+        "--include-ref",
+        action="store_true",
+        help="Plot the Ref1BTQSym / Ref1BTQAsym reference baselines from the "
+             "original 1BTQ paper. Hidden by default to keep the legend "
+             "focused on the methods compared in the headline figures.",
+    )
     args = ap.parse_args()
 
     results_dir = args.results_dir
@@ -266,7 +352,8 @@ def main() -> int:
             continue
         k_eval, series = parse_benchmark_txt(text)
         out_pdf = out_dir / f"{title}_recall_vs_kprime.pdf"
-        plot_dataset(title, k_eval, series, out_pdf)
+        plot_dataset(title, k_eval, series, out_pdf,
+                     include_ref=args.include_ref)
 
     return 0
 

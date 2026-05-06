@@ -8,18 +8,6 @@
 | arguana | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 5.6 | 30.03 |
 | arguana | svh_graph | svh_graph_R64_L128_a1.0 | 8.5 | 694.19 |
 | arguana | vamana | vamana_R64_L128_a1.0 | 31.4 | 0.78 |
-| arxivqa | muvera | muvera_10240_R200_L600_a1.0 | 1.6 | 19.56 |
-| arxivqa | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 3.2 | 11.57 |
-| arxivqa | svh_graph | svh_graph_R64_L128_a1.0 | 2.8 | 289.86 |
-| arxivqa | vamana | vamana_R64_L128_a1.0 | 214.2 | 0.04 |
-| chartqa | muvera | muvera_10240_R200_L600_a1.0 | 4.4 | 59.06 |
-| chartqa | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 6.6 | 19.62 |
-| chartqa | svh_graph | svh_graph_R64_L128_a1.0 | 9.3 | 871.04 |
-| chartqa | vamana | vamana_R64_L128_a1.0 | 341.0 | 0.09 |
-| docvqa | muvera | muvera_10240_R200_L600_a1.0 | 1.7 | 19.56 |
-| docvqa | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 3.3 | 11.57 |
-| docvqa | svh_graph | svh_graph_R64_L128_a1.0 | 3.7 | 296.66 |
-| docvqa | vamana | vamana_R64_L128_a1.0 | 366.9 | 0.03 |
 | fiqa | muvera | muvera_10240_R200_L600_a1.0 | 133.5 | 2254.85 |
 | fiqa | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 15.5 | 214.42 |
 | fiqa | svh_graph | svh_graph_R64_L128_a1.0 | 68.6 | 4245.40 |
@@ -30,14 +18,7 @@
 | hotpotqa | mvivf_spill | mvivf_k0_l500_d0_nit5_s0_mpcc100_spill_2_1 | 627.3 | 2802.19 |
 | hotpotqa | svh_graph | svh_graph_R64_L128_a1.0 | 2996.4 | 175150.55 |
 | hotpotqa | vamana | vamana_R64_L128_a1.0 | 5040.3 | 543.30 |
-| infovqa | muvera | muvera_10240_R200_L600_a1.0 | 1.6 | 19.56 |
-| infovqa | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 3.1 | 11.57 |
-| infovqa | svh_graph | svh_graph_R64_L128_a1.0 | 2.8 | 291.25 |
-| infovqa | vamana | vamana_R64_L128_a1.0 | 196.3 | 0.03 |
-<<<<<<< Updated upstream
-=======
 | msmarco | muvera | muvera_2560_R200_L600_a1.0 | 5940.6 | 87759.72 |
->>>>>>> Stashed changes
 | msmarco | mvivf | mvivf_k0_l500_d0_nit5_s0_mpcc100 | 942.4 | 3293.89 |
 | nfcorpus | muvera | muvera_10240_R200_L600_a1.0 | 6.1 | 142.23 |
 | nfcorpus | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 2.1 | 16.08 |
@@ -49,6 +30,7 @@
 | nq | mvivf_spill | mvivf_k0_l500_d0_nit5_s0_mpcc100_spill_2_1 | 573.8 | 2176.81 |
 | nq | svh_graph | svh_graph_R64_L128_a1.0 | 3051.3 | 133213.90 |
 | nq | vamana | vamana_R64_L128_a1.0 | 7043.8 | 289.33 |
+| nq500k | mvivf | mvivf_k0_l500_d0_nit5_s0_mpcc100 | 156.2 | 243.96 |
 | scidocs | muvera | muvera_10240_R200_L600_a1.0 | 55.3 | 1005.23 |
 | scidocs | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 7.6 | 99.51 |
 | scidocs | svh_graph | svh_graph_R64_L128_a1.0 | 31.1 | 2147.86 |
@@ -57,27 +39,3 @@
 | scifact | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 2.9 | 28.32 |
 | scifact | svh_graph | svh_graph_R64_L128_a1.0 | 8.7 | 690.22 |
 | scifact | vamana | vamana_R64_L128_a1.0 | 48.9 | 0.49 |
-| shiftproject | muvera | muvera_10240_R200_L600_a1.0 | 3.3 | 39.09 |
-| shiftproject | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 6.0 | 24.15 |
-| shiftproject | svh_graph | svh_graph_R64_L128_a1.0 | 8.8 | 594.21 |
-| shiftproject | vamana | vamana_R64_L128_a1.0 | 345.1 | 0.07 |
-| synth_ai | muvera | muvera_10240_R200_L600_a1.0 | 3.2 | 37.88 |
-| synth_ai | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 4.6 | 16.10 |
-| synth_ai | svh_graph | svh_graph_R64_L128_a1.0 | 8.4 | 572.78 |
-| synth_ai | vamana | vamana_R64_L128_a1.0 | 447.2 | 0.09 |
-| synth_energy | muvera | muvera_10240_R200_L600_a1.0 | 3.3 | 38.15 |
-| synth_energy | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 5.6 | 20.12 |
-| synth_energy | svh_graph | svh_graph_R64_L128_a1.0 | 7.8 | 574.47 |
-| synth_energy | vamana | vamana_R64_L128_a1.0 | 434.2 | 0.07 |
-| synth_gov | muvera | muvera_10240_R200_L600_a1.0 | 3.2 | 38.04 |
-| synth_gov | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 4.5 | 16.10 |
-| synth_gov | svh_graph | svh_graph_R64_L128_a1.0 | 8.4 | 574.90 |
-| synth_gov | vamana | vamana_R64_L128_a1.0 | 404.4 | 0.08 |
-| synth_healthcare | muvera | muvera_10240_R200_L600_a1.0 | 3.2 | 37.69 |
-| synth_healthcare | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 4.5 | 16.10 |
-| synth_healthcare | svh_graph | svh_graph_R64_L128_a1.0 | 9.0 | 570.33 |
-| synth_healthcare | vamana | vamana_R64_L128_a1.0 | 382.3 | 0.07 |
-| tabfquad | muvera | muvera_10240_R200_L600_a1.0 | 0.1 | 2.74 |
-| tabfquad | mvivf | mvivf_k0_l100_d0_nit5_s0_mpcc100 | 0.9 | 3.02 |
-| tabfquad | svh_graph | svh_graph_R64_L128_a1.0 | 0.3 | 40.64 |
-| tabfquad | vamana | vamana_R64_L128_a1.0 | 17.8 | 0.00 |
