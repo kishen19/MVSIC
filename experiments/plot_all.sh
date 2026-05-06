@@ -14,6 +14,9 @@
 #   experiments/plot_all.sh --only builds    # just the build report
 #   experiments/plot_all.sh --suites all,beir   # which build-report suites to emit
 #   experiments/plot_all.sh --suites beir       # BEIR-only build report
+#   experiments/plot_all.sh --include-vidore # include ViDoRe per-dataset plots
+#   experiments/plot_all.sh --clean         # remove generated plots/reports and exit
+#   experiments/plot_all.sh --clean --dry-run --only latency,batch
 #   experiments/plot_all.sh --dry-run        # print commands, do not run
 #   experiments/plot_all.sh --list-stages    # print the names accepted by --only / --skip
 #
@@ -24,12 +27,16 @@
 # - --suites only affects shared-across-datasets plots (currently the build
 #   report); per-dataset PDFs always get one file per dataset, so suite
 #   filtering would just be a no-op.
+# - ViDoRe per-dataset plots are skipped by default to keep plot_all fast and
+#   focused on the paper's current BEIR/LoTTE set. Pass --include-vidore to
+#   regenerate them too.
 # - mvivf_ablation needs (variant, stage) tuples; we discover them from the
 #   results tree and dispatch through scripts/run_ablation.sh --task evaluate.
 # - query_compression needs --dataset; we iterate over every per-dataset
 #   results dir that has a CSV.
 
 set -euo pipefail
+shopt -s nullglob globstar
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -56,6 +63,8 @@ SKIP=""
 ONLY=""
 DRY_RUN=0
 LIST_STAGES=0
+INCLUDE_VIDORE=0
+CLEAN=0
 # Default: emit the all-datasets, BEIR-only and LoTTE-only build reports.
 # Use --suites to scope to just one (e.g. --suites beir).
 SUITES="all,beir,lotte"
@@ -65,6 +74,8 @@ while [[ $# -gt 0 ]]; do
     --skip)        SKIP="$2"; shift 2;;
     --only)        ONLY="$2"; shift 2;;
     --suites)      SUITES="$2"; shift 2;;
+    --include-vidore) INCLUDE_VIDORE=1; shift;;
+    --clean)       CLEAN=1; shift;;
     --dry-run)     DRY_RUN=1; shift;;
     --list-stages) LIST_STAGES=1; shift;;
     -h|--help)
@@ -86,6 +97,20 @@ if [[ "$LIST_STAGES" -eq 1 ]]; then
   exit 0
 fi
 
+VIDORE_DATASETS=(
+  docvqa
+  infovqa
+  arxivqa
+  tabfquad
+  chartqa
+  shiftproject
+  synth_ai
+  synth_energy
+  synth_gov
+  synth_healthcare
+  tatdqa
+)
+
 is_in_csv() {
   # is_in_csv <needle> <comma_separated_haystack>
   local needle="$1" csv="$2"
@@ -94,6 +119,35 @@ is_in_csv() {
     [[ "$(echo "$p" | xargs)" == "$needle" ]] && return 0
   done
   return 1
+}
+
+is_vidore_dataset() {
+  local needle="$1"
+  local ds
+  for ds in "${VIDORE_DATASETS[@]}"; do
+    [[ "$needle" == "$ds" ]] && return 0
+  done
+  return 1
+}
+
+dataset_csv_for_stage() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  local datasets=()
+  for ds_dir in "$root"/*/; do
+    [[ -d "$ds_dir" ]] || continue
+    local ds
+    ds="$(basename "$ds_dir")"
+    [[ "$ds" == "_plots" ]] && continue
+    if [[ "$INCLUDE_VIDORE" -eq 0 ]] && is_vidore_dataset "$ds"; then
+      continue
+    fi
+    datasets+=("$ds")
+  done
+  if (( ${#datasets[@]} > 0 )); then
+    local IFS=,
+    echo "${datasets[*]}"
+  fi
 }
 
 # Validate --only / --skip values against ALL_STAGES so a typo fails loudly
@@ -146,6 +200,61 @@ run_or_warn() {
     echo "[plot_all] WARN: command failed (continuing): $*" >&2
   fi
 }
+
+clean_glob() {
+  local pattern="$1"
+  local matched=0
+  local path
+  for path in $pattern; do
+    [[ -e "$path" ]] || continue
+    matched=1
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "rm -rf \"$path\""
+    else
+      rm -rf "$path"
+      echo "[plot_all] removed $path"
+    fi
+  done
+  if [[ "$matched" -eq 0 && "$DRY_RUN" -eq 1 ]]; then
+    echo "# no matches: $pattern"
+  fi
+}
+
+clean_stage() {
+  local stage="$1"
+  case "$stage" in
+    builds)
+      clean_glob "$REPO_ROOT/experiments/builds/results/build_report*.md"
+      clean_glob "$REPO_ROOT/experiments/builds/results/_plots/build_time*.pdf"
+      clean_glob "$REPO_ROOT/experiments/builds/results/_plots/index_size*.pdf"
+      ;;
+    latency|batch|multi_latency)
+      clean_glob "$REPO_ROOT/experiments/${stage}/results/_plots/*.pdf"
+      clean_glob "$REPO_ROOT/experiments/${stage}/results/_plots/k=*/*.pdf"
+      ;;
+    nq_study)
+      clean_glob "$REPO_ROOT/experiments/nq_study/results/latency/_plots/*.pdf"
+      clean_glob "$REPO_ROOT/experiments/nq_study/results/batch/_plots/*.pdf"
+      clean_glob "$REPO_ROOT/experiments/nq_study/results/multi_latency/_plots/*.pdf"
+      ;;
+    mvivf_ablation|muvera_ablation|svh_graph_ablation|vamana_ablations|optimizations|quantization_compare|overretrieve_singlevector_benchmark|overretrieve_multivector_benchmark|query_compression)
+      clean_glob "$REPO_ROOT/experiments/${stage}/results/_plots/*.pdf"
+      clean_glob "$REPO_ROOT/experiments/${stage}/results/_plots/**/*.pdf"
+      ;;
+  esac
+}
+
+if [[ "$CLEAN" -eq 1 ]]; then
+  echo "=== plot_all.sh clean ==="
+  for stage in "${ALL_STAGES[@]}"; do
+    if want_stage "$stage"; then
+      echo "=== clean: ${stage} ==="
+      clean_stage "$stage"
+    fi
+  done
+  echo "=== plot_all.sh clean done ==="
+  exit 0
+fi
 
 # -----------------------------------------------------------------------------
 # 1) Build report (markdown + bar plots).
@@ -200,17 +309,28 @@ for stage in latency batch multi_latency; do
   if want_stage "$stage"; then
     echo "=== plot: ${stage} ==="
     stage_results="$REPO_ROOT/experiments/${stage}/results"
+    datasets_csv="$(dataset_csv_for_stage "$stage_results")"
+    dataset_args=()
+    if [[ -n "$datasets_csv" ]]; then
+      dataset_args=(--datasets "$datasets_csv")
+    fi
     mapfile -t K_VALUES < <(discover_k_values "$stage_results")
     if (( ${#K_VALUES[@]} == 0 )); then
-      run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py"
+      run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
+        "${dataset_args[@]}"
     else
       for k in "${K_VALUES[@]}"; do
         echo "    --- k=$k ---"
-        run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" --k "$k"
+        run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
+          --k "$k" "${dataset_args[@]}"
       done
+      echo "    --- combined k values / paper four-panel ---"
+      run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
+        "${dataset_args[@]}"
     fi
-    if [[ -f "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py" ]]; then
-      run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py"
+    if [[ "$stage" != "batch" && -f "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py" ]]; then
+      run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py" \
+        "${dataset_args[@]}"
     fi
   fi
 done

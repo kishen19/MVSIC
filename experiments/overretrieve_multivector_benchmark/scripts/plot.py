@@ -19,6 +19,18 @@ try:
 except ImportError:
     sys.exit("pip install matplotlib numpy")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 
 HEADER_KP = re.compile(r"k'=(\d+)")
 ROW_NUM = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
@@ -49,15 +61,15 @@ _ORDER = [
 # "TQ-1bit" in the other, plotted in the same color.
 _LABEL = {
     "TurboQuant_mv (4bit)": "TQ-4bit",
-    "TurboQuant_mv (8bit)": "TQ-8bit",
+    "TurboQuant_mv (8bit)": "Rand-8bit",
     "FastScan-b2":          "FS-b2",
     "FastScan-b4":          "FS-b4",
     "FastScan-b8":          "FS-b8",
     "RaBitQ-1bit":          "RQ-1bit",
     "RaBitQ-4bit":          "RQ-4bit",
     "RaBitQ-8bit":          "RQ-8bit",
-    "1BTQ-mv":              "TQ-1bit",
-    "1BTQAsym-mv":          "TQ-1bit-asym",
+    "1BTQ-mv":              "Rand-1bit",
+    "1BTQAsym-mv":          "Rand-1bit-asym",
 }
 
 # Canonical "method family" for cross-experiment color sharing. The SV plot in
@@ -107,6 +119,11 @@ def _color_for(method: str, fallback_idx: int):
     return cmap(fallback_idx % 10)
 
 
+def _recall_label(k_eval: int | None) -> str:
+    k_str = str(k_eval) if k_eval is not None else "k"
+    return rf"Recall-${k_str}$@$k'$"
+
+
 def _parse_table(text: str) -> tuple[int | None, dict[str, np.ndarray]]:
     k_eval = None
     m = re.search(r"Recall@(\d+)\s+vs candidate budget k'", text)
@@ -153,27 +170,35 @@ def _plot_dataset(dataset: str, k_eval: int | None, series: dict[str, np.ndarray
     labels = [m for m in _ORDER if m in series] + sorted(m for m in series if m not in _ORDER)
 
     fig, ax = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
-    k_str = str(k_eval) if k_eval is not None else "?"
+    recall_label = _recall_label(k_eval)
     for i, method in enumerate(labels):
         arr = series[method]
         ax.plot(
             arr[:, 0],
             arr[:, 1],
             color=_color_for(method, i),
-            linewidth=1.9,
+            linewidth=2.8,
             label=_LABEL.get(method, method),
             zorder=3,
         )
 
     ax.set_xscale("log")
-    ax.set_xlabel(r"Candidate budget $k'$")
-    ax.set_ylabel(f"Recall@{k_str}")
+    ax.set_xlabel(r"$k'$")
+    ax.set_ylabel(recall_label)
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
-    ax.set_title(f"{dataset}: Recall@{k_str} vs $k'$", fontsize=11)
+    ax.set_title(f"{dataset}: {recall_label} vs $k'$")
     ncol = 3 if len(labels) > 8 else (2 if len(labels) > 5 else 1)
-    ax.legend(loc="best", ncol=ncol, fontsize=8)
+    ax.legend(
+        loc="best",
+        ncol=ncol,
+        fontsize=13,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)

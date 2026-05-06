@@ -40,6 +40,20 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib pyyaml numpy to use this script")
 
+plt.rcParams.update({
+    # These PDFs are often included as four panels in one NeurIPS-width row.
+    # Use large source fonts so the final scaled figure remains readable.
+    "font.size": 15,
+    "axes.titlesize": 17,
+    "axes.labelsize": 17,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 13,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 
 _PREFIX_FOR_STAGE = {
     "latency":       "latency_",
@@ -53,17 +67,95 @@ _METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph", "fastp
 
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
-    "mvivf": "MVIVF",
-    "mvivf_spill": "MVIVF Spill",
-    "mvivf_flat": "MVIVF Flat",
+    "mvivf": "MV-IVF",
+    "mvivf_spill": "MV-IVF Spill",
+    "mvivf_flat": "MV-IVF Flat",
     "muvera": "MUVERA",
     "mpool": "Mean-Pool",
     "vamana": "MV-Vamana",
     "svh_ivf": "SVH IVF",
-    "svh_graph": "SVH Graph",
+    "svh_graph": "SVH",
     "fastplaid": "FastPlaid",
     "igp": "IGP",
 }
+
+_PRETTY_VARIANT = {
+    "tq1": "Rand-1bit",
+    "1btq": "Rand-1bit",
+    "onebittq": "Rand-1bit",
+    "tq8": "Rand-8bit",
+    "8btq": "Rand-8bit",
+    "eightbittq": "Rand-8bit",
+    "tq4": "TQ-4bit",
+    "4btq": "TQ-4bit",
+    "turboquant4": "TQ-4bit",
+    "fastscan": "FastScan",
+    "raw": "",
+}
+
+
+def _pretty_variant(variant: str | None) -> str:
+    if not variant or variant == "raw":
+        return ""
+    key = str(variant).strip().lower().replace("-", "").replace("_", "")
+    return _PRETTY_VARIANT.get(key, str(variant))
+
+
+def _pretty_label(method: str, variant: str | None) -> str:
+    return _PRETTY_METHOD.get(method, method)
+
+
+def _legend(ax) -> None:
+    ax.legend(
+        loc="best",
+        fontsize=15,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+        borderpad=0.3,
+        handlelength=1.6,
+        handletextpad=0.35,
+        labelspacing=0.2,
+    )
+
+
+def _stage_title(stage: str, *, latency_ms: bool = False) -> str:
+    if stage == "batch":
+        return "Recall vs Throughput (Batch)"
+    if stage == "multi_latency":
+        return "Recall vs Latency (all thrds)"
+    if stage == "latency":
+        return "Recall vs Latency (1 thrd)" if latency_ms else "Recall vs QPS (1 thrd)"
+    return f"Recall vs {stage}"
+
+
+def _stage_ylabel(stage: str, *, latency_ms: bool = False) -> str:
+    if latency_ms:
+        return "Latency (ms)"
+    if stage == "batch":
+        return "QPS"
+    return "QPS"
+
+
+def _recall_xlabel(kind: str, k: int | None) -> str:
+    if k is None:
+        return r"Recall-$1$@$k$" if kind == "1" else r"Recall-$k$@$k$"
+    return f"Recall-${kind}$@${k}$" if kind == "1" else f"Recall-${k}$@${k}$"
+
+
+def _single_k(df: pd.DataFrame) -> int | None:
+    if "k" not in df.columns:
+        return None
+    vals = sorted({int(v) for v in df["k"].dropna().astype(int).unique()})
+    return vals[0] if len(vals) == 1 else None
+
+
+def _is_combined_k_structured_run(df: pd.DataFrame, search: str | None) -> bool:
+    if search is not None or "search" not in df.columns:
+        return False
+    searches = {str(v) for v in df["search"].dropna().unique()}
+    return any(s.startswith("k=") for s in searches)
 
 # Logical breakdown buckets per method: collapse the raw timer columns coming
 # out of methods.yaml into 3-4 named segments so the per-dataset breakdown
@@ -389,7 +481,7 @@ def _plot_pareto_panel(
     # Key color by position in the full _METHOD_ORDER so colors are stable
     # across datasets even when some methods are absent.
     color_for = {m: cmap(_METHOD_ORDER.index(m) % 10) for m in methods_present}
-    y_label = "QPS (batch)" if stage == "batch" else "QPS (per-query)"
+    y_label = _stage_ylabel(stage, latency_ms=False)
 
     for method in methods_present:
         sub_m = df[df["method"] == method]
@@ -399,20 +491,17 @@ def _plot_pareto_panel(
                 continue
             xs = sub[x_col].to_numpy(dtype=float)
             ys = sub[qps].to_numpy(dtype=float)
-            ax.scatter(xs, ys, s=18, color=color_for[method], alpha=0.22, zorder=1)
             fx, fy = _pareto_curve(xs, ys)
             if fx.size == 0:
                 continue
-            label = f"{_PRETTY_METHOD.get(method, method)}"
-            if variant and variant != "raw":
-                label += f" / {variant}"
+            label = _pretty_label(method, variant)
             ls = "-" if vi == 0 else "--"
             ax.plot(
                 fx,
                 fy,
                 marker="o",
-                markersize=4.5,
-                linewidth=1.9,
+                markersize=5.4,
+                linewidth=2.8,
                 linestyle=ls,
                 color=color_for[method],
                 label=label if show_legend else None,
@@ -426,13 +515,14 @@ def _plot_pareto_panel(
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
     if show_legend:
-        ax.legend(loc="best", fontsize=8)
+        _legend(ax)
     _pareto_panel_xlim(ax, df, methods_present, x_col, qps)
 
 
 def _plot_pareto_latency_ms_panel(
     ax,
     df: pd.DataFrame,
+    stage: str,
     qps: str,
     x_col: str,
     xlabel: str,
@@ -445,7 +535,7 @@ def _plot_pareto_latency_ms_panel(
     # Key color by position in the full _METHOD_ORDER so colors are stable
     # across datasets even when some methods are absent.
     color_for = {m: cmap(_METHOD_ORDER.index(m) % 10) for m in methods_present}
-    y_label = "Latency (ms)"
+    y_label = _stage_ylabel(stage, latency_ms=True)
 
     for method in methods_present:
         sub_m = df[df["method"] == method]
@@ -456,20 +546,17 @@ def _plot_pareto_latency_ms_panel(
             xs = sub[x_col].to_numpy(dtype=float)
             qv = sub[qps].to_numpy(dtype=float)
             lat_ms = 1000.0 / np.maximum(qv, 1e-12)
-            ax.scatter(xs, lat_ms, s=18, color=color_for[method], alpha=0.22, zorder=1)
             fx, fy = _pareto_curve_recall_latency_ms(xs, qv)
             if fx.size == 0:
                 continue
-            label = f"{_PRETTY_METHOD.get(method, method)}"
-            if variant and variant != "raw":
-                label += f" / {variant}"
+            label = _pretty_label(method, variant)
             ls = "-" if vi == 0 else "--"
             ax.plot(
                 fx,
                 fy,
                 marker="o",
-                markersize=4.5,
-                linewidth=1.9,
+                markersize=5.4,
+                linewidth=2.8,
                 linestyle=ls,
                 color=color_for[method],
                 label=label if show_legend else None,
@@ -483,7 +570,7 @@ def _plot_pareto_latency_ms_panel(
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
     if show_legend:
-        ax.legend(loc="best", fontsize=8)
+        _legend(ax)
     _pareto_panel_xlim(ax, df, methods_present, x_col, qps)
 
 
@@ -509,6 +596,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
         return
 
     if has_left and has_right:
+        k_eval = _single_k(df)
         fig, (ax_left, ax_right) = plt.subplots(
             1, 2, figsize=(12, 5), sharey=True, layout="constrained"
         )
@@ -518,7 +606,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             stage,
             qps,
             "recall_1_k",
-            "Recall (1@k)",
+            _recall_xlabel("1", k_eval),
             show_ylabel=True,
             show_legend=False,
         )
@@ -528,7 +616,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             stage,
             qps,
             "recall_k_k",
-            "Recall (k@k)",
+            _recall_xlabel("k", k_eval),
             show_ylabel=False,
             show_legend=True,
         )
@@ -540,7 +628,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             stage,
             qps,
             "recall_1_k",
-            "Recall (1@k)",
+            _recall_xlabel("1", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
         )
@@ -552,12 +640,12 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             stage,
             qps,
             "recall_k_k",
-            "Recall (k@k)",
+            _recall_xlabel("k", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
         )
 
-    fig.suptitle(f"{dataset}: recall vs QPS [{stage}]", fontsize=11)
+    fig.suptitle(f"{dataset}: {_stage_title(stage)}", fontsize=17)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
@@ -592,18 +680,20 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
         _plot_pareto_latency_ms_panel(
             ax_left,
             df,
+            stage,
             qps,
             "recall_1_k",
-            "Recall (1@k)",
+            _recall_xlabel("1", _single_k(df)),
             show_ylabel=True,
             show_legend=False,
         )
         _plot_pareto_latency_ms_panel(
             ax_right,
             df,
+            stage,
             qps,
             "recall_k_k",
-            "Recall (k@k)",
+            _recall_xlabel("k", _single_k(df)),
             show_ylabel=False,
             show_legend=True,
         )
@@ -612,9 +702,10 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
         _plot_pareto_latency_ms_panel(
             ax_one,
             df,
+            stage,
             qps,
             "recall_1_k",
-            "Recall (1@k)",
+            _recall_xlabel("1", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
         )
@@ -623,16 +714,96 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
         _plot_pareto_latency_ms_panel(
             ax_one,
             df,
+            stage,
             qps,
             "recall_k_k",
-            "Recall (k@k)",
+            _recall_xlabel("k", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
         )
 
     fig.suptitle(
-        f"{dataset}: recall vs latency (1000 / QPS_seq ms) [{stage}]",
-        fontsize=11,
+        f"{dataset}: {_stage_title(stage, latency_ms=True)}",
+        fontsize=17,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def _has_recall_data(df: pd.DataFrame, x_col: str, y_col: str) -> bool:
+    return x_col in df.columns and y_col in df.columns and not df.dropna(
+        subset=[x_col, y_col]
+    ).empty
+
+
+def _plot_paper_four_panel(
+    df: pd.DataFrame,
+    stage: str,
+    dataset: str,
+    out_path: pathlib.Path,
+    *,
+    latency_ms: bool,
+) -> None:
+    """Paper-facing one-row plot:
+    R1@10, R10@10, R1@100, R100@100.
+
+    Emitted only when both k=10 and k=100 are present.
+    """
+    qps = _qps_column(stage)
+    if "k" not in df.columns or qps not in df.columns:
+        return
+    k_vals = {int(v) for v in df["k"].dropna().astype(int).unique()}
+    if not {10, 100}.issubset(k_vals):
+        return
+
+    specs = [
+        (10, "recall_1_k", _recall_xlabel("1", 10)),
+        (10, "recall_k_k", _recall_xlabel("k", 10)),
+        (100, "recall_1_k", _recall_xlabel("1", 100)),
+        (100, "recall_k_k", _recall_xlabel("k", 100)),
+    ]
+    for k_eval, x_col, _ in specs:
+        sub = df[df["k"].astype(int) == k_eval]
+        if not _has_recall_data(sub, x_col, qps):
+            return
+
+    fig, axes = plt.subplots(
+        1,
+        4,
+        figsize=(12.8, 3.15),
+        sharey=True,
+        layout="constrained",
+    )
+    for i, (k_eval, x_col, xlabel) in enumerate(specs):
+        sub = df[df["k"].astype(int) == k_eval]
+        if latency_ms:
+            _plot_pareto_latency_ms_panel(
+                axes[i],
+                sub,
+                stage,
+                qps,
+                x_col,
+                xlabel,
+                show_ylabel=(i == 0),
+                show_legend=(i == len(specs) - 1),
+            )
+        else:
+            _plot_pareto_panel(
+                axes[i],
+                sub,
+                stage,
+                qps,
+                x_col,
+                xlabel,
+                show_ylabel=(i == 0),
+                show_legend=(i == len(specs) - 1),
+            )
+
+    fig.suptitle(
+        f"{dataset}: {_stage_title(stage, latency_ms=latency_ms)}",
+        fontsize=17,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
@@ -714,9 +885,7 @@ def _plot_breakdown(df: pd.DataFrame, stage: str,
             seg = {k: v / factor for k, v in seg.items()}
             bar_data.append(seg)
             variant = row.get("variant", "")
-            nice = _PRETTY_METHOD.get(method, method)
-            if variant and variant != "raw":
-                nice += f"\n{variant}"
+            nice = _pretty_label(method, variant).replace(" / ", "\n")
             bar_labels.append(nice)
             bar_x.append(len(bar_x))
 
@@ -748,10 +917,18 @@ def _plot_breakdown(df: pd.DataFrame, stage: str,
         bottoms += heights
 
     ax.set_xticks(bar_x)
-    ax.set_xticklabels(bar_labels, rotation=15, ha="right", fontsize=9)
+    ax.set_xticklabels(bar_labels, rotation=15, ha="right", fontsize=13)
     ax.set_ylabel("Per-query time (s) @ best recall")
     ax.set_title(f"{dataset}: timer breakdown [{stage}]")
-    ax.legend(loc="best", fontsize=8, ncol=1)
+    ax.legend(
+        loc="best",
+        fontsize=13,
+        ncol=1,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -825,12 +1002,34 @@ def main() -> int:
                 continue
         print(f"[{ds}] {len(df)} rows from {df['method'].nunique()} methods"
               + (f" (search={args.search})" if args.search else ""))
-        _plot_pareto(df, args.stage, ds, out_dir / f"{ds}_pareto.pdf")
-        if args.stage in ("latency", "multi_latency"):
-            _plot_pareto_latency_ms(
-                df, args.stage, ds, out_dir / f"{ds}_pareto_latency_ms.pdf"
+        combined_k_structured = _is_combined_k_structured_run(df, args.search)
+        if combined_k_structured:
+            print(
+                f"  [skip legacy combined plots for {ds}: k-structured data; "
+                "paper plots require both k=10 and k=100]"
             )
-        _plot_breakdown(df, args.stage, ds, out_dir / f"{ds}_breakdown.pdf")
+        else:
+            _plot_pareto(df, args.stage, ds, out_dir / f"{ds}_pareto.pdf")
+        if args.stage == "batch":
+            _plot_paper_four_panel(
+                df,
+                args.stage,
+                ds,
+                out_dir / f"{ds}_paper_pareto.pdf",
+                latency_ms=False,
+            )
+        if args.stage in ("latency", "multi_latency"):
+            if not combined_k_structured:
+                _plot_pareto_latency_ms(
+                    df, args.stage, ds, out_dir / f"{ds}_pareto_latency_ms.pdf"
+                )
+            _plot_paper_four_panel(
+                df,
+                args.stage,
+                ds,
+                out_dir / f"{ds}_paper_pareto_latency_ms.pdf",
+                latency_ms=True,
+            )
     return 0
 
 

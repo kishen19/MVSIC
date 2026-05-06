@@ -31,6 +31,18 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib to use this script")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     rename = {}
@@ -241,6 +253,14 @@ def _filter_to_recall_window(
     return df[s.between(lo, hi)]
 
 
+def _recall_k_k_label(df: pd.DataFrame) -> str:
+    if "k" in df.columns:
+        vals = sorted({int(v) for v in df["k"].dropna().astype(int).unique()})
+        if len(vals) == 1:
+            return f"Recall-${vals[0]}$@${vals[0]}$"
+    return r"Recall-$k$@$k$"
+
+
 def _plot_xy(df: pd.DataFrame, group_col: str, x_col: str, y_col: str,
              x_label: str, y_label: str, title: str, out_path: pathlib.Path,
              extra_label_col: str | None = None) -> None:
@@ -255,7 +275,14 @@ def _plot_xy(df: pd.DataFrame, group_col: str, x_col: str, y_col: str,
     ax.set_ylabel(y_label)
     ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="best")
+    ax.legend(
+        loc="best",
+        fontsize=13,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
     ax.set_title(title)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,7 +336,7 @@ def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path,
         sub = sub.dropna(subset=["recall_k_k", "QPS_seq"])
         if sub.empty:
             continue
-        ax.scatter(sub["recall_k_k"], sub["QPS_seq"], s=16, alpha=0.35)
+        ax.scatter(sub["recall_k_k"], sub["QPS_seq"], s=20, alpha=0.25)
         fx, fy = _pareto_curve(sub["recall_k_k"], sub["QPS_seq"])
         if len(fx) == 0:
             continue
@@ -317,11 +344,18 @@ def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path,
                 label=_series_label(key, group_col, extra_label_col))
     ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
 
-    ax.set_xlabel("Recall@k (k@k)")
+    ax.set_xlabel(_recall_k_k_label(df))
     ax.set_ylabel("QPS (per-query)")
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="best")
+    ax.legend(
+        loc="best",
+        fontsize=13,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
     ax.set_title(title)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -340,7 +374,7 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
         raise SystemExit("Missing avg_cmps column in merged CSVs.")
     df = _ensure_group_col(df, group_col)
 
-    # For stage selection we use Recall@k (k@k).
+    # For stage selection we use Recall-k@k.
     recall_x = "recall_k_k"
     if recall_x not in df.columns:
         raise SystemExit("Missing recall_k_k column in merged CSVs.")
@@ -362,8 +396,8 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
         group_col=group_col,
         x_col=recall_x,
         y_col="latency_ms",
-        x_label="Recall@k (k@k)",
-        y_label="Sequential latency per query (ms)",
+        x_label=_recall_k_k_label(df),
+        y_label="Latency (ms)",
         title=f"{prefix}: latency vs recall ({title_suffix})",
         out_path=out_dir / f"{prefix}_latency.pdf",
         extra_label_col=extra_label_col,
@@ -373,7 +407,7 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
         group_col=group_col,
         x_col=recall_x,
         y_col="avg_cmps",
-        x_label="Recall@k (k@k)",
+        x_label=_recall_k_k_label(df),
         y_label="Average bytes accessed per query",
         title=f"{prefix}: bytes accessed vs recall ({title_suffix})",
         out_path=out_dir / f"{prefix}_cmps.pdf",

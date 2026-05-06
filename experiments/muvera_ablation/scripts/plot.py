@@ -14,6 +14,18 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib numpy to use this script")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent
@@ -127,6 +139,14 @@ def _build_label(build: str) -> str:
     return f"d_fde={d}" if d < 10**9 else build
 
 
+def _recall_k_k_label(df: pd.DataFrame) -> str:
+    if "k" in df.columns:
+        vals = sorted({int(v) for v in df["k"].dropna().astype(int).unique()})
+        if len(vals) == 1:
+            return f"Recall-${vals[0]}$@${vals[0]}$"
+    return r"Recall-$k$@$k$"
+
+
 def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None:
     sub = df[(df["method"] == "muvera")].dropna(subset=["recall_k_k", "QPS_seq"])
     if sub.empty:
@@ -143,12 +163,12 @@ def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> Non
         xs = s["recall_k_k"].to_numpy(dtype=float)
         ys = s["QPS_seq"].to_numpy(dtype=float)
         # Faded points behind the Pareto line.
-        ax.scatter(xs, ys, s=18, color=colors[b], alpha=0.22, zorder=1)
+        ax.scatter(xs, ys, s=20, color=colors[b], alpha=0.25, zorder=1)
         fx, fy = _pareto_curve(xs, ys)
         if fx.size == 0:
             continue
         ax.plot(
-            fx, fy, marker="o", markersize=4.5, linewidth=1.9,
+            fx, fy, marker="o", markersize=5.4, linewidth=2.8,
             color=colors[b], label=_build_label(b), zorder=3
         )
 
@@ -163,11 +183,18 @@ def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> Non
     else:
         ax.set_xlim(0.0, 1.0)
 
-    ax.set_xlabel("Recall@k")
+    ax.set_xlabel(_recall_k_k_label(sub))
     ax.set_ylabel("QPS (per-query)")
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(
+        loc="best",
+        fontsize=13,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
     ax.set_title(f"{dataset}: MUVERA ablation (Pareto by d_fde)")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)

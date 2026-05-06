@@ -30,6 +30,18 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 
 def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None:
     df = pd.read_csv(csv_path)
@@ -47,14 +59,22 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
 
     cmap = plt.colormaps.get_cmap("tab10")
 
+    def recall_label(col: str) -> str:
+        parts = col.split("_")
+        if len(parts) == 3 and parts[0] == "recall":
+            return f"Recall-${parts[1]}$@${parts[2]}$"
+        return col.replace("_", " ")
+
+    legend_loc = "lower right" if "ball_carving" in csv_path.stem else "best"
+
     for i, col in enumerate(recall_cols):
         ax_r.plot(
             tau,
             df[col],
             color=cmap(i % 10),
-            lw=1.9,
+            lw=2.8,
             zorder=4,
-            label=col.replace("_", " "),
+            label=recall_label(col),
         )
 
     ax_r.set_xlabel(r"Threshold $\tau$")
@@ -72,12 +92,12 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
             tau,
             df["avg_compressed_vectors"],
             color=qcol,
-            lw=1.9,
+            lw=2.8,
             linestyle="--",
             zorder=3,
-            label="Avg compressed size",
+            label="Avg Query Size",
         )
-        ax_q.set_ylabel("Avg vectors/query")
+        ax_q.set_ylabel("Avg Query Size")
         ax_q.tick_params(axis="y", colors=qcol)
         ax_q.spines["top"].set_visible(False)
 
@@ -85,20 +105,28 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
         ax_r.legend(
             lines_r + lines_q,
             labels_r + labels_q,
-            loc="best",
-            ncol=2 if len(lines_r) + len(lines_q) > 5 else 1,
-            fontsize=8,
+            loc=legend_loc,
+            ncol=1,
+            fontsize=13,
+            frameon=True,
+            framealpha=0.95,
+            facecolor="white",
+            edgecolor="0.35",
         )
     else:
         ax_r.legend(
             lines_r,
             labels_r,
-            loc="best",
-            ncol=2 if len(lines_r) > 5 else 1,
-            fontsize=8,
+            loc=legend_loc,
+            ncol=1,
+            fontsize=13,
+            frameon=True,
+            framealpha=0.95,
+            facecolor="white",
+            edgecolor="0.35",
         )
 
-    ax_r.set_title(title, fontsize=11)
+    ax_r.set_title(title)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)
     plt.close(fig)
@@ -122,8 +150,8 @@ def main() -> None:
     od.mkdir(parents=True, exist_ok=True)
 
     pairs = [
-        (rd / "ball_carving.csv", od / f"recall_ball_carving_{ds}.pdf", f"{ds} — ball carving"),
-        (rd / "wards.csv", od / f"recall_wards_{ds}.pdf", f"{ds} — Ward linkage"),
+        (rd / "ball_carving.csv", od / f"recall_ball_carving_{ds}.pdf", f"{ds} - Ball Carving"),
+        (rd / "wards.csv", od / f"recall_wards_{ds}.pdf", f"{ds} - Ward's Method"),
     ]
     for csv_path, pdf_path, title in pairs:
         if not csv_path.is_file():

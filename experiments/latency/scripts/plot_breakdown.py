@@ -20,6 +20,7 @@ def main() -> int:
     p.add_argument("--results", type=pathlib.Path,
                    default=REPO_ROOT / "experiments" / "latency" / "results")
     p.add_argument("--out-dir", type=pathlib.Path, default=None)
+    p.add_argument("--target-recall", type=float, default=0.90)
     args = p.parse_args()
 
     cmd = [
@@ -31,6 +32,7 @@ def main() -> int:
         cmd += ["--datasets", args.datasets]
     if args.out_dir:
         cmd += ["--out-dir", str(args.out_dir)]
+    cmd += ["--target-recall", str(args.target_recall)]
     return subprocess.call(cmd)
 
 

@@ -28,6 +28,18 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib numpy to use this script")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent.parent.parent
@@ -37,7 +49,7 @@ REPO_ROOT = HERE.parent.parent.parent
 # so colors stay stable across datasets even when a variant is missing.
 _VARIANT_ORDER = ["tq1", "fs"]
 _VARIANT_LABELS = {
-    "tq1": "TQ-1bit (OneBitTQ)",
+    "tq1": "Rand-1bit",
     "fs":  "FastScan (block_size=8)",
 }
 
@@ -144,6 +156,14 @@ def _set_recall_xlim(ax, xs_all: np.ndarray) -> None:
     ax.set_xlim(left, _XLIM_RIGHT_RECALL)
 
 
+def _recall_k_k_label(df: pd.DataFrame) -> str:
+    if "k" in df.columns:
+        vals = sorted({int(v) for v in df["k"].dropna().astype(int).unique()})
+        if len(vals) == 1:
+            return f"Recall-${vals[0]}$@${vals[0]}$"
+    return r"Recall-$k$@$k$"
+
+
 def _plot_pareto(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None:
     variants_present = [q for q in _VARIANT_ORDER if q in df["variant"].unique()]
     if not variants_present:
@@ -175,25 +195,33 @@ def _plot_pareto(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None
             fx,
             fy,
             marker="o",
-            markersize=4.5,
-            linewidth=1.9,
+            markersize=5.4,
+            linewidth=2.8,
             color=color,
             label=_VARIANT_LABELS.get(q, q),
             zorder=3,
         )
 
-    ax.set_xlabel("Recall (k@k)")
+    ax.set_xlabel(_recall_k_k_label(df))
     ax.set_ylabel("QPS (per-query)")
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
-    ax.legend(loc="best", fontsize=8, title="leaf quantizer")
+    ax.legend(
+        loc="best",
+        fontsize=13,
+        title="leaf quantizer",
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
     _set_recall_xlim(
         ax,
         np.concatenate(xs_all_parts) if xs_all_parts else np.array([], dtype=float),
     )
 
-    fig.suptitle(f"{dataset}: leaf-quantization compare [latency]", fontsize=11)
+    fig.suptitle(f"{dataset}: leaf-quantization compare [latency]")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)

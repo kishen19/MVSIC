@@ -41,6 +41,18 @@ try:
 except ImportError:
     sys.exit("pip install matplotlib numpy")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 14,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "lines.linewidth": 2.8,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
 SECTION_HDR = re.compile(r"^===\s+(.+?)\s+===\s*$")
 TABLE_HEADER = re.compile(r"k'\s+Recall@(\d+)")
 DATA_ROW = re.compile(r"^\s*(\d+)\s+([0-9.]+(?:[eE][+-]?\d+)?)\s*$")
@@ -49,14 +61,14 @@ DATA_ROW = re.compile(r"^\s*(\d+)\s+([0-9.]+(?:[eE][+-]?\d+)?)\s*$")
 # Canonical section labels from bench_singlevector_overretrieve.cpp -> legend text.
 _LEGEND_ABBREV: dict[str, str] = {
     "TurboQuant": "TQ-4bit",
-    "TurboQuant-8bit": "TQ-8bit",
+    "TurboQuant-8bit": "Rand-8bit",
     "FastScan-b2": "FS-b2",
     "FastScan-b4": "FS-b4",
     "FastScan-b8": "FS-b8",
-    "1BTQ": "TQ-1bit",
-    "1BTQAsym": "TQ-1bit-asym",
-    "Ref1BTQAsym": "Ref-TQ-1bit-asym",
-    "Ref1BTQSym": "Ref-TQ-1bit-sym",
+    "1BTQ": "Rand-1bit",
+    "1BTQAsym": "Rand-1bit-asym",
+    "Ref1BTQAsym": "Ref-Rand-1bit-asym",
+    "Ref1BTQSym": "Ref-Rand-1bit-sym",
     "RaBitQ-1bit": "RQ-1bit",
     "RaBitQ-4bit": "RQ-4bit",
     "RaBitQ-8bit": "RQ-8bit",
@@ -118,6 +130,11 @@ def _color_for(canonical: str, fallback_idx: int):
             return c
     cmap = plt.colormaps.get_cmap("tab10")
     return cmap(fallback_idx % 10)
+
+
+def _recall_label(k_eval: int | None) -> str:
+    k_str = str(k_eval) if k_eval is not None else "k"
+    return rf"Recall-${k_str}$@$k'$"
 
 
 def parse_benchmark_txt(text: str) -> tuple[int | None, dict[str, np.ndarray]]:
@@ -241,7 +258,7 @@ def plot_dataset(
 
     fig, ax = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
 
-    k_str = str(k_eval) if k_eval is not None else "?"
+    recall_label = _recall_label(k_eval)
 
     for i, lbl in enumerate(labels):
         arr = series[lbl]
@@ -251,22 +268,30 @@ def plot_dataset(
             kp,
             rec,
             color=_color_for(lbl, i),
-            linewidth=1.9,
+            linewidth=2.8,
             label=_legend_label(lbl),
             zorder=3,
         )
 
     ax.set_xscale("log")
-    ax.set_xlabel(r"Candidate budget $k'$")
-    ax.set_ylabel(f"Recall@{k_str}")
+    ax.set_xlabel(r"$k'$")
+    ax.set_ylabel(recall_label)
     ax.set_ylim(0.0, 1.02)
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
 
-    ax.set_title(f"{dataset_title}: Recall@{k_str} vs $k'$", fontsize=11)
+    ax.set_title(f"{dataset_title}: {recall_label} vs $k'$")
 
     ncol = 2 if len(labels) > 5 else 1
-    ax.legend(loc="best", ncol=ncol, fontsize=8)
+    ax.legend(
+        loc="best",
+        ncol=ncol,
+        fontsize=13,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_pdf)

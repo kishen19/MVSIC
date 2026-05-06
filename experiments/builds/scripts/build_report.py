@@ -49,8 +49,19 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib numpy to use this script")
 
+plt.rcParams.update({
+    "font.size": 15,
+    "axes.titlesize": 18,
+    "axes.labelsize": 18,
+    "xtick.labelsize": 13,
+    "ytick.labelsize": 14,
+    "legend.fontsize": 13,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
 
-_METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph", "fastplaid", "igp"]
+
+_METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph"]
 
 
 # Canonical dataset suites. Mirrors the lists in
@@ -71,10 +82,10 @@ _SUITES: dict[str, list[str]] = {
     ],
 }
 _PRETTY = {
-    "mvivf": "MVIVF",
+    "mvivf": "MV-IVF",
     "muvera": "MUVERA",
     "vamana": "MV-Vamana",
-    "svh_graph": "SVH Graph",
+    "svh_graph": "SVH",
     "fastplaid": "FastPlaid",
     "igp": "IGP",
 }
@@ -166,7 +177,14 @@ def _bar_plot(df: pd.DataFrame, value_col: str, ylabel: str,
     if log:
         ax.set_yscale("log")
     ax.grid(True, axis="y", alpha=0.3)
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(
+        loc="best",
+        fontsize=13,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+    )
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
