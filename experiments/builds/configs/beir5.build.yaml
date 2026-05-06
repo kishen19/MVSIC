@@ -105,7 +105,10 @@ indices:
           n_centroid_factor: 16
           kmeans_niter: 20
           kmeans_seed: 123
-          kmeans_sample_max_vectors: 500000
+          # Upstream's default samples ~all vectors for BEIR-5 shards; 2M is
+          # safely above arguana / scifact / nfcorpus total vec counts so
+          # k-means trains on the full corpus, matching the paper.
+          kmeans_sample_max_vectors: 2000000
           assign_batch_size: 100000
           residual_batch_size: 100000
           kmeans_gpu: false

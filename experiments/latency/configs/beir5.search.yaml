@@ -178,16 +178,21 @@ indices:
           n_centroid_factor: 16
           kmeans_niter: 20
           kmeans_seed: 123
-          kmeans_sample_max_vectors: 500000
+          kmeans_sample_max_vectors: 2000000
           assign_batch_size: 100000
           residual_batch_size: 100000
           kmeans_gpu: false
         search_configs:
           - name: k=10
+            # IGP search has no separate num_rerank knob -- ``probe_topk`` is
+            # the count of candidates that pass through the decode + refine
+            # pipeline before the final top-k. Paper's grid for k=10 sweeps
+            # probe_topk over [100, 200, 300, 400, 600] and the headline
+            # high-recall point uses probe_topk=1400, so we cover that range.
             params:
               nprobe: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
               k: [10]
               config:
-                - { name: nr100, probe_topk: 100 }
-                - { name: nr200, probe_topk: 200 }
-                - { name: nr400, probe_topk: 400 }
+                - { name: nr100,  probe_topk: 100 }
+                - { name: nr200,  probe_topk: 200 }
+                - { name: nr400,  probe_topk: 400 }
