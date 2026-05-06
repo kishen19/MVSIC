@@ -27,6 +27,7 @@ _external_should_strip_indices() {
   local ds="$1"
   [[ "$ds" == "msmarco" ]] && return 0
   [[ "$ds" == "nq500k" ]] && return 0
+  [[ "$ds" == "lotte" ]] && return 0
   _fp_is_in "$ds" "${EXTERNAL_BEIR_SHARDS[@]}" && return 1
   _fp_is_in "$ds" "${BEIRBIG_NAMES[@]}" && return 0
   return 1
@@ -63,7 +64,7 @@ _external_should_strip_after_filters() {
 # FastPlaid is **opt-in** for allowed datasets: default ``--dataset arguana`` (no ``--method``)
 # and ``--method all`` both strip FastPlaid. Enable via ``--method fastplaid`` or
 # ``--with-fastplaid``. Dataset-level bans from ``fastplaid_should_strip_indices`` (e.g. nq,
-# msmarco, nq500k) **always** strip; ``--with-fastplaid`` cannot override that.
+# msmarco, nq500k, lotte) **always** strip; ``--with-fastplaid`` cannot override that.
 #
 # Args: effective_dataset  method  with_fastplaid_flag (0 or 1)
 fastplaid_should_strip_after_filters() {
@@ -88,6 +89,7 @@ _external_skip_method() {
   [[ "$dataset" == "vidore" ]] && return 1
   [[ "$dataset" == "msmarco" ]] && return 0
   [[ "$dataset" == "nq500k" ]] && return 0
+  [[ "$dataset" == "lotte" ]] && return 0
   _fp_is_in "$dataset" "${EXTERNAL_BEIR_SHARDS[@]}" && return 1
   _fp_is_in "$dataset" "${BEIRBIG_NAMES[@]}" && return 0
   # Aliases that resolve to a top-level YAML (beir5/beirbig).

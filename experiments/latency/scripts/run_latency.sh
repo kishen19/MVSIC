@@ -5,6 +5,8 @@
 #   experiments/latency/scripts/run_latency.sh --dataset beir5         # all BEIR-5 shards (beir5.search.yaml)
 #   experiments/latency/scripts/run_latency.sh --dataset beirbig       # quora/nq/hotpotqa (beirbig.search.yaml)
 #   experiments/latency/scripts/run_latency.sh --dataset nq500k        # standalone (nq500k.search.yaml)
+#   experiments/latency/scripts/run_latency.sh --dataset msmarco       # standalone (msmarco.search.yaml)
+#   experiments/latency/scripts/run_latency.sh --dataset lotte         # standalone (lotte.search.yaml)
 #   experiments/latency/scripts/run_latency.sh --dataset arguana       # one shard from beir5.search.yaml
 #   experiments/latency/scripts/run_latency.sh --dataset nq --method mvivf
 #   experiments/latency/scripts/run_latency.sh --dataset arguana --method mvivf_spill
@@ -52,7 +54,7 @@ EXTRA_ARGS=()
 
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
 BEIRBIG_DATASETS=(quora nq hotpotqa)
-DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco)
+DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco lotte)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {

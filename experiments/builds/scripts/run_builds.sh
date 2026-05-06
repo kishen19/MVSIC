@@ -5,6 +5,8 @@
 #   experiments/builds/scripts/run_builds.sh --dataset beir5            # all BEIR-5 shards (beir5.build.yaml)
 #   experiments/builds/scripts/run_builds.sh --dataset beirbig          # quora/nq/hotpotqa (beirbig.build.yaml)
 #   experiments/builds/scripts/run_builds.sh --dataset nq500k           # standalone (nq500k.build.yaml)
+#   experiments/builds/scripts/run_builds.sh --dataset msmarco          # standalone (msmarco.build.yaml)
+#   experiments/builds/scripts/run_builds.sh --dataset lotte            # standalone (lotte.build.yaml)
 #   experiments/builds/scripts/run_builds.sh --dataset arguana          # one shard from beir5.build.yaml
 #   experiments/builds/scripts/run_builds.sh --dataset nq --method mvivf
 #   experiments/builds/scripts/run_builds.sh --dataset arguana --method mvivf_spill
@@ -25,7 +27,7 @@
 # FastPlaid + IGP are opt-in for builds too: omitted by default / ``--method all``.
 # Use ``--method fastplaid`` / ``--method igp`` or the corresponding
 # ``--with-fastplaid`` / ``--with-igp`` flags (see fastplaid_scope.sh). Both are
-# never built on beirbig / nq500k / msmarco even with opt-in flags.
+# never built on beirbig / nq500k / msmarco / lotte even with opt-in flags.
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
 # resolved config (after --method / --dataset filtering and FastPlaid scoping).
@@ -70,7 +72,7 @@ BEIRBIG_DATASETS=(quora nq hotpotqa)
 
 # Top-level config aliases (each has a dedicated <ds>.build.yaml file and is
 # accepted directly without a per-dataset name filter).
-DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco)
+DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco lotte)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {

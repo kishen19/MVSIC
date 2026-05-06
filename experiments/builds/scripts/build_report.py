@@ -6,10 +6,16 @@ Walks the mirrored build-stats tree at
 (populated by ``experiments/builds/scripts/run_builds.sh`` from the per-machine
 ``results/indexes/`` tree) and emits
 
-    <out_dir>/build_report.md            per-(dataset, method, build) markdown
-                                         table -- the canonical build-stats md
-    <out_dir>/_plots/build_time.pdf      bar plot of build time
-    <out_dir>/_plots/index_size.pdf      bar plot of on-disk index size (MB)
+    <out_dir>/build_report<tag>.md          per-(dataset, method, build)
+                                            markdown -- the canonical
+                                            build-stats md
+    <out_dir>/_plots/build_time<tag>.pdf    bar plot of build time
+    <out_dir>/_plots/index_size<tag>.pdf    bar plot of on-disk index size (MB)
+
+Where ``<tag>`` is empty for the default (every dataset under the indexes
+tree), or e.g. ``_beir`` / ``_vidore`` when ``--suite`` is set. This keeps a
+crowded all-datasets view next to a clean BEIR-only view in the same
+``_plots/`` directory.
 
 The PDFs share the canonical experiments/<stage>/results/_plots/ tree used by
 latency / batch / multi_latency / ... ; the build-stats markdown stays at the
@@ -21,9 +27,11 @@ tracked in the repo, not just the ones whose binaries happen to live on the
 current machine.
 
 Usage:
-    experiments/builds/scripts/build_report.py
+    experiments/builds/scripts/build_report.py                   # all datasets
+    experiments/builds/scripts/build_report.py --suite beir      # BEIR only
+    experiments/builds/scripts/build_report.py --suite vidore    # ViDoRe only
+    experiments/builds/scripts/build_report.py --suite lotte     # LoTTE only
     experiments/builds/scripts/build_report.py \
-        --indexes experiments/builds/results/indexes \
         --datasets nfcorpus,scifact,arguana,scidocs,fiqa
 """
 from __future__ import annotations
@@ -42,6 +50,25 @@ except ImportError:
 
 
 _METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph", "fastplaid", "igp"]
+
+
+# Canonical dataset suites. Mirrors the lists in
+# experiments/query_compression/scripts/run_query_compression.sh
+# (BEIR_DATASETS / VIDORE_DATASETS) so suite membership stays consistent
+# across runners.
+_SUITES: dict[str, list[str]] = {
+    "beir": [
+        "nfcorpus", "scifact", "arguana", "scidocs", "fiqa",
+        "quora", "nq", "hotpotqa", "nq500k", "msmarco",
+    ],
+    "vidore": [
+        "docvqa", "infovqa", "arxivqa", "tabfquad", "chartqa", "shiftproject",
+        "synth_ai", "synth_energy", "synth_gov", "synth_healthcare", "tatdqa",
+    ],
+    "lotte": [
+        "lotte",
+    ],
+}
 _PRETTY = {
     "mvivf": "MVIVF",
     "muvera": "MUVERA",
@@ -177,30 +204,60 @@ def main() -> int:
              "every dataset). Pass results/indexes/ to use the per-machine "
              "real-binary tree instead.",
     )
+    p.add_argument(
+        "--suite",
+        choices=("all", *_SUITES.keys()),
+        default="all",
+        help="Dataset suite preset (mutually exclusive with --datasets). "
+             "'all' = every dataset under --indexes; 'beir' = nfcorpus, "
+             "scifact, arguana, scidocs, fiqa, quora, nq, hotpotqa, nq500k, "
+             "msmarco; 'vidore' = the ColPali ViDoRe shards; 'lotte' = the "
+             "LoTTE corpus. Output filenames are tagged with the suite (e.g. "
+             "build_time_beir.pdf) so multiple suites coexist in the same "
+             "_plots/ directory.",
+    )
     p.add_argument("--datasets", default=None,
-                   help="Comma-separated dataset names; default: all.")
+                   help="Comma-separated dataset names; overrides --suite.")
+    p.add_argument(
+        "--tag",
+        default=None,
+        help="Custom filename suffix (default: derived from --suite). "
+             "Pass an empty string to skip suffixing entirely.",
+    )
     p.add_argument("--out-dir", type=pathlib.Path, default=None,
                    help="Default: experiments/builds/results/")
     args = p.parse_args()
 
     out_dir = args.out_dir if args.out_dir else pathlib.Path("experiments/builds/results")
-    datasets = (
-        [d.strip() for d in args.datasets.split(",") if d.strip()]
-        if args.datasets else None
-    )
+    if args.datasets is not None:
+        datasets = [d.strip() for d in args.datasets.split(",") if d.strip()]
+    elif args.suite != "all":
+        datasets = list(_SUITES[args.suite])
+    else:
+        datasets = None  # walk everything under args.indexes
+
     df = _walk_stats(args.indexes, datasets)
     if df.empty:
         print(f"[warn] no build_stats.json under {args.indexes}; nothing to report.")
         return 0
 
+    if args.tag is not None:
+        tag = args.tag
+    elif args.suite != "all":
+        tag = f"_{args.suite}"
+    else:
+        tag = ""
+    if tag and not tag.startswith("_"):
+        tag = "_" + tag
+
     out_dir.mkdir(parents=True, exist_ok=True)
     plots_dir = out_dir / "_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    _markdown_table(df, out_dir / "build_report.md")
+    _markdown_table(df, out_dir / f"build_report{tag}.md")
     _bar_plot(df, "build_time_sec", "Build time (s)",
-              plots_dir / "build_time.pdf", log=True)
+              plots_dir / f"build_time{tag}.pdf", log=True)
     _bar_plot(df, "index_size_mb", "Index size on disk (MB)",
-              plots_dir / "index_size.pdf", log=True)
+              plots_dir / f"index_size{tag}.pdf", log=True)
     return 0
 
 

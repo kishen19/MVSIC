@@ -9,6 +9,8 @@
 #   experiments/batch/scripts/run_batch.sh --dataset beir5             # all BEIR-5 shards
 #   experiments/batch/scripts/run_batch.sh --dataset beirbig           # quora/nq/hotpotqa
 #   experiments/batch/scripts/run_batch.sh --dataset nq500k            # standalone
+#   experiments/batch/scripts/run_batch.sh --dataset msmarco           # standalone
+#   experiments/batch/scripts/run_batch.sh --dataset lotte             # standalone
 #   experiments/batch/scripts/run_batch.sh --dataset arguana           # one BEIR-5 shard
 #   experiments/batch/scripts/run_batch.sh --dataset nq --method mvivf
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --method mvivf_spill
@@ -48,7 +50,7 @@ EXTRA_ARGS=()
 
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
 BEIRBIG_DATASETS=(quora nq hotpotqa)
-DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco)
+DATASET_ALIASES=(beir5 beirbig nq500k vidore msmarco lotte)
 
 TEMP_YAMLS=()
 cleanup_tmp_yamls() {

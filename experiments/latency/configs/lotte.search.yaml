@@ -1,11 +1,7 @@
-name: "Main experiments latency (MS MARCO)"
-
-# MS MARCO is kept as its own config so we can sweep different params (the
-# corpus is much larger than the BEIR shards). Mirror the BEIR search
-# definitions here -- override in this file as needed.
+name: "Main experiments latency (lotte)"
 
 datasets:
-  - { name: msmarco, path: data/beir/msmarco, index_dir: results/indexes/msmarco, results_dir: experiments/latency/results/msmarco, is_mmap: true }
+  - { name: lotte,    path: data/lotte,    index_dir: results/indexes/lotte,    results_dir: experiments/latency/results/lotte,    is_mmap: true }
 
 indices:
   - name: mvivf
@@ -31,38 +27,16 @@ indices:
               nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
               k: [10]
               config:
-                - { name: nr100,  num_rerank: 100 }
-                - { name: nr500,  num_rerank: 500 }
-
-      - build_name: mvivf_k0_l1000_d0_nit5_s0_mpcc100
-        build_params:
-          k_per_level: 0
-          max_leaf_size: 1000
-          max_depth: 0
-          niters: 5
-          s: 0
-          max_point_clouds_per_cluster: 100
-          build_with_8btq: true
-        variants:
-          - { name: tq1, compress: true, quantizer: OneBitTQ }
-        search_configs:
-          - name: k=10
-            params:
-              tq8_rerank: [true]
-              query_compression: ["Wards"]
-              query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-              k: [10]
-              config:
+                - { name: nr50,   num_rerank: 50 }
                 - { name: nr100,  num_rerank: 100 }
                 - { name: nr500,  num_rerank: 500 }
 
   - name: muvera
     metric: ip
     builds:
-      - build_name: muvera_2560_R200_L600_a1.0
+      - build_name: muvera_10240_R200_L600_a1.0
         build_params:
-          d_fde: 2560
+          d_fde: 10240
           R: 200
           L: 600
           alpha: 1.0
