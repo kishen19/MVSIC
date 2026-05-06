@@ -64,6 +64,7 @@ _PREFIX_FOR_STAGE = {
 # Methods we expect to show up under <results>/<dataset>/. Order also drives
 # legend ordering in the plot.
 _METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph", "fastplaid", "igp"]
+_PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER if m != "mvivf_spill"]
 
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
@@ -118,6 +119,31 @@ def _legend(ax) -> None:
         handletextpad=0.35,
         labelspacing=0.2,
     )
+
+
+def _dedup_legend_handles(axes) -> tuple[list, list[str]]:
+    """Collect legend entries once, preserving the order used by the panels."""
+    handles = []
+    labels = []
+    seen = set()
+    for ax in axes:
+        ax_handles, ax_labels = ax.get_legend_handles_labels()
+        for handle, label in zip(ax_handles, ax_labels):
+            if label in seen:
+                continue
+            seen.add(label)
+            handles.append(handle)
+            labels.append(label)
+    return handles, labels
+
+
+def _top_legend_ncols(n_labels: int) -> int:
+    """Keep the top legend compact without hard-coding the method count."""
+    if n_labels <= 0:
+        return 1
+    if n_labels <= 5:
+        return n_labels
+    return (n_labels + 1) // 2
 
 
 def _stage_title(stage: str, *, latency_ms: bool = False) -> str:
@@ -476,7 +502,7 @@ def _plot_pareto_panel(
     show_ylabel: bool,
     show_legend: bool,
 ) -> None:
-    methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
+    methods_present = [m for m in _PLOTTED_METHOD_ORDER if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
     # Key color by position in the full _METHOD_ORDER so colors are stable
     # across datasets even when some methods are absent.
@@ -504,7 +530,7 @@ def _plot_pareto_panel(
                 linewidth=2.8,
                 linestyle=ls,
                 color=color_for[method],
-                label=label if show_legend else None,
+                label=label,
                 zorder=3,
             )
 
@@ -530,7 +556,7 @@ def _plot_pareto_latency_ms_panel(
     show_ylabel: bool,
     show_legend: bool,
 ) -> None:
-    methods_present = [m for m in _METHOD_ORDER if m in df["method"].unique()]
+    methods_present = [m for m in _PLOTTED_METHOD_ORDER if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
     # Key color by position in the full _METHOD_ORDER so colors are stable
     # across datasets even when some methods are absent.
@@ -559,7 +585,7 @@ def _plot_pareto_latency_ms_panel(
                 linewidth=2.8,
                 linestyle=ls,
                 color=color_for[method],
-                label=label if show_legend else None,
+                label=label,
                 zorder=3,
             )
 
@@ -772,9 +798,8 @@ def _plot_paper_four_panel(
     fig, axes = plt.subplots(
         1,
         4,
-        figsize=(12.8, 3.15),
+        figsize=(12.8, 3.55),
         sharey=True,
-        layout="constrained",
     )
     for i, (k_eval, x_col, xlabel) in enumerate(specs):
         sub = df[df["k"].astype(int) == k_eval]
@@ -787,7 +812,7 @@ def _plot_paper_four_panel(
                 x_col,
                 xlabel,
                 show_ylabel=(i == 0),
-                show_legend=(i == len(specs) - 1),
+                show_legend=False,
             )
         else:
             _plot_pareto_panel(
@@ -798,13 +823,52 @@ def _plot_paper_four_panel(
                 x_col,
                 xlabel,
                 show_ylabel=(i == 0),
-                show_legend=(i == len(specs) - 1),
+                show_legend=False,
             )
 
     fig.suptitle(
         f"{dataset}: {_stage_title(stage, latency_ms=latency_ms)}",
         fontsize=17,
+        y=0.985,
     )
+    handles, labels = _dedup_legend_handles(axes)
+    if handles:
+        ncols = _top_legend_ncols(len(labels))
+        legend_rows = (len(labels) + ncols - 1) // ncols
+        axes_top = 0.72 if legend_rows == 1 else 0.62
+        fig.subplots_adjust(
+            left=0.065,
+            right=0.995,
+            bottom=0.18,
+            top=axes_top,
+            wspace=0.14,
+        )
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.08, 0.805, 0.84, 0.08),
+            ncol=ncols,
+            mode="expand",
+            fontsize=13,
+            frameon=True,
+            framealpha=0.95,
+            facecolor="white",
+            edgecolor="0.35",
+            borderpad=0.3,
+            handlelength=1.6,
+            handletextpad=0.35,
+            columnspacing=0.8,
+            labelspacing=0.2,
+        )
+    else:
+        fig.subplots_adjust(
+            left=0.065,
+            right=0.995,
+            bottom=0.18,
+            top=0.84,
+            wspace=0.14,
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
@@ -870,7 +934,7 @@ def _plot_breakdown(df: pd.DataFrame, stage: str,
 
     # Method order matches _METHOD_ORDER so plots are visually consistent
     # across datasets even when only a subset of methods has CSVs.
-    methods_in_order = [m for m in _METHOD_ORDER if m in best["method"].unique()]
+    methods_in_order = [m for m in _PLOTTED_METHOD_ORDER if m in best["method"].unique()]
     extras = sorted(set(best["method"]) - set(methods_in_order))
     methods_in_order += extras
 
