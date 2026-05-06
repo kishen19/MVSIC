@@ -41,7 +41,7 @@ except ImportError:
     sys.exit("pip install pandas matplotlib pyyaml numpy to use this script")
 
 plt.rcParams.update({
-    # These PDFs are often included as four panels in one NeurIPS-width row.
+    # These PDFs are often included as three panels in one NeurIPS-width row.
     # Use large source fonts so the final scaled figure remains readable.
     "font.size": 15,
     "axes.titlesize": 17,
@@ -144,6 +144,12 @@ def _top_legend_ncols(n_labels: int) -> int:
     if n_labels <= 5:
         return n_labels
     return (n_labels + 1) // 2
+
+
+def _show_y_tick_labels(axes) -> None:
+    """With shared y-axes, Matplotlib hides labels except on the left panel."""
+    for ax in axes:
+        ax.tick_params(axis="y", which="both", left=True, labelleft=True)
 
 
 def _stage_title(stage: str, *, latency_ms: bool = False) -> str:
@@ -773,7 +779,7 @@ def _plot_paper_four_panel(
     latency_ms: bool,
 ) -> None:
     """Paper-facing one-row plot:
-    R1@10, R10@10, R1@100, R100@100.
+    R1@10, R10@10, R100@100.
 
     Emitted only when both k=10 and k=100 are present.
     """
@@ -787,7 +793,6 @@ def _plot_paper_four_panel(
     specs = [
         (10, "recall_1_k", _recall_xlabel("1", 10)),
         (10, "recall_k_k", _recall_xlabel("k", 10)),
-        (100, "recall_1_k", _recall_xlabel("1", 100)),
         (100, "recall_k_k", _recall_xlabel("k", 100)),
     ]
     for k_eval, x_col, _ in specs:
@@ -797,8 +802,8 @@ def _plot_paper_four_panel(
 
     fig, axes = plt.subplots(
         1,
-        4,
-        figsize=(12.8, 3.55),
+        3,
+        figsize=(11.4, 4.05),
         sharey=True,
     )
     for i, (k_eval, x_col, xlabel) in enumerate(specs):
@@ -826,6 +831,7 @@ def _plot_paper_four_panel(
                 show_legend=False,
             )
 
+    _show_y_tick_labels(axes)
     fig.suptitle(
         f"{dataset}: {_stage_title(stage, latency_ms=latency_ms)}",
         fontsize=17,
@@ -835,21 +841,20 @@ def _plot_paper_four_panel(
     if handles:
         ncols = _top_legend_ncols(len(labels))
         legend_rows = (len(labels) + ncols - 1) // ncols
-        axes_top = 0.72 if legend_rows == 1 else 0.62
+        axes_top = 0.81 if legend_rows == 1 else 0.70
         fig.subplots_adjust(
-            left=0.065,
-            right=0.995,
-            bottom=0.18,
+            left=0.08,
+            right=0.975,
+            bottom=0.16,
             top=axes_top,
-            wspace=0.14,
+            wspace=0.28,
         )
         fig.legend(
             handles,
             labels,
             loc="upper center",
-            bbox_to_anchor=(0.08, 0.805, 0.84, 0.08),
+            bbox_to_anchor=(0.5, 0.925),
             ncol=ncols,
-            mode="expand",
             fontsize=13,
             frameon=True,
             framealpha=0.95,
@@ -863,14 +868,14 @@ def _plot_paper_four_panel(
         )
     else:
         fig.subplots_adjust(
-            left=0.065,
-            right=0.995,
-            bottom=0.18,
+            left=0.08,
+            right=0.975,
+            bottom=0.16,
             top=0.84,
-            wspace=0.14,
+            wspace=0.28,
         )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.10)
     plt.close(fig)
     print(f"  wrote {out_path}")
 
