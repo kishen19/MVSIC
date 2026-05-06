@@ -2,7 +2,7 @@
 # config: /home/laxmand_google_com/MVSIC/experiments/overretrieve_multivector_benchmark/configs/datasets.yaml
 # binary: /home/laxmand_google_com/MVSIC/bazel-bin/microbenchmark/quantization/bench_chamfer_overretrieve
 # host:   ann-exps-2.us-central1-b.c.quantize-2-sandbox-331536.internal
-# date:   2026-05-05T23:56:05Z
-# git:    59885ea (main)
+# date:   2026-05-06T08:57:08Z
+# git:    8760d12 (main)
 
-[chamfer_hotpotqa] OK -> /home/laxmand_google_com/MVSIC/experiments/overretrieve_multivector_benchmark/results/chamfer_hotpotqa.txt
+[chamfer_scifact] OK -> /home/laxmand_google_com/MVSIC/experiments/overretrieve_multivector_benchmark/results/chamfer_scifact.txt
