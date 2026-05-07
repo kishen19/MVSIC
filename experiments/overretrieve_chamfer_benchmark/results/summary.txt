@@ -1,0 +1,12 @@
+# Overretrieve Benchmark — summary
+# config: /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_benchmark/configs/datasets.yaml
+# binary: /home/laxmand_google_com/current/mvsic-paper/MVSIC/bazel-bin/microbenchmark/quantization/bench_chamfer_overretrieve
+# host:   c4-test
+# date:   2026-04-30T14:58:14Z
+# git:    8cb2804 (main)
+
+[arguana] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_benchmark/results/arguana.txt
+[scidocs] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_benchmark/results/scidocs.txt
+[scifact] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_benchmark/results/scifact.txt
+[quora] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_benchmark/results/quora.txt
+[fiqa] OK -> /home/laxmand_google_com/current/mvsic-paper/MVSIC/experiments/overretrieve_benchmark/results/fiqa.txt

@@ -1,0 +1,30 @@
+name: "Overretrieve Benchmark — BEIR small datasets"
+
+# Default location of the BEIR data tree on disk. Each dataset is expected at:
+#   <data_root>/<name>/<name>_points.pcs
+#   <data_root>/<name>/<name>_queries.pcs
+#   <data_root>/<name>/<name>_chamfer_neighbors.gt
+#
+# Override at runtime with the DATA_ROOT environment variable or the
+# --data-root flag of run_benchmark.sh.
+data_root: /mnt/ann_data/chamfer_data/beir
+
+# Defaults applied to every dataset (can be overridden per-dataset).
+defaults:
+  metric: IP   # ChamferIP — what the BEIR ColBERT-style encodings use.
+  k: 10        # Recall@k that the binary reports for each k' in its grid.
+
+# Datasets listed in /mnt/ann_data/chamfer_data/beir/small_datasets.md.
+# Per-dataset keys (all optional): metric, k, points, queries, gt, extra_args.
+# When points/queries/gt are omitted, the conventional <name>/<name>_*.pcs|gt
+# layout under data_root is used.
+datasets:
+  - { name: arguana  }
+  - { name: fiqa     }
+  - { name: hotpotqa }
+  - { name: nfcorpus }
+  - { name: nq       }
+  - { name: nq500k   }
+  - { name: quora    }
+  - { name: scidocs  }
+  - { name: scifact  }

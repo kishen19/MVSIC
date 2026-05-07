@@ -1,0 +1,71 @@
+# command: /home/laxmand_google_com/current/mvsic-paper/MVSIC/bazel-bin/microbenchmark/quantization/bench_chamfer_overretrieve -dist_func IP -i /mnt/ann_data/chamfer_data/beir/scifact/scifact_points.pcs -q /mnt/ann_data/chamfer_data/beir/scifact/scifact_queries.pcs -gt /mnt/ann_data/chamfer_data/beir/scifact/scifact_chamfer_neighbors.gt -k 10
+# host:    c4-test
+# date:    2026-04-30T14:58:29Z
+
+filename = /mnt/ann_data/chamfer_data/beir/scifact/scifact_points.pcs
+Detected 5183 point clouds with embedding dimension 128
+Aligned dims = 128
+filename = /mnt/ann_data/chamfer_data/beir/scifact/scifact_queries.pcs
+Detected 300 point clouds with embedding dimension 128
+Aligned dims = 128
+Mode: file
+  db=/mnt/ann_data/chamfer_data/beir/scifact/scifact_points.pcs
+  q =/mnt/ann_data/chamfer_data/beir/scifact/scifact_queries.pcs
+DB: clouds=5183 dims=128 total_vecs=1554900 avg_k=300.00
+Q : clouds=100 dims=128 total_vecs=3200 avg_k=32.00
+pq_block=8 fs_block=8 rbits=2 dist=IP
+k=10  k' grid: 10 20 50 100 250 500 
+Ground truth: /mnt/ann_data/chamfer_data/beir/scifact/scifact_chamfer_neighbors.gt
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+Aligning bytes to 64
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+FhtKacRotator is selected
+Loaded ground truth from /mnt/ann_data/chamfer_data/beir/scifact/scifact_chamfer_neighbors.gt (k_gt=5000, queries=100)
+Outer iterations: 100
+
+=== Recall@10 vs candidate budget k' ===
+Averages over Q=100 query clouds.
+
+Method                       k'=10     k'=20     k'=50    k'=100    k'=250    k'=500
+------------------------------------------------------------------------------------
+FastScan (K=16)               0.35      0.47      0.61      0.71      0.84      0.91
+TurboQuant_mv (4bit)          0.97      1.00      1.00      1.00      1.00      1.00
+TurboQuant_mv (8bit)          1.00      1.00      1.00      1.00      1.00      1.00
+TQ-PQ (K=16,B=1)              0.87      1.00      1.00      1.00      1.00      1.00
+TQ-PQ (K=16,B=2)              0.84      0.99      1.00      1.00      1.00      1.00
+TQ-PQ (K=16,B=4)              0.78      0.96      1.00      1.00      1.00      1.00
+TQ-PQ (K=16,B=8)              0.68      0.84      0.96      0.99      1.00      1.00
