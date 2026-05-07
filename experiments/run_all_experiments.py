@@ -8,16 +8,16 @@ import time
 from pathlib import Path
 
 DATASETS = [
-    "hotpotqa"
+    "msmarco"
 ]
 
-METHODS = ["mvivf", "muvera", "vamana", "svh_graph"]
+METHODS = ["vamana", "svh_graph"]
 
 STEPS = [
-    ("builds", "experiments/builds/scripts/run_builds.sh"),
+#    ("builds", "experiments/builds/scripts/run_builds.sh"),
     ("latency", "experiments/latency/scripts/run_latency.sh"),
     ("batch", "experiments/batch/scripts/run_batch.sh"),
-    ("multi_latency", "experiments/multi_latency/scripts/run_multi_latency.sh"),
+#    ("multi_latency", "experiments/multi_latency/scripts/run_multi_latency.sh"),
 ]
 #    (multi_latency", "experiments/multi_latency/scripts/run_multi_latency.sh"),
 
@@ -29,7 +29,7 @@ def run_step(repo_root: Path, name: str, script_rel: str, dataset: str, method: 
         return 127
     cmd = [str(script_path), "--dataset", dataset, "--method", method]
     if name != "builds":
-        cmd += ["--k", "100"]
+        cmd += ["--k", "10"]
     print(f"  $ {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd, cwd=repo_root)
     return proc.returncode
