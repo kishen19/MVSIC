@@ -61,7 +61,14 @@ plt.rcParams.update({
 })
 
 
-_METHOD_ORDER = ["mvivf", "muvera", "vamana", "svh_graph"]
+_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph"]
+_PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER if m != "mvivf_spill"]
+_METHOD_HATCHES = {
+    "mvivf": "",
+    "muvera": "///",
+    "vamana": "\\\\\\",
+    "svh_graph": "...",
+}
 
 
 # Canonical dataset suites. Mirrors the lists in
@@ -83,6 +90,7 @@ _SUITES: dict[str, list[str]] = {
 }
 _PRETTY = {
     "mvivf": "MV-IVF",
+    "mvivf_spill": "MV-IVF Spill",
     "muvera": "MUVERA",
     "vamana": "MV-Vamana",
     "svh_graph": "SVH",
@@ -155,13 +163,17 @@ def _bar_plot(df: pd.DataFrame, value_col: str, ylabel: str,
     if df.empty or value_col not in df.columns or df[value_col].dropna().empty:
         return
     datasets = sorted(df["dataset"].unique())
-    methods = [m for m in _METHOD_ORDER if m in df["method"].unique()]
+    methods = [m for m in _PLOTTED_METHOD_ORDER if m in df["method"].unique()]
     if not datasets or not methods:
         return
     cmap = plt.colormaps.get_cmap("tab10")
     fig, ax = plt.subplots(figsize=(max(6, 1.0 * len(datasets) + 2), 4.5))
     width = 0.8 / max(1, len(methods))
     x_centers = np.arange(len(datasets))
+    def soften(color, amount: float = 0.28):
+        rgb = np.array(color[:3], dtype=float)
+        return tuple(rgb * (1.0 - amount) + amount) + (1.0,)
+
     for mi, method in enumerate(methods):
         heights = []
         for ds in datasets:
@@ -169,8 +181,13 @@ def _bar_plot(df: pd.DataFrame, value_col: str, ylabel: str,
             v = sub[value_col].dropna()
             heights.append(float(v.iloc[0]) if not v.empty else np.nan)
         offsets = (mi - (len(methods) - 1) / 2.0) * width
+        color = soften(cmap(_METHOD_ORDER.index(method) % 10))
         ax.bar(x_centers + offsets, heights, width=width,
-               label=_PRETTY.get(method, method), color=cmap(mi % 10))
+               label=_PRETTY.get(method, method),
+               color=color,
+               edgecolor="0.25",
+               linewidth=0.7,
+               hatch=_METHOD_HATCHES.get(method, ""))
     ax.set_xticks(x_centers)
     ax.set_xticklabels(datasets, rotation=20, ha="right")
     ax.set_ylabel(ylabel)

@@ -63,7 +63,7 @@ _PREFIX_FOR_STAGE = {
 
 # Methods we expect to show up under <results>/<dataset>/. Order also drives
 # legend ordering in the plot.
-_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph", "fastplaid", "igp"]
+_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph"]
 _PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER if m != "mvivf_spill"]
 
 # Pretty labels for the legend / x-tick names.

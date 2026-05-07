@@ -31,13 +31,13 @@ except ImportError:
     sys.exit("pip install pandas matplotlib")
 
 plt.rcParams.update({
-    "font.size": 15,
-    "axes.titlesize": 18,
-    "axes.labelsize": 18,
-    "xtick.labelsize": 14,
-    "ytick.labelsize": 14,
-    "legend.fontsize": 13,
-    "lines.linewidth": 2.8,
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.labelsize": 13,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "legend.fontsize": 9,
+    "lines.linewidth": 2.3,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
 })
@@ -54,7 +54,7 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
     recall_cols = [c for c in df.columns if c.startswith("recall_")]
     has_avg = "avg_compressed_vectors" in df.columns
 
-    fig, ax_r = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+    fig, ax_r = plt.subplots(figsize=(4.2, 3.0), layout="constrained")
     ax_q = ax_r.twinx() if has_avg else None
 
     cmap = plt.colormaps.get_cmap("tab10")
@@ -65,14 +65,12 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
             return f"Recall-${parts[1]}$@${parts[2]}$"
         return col.replace("_", " ")
 
-    legend_loc = "lower right" if "ball_carving" in csv_path.stem else "best"
-
     for i, col in enumerate(recall_cols):
         ax_r.plot(
             tau,
             df[col],
             color=cmap(i % 10),
-            lw=2.8,
+            lw=2.3,
             zorder=4,
             label=recall_label(col),
         )
@@ -80,6 +78,7 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
     ax_r.set_xlabel(r"Threshold $\tau$")
     ax_r.set_ylabel("Recall")
     ax_r.set_ylim(0.0, 1.02)
+    ax_r.tick_params(axis="both", pad=1)
     ax_r.grid(True, which="both", alpha=0.3)
     ax_r.set_axisbelow(True)
     ax_r.spines["top"].set_visible(False)
@@ -92,43 +91,54 @@ def _plot_csv(csv_path: pathlib.Path, out_pdf: pathlib.Path, title: str) -> None
             tau,
             df["avg_compressed_vectors"],
             color=qcol,
-            lw=2.8,
+            lw=2.3,
             linestyle="--",
             zorder=3,
             label="Avg Query Size",
         )
         ax_q.set_ylabel("Avg Query Size")
         ax_q.tick_params(axis="y", colors=qcol)
+        ax_q.tick_params(axis="y", pad=1)
         ax_q.spines["top"].set_visible(False)
 
         lines_q, labels_q = ax_q.get_legend_handles_labels()
         ax_r.legend(
             lines_r + lines_q,
             labels_r + labels_q,
-            loc=legend_loc,
-            ncol=1,
-            fontsize=13,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.01),
+            ncol=3,
+            fontsize=9,
             frameon=True,
             framealpha=0.95,
             facecolor="white",
             edgecolor="0.35",
+            borderpad=0.25,
+            handlelength=1.35,
+            handletextpad=0.35,
+            columnspacing=0.75,
         )
     else:
         ax_r.legend(
             lines_r,
             labels_r,
-            loc=legend_loc,
-            ncol=1,
-            fontsize=13,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.01),
+            ncol=2,
+            fontsize=9,
             frameon=True,
             framealpha=0.95,
             facecolor="white",
             edgecolor="0.35",
+            borderpad=0.25,
+            handlelength=1.35,
+            handletextpad=0.35,
+            columnspacing=0.75,
         )
 
-    ax_r.set_title(title)
+    ax_r.set_title(title, pad=30)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_pdf)
+    fig.savefig(out_pdf, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     print(f"Wrote {out_pdf}")
 
