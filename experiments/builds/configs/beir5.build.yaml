@@ -91,9 +91,9 @@ indices:
   - name: fastplaid
     metric: ip
     build_configs:
-      - name: fastplaid_nbits4
+      - name: fastplaid_nbits2
         params:
-          nbits: 4
+          nbits: 2
 
   # ----- IGP (BEIR-5 only). Build via IGPWrapper.create. -----
   - name: igp

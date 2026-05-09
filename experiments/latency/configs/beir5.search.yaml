@@ -198,17 +198,18 @@ indices:
   - name: fastplaid
     metric: ip
     builds:
-      - build_name: fastplaid_nbits4
+      - build_name: fastplaid_nbits2
         build_params:
-          nbits: 4
+          nbits: 2
         search_configs:
           - name: k=10
             params:
-              n_ivf_probe: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+              n_ivf_probe: [1, 2, 4, 8, 16]
               k: [10]
               config:
-                - { name: nr512, num_rerank: 512 }
+                - { name: nr256, num_rerank: 256 }
                 - { name: nr1024, num_rerank: 1024 }
+                - { name: nr4096, num_rerank: 4096 }
 
   # -------------------- IGP (BEIR-5 only) --------------------
   - name: igp
@@ -232,9 +233,11 @@ indices:
             # probe_topk over [100, 200, 300, 400, 600] and the headline
             # high-recall point uses probe_topk=1400, so we cover that range.
             params:
-              nprobe: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+              nprobe: [1, 2, 4, 8, 16, 32]
               k: [10]
               config:
                 - { name: nr100,  probe_topk: 100 }
                 - { name: nr200,  probe_topk: 200 }
                 - { name: nr400,  probe_topk: 400 }
+                - { name: nr600,  probe_topk: 600 }
+                - { name: nr1400,  probe_topk: 1400 }
