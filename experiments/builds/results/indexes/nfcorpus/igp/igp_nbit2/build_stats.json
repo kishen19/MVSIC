@@ -1,7 +1,7 @@
 {
-  "built_at": "2026-05-09 09:26:17 UTC",
-  "build_time_sec": 3248.9233388900757,
-  "index_size_mb": 49.507863998413086,
+  "built_at": "2026-05-09 06:07:40 UTC",
+  "build_time_sec": 1155.8436057567596,
+  "index_size_mb": 33.38674545288086,
   "build_params": {
     "n_bit": 2,
     "n_centroid_factor": 16,
