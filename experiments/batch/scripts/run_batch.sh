@@ -50,6 +50,7 @@ METHOD=""
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
 WITH_IGP=0
+INCLUDE_IGP_FP=0 # opt-in plotting flag; emits *_igp_fp.pdf siblings
 TASK="all"       # run | plot | all
 K_VALUE=10       # search_config name `k=<K_VALUE>`; only 10 / 100 configured
 EXTRA_ARGS=()
@@ -76,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --k)       K_VALUE="$2"; shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
     --with-igp) WITH_IGP=1; shift;;
+    --include-igp-fp|--include_igp_fp) INCLUDE_IGP_FP=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -207,6 +209,8 @@ fi
 
 if [[ "$TASK" == "plot" || "$TASK" == "all" ]]; then
   echo "=== Plots ($SEARCH_NAME): $DATASET ==="
+  plot_args=(--datasets "$DATASET" --k "$K_VALUE")
+  [[ "$INCLUDE_IGP_FP" -eq 1 ]] && plot_args+=(--include-igp-fp)
   python3 "$REPO_ROOT/experiments/batch/scripts/plot.py" \
-      --datasets "$DATASET" --k "$K_VALUE" || true
+      "${plot_args[@]}" || true
 fi

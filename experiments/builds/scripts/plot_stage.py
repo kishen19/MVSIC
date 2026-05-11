@@ -63,8 +63,42 @@ _PREFIX_FOR_STAGE = {
 
 # Methods we expect to show up under <results>/<dataset>/. Order also drives
 # legend ordering in the plot.
-_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph"]
-_PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER if m != "mvivf_spill"]
+#
+# The default canonical plot family is the four "core" methods (mvivf gets
+# legend ordering ahead of muvera / vamana / svh_graph); ``mvivf_spill`` is
+# carried in ``_METHOD_ORDER`` only for stable color indexing. ``igp`` and
+# ``fastplaid`` are baselines that the user opts into via ``--include-igp-fp``
+# (and the matching wrappers / runners). Including them generates a parallel
+# set of ``*_igp_fp.pdf`` files instead of clobbering the default plots.
+_METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph",
+                 "igp", "fastplaid"]
+_PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER
+                         if m not in ("mvivf_spill", "igp", "fastplaid")]
+# Methods that are silently dropped from default plots but appear when the
+# caller explicitly opts in via --include-igp-fp / include_igp_fp=True.
+_OPTIONAL_BASELINE_METHODS = ("igp", "fastplaid")
+# Filename suffix applied to every PDF generated in the include-igp-fp pass
+# so the default and the opt-in pass coexist in the same _plots/ directory.
+_IGP_FP_SUFFIX = "_igp_fp"
+
+
+def _methods_for_plot(include_igp_fp: bool) -> list[str]:
+    """Return the ordered method list the panel renderers should iterate.
+
+    When ``include_igp_fp`` is True the optional baselines (``igp``,
+    ``fastplaid``) are appended after the four core methods so legend /
+    color order stays stable across the default and opt-in passes.
+    """
+    methods = list(_PLOTTED_METHOD_ORDER)
+    if include_igp_fp:
+        for m in _OPTIONAL_BASELINE_METHODS:
+            if m not in methods:
+                methods.append(m)
+    return methods
+
+
+def _suffix_for(include_igp_fp: bool) -> str:
+    return _IGP_FP_SUFFIX if include_igp_fp else ""
 
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
@@ -329,11 +363,34 @@ def _annotate_path(results_root: pathlib.Path, csv_file: pathlib.Path) -> dict:
 
 
 def _load_csvs(results_root: pathlib.Path, prefix: str,
-               dataset: Optional[str] = None) -> pd.DataFrame:
+               dataset: Optional[str] = None,
+               *, include_igp_fp: bool = False) -> pd.DataFrame:
+    """Load every CSV under ``<results_root>/<dataset>/`` whose filename
+    matches the stage's ``prefix*.csv`` glob.
+
+    When ``include_igp_fp`` is True we additionally pick up ``nr*.csv``
+    files but only under ``<dataset>/fastplaid/``: FastPlaid's batch driver
+    writes files named ``nr<num_rerank>.csv`` rather than the canonical
+    ``batch_results_*.csv``, so the standard glob silently skips them. We
+    scope the auxiliary glob to the fastplaid sub-tree so we don't pick up
+    e.g. mvivf's per-num_rerank shards twice.
+    """
     base = results_root / dataset if dataset else results_root
     if not base.exists():
         raise SystemExit(f"no results directory found at {base}")
-    files = sorted(base.rglob(f"{prefix}*.csv"))
+    files = list(sorted(base.rglob(f"{prefix}*.csv")))
+    if include_igp_fp:
+        # FastPlaid's batch CSVs live at <ds>/fastplaid/<build>/<search>/nr*.csv.
+        # Restrict the auxiliary glob to that sub-tree so we don't accidentally
+        # double-count `nr*.csv` shards that some other method might write.
+        fp_root = base / "fastplaid" if dataset else None
+        fp_iter = (fp_root.rglob("nr*.csv") if fp_root and fp_root.exists()
+                   else base.rglob("fastplaid/**/nr*.csv"))
+        seen = set(files)
+        for f in sorted(fp_iter):
+            if f not in seen:
+                files.append(f)
+                seen.add(f)
     if not files:
         raise SystemExit(f"no {prefix}*.csv files under {base}")
     rows = []
@@ -507,8 +564,10 @@ def _plot_pareto_panel(
     *,
     show_ylabel: bool,
     show_legend: bool,
+    methods_override: Optional[list[str]] = None,
 ) -> None:
-    methods_present = [m for m in _PLOTTED_METHOD_ORDER if m in df["method"].unique()]
+    method_order = methods_override if methods_override is not None else _PLOTTED_METHOD_ORDER
+    methods_present = [m for m in method_order if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
     # Key color by position in the full _METHOD_ORDER so colors are stable
     # across datasets even when some methods are absent.
@@ -561,8 +620,10 @@ def _plot_pareto_latency_ms_panel(
     *,
     show_ylabel: bool,
     show_legend: bool,
+    methods_override: Optional[list[str]] = None,
 ) -> None:
-    methods_present = [m for m in _PLOTTED_METHOD_ORDER if m in df["method"].unique()]
+    method_order = methods_override if methods_override is not None else _PLOTTED_METHOD_ORDER
+    methods_present = [m for m in method_order if m in df["method"].unique()]
     cmap = plt.colormaps.get_cmap("tab10")
     # Key color by position in the full _METHOD_ORDER so colors are stable
     # across datasets even when some methods are absent.
@@ -607,7 +668,8 @@ def _plot_pareto_latency_ms_panel(
 
 
 def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
-                 out_path: pathlib.Path) -> None:
+                 out_path: pathlib.Path,
+                 *, methods_override: Optional[list[str]] = None) -> None:
     qps = _qps_column(stage)
     if qps not in df.columns:
         print(f"  [skip pareto for {dataset}: missing {qps}]")
@@ -641,6 +703,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("1", k_eval),
             show_ylabel=True,
             show_legend=False,
+            methods_override=methods_override,
         )
         _plot_pareto_panel(
             ax_right,
@@ -651,6 +714,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("k", k_eval),
             show_ylabel=False,
             show_legend=True,
+            methods_override=methods_override,
         )
     elif has_left:
         fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
@@ -663,6 +727,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("1", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
+            methods_override=methods_override,
         )
     else:
         fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
@@ -675,6 +740,7 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("k", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
+            methods_override=methods_override,
         )
 
     fig.suptitle(f"{dataset}: {_stage_title(stage)}", fontsize=17)
@@ -685,7 +751,8 @@ def _plot_pareto(df: pd.DataFrame, stage: str, dataset: str,
 
 
 def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
-                          out_path: pathlib.Path) -> None:
+                          out_path: pathlib.Path,
+                          *, methods_override: Optional[list[str]] = None) -> None:
     """Recall vs ``1000/QPS_seq`` (ms). Only for latency / multi_latency stages."""
     qps = _qps_column(stage)
     if qps not in df.columns:
@@ -718,6 +785,7 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("1", _single_k(df)),
             show_ylabel=True,
             show_legend=False,
+            methods_override=methods_override,
         )
         _plot_pareto_latency_ms_panel(
             ax_right,
@@ -728,6 +796,7 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("k", _single_k(df)),
             show_ylabel=False,
             show_legend=True,
+            methods_override=methods_override,
         )
     elif has_left:
         fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
@@ -740,6 +809,7 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("1", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
+            methods_override=methods_override,
         )
     else:
         fig, ax_one = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
@@ -752,6 +822,7 @@ def _plot_pareto_latency_ms(df: pd.DataFrame, stage: str, dataset: str,
             _recall_xlabel("k", _single_k(df)),
             show_ylabel=True,
             show_legend=True,
+            methods_override=methods_override,
         )
 
     fig.suptitle(
@@ -777,6 +848,7 @@ def _plot_paper_four_panel(
     out_path: pathlib.Path,
     *,
     latency_ms: bool,
+    methods_override: Optional[list[str]] = None,
 ) -> None:
     """Paper-facing one-row plot:
     R1@10, R10@10, R100@100.
@@ -818,6 +890,7 @@ def _plot_paper_four_panel(
                 xlabel,
                 show_ylabel=(i == 0),
                 show_legend=False,
+                methods_override=methods_override,
             )
         else:
             _plot_pareto_panel(
@@ -829,6 +902,7 @@ def _plot_paper_four_panel(
                 xlabel,
                 show_ylabel=(i == 0),
                 show_legend=False,
+                methods_override=methods_override,
             )
 
     _show_y_tick_labels(axes)
@@ -1036,6 +1110,16 @@ def main() -> int:
             "so per-k PDFs do not collide."
         ),
     )
+    p.add_argument(
+        "--include-igp-fp", action="store_true",
+        help=(
+            "Generate an additional pass of every plot that includes the "
+            "``igp`` and ``fastplaid`` baselines. The opt-in pass writes "
+            "``<dataset>_<plot>_igp_fp.pdf`` siblings beside the default "
+            "PDFs, and is skipped silently for datasets where neither "
+            "baseline has any rows. The default plots are unchanged."
+        ),
+    )
     args = p.parse_args()
 
     prefix = _PREFIX_FOR_STAGE[args.stage]
@@ -1056,21 +1140,10 @@ def main() -> int:
         print(f"[warn] no datasets under {args.results}; nothing to plot.")
         return 0
 
-    for ds in datasets:
-        try:
-            df = _load_csvs(args.results, prefix, dataset=ds)
-        except SystemExit as e:
-            print(f"[skip {ds}] {e}")
-            continue
-        if args.search:
-            available = sorted(df["search"].dropna().unique().tolist())
-            df = df[df["search"] == args.search]
-            if df.empty:
-                print(f"[skip {ds}] no rows with search={args.search!r} "
-                      f"(available under {ds}: {available or 'n/a'})")
-                continue
-        print(f"[{ds}] {len(df)} rows from {df['method'].nunique()} methods"
-              + (f" (search={args.search})" if args.search else ""))
+    # Per-pass closures so the default + opt-in passes share rendering code.
+    def _emit_plots(ds: str, df: pd.DataFrame, *,
+                    methods_override: Optional[list[str]] = None,
+                    file_suffix: str = "") -> None:
         combined_k_structured = _is_combined_k_structured_run(df, args.search)
         if combined_k_structured:
             print(
@@ -1078,27 +1151,88 @@ def main() -> int:
                 "paper plots require both k=10 and k=100]"
             )
         else:
-            _plot_pareto(df, args.stage, ds, out_dir / f"{ds}_pareto.pdf")
+            _plot_pareto(
+                df, args.stage, ds,
+                out_dir / f"{ds}_pareto{file_suffix}.pdf",
+                methods_override=methods_override,
+            )
         if args.stage == "batch":
             _plot_paper_four_panel(
                 df,
                 args.stage,
                 ds,
-                out_dir / f"{ds}_paper_pareto.pdf",
+                out_dir / f"{ds}_paper_pareto{file_suffix}.pdf",
                 latency_ms=False,
+                methods_override=methods_override,
             )
         if args.stage in ("latency", "multi_latency"):
             if not combined_k_structured:
                 _plot_pareto_latency_ms(
-                    df, args.stage, ds, out_dir / f"{ds}_pareto_latency_ms.pdf"
+                    df, args.stage, ds,
+                    out_dir / f"{ds}_pareto_latency_ms{file_suffix}.pdf",
+                    methods_override=methods_override,
                 )
             _plot_paper_four_panel(
                 df,
                 args.stage,
                 ds,
-                out_dir / f"{ds}_paper_pareto_latency_ms.pdf",
+                out_dir / f"{ds}_paper_pareto_latency_ms{file_suffix}.pdf",
                 latency_ms=True,
+                methods_override=methods_override,
             )
+
+    def _filter_search(ds: str, df: pd.DataFrame) -> pd.DataFrame | None:
+        if not args.search:
+            return df
+        available = sorted(df["search"].dropna().unique().tolist())
+        df = df[df["search"] == args.search]
+        if df.empty:
+            print(f"[skip {ds}] no rows with search={args.search!r} "
+                  f"(available under {ds}: {available or 'n/a'})")
+            return None
+        return df
+
+    for ds in datasets:
+        # ---- Default pass: canonical core methods only. -----------------
+        try:
+            df = _load_csvs(args.results, prefix, dataset=ds)
+        except SystemExit as e:
+            print(f"[skip {ds}] {e}")
+        else:
+            df_default = _filter_search(ds, df)
+            if df_default is not None:
+                print(f"[{ds}] {len(df_default)} rows from "
+                      f"{df_default['method'].nunique()} methods"
+                      + (f" (search={args.search})" if args.search else ""))
+                _emit_plots(ds, df_default)
+
+        # ---- Opt-in pass: add igp + fastplaid (skips silently if absent). ----
+        if not args.include_igp_fp:
+            continue
+        try:
+            df_ext = _load_csvs(
+                args.results, prefix, dataset=ds, include_igp_fp=True,
+            )
+        except SystemExit as e:
+            print(f"[skip {ds} +igp/fp] {e}")
+            continue
+        df_ext = _filter_search(ds, df_ext)
+        if df_ext is None:
+            continue
+        present = set(df_ext.get("method", pd.Series(dtype=str)).unique())
+        baselines_present = present & set(_OPTIONAL_BASELINE_METHODS)
+        if not baselines_present:
+            print(f"[skip {ds} +igp/fp] neither igp nor fastplaid present")
+            continue
+        print(f"[{ds} +igp/fp] {len(df_ext)} rows from "
+              f"{df_ext['method'].nunique()} methods (added: "
+              f"{sorted(baselines_present)})"
+              + (f" (search={args.search})" if args.search else ""))
+        _emit_plots(
+            ds, df_ext,
+            methods_override=_methods_for_plot(True),
+            file_suffix=_IGP_FP_SUFFIX,
+        )
     return 0
 
 

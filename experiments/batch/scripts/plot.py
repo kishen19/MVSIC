@@ -31,6 +31,14 @@ def main() -> int:
               "--out-dir is unset, plots land under "
               "<results>/_plots/k=<value>/."),
     )
+    p.add_argument(
+        "--include-igp-fp", "--include_igp_fp",
+        dest="include_igp_fp", action="store_true",
+        help=("Generate an additional pass of every plot with the ``igp`` "
+              "and ``fastplaid`` baselines included. Output filenames get a "
+              "``_igp_fp`` suffix; default plots are unchanged. The opt-in "
+              "pass is skipped per-dataset if neither baseline has data."),
+    )
     args = p.parse_args()
 
     cmd = [
@@ -45,6 +53,8 @@ def main() -> int:
         cmd += ["--out-dir", str(args.out_dir)]
     if args.k is not None:
         cmd += ["--search", f"k={args.k}"]
+    if args.include_igp_fp:
+        cmd += ["--include-igp-fp"]
     return subprocess.call(cmd)
 
 
