@@ -18,9 +18,9 @@
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --task plot
 #   experiments/batch/scripts/run_batch.sh --dataset arguana --k 100
 #
-# FastPlaid + IGP are opt-in: omit by default and for ``--method all``. Use
-# ``--method fastplaid`` / ``--method igp`` or ``--with-fastplaid`` /
-# ``--with-igp`` to include them (BEIR-5 + vidore only; see fastplaid_scope.sh).
+# External baselines (fastplaid, igp, gem, hnswlib) are opt-in: omit by default
+# and for ``--method all``. Use ``--method <name>`` or ``--with-<name>`` /
+# ``--with-external`` (see external_scope.sh). FastPlaid also runs on vidore.
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries after the
 # --method / --dataset filters and FastPlaid scoping. It does not affect the
@@ -42,7 +42,7 @@ CONFIGS_DIR="$REPO_ROOT/experiments/latency/configs"
 FILTER_PY="$REPO_ROOT/experiments/builds/scripts/filter_config.py"
 REWRITE_PY="$REPO_ROOT/experiments/builds/scripts/rewrite_results_dir.py"
 # shellcheck disable=SC1091
-source "$REPO_ROOT/experiments/builds/scripts/fastplaid_scope.sh"
+source "$REPO_ROOT/experiments/builds/scripts/external_scope.sh"
 cd "$REPO_ROOT"
 
 DATASET=""
@@ -50,7 +50,9 @@ METHOD=""
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
 WITH_IGP=0
-INCLUDE_IGP_FP=0 # opt-in plotting flag; emits *_igp_fp.pdf siblings
+WITH_GEM=0
+WITH_HNSWLIB=0
+INCLUDE_EXTERNAL=0 # opt-in plotting; emits *_external.pdf siblings
 TASK="all"       # run | plot | all
 K_VALUE=10       # search_config name `k=<K_VALUE>`; only 10 / 100 configured
 EXTRA_ARGS=()
@@ -77,7 +79,12 @@ while [[ $# -gt 0 ]]; do
     --k)       K_VALUE="$2"; shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
     --with-igp) WITH_IGP=1; shift;;
-    --include-igp-fp|--include_igp_fp) INCLUDE_IGP_FP=1; shift;;
+    --with-gem) WITH_GEM=1; shift;;
+    --with-hnswlib) WITH_HNSWLIB=1; shift;;
+    --with-external)
+      WITH_FASTPLAID=1; WITH_IGP=1; WITH_GEM=1; WITH_HNSWLIB=1; shift;;
+    --include-external|--include_external) INCLUDE_EXTERNAL=1; shift;;
+    --include-igp-fp|--include_igp_fp) INCLUDE_EXTERNAL=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -110,6 +117,14 @@ if fastplaid_skip_fastplaid_method "$DATASET" "${METHOD:-}"; then
 fi
 if igp_skip_igp_method "$DATASET" "${METHOD:-}"; then
   echo "[warn] IGP batch search only runs on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
+  exit 0
+fi
+if hnswlib_skip_hnswlib_method "$DATASET" "${METHOD:-}"; then
+  echo "[warn] hnswlib batch search only runs on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
+  exit 0
+fi
+if gem_skip_gem_method "$DATASET" "${METHOD:-}"; then
+  echo "[warn] GEM batch search only runs on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
   exit 0
 fi
 
@@ -175,6 +190,24 @@ if igp_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_IGP"; then
   fi
   CONFIG_PATH="$strip_tmp"
 fi
+if hnswlib_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_HNSWLIB"; then
+  strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_striphnswlib.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$strip_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices hnswlib; then
+    echo "[error] filter_config.py --strip-indices hnswlib failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$strip_tmp"
+fi
+if gem_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_GEM"; then
+  strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_stripgem.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$strip_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices gem; then
+    echo "[error] filter_config.py --strip-indices gem failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$strip_tmp"
+fi
 
 if [[ -n "$EXCLUDE" ]]; then
   excl_tmp="$(mktemp "${TMPDIR:-/tmp}/main_batch_exclude.XXXXXX.yaml")"
@@ -210,7 +243,7 @@ fi
 if [[ "$TASK" == "plot" || "$TASK" == "all" ]]; then
   echo "=== Plots ($SEARCH_NAME): $DATASET ==="
   plot_args=(--datasets "$DATASET" --k "$K_VALUE")
-  [[ "$INCLUDE_IGP_FP" -eq 1 ]] && plot_args+=(--include-igp-fp)
+  [[ "$INCLUDE_EXTERNAL" -eq 1 ]] && plot_args+=(--include-external)
   python3 "$REPO_ROOT/experiments/batch/scripts/plot.py" \
       "${plot_args[@]}" || true
 fi

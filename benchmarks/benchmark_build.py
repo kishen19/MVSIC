@@ -64,6 +64,8 @@ import mvsic
 # FastPlaid is an optional baseline; only imported when the config asks for it.
 _FastPlaidWrapper = None
 _IGPWrapper = None
+_GEMWrapper = None
+_HnswlibWrapper = None
 _load_point_clouds = None
 
 
@@ -77,6 +79,31 @@ def _ensure_fastplaid_imports():
         _load_point_clouds = _lpc
 
 
+def _ensure_gem_imports():
+    """Lazy import of GEMWrapper.
+
+    Importing GEMWrapper itself is cheap (it's pure Python -- the C++
+    runner is invoked via subprocess), so we don't gate on a try/except
+    the way IGP does. We do still need utils.load_point_clouds to be
+    available so that the build path can probe the document dimension.
+    """
+    global _GEMWrapper, _load_point_clouds
+    if _GEMWrapper is None:
+        from framework_utils import GEMWrapper as _GW  # type: ignore
+        from utils import load_point_clouds as _lpc  # type: ignore
+        _GEMWrapper = _GW
+        _load_point_clouds = _lpc
+
+
+def _ensure_hnswlib_imports():
+    global _HnswlibWrapper, _load_point_clouds
+    if _HnswlibWrapper is None:
+        from framework_utils import HnswlibWrapper as _HW  # type: ignore
+        from utils import load_point_clouds as _lpc  # type: ignore
+        _HnswlibWrapper = _HW
+        _load_point_clouds = _lpc
+
+
 def _ensure_igp_imports():
     global _IGPWrapper, _load_point_clouds
     if _IGPWrapper is None:
@@ -86,7 +113,7 @@ def _ensure_igp_imports():
         except Exception as e:
             raise RuntimeError(
                 "IGP support is optional and only needed when running `index.name: igp`.\n"
-                "If you want IGP, run `bash setup_igp.sh` in the repo root, then retry.\n"
+                "If you want IGP, run `bash setup_external.sh --igp` in the repo root, then retry.\n"
                 f"Original error: {e}"
             ) from e
 
@@ -200,7 +227,7 @@ def run_build(
             metric = index_details.get("metric", "ip")
             method_info = methods[index_name]
 
-            if index_name in {"fastplaid", "igp"}:
+            if index_name in {"fastplaid", "igp", "gem", "hnswlib"}:
                 for bc in index_details["build_configs"]:
                     build_name = bc["name"]
                     build_params = bc.get("params") or {}
@@ -223,8 +250,12 @@ def run_build(
                     try:
                         if index_name == "fastplaid":
                             _ensure_fastplaid_imports()
-                        else:
+                        elif index_name == "igp":
                             _ensure_igp_imports()
+                        elif index_name == "gem":
+                            _ensure_gem_imports()
+                        else:
+                            _ensure_hnswlib_imports()
                         if points_tensors is None:
                             points_path = os.path.join(
                                 ds_path, f"{ds_name}_points.pcs"
@@ -238,8 +269,24 @@ def run_build(
                         )
                         if index_name == "fastplaid":
                             wrapper = _FastPlaidWrapper(dim, build_params, index_path=out_dir)
-                        else:
+                        elif index_name == "igp":
                             wrapper = _IGPWrapper(dim, build_params, index_path=out_dir)
+                        elif index_name == "gem":
+                            # GEM build doesn't use the in-memory document
+                            # tensors at all (the gem_runner subprocess
+                            # streams from gem_data .npy shards), but it
+                            # needs to know where to find the source .pcs
+                            # files so the preprocessor can materialize the
+                            # gem_data tree if it's missing.
+                            wrapper = _GEMWrapper(dim, build_params, index_path=out_dir)
+                            wrapper.ds_path = ds_path
+                            wrapper.ds_name = ds_name
+                        else:
+                            bp = dict(build_params)
+                            bp.setdefault("metric", metric)
+                            wrapper = _HnswlibWrapper(dim, bp, index_path=out_dir)
+                            wrapper.ds_path = ds_path
+                            wrapper.ds_name = ds_name
                         t0 = time.time()
                         wrapper.build(points_tensors)
                         build_time = time.time() - t0

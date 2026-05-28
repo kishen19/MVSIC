@@ -88,6 +88,8 @@ _DEFAULT_QUERY_SUBSAMPLE_SEED = 42
 # FastPlaid is an optional baseline; only imported when the config asks for it.
 _FastPlaidWrapper = None
 _IGPWrapper = None
+_GEMWrapper = None
+_HnswlibWrapper = None
 _load_point_clouds = None
 
 
@@ -100,6 +102,27 @@ def _ensure_fastplaid_imports():
         _load_point_clouds = _lpc
 
 
+def _ensure_hnswlib_imports():
+    global _HnswlibWrapper, _load_point_clouds
+    if _HnswlibWrapper is None:
+        from framework_utils import HnswlibWrapper as _HW  # type: ignore
+        _HnswlibWrapper = _HW
+
+
+def _ensure_gem_imports():
+    """Lazy import of GEMWrapper for the search dispatch.
+
+    Pure-Python wrapper (the C++ runner is invoked via subprocess), so
+    unlike IGP we don't need to defend against import failure here.
+    """
+    global _GEMWrapper, _load_point_clouds
+    if _GEMWrapper is None:
+        from framework_utils import GEMWrapper as _GW  # type: ignore
+        from utils import load_point_clouds as _lpc  # type: ignore
+        _GEMWrapper = _GW
+        _load_point_clouds = _lpc
+
+
 def _ensure_igp_imports():
     global _IGPWrapper, _load_point_clouds
     if _IGPWrapper is None:
@@ -109,7 +132,7 @@ def _ensure_igp_imports():
         except Exception as e:
             raise RuntimeError(
                 "IGP support is optional and only needed when running `index.name: igp`.\n"
-                "If you want IGP, run `bash setup_igp.sh` in the repo root, then retry.\n"
+                "If you want IGP, run `bash setup_external.sh --igp` in the repo root, then retry.\n"
                 f"Original error: {e}"
             ) from e
         _IGPWrapper = _IWP
@@ -174,6 +197,33 @@ def _subsample_pcs_buffers(dim, n, data, offsets, ids_buf, indices):
     return new_data, new_offsets, new_ids
 
 
+def _count_queries_in_pcs(ds) -> int:
+    """Return the number of query point clouds in ``{ds}_queries.pcs``."""
+    ds_path = ds["path"]
+    ds_name = ds["name"]
+    queries_path = os.path.join(ds_path, f"{ds_name}_queries.pcs")
+    with open(queries_path, "rb") as f:
+        f.read(8)  # dim
+        n = struct.unpack("Q", f.read(8))[0]
+    return int(n)
+
+
+def _query_subsample_indices(ds, n_max, seed):
+    """Deterministic query indices for external runners (GEM / hnswlib).
+
+    Uses the same RNG logic as ``_maybe_subsample_queries``. Returns ``None``
+    when subsampling is disabled or the corpus already has at most ``n_max``
+    queries.
+    """
+    if n_max is None or n_max <= 0:
+        return None
+    n_q = _count_queries_in_pcs(ds)
+    if n_q <= int(n_max):
+        return None
+    rng = np.random.default_rng(int(seed))
+    return np.sort(rng.choice(n_q, size=int(n_max), replace=False))
+
+
 def _subsample_gt_via_temp(gt_path, indices, gt_loader=None):
     if gt_loader is None:
         gt_loader = mvsic.ReadGT
@@ -232,8 +282,13 @@ def _maybe_subsample_queries(ds, points, queries, gt, n_max, seed,
     if n_q <= n_max:
         return queries, gt
 
-    rng = np.random.default_rng(int(seed))
-    indices = np.sort(rng.choice(n_q, size=int(n_max), replace=False))
+    indices = _query_subsample_indices(
+        {"path": ds["path"], "name": ds["name"]},
+        n_max,
+        seed,
+    )
+    if indices is None:
+        return queries, gt
 
     ds_path = ds["path"]
     ds_name = ds["name"]
@@ -907,6 +962,425 @@ def _run_igp(ds, index_details, method_info, mode, qps_thresh=None,
                 df.to_csv(results_path, index=False)
 
 
+def _run_hnswlib(ds, index_details, method_info, mode, qps_thresh=None,
+                 subsample_n=None, subsample_seed=None):
+    """Run search sweeps for the upstream hnswlib baseline (subprocess runner)."""
+    if mode == "multi_latency":
+        print("  [hnswlib] multi-latency unsupported; skipping.", flush=True)
+        return
+
+    _ensure_hnswlib_imports()
+
+    ds_name = ds['name']
+    ds_path = ds['path']
+    index_dir = ds['index_dir']
+    results_dir = ds['results_dir']
+    variable_param = method_info.get('variable_param') or 'ef_search'
+
+    if mode == 'batch':
+        try:
+            n_thr = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n_thr = os.cpu_count() or 1
+    else:
+        n_thr = 1
+
+    queries_path = os.path.join(ds_path, f"{ds_name}_queries.pcs")
+    points_dim_probe = None
+
+    query_indices = _query_subsample_indices(ds, subsample_n, subsample_seed)
+    if query_indices is not None:
+        print(
+            f"  [subsample] {ds_name}: queries {_count_queries_in_pcs(ds)} -> "
+            f"{len(query_indices)} (seed={int(subsample_seed)})",
+            flush=True,
+        )
+
+    for build in index_details['builds']:
+        build_name = build['build_name']
+        build_params = build.get('build_params') or {}
+
+        index_root = os.path.join(index_dir, "hnswlib", build_name)
+        if not (os.path.isdir(index_root) and os.listdir(index_root)):
+            print(
+                f"  [hnswlib/{build_name}] MISSING {index_root} -- "
+                "run benchmark_build.py first.",
+                flush=True,
+            )
+            continue
+
+        if points_dim_probe is None:
+            with open(queries_path, "rb") as f:
+                import struct as _st
+                points_dim_probe = _st.unpack('Q', f.read(8))[0]
+        dim = int(points_dim_probe)
+
+        index = _HnswlibWrapper(dim, build_params, index_path=index_root)
+        index.ds_path = ds_path
+        index.ds_name = ds_name
+        index.load(index_root, None)
+
+        variant_results_dir = os.path.join(results_dir, "hnswlib", build_name)
+        os.makedirs(variant_results_dir, exist_ok=True)
+
+        for search_config in build.get('search_configs', []):
+            search_name = search_config['name']
+            search_out_dir = os.path.join(variant_results_dir, search_name)
+            os.makedirs(search_out_dir, exist_ok=True)
+
+            combos = _expand_search_params(search_config, variable_param)
+            sv_buckets = {}
+            for p in combos:
+                vn = p.pop('_variant_name')
+                sv_buckets.setdefault(vn, []).append(p)
+
+            for sv_name, params_list in sv_buckets.items():
+                prefix = _csv_prefix_for(mode) if mode else ""
+                suffix = f"_{sv_name}" if sv_name else ""
+                results_path = os.path.join(search_out_dir, f"{prefix}results{suffix}.csv")
+
+                append = search_config.get('append', True)
+                if os.path.exists(results_path) and not append:
+                    os.remove(results_path)
+
+                if variable_param:
+                    params_list.sort(key=lambda p: p.get(variable_param, 0))
+
+                if (
+                    qps_thresh is not None
+                    and os.path.exists(results_path)
+                    and append
+                ):
+                    try:
+                        prev_df = pd.read_csv(results_path)
+                    except pd.errors.EmptyDataError:
+                        prev_df = None
+                    if prev_df is not None and not prev_df.empty:
+                        qps_col = _qps_attr_for_mode(mode)
+                        if qps_col in prev_df.columns:
+                            sort_col = (
+                                variable_param
+                                if variable_param and variable_param in prev_df.columns
+                                else None
+                            )
+                            ex = prev_df.sort_values(by=sort_col) if sort_col else prev_df
+                            try:
+                                last_qps = float(ex.iloc[-1][qps_col])
+                            except (TypeError, ValueError):
+                                last_qps = None
+                            if (
+                                last_qps is not None
+                                and last_qps > 0
+                                and last_qps < qps_thresh
+                            ):
+                                print(
+                                    f"      [hnswlib] cached {qps_col}={last_qps:.2f} "
+                                    f"< qps_thresh={qps_thresh}; skipping remaining sweep",
+                                    flush=True,
+                                )
+                                params_list = []
+
+                if not params_list:
+                    continue
+
+                grouped: dict = {}
+                for p in params_list:
+                    key = int(p['k'])
+                    grouped.setdefault(key, []).append(p)
+
+                rows = []
+                qps_attr = _qps_attr_for_mode(mode)
+                qps_label = _qps_label_for_mode(mode)
+                for k_val, pg in grouped.items():
+                    ef_list = sorted({int(p['ef_search']) for p in pg})
+                    rerank_list = sorted({int(p.get('rerank_k', 256)) for p in pg})
+                    try:
+                        out_rows = index.sweep(
+                            k=k_val,
+                            ef_list=ef_list,
+                            rerank_list=rerank_list,
+                            threads=n_thr,
+                            qps_thresh=qps_thresh,
+                            query_indices=query_indices,
+                        )
+                    except Exception as e:
+                        jid = f"{ds_name}/hnswlib/{build_name}/{search_name}/{sv_name}"
+                        print(
+                            f"  [FAIL {jid}] {type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        traceback.print_exc()
+                        continue
+                    for r in out_rows:
+                        try:
+                            res = index.row_to_stats(r)
+                        except Exception as e:
+                            print(
+                                f"  [WARN hnswlib] skipping malformed row {r}: {e}",
+                                flush=True,
+                            )
+                            continue
+                        qps_val = getattr(res, qps_attr, None)
+                        qps_str = f"{qps_val:.1f}" if qps_val is not None else "N/A"
+                        print(
+                            f"      ef={int(float(r['ef_search']))} "
+                            f"rerank={int(float(r['rerank_k']))} | "
+                            f"R@{res.k}={res.recall_k_k:.3f} "
+                            f"{qps_label}={qps_str}",
+                            flush=True,
+                        )
+                        rows.append({
+                            "k": res.k,
+                            "recall_1_k": res.recall_1_k,
+                            "recall_k_k": res.recall_k_k,
+                            "QPS_seq": res.QPS_seq if res.QPS_seq is not None else 0.0,
+                            "QPS_par": res.QPS_par if res.QPS_par is not None else 0.0,
+                            "avg_cmps": res.avg_cmps,
+                            "avg_timings": res.avg_timings,
+                            "ef_search": int(float(r['ef_search'])),
+                            "rerank_k": int(float(r['rerank_k'])),
+                        })
+
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df = _expand_timings(df, method_info.get('labels') or [])
+                    df = _reorder_columns(df, variable_param, method_info.get('labels') or [])
+                if os.path.exists(results_path):
+                    try:
+                        prev = pd.read_csv(results_path)
+                        df = pd.concat([prev, df], ignore_index=True)
+                    except pd.errors.EmptyDataError:
+                        pass
+                if variable_param and variable_param in df.columns:
+                    df = df.sort_values(by=variable_param)
+                df.to_csv(results_path, index=False)
+
+
+def _run_gem(ds, index_details, method_info, mode, qps_thresh=None,
+             subsample_n=None, subsample_seed=None):
+    """Run search-only sweeps for the GEM (sigmod26gem) baseline.
+
+    Structurally similar to ``_run_igp`` but with one important difference:
+    instead of looping over (ef_search, rerank_k) combos and calling
+    ``compute_stats_latency`` once per combo, we collect each
+    ``search_config`` variant's combos and dispatch them as a *single*
+    ``GEMWrapper.sweep(...)`` call. The runner amortizes its ~multi-second
+    gem_data load + 0.bin reload cost over the whole sweep that way (a
+    per-combo subprocess would otherwise dominate end-to-end search time
+    on small datasets).
+
+    `multi_latency` is intentionally skipped -- the runner doesn't expose
+    a per-query multi-thread path, mirroring the IGP behavior.
+    """
+    if mode == "multi_latency":
+        print("  [gem] multi-latency unsupported; skipping.", flush=True)
+        return
+
+    _ensure_gem_imports()
+
+    ds_name = ds['name']
+    ds_path = ds['path']
+    index_dir = ds['index_dir']
+    results_dir = ds['results_dir']
+
+    variable_param = method_info.get('variable_param') or 'ef_search'
+
+    # Number of threads for the search subprocess. Mode-driven, matches
+    # FastPlaid/IGP conventions: 1 thread for latency, all-cores for batch.
+    if mode == 'batch':
+        try:
+            n_thr = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n_thr = os.cpu_count() or 1
+    else:
+        n_thr = 1
+
+    queries_path = os.path.join(ds_path, f"{ds_name}_queries.pcs")
+
+    # We don't load .pcs queries into Python at all (the runner reads
+    # qdata/qembs.npy directly), but we still resolve dim from the .pcs so
+    # GEMWrapper can be constructed before load() is called.
+    points_dim_probe = None
+
+    query_indices = _query_subsample_indices(ds, subsample_n, subsample_seed)
+    if query_indices is not None:
+        print(
+            f"  [subsample] {ds_name}: queries {_count_queries_in_pcs(ds)} -> "
+            f"{len(query_indices)} (seed={int(subsample_seed)})",
+            flush=True,
+        )
+
+    for build in index_details['builds']:
+        build_name = build['build_name']
+        build_params = build.get('build_params') or {}
+
+        index_root = os.path.join(index_dir, "gem", build_name)
+        if not (os.path.isdir(index_root) and os.listdir(index_root)):
+            print(
+                f"  [gem/{build_name}] MISSING {index_root} -- "
+                "run benchmark_build.py first (or copy your prebuilt index here).",
+                flush=True,
+            )
+            continue
+
+        if points_dim_probe is None:
+            # Cheap probe: just read the dim header off the queries file.
+            with open(queries_path, "rb") as f:
+                import struct as _st
+                points_dim_probe = _st.unpack('Q', f.read(8))[0]
+        dim = int(points_dim_probe)
+
+        index = _GEMWrapper(dim, build_params, index_path=index_root)
+        index.ds_path = ds_path
+        index.ds_name = ds_name
+        index.load(index_root, None)
+
+        variant_results_dir = os.path.join(results_dir, "gem", build_name)
+        os.makedirs(variant_results_dir, exist_ok=True)
+
+        for search_config in build.get('search_configs', []):
+            search_name = search_config['name']
+            search_out_dir = os.path.join(variant_results_dir, search_name)
+            os.makedirs(search_out_dir, exist_ok=True)
+
+            combos = _expand_search_params(search_config, variable_param)
+            sv_buckets = {}
+            for p in combos:
+                vn = p.pop('_variant_name')
+                sv_buckets.setdefault(vn, []).append(p)
+
+            for sv_name, params_list in sv_buckets.items():
+                prefix = _csv_prefix_for(mode) if mode else ""
+                suffix = f"_{sv_name}" if sv_name else ""
+                results_path = os.path.join(search_out_dir, f"{prefix}results{suffix}.csv")
+
+                append = search_config.get('append', True)
+                if os.path.exists(results_path) and not append:
+                    os.remove(results_path)
+
+                if variable_param:
+                    params_list.sort(key=lambda p: p.get(variable_param, 0))
+
+                if (
+                    qps_thresh is not None
+                    and os.path.exists(results_path)
+                    and append
+                ):
+                    try:
+                        prev_df = pd.read_csv(results_path)
+                    except pd.errors.EmptyDataError:
+                        prev_df = None
+                    if prev_df is not None and not prev_df.empty:
+                        qps_col = _qps_attr_for_mode(mode)
+                        if qps_col in prev_df.columns:
+                            sort_col = (
+                                variable_param
+                                if variable_param and variable_param in prev_df.columns
+                                else None
+                            )
+                            ex = prev_df.sort_values(by=sort_col) if sort_col else prev_df
+                            try:
+                                last_qps = float(ex.iloc[-1][qps_col])
+                            except (TypeError, ValueError):
+                                last_qps = None
+                            if (
+                                last_qps is not None
+                                and last_qps > 0
+                                and last_qps < qps_thresh
+                            ):
+                                print(
+                                    f"      [gem] cached {qps_col}={last_qps:.2f} "
+                                    f"< qps_thresh={qps_thresh}; "
+                                    "skipping remaining sweep",
+                                    flush=True,
+                                )
+                                params_list = []
+
+                if not params_list:
+                    continue
+
+                # Collapse the combo list down to (k, nprobe) groups that
+                # share an ef_search x rerank_k grid -- one runner call
+                # per group.
+                grouped: dict = {}
+                for p in params_list:
+                    key = (int(p['k']), int(p.get('nprobe', 4)))
+                    grouped.setdefault(key, []).append(p)
+
+                rows = []
+                qps_attr = _qps_attr_for_mode(mode)
+                qps_label = _qps_label_for_mode(mode)
+                for (k_val, nprobe), pg in grouped.items():
+                    ef_list = sorted({int(p['ef_search']) for p in pg})
+                    rerank_list = sorted({int(p.get('rerank_k', 256)) for p in pg})
+                    try:
+                        out_rows = index.sweep(
+                            k=k_val,
+                            nprobe=nprobe,
+                            ef_list=ef_list,
+                            rerank_list=rerank_list,
+                            threads=n_thr,
+                            qps_thresh=qps_thresh,
+                            query_indices=query_indices,
+                        )
+                    except Exception as e:
+                        jid = f"{ds_name}/gem/{build_name}/{search_name}/{sv_name}"
+                        print(
+                            f"  [FAIL {jid}] {type(e).__name__}: {e}",
+                            flush=True,
+                        )
+                        traceback.print_exc()
+                        continue
+                    # Stitch back into MVSIC's results-CSV schema.
+                    for r in out_rows:
+                        try:
+                            res = index.row_to_stats(r)
+                        except Exception as e:
+                            print(
+                                f"  [WARN gem] skipping malformed row {r}: {e}",
+                                flush=True,
+                            )
+                            continue
+                        qps_val = getattr(res, qps_attr, None)
+                        qps_str = f"{qps_val:.1f}" if qps_val is not None else "N/A"
+                        print(
+                            f"      ef={int(float(r['ef_search']))} "
+                            f"rerank={int(float(r['rerank_k']))} | "
+                            f"R@{res.k}={res.recall_k_k:.3f} "
+                            f"{qps_label}={qps_str}",
+                            flush=True,
+                        )
+                        row = {
+                            "k": res.k,
+                            "recall_1_k": res.recall_1_k,
+                            "recall_k_k": res.recall_k_k,
+                            "QPS_seq": res.QPS_seq if res.QPS_seq is not None else 0.0,
+                            "QPS_par": res.QPS_par if res.QPS_par is not None else 0.0,
+                            "avg_cmps": res.avg_cmps,
+                            "avg_timings": res.avg_timings,
+                            # Echo back the GEM-specific params so the CSV
+                            # round-trips through _expand_search_params.
+                            "ef_search": int(float(r['ef_search'])),
+                            "rerank_k": int(float(r['rerank_k'])),
+                            "nprobe": int(float(r.get('nprobe', nprobe))),
+                        }
+                        rows.append(row)
+
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df = _expand_timings(df, method_info.get('labels') or [])
+                    df = _reorder_columns(df, variable_param, method_info.get('labels') or [])
+                if os.path.exists(results_path):
+                    try:
+                        prev = pd.read_csv(results_path)
+                        df = pd.concat([prev, df], ignore_index=True)
+                    except pd.errors.EmptyDataError:
+                        pass
+                if variable_param and variable_param in df.columns:
+                    df = df.sort_values(by=variable_param)
+                df.to_csv(results_path, index=False)
+
+
 def _csv_prefix_for(mode):
     # Pick a per-mode CSV prefix so latency/multi_latency/batch coexist in the same dir.
     return {
@@ -1006,6 +1480,38 @@ def run_search(
                     )
                 except Exception as e:
                     jid = f"{ds_name}/igp"
+                    print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
+                    traceback.print_exc()
+                    failures.append((jid, str(e)))
+                    if fail_fast:
+                        abort = True
+                continue
+            if index_name == "gem":
+                try:
+                    _run_gem(
+                        ds, index_details, method_info, mode,
+                        qps_thresh=qps_thresh,
+                        subsample_n=subsample_n,
+                        subsample_seed=subsample_seed,
+                    )
+                except Exception as e:
+                    jid = f"{ds_name}/gem"
+                    print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
+                    traceback.print_exc()
+                    failures.append((jid, str(e)))
+                    if fail_fast:
+                        abort = True
+                continue
+            if index_name == "hnswlib":
+                try:
+                    _run_hnswlib(
+                        ds, index_details, method_info, mode,
+                        qps_thresh=qps_thresh,
+                        subsample_n=subsample_n,
+                        subsample_seed=subsample_seed,
+                    )
+                except Exception as e:
+                    jid = f"{ds_name}/hnswlib"
                     print(f"  [FAIL {jid}] {type(e).__name__}: {e}", flush=True)
                     traceback.print_exc()
                     failures.append((jid, str(e)))

@@ -145,3 +145,24 @@ igp:
   supports_compress: false
   quantizers: [None]
   labels: ["t_retrieval", "t_filter", "t_decode", "t_refine"]
+
+gem:
+  # GEM (SIGMOD'26 multi-vector retrieval) -- graph-on-IVF hybrid built via
+  # an external C++ runner (//benchmarks/gem:gem_runner). Search-side
+  # sweeps `ef_search`; the per-result-budget knob is `rerank_k` (which the
+  # `nrXXX` filename convention encodes, matching other methods'
+  # num_rerank). `nprobe` is the per-token coarse-cluster filter (paper t).
+  variable_param: ef_search
+  class: "GEM"
+  supports_compress: false
+  quantizers: [None]
+  labels: ["t_filter", "t_graph_search", "t_rerank"]
+
+hnswlib:
+  # Upstream nmslib/hnswlib flat token HNSW + chamfer-IP rerank baseline.
+  # Built/searched via //benchmarks/hnswlib:hnswlib_runner (subprocess).
+  variable_param: ef_search
+  class: "Hnswlib"
+  supports_compress: false
+  quantizers: [None]
+  labels: ["t_graph_search", "t_rerank"]

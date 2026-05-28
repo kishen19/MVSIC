@@ -51,11 +51,11 @@ indices:
   - name: mvivf
     metric: ip
     builds:
-      - build_name: mvivf_k0_l500_d15_nit0_s0_mpcc100
+      - build_name: mvivf_k0_l500_d0_nit0_s0_mpcc100
         build_params: &stage4_defaults
           k_per_level: 0
           max_leaf_size: 100
-          max_depth: 15
+          max_depth: 0
           niters: 0
           s: 0
           max_point_clouds_per_cluster: 100
@@ -69,15 +69,18 @@ indices:
               tq8_rerank: [true]
               query_compression: ["Wards"]
               query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
               k: [10]
               config:
-                - {name: "nr500", num_rerank: 500}
-      - build_name: mvivf_k0_l500_d15_nit5_s0_mpcc100
+                - { name: nr20,   num_rerank: 20 }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr100,   num_rerank: 100 }
+                - { name: nr500,   num_rerank: 500 }
+      - build_name: mvivf_k0_l500_d0_nit5_s0_mpcc100
         build_params: { <<: *stage4_defaults, niters: 5 }
         variants: *stage4_variants
         search_configs: *ivf_k10
-      - build_name: mvivf_k0_l500_d15_nit10_s0_mpcc100
+      - build_name: mvivf_k0_l500_d0_nit10_s0_mpcc100
         build_params: { <<: *stage4_defaults, niters: 10 }
         variants: *stage4_variants
         search_configs: *ivf_k10

@@ -24,10 +24,10 @@
 #           or just want to regenerate the report.
 #   all   = build, then mirror, then report (the previous default).
 #
-# FastPlaid + IGP are opt-in for builds too: omitted by default / ``--method all``.
-# Use ``--method fastplaid`` / ``--method igp`` or the corresponding
-# ``--with-fastplaid`` / ``--with-igp`` flags (see fastplaid_scope.sh). Both are
-# never built on beirbig / nq500k / msmarco / lotte even with opt-in flags.
+# External baselines (fastplaid, igp, gem, hnswlib) are opt-in for builds:
+# omitted by default / ``--method all``. Use ``--method <name>`` or
+# ``--with-<name>`` / ``--with-external`` (see external_scope.sh). Never built
+# on beirbig / nq500k / msmarco / lotte even with opt-in flags.
 #
 # ``--exclude <name>[,<name>...]`` drops those indices[].name entries from the
 # resolved config (after --method / --dataset filtering and FastPlaid scoping).
@@ -50,14 +50,16 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CONFIGS_DIR="$REPO_ROOT/experiments/builds/configs"
 FILTER_PY="$REPO_ROOT/experiments/builds/scripts/filter_config.py"
 # shellcheck disable=SC1091
-source "$REPO_ROOT/experiments/builds/scripts/fastplaid_scope.sh"
+source "$REPO_ROOT/experiments/builds/scripts/external_scope.sh"
 cd "$REPO_ROOT"
 
 DATASET=""
-METHOD=""        # empty | all | mvivf | mvivf_spill | muvera | vamana | svh_graph | fastplaid | igp
+METHOD=""        # empty | all | mvivf | ... | fastplaid | igp | gem | hnswlib
 EXCLUDE=""       # comma-separated indices[].name to drop after filtering
 WITH_FASTPLAID=0
 WITH_IGP=0
+WITH_GEM=0
+WITH_HNSWLIB=0
 # build = run benchmark_build only; plot = mirror+report only (no build);
 # all   = build, then mirror, then report. Default = all so existing
 # scripted runs keep behaving the same.
@@ -65,7 +67,7 @@ TASK="all"
 EXTRA_ARGS=()
 
 # Per-shard dataset names, grouped by the YAML they share. Keep in sync with
-# BEIR5_NAMES / BEIRBIG_NAMES in fastplaid_scope.sh and with the {build,search}
+# BEIR5_NAMES / BEIRBIG_NAMES in external_scope.sh and with the {build,search}
 # yaml filenames in experiments/{builds,latency}/configs.
 BEIR5_DATASETS=(nfcorpus scifact arguana scidocs fiqa)
 BEIRBIG_DATASETS=(quora nq hotpotqa)
@@ -91,6 +93,10 @@ while [[ $# -gt 0 ]]; do
     --task)    TASK="$2";    shift 2;;
     --with-fastplaid) WITH_FASTPLAID=1; shift;;
     --with-igp) WITH_IGP=1; shift;;
+    --with-gem) WITH_GEM=1; shift;;
+    --with-hnswlib) WITH_HNSWLIB=1; shift;;
+    --with-external)
+      WITH_FASTPLAID=1; WITH_IGP=1; WITH_GEM=1; WITH_HNSWLIB=1; shift;;
     *) EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -134,6 +140,14 @@ if igp_skip_igp_method "$DATASET" "${METHOD:-}"; then
   echo "[warn] IGP builds only run on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
   exit 0
 fi
+if hnswlib_skip_hnswlib_method "$DATASET" "${METHOD:-}"; then
+  echo "[warn] hnswlib builds only run on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
+  exit 0
+fi
+if gem_skip_gem_method "$DATASET" "${METHOD:-}"; then
+  echo "[warn] GEM builds only run on the classic BEIR-5 shards (nfcorpus … fiqa); skipping." >&2
+  exit 0
+fi
 
 NEED_FILTER=0
 [[ -n "$FILTER_DATASET" ]] && NEED_FILTER=1
@@ -172,6 +186,24 @@ if igp_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_IGP"; then
   TEMP_YAMLS+=("$strip_tmp")
   if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices igp; then
     echo "[error] filter_config.py --strip-indices igp failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$strip_tmp"
+fi
+if hnswlib_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_HNSWLIB"; then
+  strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_build_striphnswlib.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$strip_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices hnswlib; then
+    echo "[error] filter_config.py --strip-indices hnswlib failed" >&2
+    exit 2
+  fi
+  CONFIG_PATH="$strip_tmp"
+fi
+if gem_should_strip_after_filters "$eff_ds" "${METHOD:-}" "$WITH_GEM"; then
+  strip_tmp="$(mktemp "${TMPDIR:-/tmp}/main_build_stripgem.XXXXXX.yaml")"
+  TEMP_YAMLS+=("$strip_tmp")
+  if ! python3 "$FILTER_PY" --in "$CONFIG_PATH" --out "$strip_tmp" --strip-indices gem; then
+    echo "[error] filter_config.py --strip-indices gem failed" >&2
     exit 2
   fi
   CONFIG_PATH="$strip_tmp"

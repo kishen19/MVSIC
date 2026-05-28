@@ -112,3 +112,33 @@ indices:
           assign_batch_size: 100000
           residual_batch_size: 100000
           kmeans_gpu: false
+
+  # ----- GEM (BEIR-5 only). SIGMOD'26 graph-on-IVF; very slow builds. -----
+  # Paper §5.1.3 defaults: M=24, ef_construction=80; |C_quant| = 2^round(log2(16√#tokens));
+  # |C_index| dataset-scaled (40K/10K/1K on MSMARCO/LoTTE/OKVQA); TF-IDF top-r per doc.
+  # BEIR-5 uses auto k-means (0 → preprocess picks k1/k2 from corpus size).
+  - name: gem
+    metric: ip
+    build_configs:
+      - name: gem_m24_ef80
+        params:
+          m_index: 24                    # M — max neighbors per graph vertex (paper §5.1.3)
+          ef_construction: 80            # ef_construction — HNSW build beam (paper §5.1.3)
+          top_r: 4                       # r — TF-IDF top-r coarse clusters per document (§4.1.2)
+          num_doc_shards: 1              # encoding shards (1 suffices for BEIR-5 corpus size)
+          num_fine_clusters: 0           # |C_quant| / k1 — 0 = auto ≈ 2^round(log2(16√N_tok))
+          num_coarse_clusters: 0         # |C_index| / k2 — 0 = auto ~ N_doc/5000 (floored)
+          kmeans_niter: 20               # (preprocess only; not named in paper)
+          kmeans_seed: 123
+          kmeans_sample_max: 2000000
+
+  # ----- hnswlib flat token HNSW (BEIR-5 only). -----
+  # Not a GEM-paper method: per-token HNSW + chamfer rerank. Paper MVG uses M=24,
+  # ef_construction=80 (same graph params as GEM); values below are hnswlib_runner defaults.
+  - name: hnswlib
+    metric: ip
+    build_configs:
+      - name: hnswlib_m16_ef200
+        params:
+          m_index: 16                    # M — hnswlib_runner default (paper MVG: M=24)
+          ef_construction: 200           # ef_construction — runner default (paper MVG: 80)

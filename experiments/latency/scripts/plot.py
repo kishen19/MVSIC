@@ -45,12 +45,15 @@ def main() -> int:
               "into one set of PDFs at <results>/_plots/."),
     )
     p.add_argument(
+        "--include-external", "--include_external",
+        dest="include_external", action="store_true",
+        help=("Additional plot pass with external baselines (igp, fastplaid, "
+              "gem, hnswlib). Writes ``_external.pdf`` siblings."),
+    )
+    p.add_argument(
         "--include-igp-fp", "--include_igp_fp",
-        dest="include_igp_fp", action="store_true",
-        help=("Generate an additional pass of every plot with the ``igp`` "
-              "and ``fastplaid`` baselines included. Output filenames get a "
-              "``_igp_fp`` suffix; default plots are unchanged. The opt-in "
-              "pass is skipped per-dataset if neither baseline has data."),
+        dest="include_external", action="store_true",
+        help="Deprecated alias for --include-external.",
     )
     args = p.parse_args()
 
@@ -66,8 +69,8 @@ def main() -> int:
         cmd += ["--out-dir", str(args.out_dir)]
     if args.k is not None:
         cmd += ["--search", f"k={args.k}"]
-    if args.include_igp_fp:
-        cmd += ["--include-igp-fp"]
+    if args.include_external:
+        cmd += ["--include-external"]
     return subprocess.call(cmd)
 
 

@@ -96,6 +96,8 @@ _PRETTY = {
     "svh_graph": "SVH",
     "fastplaid": "FastPlaid",
     "igp": "IGP",
+    "gem": "GEM",
+    "hnswlib": "HNSWlib",
 }
 
 

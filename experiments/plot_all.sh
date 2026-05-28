@@ -12,6 +12,7 @@
 #   experiments/plot_all.sh --skip mvivf_ablation,query_compression
 #   experiments/plot_all.sh --only latency,batch,multi_latency
 #   experiments/plot_all.sh --only builds    # just the build report
+#   experiments/plot_all.sh --only optimizations
 #   experiments/plot_all.sh --suites all,beir   # which build-report suites to emit
 #   experiments/plot_all.sh --suites beir       # BEIR-only build report
 #   experiments/plot_all.sh --include-vidore # include ViDoRe per-dataset plots
@@ -34,6 +35,9 @@
 #   results tree and dispatch through scripts/run_ablation.sh --task evaluate.
 # - query_compression needs --dataset; we iterate over every per-dataset
 #   results dir that has a CSV.
+# - optimizations: MVIVF optimization ladder (Pareto + latency waterfall).
+# - latency/batch: also emit *_external.pdf siblings when igp/fastplaid/gem/hnswlib
+#   CSVs exist under results/ (auto-detected; pass --no-external to skip).
 
 set -euo pipefail
 shopt -s nullglob globstar
@@ -64,6 +68,7 @@ ONLY=""
 DRY_RUN=0
 LIST_STAGES=0
 INCLUDE_VIDORE=0
+NO_EXTERNAL=0
 CLEAN=0
 # Default: emit the all-datasets, BEIR-only and LoTTE-only build reports.
 # Use --suites to scope to just one (e.g. --suites beir).
@@ -75,6 +80,7 @@ while [[ $# -gt 0 ]]; do
     --only)        ONLY="$2"; shift 2;;
     --suites)      SUITES="$2"; shift 2;;
     --include-vidore) INCLUDE_VIDORE=1; shift;;
+    --no-external|--no_external) NO_EXTERNAL=1; shift;;
     --clean)       CLEAN=1; shift;;
     --dry-run)     DRY_RUN=1; shift;;
     --list-stages) LIST_STAGES=1; shift;;
@@ -294,6 +300,43 @@ fi
 #    across k. If no k=* dirs are present (legacy data) we fall back to a
 #    single mixed render at ``<results>/_plots/``.
 # -----------------------------------------------------------------------------
+# Comma-separated dataset names from overretrieve text logs (chamfer_*.txt).
+overretrieve_txt_datasets_csv() {
+  local root="$1" glob="${2:-chamfer_*.txt}"
+  [[ -d "$root" ]] || return 0
+  local names=()
+  local f base
+  for f in "$root"/$glob; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f" .txt)"
+    [[ "$base" == "summary" ]] && continue
+    if [[ "$base" == chamfer_* ]]; then
+      base="${base#chamfer_}"
+    fi
+    names+=("$base")
+  done
+  if (( ${#names[@]} > 0 )); then
+    local IFS=,
+    echo "${names[*]}"
+  fi
+}
+
+# External baseline method dirs (igp, fastplaid, gem, hnswlib).
+EXTERNAL_METHODS=(igp fastplaid gem hnswlib)
+
+# Exit 0 when any external method has at least one CSV under results/<ds>/<method>/...
+has_external_results() {
+  local root="$1"
+  [[ -d "$root" ]] || return 1
+  local m
+  for m in "${EXTERNAL_METHODS[@]}"; do
+    if find "$root" -path "*/${m}/*" -name '*.csv' -print -quit 2>/dev/null | grep -q .; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 discover_k_values() {
   # Echo space-separated, sorted k values (just the integer) found under
   # any depth of the given results root. Empty output => no k=* dirs.
@@ -314,19 +357,26 @@ for stage in latency batch multi_latency; do
     if [[ -n "$datasets_csv" ]]; then
       dataset_args=(--datasets "$datasets_csv")
     fi
+    external_args=()
+    if [[ "$NO_EXTERNAL" -eq 0 ]] && [[ "$stage" == "latency" || "$stage" == "batch" ]]; then
+      if has_external_results "$stage_results"; then
+        echo "    (external baseline CSVs found — also plotting *_external.pdf)"
+        external_args=(--include-external)
+      fi
+    fi
     mapfile -t K_VALUES < <(discover_k_values "$stage_results")
     if (( ${#K_VALUES[@]} == 0 )); then
       run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
-        "${dataset_args[@]}"
+        "${dataset_args[@]}" "${external_args[@]}"
     else
       for k in "${K_VALUES[@]}"; do
         echo "    --- k=$k ---"
         run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
-          --k "$k" "${dataset_args[@]}"
+          --k "$k" "${dataset_args[@]}" "${external_args[@]}"
       done
       echo "    --- combined k values / paper four-panel ---"
       run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
-        "${dataset_args[@]}"
+        "${dataset_args[@]}" "${external_args[@]}"
     fi
     if [[ "$stage" != "batch" && -f "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py" ]]; then
       run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot_breakdown.py" \
@@ -345,7 +395,24 @@ for stage in muvera_ablation svh_graph_ablation vamana_ablations \
              overretrieve_multivector_benchmark; do
   if want_stage "$stage"; then
     echo "=== plot: ${stage} ==="
-    run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py"
+    plot_args=()
+    case "$stage" in
+      overretrieve_singlevector_benchmark|overretrieve_multivector_benchmark)
+        ds_csv="$(overretrieve_txt_datasets_csv \
+          "$REPO_ROOT/experiments/${stage}/results")"
+        ;;
+      optimizations)
+        ds_csv="$(dataset_csv_for_stage "$REPO_ROOT/experiments/${stage}/results")"
+        ;;
+      *)
+        ds_csv=""
+        ;;
+    esac
+    if [[ -n "${ds_csv:-}" ]]; then
+      plot_args=(--datasets "$ds_csv")
+    fi
+    run_or_warn python3 "$REPO_ROOT/experiments/${stage}/scripts/plot.py" \
+      "${plot_args[@]}"
   fi
 done
 

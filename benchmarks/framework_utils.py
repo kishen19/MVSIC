@@ -1,5 +1,9 @@
+import csv
+import io
 import json
 import os
+import subprocess
+import sys
 import time
 import ctypes
 from collections import namedtuple
@@ -242,7 +246,7 @@ class IGPWrapper:
             except ImportError as e:
                 raise RuntimeError(
                     "IGP python module is unavailable. This is only required for "
-                    "`index.name: igp` runs. Install it with `bash setup_igp.sh` "
+                    "`index.name: igp` runs. Install it with `bash setup_external.sh --igp` "
                     "from the repo root (or build/install upstream `IGP` manually). "
                     f"Original import error: {e}"
                 ) from e
@@ -610,6 +614,575 @@ class IGPWrapper:
             avg_cmps=avg_cmps,
             avg_timings=avg_timings,
         )
+
+
+class GEMWrapper:
+    """Subprocess-backed adapter for the GEM (sigmod26gem) baseline.
+
+    Unlike IGP / FastPlaid (Python-importable extensions), GEM ships only as
+    a C++ library. We invoke the standalone ``gem_runner`` binary
+    (//benchmarks/gem:gem_runner) as a subprocess for both build and search.
+
+    Search-time IO contract differs from the other wrappers because the
+    runner amortizes its ~multi-second data-load cost over an internal
+    ``ef_search`` x ``rerank_k`` cartesian sweep. The wrapper exposes:
+
+      * ``sweep(...)``     -- preferred: one runner invocation over many
+                              (ef, rerank) combos; returns one row per combo.
+      * ``compute_stats_latency`` / ``compute_stats_batch`` -- single-combo
+                              shims that internally call ``sweep`` with a
+                              1x1 list. Kept for API parity, but the
+                              ``_run_gem`` dispatcher in benchmark_search.py
+                              should call ``sweep`` directly.
+
+    Build-time inputs (the gem_data tree) are produced by
+    ``benchmarks/gem/gem_preprocess.py`` (two-stage faiss k-means + TF-IDF coarse
+    routing + FP16 doc shards). The wrapper calls the preprocessor lazily
+    on the first ``build()`` invocation, keyed on (k1, k2, top_r) via the
+    ``.READY`` marker the preprocessor writes.
+
+    Per-build artifacts live entirely under ``index_path``:
+
+      <index_path>/
+        gem_data/cdata/{centroids,coarse_centroids}.npy
+        gem_data/cdata/coarse_cluster_info.txt
+        gem_data/docdata/{encoding,doc_codes,doclens}<i>.npy
+        gem_data/qdata/{qembs,qlens}.npy
+        0.bin             # HNSW graph
+        gem_meta.json
+        build_stats.json  # written by benchmark_build.py
+        _BUILD_OK         # written by benchmark_build.py
+    """
+
+    GEM_DATA_SUBDIR = "gem_data"
+
+    def __init__(self, dim, build_params, index_path, device=None):
+        self.dim = int(dim)
+        self.build_params = dict(build_params or {})
+        self.index_path = index_path
+        self._runner_bin: str | None = None
+        # Set by the dispatcher (_run_gem) right after construction so the
+        # wrapper can locate the source .pcs files for preprocessing and
+        # the .gt file for recall evaluation. Without these, build() and
+        # search() will refuse to run.
+        self.ds_path: str | None = None
+        self.ds_name: str | None = None
+        self._meta: dict | None = None
+
+    # ----- runner discovery ------------------------------------------------
+
+    def _find_runner(self) -> str:
+        if self._runner_bin:
+            return self._runner_bin
+        env = os.environ.get("MVSIC_GEM_RUNNER")
+        if env and os.path.exists(env) and os.access(env, os.X_OK):
+            self._runner_bin = env
+            return env
+        # Repo root = parent of the benchmarks/ folder this file lives in.
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cand = os.path.join(repo_root, "bazel-bin", "benchmarks", "gem", "gem_runner")
+        if (
+            os.path.exists(cand)
+            and os.access(cand, os.X_OK)
+        ):
+            self._runner_bin = cand
+            return cand
+        raise RuntimeError(
+            "gem_runner binary not found at "
+            f"{cand}. Run `bash setup_external.sh --gem` from the repo root, "
+            "or set $MVSIC_GEM_RUNNER."
+        )
+
+    def _repo_root(self) -> str:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # ----- gem_data preprocessing -----------------------------------------
+
+    def _ensure_gem_data(self) -> str:
+        if not self.ds_path or not self.ds_name:
+            raise RuntimeError(
+                "GEMWrapper requires ds_path / ds_name to be set before "
+                "build/search (normally injected by _run_gem)."
+            )
+        out_dir = os.path.join(self.index_path, self.GEM_DATA_SUBDIR)
+        ready = os.path.join(out_dir, ".READY")
+        if os.path.exists(ready) and not self.build_params.get("force_preprocess", False):
+            return out_dir
+        os.makedirs(out_dir, exist_ok=True)
+        preproc = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "gem", "gem_preprocess.py",
+        )
+        py = os.environ.get("PYTHON", sys.executable)
+        cmd = [
+            py, preproc,
+            "--dataset", str(self.ds_name),
+            "--ds-path", str(self.ds_path),
+            "--out-dir", out_dir,
+            "--num-shards", str(int(self.build_params.get("num_doc_shards", 1))),
+            "--niter", str(int(self.build_params.get("kmeans_niter", 20))),
+            "--seed", str(int(self.build_params.get("kmeans_seed", 123))),
+            "--kmeans-sample-max",
+            str(int(self.build_params.get("kmeans_sample_max", 2_000_000))),
+            "--k1", str(int(self.build_params.get("num_fine_clusters", 0))),
+            "--k2", str(int(self.build_params.get("num_coarse_clusters", 0))),
+            "--top-r", str(int(self.build_params.get("top_r", 4))),
+        ]
+        if self.build_params.get("verbose_preprocess", False):
+            cmd.append("--verbose")
+        print(f"    [gem] preprocessing -> {out_dir}", flush=True)
+        # Inherit stdout/stderr so the preprocessor's progress prints stream
+        # into the surrounding build log.
+        subprocess.run(cmd, check=True)
+        return out_dir
+
+    # ----- build ----------------------------------------------------------
+
+    def build(self, documents=None):
+        # ``documents`` is unused by GEM (the runner reads .npy files from
+        # the gem_data tree directly). We accept it for API parity with
+        # FastPlaid / IGP wrappers in benchmark_build.py.
+        del documents
+        runner = self._find_runner()
+        gem_data = self._ensure_gem_data()
+        num_shards = int(self.build_params.get("num_doc_shards", 1))
+        m_index = int(self.build_params.get("m_index", 24))
+        ef_construction = int(self.build_params.get("ef_construction", 80))
+        try:
+            n_thr_default = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n_thr_default = os.cpu_count() or 1
+        threads = int(self.build_params.get("build_threads", n_thr_default))
+        cmd = [
+            runner,
+            "--mode", "build",
+            "--gem-data", gem_data,
+            "--num-doc-shards", str(num_shards),
+            "--dim", str(self.dim),
+            "--m-index", str(m_index),
+            "--ef-construction", str(ef_construction),
+            "--out", self.index_path,
+            "--threads", str(threads),
+        ]
+        print(
+            f"    [gem] building hnswlib graph -> {self.index_path} "
+            f"(m={m_index}, ef={ef_construction}, threads={threads})",
+            flush=True,
+        )
+        subprocess.run(cmd, check=True)
+
+    def save(self, path: str):
+        return  # gem_runner writes 0.bin during build().
+
+    def load(self, path, points):
+        # No eager load -- the runner reloads gem_data + 0.bin for each
+        # search subprocess. We only need to remember where the index lives.
+        del points
+        self.index_path = path
+        meta = os.path.join(path, "gem_meta.json")
+        if os.path.exists(meta):
+            try:
+                with open(meta) as f:
+                    self._meta = json.load(f)
+            except Exception:
+                self._meta = None
+
+    # ----- search ---------------------------------------------------------
+
+    def _gt_path(self) -> str:
+        if not self.ds_path or not self.ds_name:
+            raise RuntimeError(
+                "GEMWrapper requires ds_path / ds_name to be set before search."
+            )
+        return os.path.join(self.ds_path, f"{self.ds_name}_chamfer_neighbors.gt")
+
+    def sweep(
+        self,
+        *,
+        k: int,
+        nprobe: int,
+        ef_list,
+        rerank_list,
+        threads: int,
+        qps_thresh: float | None = None,
+        warmup: int = 10,
+        query_indices=None,
+    ):
+        """Invoke gem_runner once over the cartesian product (ef x rerank).
+
+        Returns the parsed CSV rows as a list of dicts (one per combo).
+
+        ``qps_thresh`` is forwarded as ``--qps-stop-below``, which makes the
+        runner stop each ``rerank_k`` chain at the first ef whose QPS falls
+        below the threshold (matches the per-sweep early-termination
+        semantics of _run_igp's outer loop).
+        """
+        runner = self._find_runner()
+        gem_data = os.path.join(self.index_path, self.GEM_DATA_SUBDIR)
+        if not os.path.exists(os.path.join(gem_data, ".READY")):
+            raise RuntimeError(
+                f"GEM gem_data tree missing or incomplete at {gem_data}. "
+                "Run benchmark_build.py first."
+            )
+        num_shards = int(self.build_params.get("num_doc_shards", 1))
+        m_index = int(self.build_params.get("m_index", 24))
+        ef_construction = int(self.build_params.get("ef_construction", 80))
+        ef_list = sorted({int(x) for x in ef_list})
+        rerank_list = sorted({int(x) for x in rerank_list})
+        cmd = [
+            runner,
+            "--mode", "search",
+            "--gem-data", gem_data,
+            "--num-doc-shards", str(num_shards),
+            "--dim", str(self.dim),
+            "--m-index", str(m_index),
+            "--ef-construction", str(ef_construction),
+            "--index", self.index_path,
+            "--gt", self._gt_path(),
+            "--k", str(int(k)),
+            "--nprobe-t", str(int(nprobe)),
+            "--ef-list", ",".join(str(x) for x in ef_list),
+            "--rerank-list", ",".join(str(x) for x in rerank_list),
+            "--threads", str(int(threads)),
+            "--warmup", str(int(warmup)),
+            "--output-csv", "-",
+        ]
+        if qps_thresh is not None and qps_thresh > 0:
+            cmd += ["--qps-stop-below", str(float(qps_thresh))]
+        if query_indices is not None:
+            idx = (
+                query_indices.tolist()
+                if hasattr(query_indices, "tolist")
+                else list(query_indices)
+            )
+            if idx:
+                cmd += ["--query-indices", ",".join(str(int(i)) for i in idx)]
+        # capture stdout (CSV rows), forward stderr so progress logs stream
+        # into the surrounding search log.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+            sys.stderr.flush()
+        if proc.returncode != 0:
+            err_tail = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+            raise RuntimeError(
+                f"gem_runner failed (exit {proc.returncode}): {err_tail}"
+            )
+        rows = []
+        reader = csv.DictReader(io.StringIO(proc.stdout))
+        for row in reader:
+            rows.append({key: row[key] for key in row.keys()})
+        return rows
+
+    def row_to_stats(self, row) -> StatsExtended:
+        """Convert one parsed CSV row from gem_runner to a StatsExtended.
+
+        Labels in methods.yaml must match the order
+        ["t_filter", "t_graph_search", "t_rerank"] (the order is the same
+        as the runner's CSV columns t_filter, t_graph_search, t_rerank).
+        """
+        k = int(float(row["k"]))
+        qps_seq = float(row["QPS_seq"]) if row.get("QPS_seq") else 0.0
+        qps_par = float(row["QPS_par"]) if row.get("QPS_par") else 0.0
+        return StatsExtended(
+            k=k,
+            recall_1_k=min(1.0, float(row["recall_1_k"])),
+            recall_k_k=min(1.0, float(row["recall_k_k"])),
+            QPS_seq=qps_seq if qps_seq > 0 else None,
+            QPS_par=qps_par,
+            avg_cmps=float(row.get("avg_cmps", 0.0) or 0.0),
+            avg_timings=[
+                float(row.get("t_filter", 0.0) or 0.0),
+                float(row.get("t_graph_search", 0.0) or 0.0),
+                float(row.get("t_rerank", 0.0) or 0.0),
+            ],
+        )
+
+    def compute_stats_latency(self, queries, gt, params):
+        del queries, gt
+        rows = self.sweep(
+            k=int(params["k"]),
+            nprobe=int(params.get("nprobe", 4)),
+            ef_list=[int(params["ef_search"])],
+            rerank_list=[int(params.get("rerank_k", 256))],
+            threads=1,
+        )
+        if not rows:
+            raise RuntimeError("gem_runner returned no CSV rows.")
+        return self.row_to_stats(rows[0])
+
+    def compute_stats_batch(self, queries, gt, params):
+        del queries, gt
+        try:
+            n_thr = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n_thr = os.cpu_count() or 1
+        rows = self.sweep(
+            k=int(params["k"]),
+            nprobe=int(params.get("nprobe", 4)),
+            ef_list=[int(params["ef_search"])],
+            rerank_list=[int(params.get("rerank_k", 256))],
+            threads=int(n_thr),
+        )
+        if not rows:
+            raise RuntimeError("gem_runner returned no CSV rows.")
+        return self.row_to_stats(rows[0])
+
+
+class HnswlibWrapper:
+    """Subprocess-backed adapter for upstream nmslib/hnswlib (v0.9.0+).
+
+    Flat token indexing with per-query-token graph probes and exact
+    asymmetric chamfer-IP rerank. See //benchmarks/hnswlib:hnswlib_runner and
+    benchmarks/hnswlib/hnswlib_preprocess.py.
+    """
+
+    HNSWLIB_DATA_SUBDIR = "hnswlib_data"
+
+    def __init__(self, dim, build_params, index_path, device=None):
+        del device
+        self.dim = int(dim)
+        self.build_params = dict(build_params or {})
+        self.index_path = index_path
+        self._runner_bin: str | None = None
+        self.ds_path: str | None = None
+        self.ds_name: str | None = None
+        self._meta: dict | None = None
+
+    def _find_runner(self) -> str:
+        if self._runner_bin:
+            return self._runner_bin
+        env = os.environ.get("MVSIC_HNSWLIB_RUNNER")
+        if env and os.path.exists(env) and os.access(env, os.X_OK):
+            self._runner_bin = env
+            return env
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cand = os.path.join(repo_root, "bazel-bin", "benchmarks", "hnswlib", "hnswlib_runner")
+        if os.path.exists(cand) and os.access(cand, os.X_OK):
+            self._runner_bin = cand
+            return cand
+        raise RuntimeError(
+            "hnswlib_runner binary not found at "
+            f"{cand}. Run `bash setup_external.sh --hnswlib` from the repo root, "
+            "or set $MVSIC_HNSWLIB_RUNNER."
+        )
+
+    def _repo_root(self) -> str:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _ensure_hnswlib_data(self) -> str:
+        if not self.ds_path or not self.ds_name:
+            raise RuntimeError(
+                "HnswlibWrapper requires ds_path / ds_name before build/search."
+            )
+        out_dir = os.path.join(self.index_path, self.HNSWLIB_DATA_SUBDIR)
+        ready = os.path.join(out_dir, ".READY")
+        if os.path.exists(ready) and not self.build_params.get("force_preprocess", False):
+            return out_dir
+        os.makedirs(out_dir, exist_ok=True)
+        preproc = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "hnswlib", "hnswlib_preprocess.py",
+        )
+        py = os.environ.get("PYTHON", sys.executable)
+        metric = str(self.build_params.get("metric", "ip")).lower()
+        cmd = [
+            py,
+            preproc,
+            "--dataset",
+            str(self.ds_name),
+            "--ds-path",
+            str(self.ds_path),
+            "--out-dir",
+            out_dir,
+            "--metric",
+            metric,
+        ]
+        if self.build_params.get("force_preprocess", False):
+            cmd.append("--force")
+        print(f"    [hnswlib] preprocessing -> {out_dir}", flush=True)
+        subprocess.run(cmd, check=True)
+        return out_dir
+
+    def build(self, documents=None):
+        del documents
+        runner = self._find_runner()
+        hnswlib_data = self._ensure_hnswlib_data()
+        m_index = int(self.build_params.get("m_index", 16))
+        ef_construction = int(self.build_params.get("ef_construction", 200))
+        metric = str(self.build_params.get("metric", "ip")).lower()
+        try:
+            n_thr_default = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n_thr_default = os.cpu_count() or 1
+        threads = int(self.build_params.get("build_threads", n_thr_default))
+        cmd = [
+            runner,
+            "--mode",
+            "build",
+            "--hnswlib-data",
+            hnswlib_data,
+            "--dim",
+            str(self.dim),
+            "--metric",
+            metric,
+            "--m-index",
+            str(m_index),
+            "--ef-construction",
+            str(ef_construction),
+            "--out",
+            self.index_path,
+            "--threads",
+            str(threads),
+        ]
+        print(
+            f"    [hnswlib] building graph -> {self.index_path} "
+            f"(m={m_index}, ef={ef_construction}, threads={threads})",
+            flush=True,
+        )
+        subprocess.run(cmd, check=True)
+
+    def save(self, path: str):
+        return
+
+    def load(self, path, points):
+        del points
+        self.index_path = path
+        meta = os.path.join(path, "hnswlib_meta.json")
+        if os.path.exists(meta):
+            try:
+                with open(meta) as f:
+                    self._meta = json.load(f)
+            except Exception:
+                self._meta = None
+
+    def _gt_path(self) -> str:
+        if not self.ds_path or not self.ds_name:
+            raise RuntimeError(
+                "HnswlibWrapper requires ds_path / ds_name before search."
+            )
+        return os.path.join(self.ds_path, f"{self.ds_name}_chamfer_neighbors.gt")
+
+    def sweep(
+        self,
+        *,
+        k: int,
+        ef_list,
+        rerank_list,
+        threads: int,
+        qps_thresh: float | None = None,
+        warmup: int = 10,
+        query_indices=None,
+    ):
+        runner = self._find_runner()
+        hnswlib_data = os.path.join(self.index_path, self.HNSWLIB_DATA_SUBDIR)
+        if not os.path.exists(os.path.join(hnswlib_data, ".READY")):
+            raise RuntimeError(
+                f"hnswlib_data tree missing at {hnswlib_data}. Run benchmark_build.py first."
+            )
+        m_index = int(self.build_params.get("m_index", 16))
+        ef_construction = int(self.build_params.get("ef_construction", 200))
+        metric = str(self.build_params.get("metric", "ip")).lower()
+        ef_list = sorted({int(x) for x in ef_list})
+        rerank_list = sorted({int(x) for x in rerank_list})
+        cmd = [
+            runner,
+            "--mode",
+            "search",
+            "--hnswlib-data",
+            hnswlib_data,
+            "--dim",
+            str(self.dim),
+            "--metric",
+            metric,
+            "--m-index",
+            str(m_index),
+            "--ef-construction",
+            str(ef_construction),
+            "--index",
+            self.index_path,
+            "--gt",
+            self._gt_path(),
+            "--k",
+            str(int(k)),
+            "--ef-list",
+            ",".join(str(x) for x in ef_list),
+            "--rerank-list",
+            ",".join(str(x) for x in rerank_list),
+            "--threads",
+            str(int(threads)),
+            "--warmup",
+            str(int(warmup)),
+            "--output-csv",
+            "-",
+        ]
+        if qps_thresh is not None and qps_thresh > 0:
+            cmd += ["--qps-stop-below", str(float(qps_thresh))]
+        if query_indices is not None:
+            idx = (
+                query_indices.tolist()
+                if hasattr(query_indices, "tolist")
+                else list(query_indices)
+            )
+            if idx:
+                cmd += ["--query-indices", ",".join(str(int(i)) for i in idx)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+            sys.stderr.flush()
+        if proc.returncode != 0:
+            err_tail = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+            raise RuntimeError(
+                f"hnswlib_runner failed (exit {proc.returncode}): {err_tail}"
+            )
+        rows = []
+        reader = csv.DictReader(io.StringIO(proc.stdout))
+        for row in reader:
+            rows.append({key: row[key] for key in row.keys()})
+        return rows
+
+    def row_to_stats(self, row) -> StatsExtended:
+        k = int(float(row["k"]))
+        qps_seq = float(row["QPS_seq"]) if row.get("QPS_seq") else 0.0
+        qps_par = float(row["QPS_par"]) if row.get("QPS_par") else 0.0
+        return StatsExtended(
+            k=k,
+            recall_1_k=min(1.0, float(row["recall_1_k"])),
+            recall_k_k=min(1.0, float(row["recall_k_k"])),
+            QPS_seq=qps_seq if qps_seq > 0 else None,
+            QPS_par=qps_par,
+            avg_cmps=float(row.get("avg_cmps", 0.0) or 0.0),
+            avg_timings=[
+                float(row.get("t_graph_search", 0.0) or 0.0),
+                float(row.get("t_rerank", 0.0) or 0.0),
+            ],
+        )
+
+    def compute_stats_latency(self, queries, gt, params):
+        del queries, gt
+        rows = self.sweep(
+            k=int(params["k"]),
+            ef_list=[int(params["ef_search"])],
+            rerank_list=[int(params.get("rerank_k", 256))],
+            threads=1,
+        )
+        if not rows:
+            raise RuntimeError("hnswlib_runner returned no CSV rows.")
+        return self.row_to_stats(rows[0])
+
+    def compute_stats_batch(self, queries, gt, params):
+        del queries, gt
+        try:
+            n_thr = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            n_thr = os.cpu_count() or 1
+        rows = self.sweep(
+            k=int(params["k"]),
+            ef_list=[int(params["ef_search"])],
+            rerank_list=[int(params.get("rerank_k", 256))],
+            threads=int(n_thr),
+        )
+        if not rows:
+            raise RuntimeError("hnswlib_runner returned no CSV rows.")
+        return self.row_to_stats(rows[0])
 
 
 def plot_results(csv_filename, plot_filename):

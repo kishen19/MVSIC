@@ -45,18 +45,18 @@ indices:
       # Stage-1 winner fixed: k_per_level = 0.
       # Stage-2 winner fixed: max_leaf_size = 100 for small, 500 for large.
       # Stage-3 winner fixed: max_depth = 0.
-      - name: mvivf_k0_l500_d15_nit0_s0_mpcc100
+      - name: mvivf_k0_l500_d0_nit0_s0_mpcc100
         params: &stage4_defaults
           verbose: 2
           k_per_level: 0
           max_leaf_size: 500
-          max_depth: 15
+          max_depth: 0
           niters: 0
           s: 0
           max_point_clouds_per_cluster: 100
           max_points_per_centroid_inner_kmeans: 20
           build_with_8btq: true
-      - name: mvivf_k0_l500_d15_nit5_s0_mpcc100
+      - name: mvivf_k0_l500_d0_nit5_s0_mpcc100
         params: { <<: *stage4_defaults, niters: 5 }
-      - name: mvivf_k0_l500_d15_nit10_s0_mpcc100
+      - name: mvivf_k0_l500_d0_nit10_s0_mpcc100
         params: { <<: *stage4_defaults, niters: 10 }

@@ -66,39 +66,29 @@ _PREFIX_FOR_STAGE = {
 #
 # The default canonical plot family is the four "core" methods (mvivf gets
 # legend ordering ahead of muvera / vamana / svh_graph); ``mvivf_spill`` is
-# carried in ``_METHOD_ORDER`` only for stable color indexing. ``igp`` and
-# ``fastplaid`` are baselines that the user opts into via ``--include-igp-fp``
-# (and the matching wrappers / runners). Including them generates a parallel
-# set of ``*_igp_fp.pdf`` files instead of clobbering the default plots.
+# carried in ``_METHOD_ORDER`` only for stable color indexing. External
+# baselines are opt-in via ``--include-external`` (alias ``--include-igp-fp``).
 _METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph",
-                 "igp", "fastplaid"]
+                 "igp", "fastplaid", "gem", "hnswlib"]
 _PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER
-                         if m not in ("mvivf_spill", "igp", "fastplaid")]
-# Methods that are silently dropped from default plots but appear when the
-# caller explicitly opts in via --include-igp-fp / include_igp_fp=True.
-_OPTIONAL_BASELINE_METHODS = ("igp", "fastplaid")
-# Filename suffix applied to every PDF generated in the include-igp-fp pass
-# so the default and the opt-in pass coexist in the same _plots/ directory.
-_IGP_FP_SUFFIX = "_igp_fp"
+                         if m not in ("mvivf_spill", "igp", "fastplaid", "gem", "hnswlib")]
+_OPTIONAL_BASELINE_METHODS = ("igp", "fastplaid", "gem", "hnswlib")
+_EXTERNAL_SUFFIX = "_external"
+_IGP_FP_SUFFIX = "_external"
 
 
-def _methods_for_plot(include_igp_fp: bool) -> list[str]:
-    """Return the ordered method list the panel renderers should iterate.
-
-    When ``include_igp_fp`` is True the optional baselines (``igp``,
-    ``fastplaid``) are appended after the four core methods so legend /
-    color order stays stable across the default and opt-in passes.
-    """
+def _methods_for_plot(include_external: bool) -> list[str]:
+    """Return the ordered method list the panel renderers should iterate."""
     methods = list(_PLOTTED_METHOD_ORDER)
-    if include_igp_fp:
+    if include_external:
         for m in _OPTIONAL_BASELINE_METHODS:
             if m not in methods:
                 methods.append(m)
     return methods
 
 
-def _suffix_for(include_igp_fp: bool) -> str:
-    return _IGP_FP_SUFFIX if include_igp_fp else ""
+def _suffix_for(include_external: bool) -> str:
+    return _EXTERNAL_SUFFIX if include_external else ""
 
 # Pretty labels for the legend / x-tick names.
 _PRETTY_METHOD = {
@@ -112,6 +102,8 @@ _PRETTY_METHOD = {
     "svh_graph": "SVH",
     "fastplaid": "FastPlaid",
     "igp": "IGP",
+    "gem": "GEM",
+    "hnswlib": "HNSWlib",
 }
 
 _PRETTY_VARIANT = {
@@ -284,6 +276,15 @@ _BREAKDOWN_BUCKETS = {
         "decode":     ["t_decode"],
         "rerank":     ["t_refine"],
     },
+    "gem": {
+        "filter":     ["t_filter"],
+        "search":     ["t_graph_search"],
+        "rerank":     ["t_rerank"],
+    },
+    "hnswlib": {
+        "search":     ["t_graph_search"],
+        "rerank":     ["t_rerank"],
+    },
 }
 
 # Stable color per bucket (shared across methods so the legend is consistent
@@ -364,11 +365,11 @@ def _annotate_path(results_root: pathlib.Path, csv_file: pathlib.Path) -> dict:
 
 def _load_csvs(results_root: pathlib.Path, prefix: str,
                dataset: Optional[str] = None,
-               *, include_igp_fp: bool = False) -> pd.DataFrame:
+               *, include_external: bool = False) -> pd.DataFrame:
     """Load every CSV under ``<results_root>/<dataset>/`` whose filename
     matches the stage's ``prefix*.csv`` glob.
 
-    When ``include_igp_fp`` is True we additionally pick up ``nr*.csv``
+    When ``include_external`` is True we additionally pick up ``nr*.csv``
     files but only under ``<dataset>/fastplaid/``: FastPlaid's batch driver
     writes files named ``nr<num_rerank>.csv`` rather than the canonical
     ``batch_results_*.csv``, so the standard glob silently skips them. We
@@ -379,7 +380,7 @@ def _load_csvs(results_root: pathlib.Path, prefix: str,
     if not base.exists():
         raise SystemExit(f"no results directory found at {base}")
     files = list(sorted(base.rglob(f"{prefix}*.csv")))
-    if include_igp_fp:
+    if include_external:
         # FastPlaid's batch CSVs live at <ds>/fastplaid/<build>/<search>/nr*.csv.
         # Restrict the auxiliary glob to that sub-tree so we don't accidentally
         # double-count `nr*.csv` shards that some other method might write.
@@ -1111,14 +1112,19 @@ def main() -> int:
         ),
     )
     p.add_argument(
-        "--include-igp-fp", action="store_true",
+        "--include-external", "--include_external",
+        action="store_true", dest="include_external",
         help=(
-            "Generate an additional pass of every plot that includes the "
-            "``igp`` and ``fastplaid`` baselines. The opt-in pass writes "
-            "``<dataset>_<plot>_igp_fp.pdf`` siblings beside the default "
-            "PDFs, and is skipped silently for datasets where neither "
-            "baseline has any rows. The default plots are unchanged."
+            "Generate an additional pass of every plot that includes external "
+            "baselines (igp, fastplaid, gem, hnswlib). Writes "
+            "``<dataset>_<plot>_external.pdf`` siblings beside the default "
+            "PDFs. Skipped silently when no external baseline has rows."
         ),
+    )
+    p.add_argument(
+        "--include-igp-fp", "--include_igp_fp",
+        action="store_true", dest="include_external",
+        help="Deprecated alias for --include-external.",
     )
     args = p.parse_args()
 
@@ -1207,14 +1213,14 @@ def main() -> int:
                 _emit_plots(ds, df_default)
 
         # ---- Opt-in pass: add igp + fastplaid (skips silently if absent). ----
-        if not args.include_igp_fp:
+        if not args.include_external:
             continue
         try:
             df_ext = _load_csvs(
-                args.results, prefix, dataset=ds, include_igp_fp=True,
+                args.results, prefix, dataset=ds, include_external=True,
             )
         except SystemExit as e:
-            print(f"[skip {ds} +igp/fp] {e}")
+            print(f"[skip {ds} +external] {e}")
             continue
         df_ext = _filter_search(ds, df_ext)
         if df_ext is None:
@@ -1222,16 +1228,16 @@ def main() -> int:
         present = set(df_ext.get("method", pd.Series(dtype=str)).unique())
         baselines_present = present & set(_OPTIONAL_BASELINE_METHODS)
         if not baselines_present:
-            print(f"[skip {ds} +igp/fp] neither igp nor fastplaid present")
+            print(f"[skip {ds} +external] no external baseline rows present")
             continue
-        print(f"[{ds} +igp/fp] {len(df_ext)} rows from "
+        print(f"[{ds} +external] {len(df_ext)} rows from "
               f"{df_ext['method'].nunique()} methods (added: "
               f"{sorted(baselines_present)})"
               + (f" (search={args.search})" if args.search else ""))
         _emit_plots(
             ds, df_ext,
             methods_override=_methods_for_plot(True),
-            file_suffix=_IGP_FP_SUFFIX,
+            file_suffix=_EXTERNAL_SUFFIX,
         )
     return 0
 

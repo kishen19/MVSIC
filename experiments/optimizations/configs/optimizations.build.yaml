@@ -1,0 +1,31 @@
+name: "Optimizations ladder (build)"
+
+# Single MVIVF skeleton for the five-stage optimizations ladder (stages 0..4).
+# `max_leaf_size: 500` (vs 100 in main latency experiments) keeps leaf chamfer
+# scoring expensive at stage 0 so later leaf/tree quant stages show clear gains.
+# `build_with_8btq: true` only affects k-means assignment at build time.
+
+datasets:
+  - { name: nfcorpus, path: data/beir/nfcorpus, index_dir: results/optimizations/indices/nfcorpus, is_mmap: true }
+  - { name: scifact,  path: data/beir/scifact,  index_dir: results/optimizations/indices/scifact,  is_mmap: true }
+  - { name: arguana,  path: data/beir/arguana,  index_dir: results/optimizations/indices/arguana,  is_mmap: true }
+  - { name: scidocs,  path: data/beir/scidocs,  index_dir: results/optimizations/indices/scidocs,  is_mmap: true }
+  - { name: fiqa,     path: data/beir/fiqa,     index_dir: results/optimizations/indices/fiqa,     is_mmap: true }
+  - { name: quora,    path: data/beir/quora,    index_dir: results/optimizations/indices/quora,    is_mmap: true }
+  - { name: nq,       path: data/beir/nq,       index_dir: results/optimizations/indices/nq,       is_mmap: true }
+  - { name: hotpotqa, path: data/beir/hotpotqa, index_dir: results/optimizations/indices/hotpotqa, is_mmap: true }
+  - { name: nq500k,   path: data/beir/nq500k,   index_dir: results/optimizations/indices/nq500k,   is_mmap: true }
+
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l500_d0_nit5_s0_mpcc100
+        params:
+          k_per_level: 0
+          max_leaf_size: 500
+          max_depth: 0
+          niters: 5
+          max_point_clouds_per_cluster: 100
+          max_points_per_centroid_inner_kmeans: 20
+          build_with_8btq: true

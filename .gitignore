@@ -23,9 +23,9 @@ bazel-*
 .vscode
 
 # Plot PDFs (generated; regenerate via experiments/plot_all.sh).
-experiments/**/_plots/*.pdf
-experiments/**/_plots/k=10/*.pdf
-experiments/**/_plots/k=100/*.pdf
+experiments/**/_plots/*
+experiments/**/_plots/k=10/*
+experiments/**/_plots/k=100/*
 
 /data
 /results

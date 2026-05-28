@@ -69,10 +69,13 @@ indices:
               tq8_rerank: [true]
               query_compression: ["Wards"]
               query_compression_threshold: [0.5]
-              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+              nprobes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
               k: [10]
               config:
-                - {name: "nr500", num_rerank: 500}
+                - { name: nr20,   num_rerank: 20 }
+                - { name: nr50,   num_rerank: 50 }
+                - { name: nr100,   num_rerank: 100 }
+                - { name: nr500,   num_rerank: 500 }
       - build_name: mvivf_k10_l500_d0_nit5_s0_mpcc100
         build_params: { <<: *stage1_defaults, k_per_level: 10 }
         variants: *stage1_variants

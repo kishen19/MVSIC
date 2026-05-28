@@ -139,6 +139,98 @@ git_repository(
     remote = "git@github.com:ParAlg/Parallel-KMeans.git",
 )
 
+# GEM (SIGMOD'26 graph-based multi-vector retrieval) source dependency.
+#
+# We consume *only* the upstream `library` bits — header-only `hnswlib/`
+# (with the GEM-specific extensions on top of vanilla hnswlib), `cnpy`
+# (for reading the gem_data .npy artifacts), and `otlib` (for the EMD
+# distance kernels that `hnswlib/space_l2.h` transitively calls).
+#
+# Upstream's `example_vecset_search_gem.cpp` is intentionally left out of
+# the build graph: it's a single-shot demo with a hardcoded dataset
+# selector and a 13 GB `train_query_data` allocation at the top of
+# `main()`. Our own runner under //benchmarks/gem lifts the demo's
+# `Solution` class body (build_fine_cluster / search_with_fine_cluster /
+# load_fine_cluster) into a clean CLI driver, so upstream itself stays
+# unmodified and no fork is required.
+#
+# Public upstream: https://github.com/sigmod26gem/sigmod26gem — pinned to a
+# fixed commit for reproducible builds (bump `commit` when you intentionally
+# want a newer upstream revision).
+git_repository(
+    name = "sigmod26gem",
+    remote = "https://github.com/sigmod26gem/sigmod26gem",
+    commit = "08046af7ad63354378b2db308c50ae87797818d9",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+# cnpy: tiny .npy / .npz reader/writer (header + one .cpp). Used by the
+# runner to read the gem_data tree (centroids.npy, encoding<i>_float16.npy,
+# doclens<i>.npy, doc_codes_<i>.npy, qembs.npy, ...).
+cc_library(
+    name = "cnpy",
+    srcs = ["hnswlib/cnpy/cnpy.cpp"],
+    hdrs = ["hnswlib/cnpy/cnpy.h"],
+    includes = ["hnswlib/cnpy"],
+    linkopts = ["-lz"],
+)
+
+# otlib: Bonneel-style optimal-transport / EMD kernels that
+# hnswlib/space_l2.h's L2SqrVecEMD* functions call into. We compile the
+# C++ TU (EMD_wrapper.cpp); the .pyx / .py files are Cython/Python and
+# ignored by the cc_library glob.
+cc_library(
+    name = "otlib",
+    srcs = ["hnswlib/otlib/EMD_wrapper.cpp"],
+    hdrs = [
+        "hnswlib/otlib/EMD.h",
+        "hnswlib/otlib/core.h",
+        "hnswlib/otlib/full_bipartitegraph.h",
+        "hnswlib/otlib/network_simplex_simple.h",
+    ],
+    includes = ["hnswlib/otlib"],
+    copts = ["-Ofast", "-march=native", "-w"],
+)
+
+# hnswlib: header-only graph index *with the GEM extensions baked in*
+# (searchKnnClusterEntries, addClusterPointEntry, entry_map, search_set,
+# fast_dot_product_blas, L2SqrVecEMD / L2SqrVecCF / L2SqrVecClusterEMD,
+# etc.). Includes Eigen + OpenBLAS via system headers (cblas.h and
+# Eigen/Dense are #included from space_l2.h).
+cc_library(
+    name = "hnswlib",
+    hdrs = glob([
+        "hnswlib/hnswlib/*.h",
+    ]),
+    includes = ["hnswlib"],
+    copts = ["-Ofast", "-march=native", "-fopenmp", "-w"],
+    linkopts = ["-fopenmp", "-lopenblas"],
+    deps = [
+        ":otlib",
+        "@eigen",
+    ],
+)
+""",
+)
+
+# Upstream nmslib/hnswlib (flat token HNSW + C++ multi-vector search API).
+# Separate from @sigmod26gem's fork (GEM-specific cluster/EMD extensions).
+git_repository(
+    name = "hnswlib_upstream",
+    remote = "https://github.com/nmslib/hnswlib",
+    commit = "d9b3608c83d83b46c96e25088cb1d729b29dcfe9",  # v0.9.0
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "hnswlib",
+    hdrs = glob(["hnswlib/*.h"]),
+    includes = ["."],
+    copts = ["-O3", "-march=native", "-w"],
+)
+""",
+)
+
 # python bindings relevant
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(
