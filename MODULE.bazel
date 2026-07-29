@@ -56,13 +56,19 @@ cc_library(
     name = "rabitqlib",
     # HEADER FILTER: Include everything EXCEPT the embedded Eigen
     hdrs = glob(
-        ["include/**"], 
+        ["include/**"],
         exclude = ["include/rabitqlib/third/Eigen/**"]
     ),
-    
+
+    # Upstream moved the SIMD kernels out of the headers into src/, behind a
+    # runtime CPU-feature dispatch, so the library is no longer header-only.
+    # Without these the bindings link but fail to import with undefined
+    # rabitqlib::simd::* symbols.
+    srcs = glob(["src/**/*.cpp", "src/**/*.hpp"]),
+
     # Add 'include' to path so "rabitqlib/..." works
     includes = ["include"],
-    
+
     copts = ["-Ofast", "-march=native", "-fopenmp", "-w"],
     linkopts = ["-fopenmp"],
     

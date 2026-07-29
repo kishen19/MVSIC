@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstring>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 #include "parlay/primitives.h"
 
@@ -112,7 +113,8 @@ class MVClustering8BTQ {
     if (n == 0 || centers.size() == 0) return out;
     parlay::sequence<std::pair<uint32_t, float>> topk = score_top_k_(points, /*top_k=*/1);
     // score_top_k_ writes pairs; first = cluster id (we set top_k=1).
-    parlay::parallel_for(0, n, [&](size_t i) { out[i] = topk[i].first; });
+    const auto to_pos = center_id_to_pos_();
+    parlay::parallel_for(0, n, [&](size_t i) { out[i] = to_pos(topk[i].first); });
     return out;
   }
 
@@ -130,8 +132,9 @@ class MVClustering8BTQ {
     auto topk = score_top_k_(points, C);
     // ManyToMany::TopKIntoUninitialized writes in worst-to-best (heap pop)
     // order at offset [i*k .. i*k+k-1]; reverse per-row so out is best-first.
+    const auto to_pos = center_id_to_pos_();
     parlay::parallel_for(0, n, [&](size_t i) {
-      for (uint32_t r = 0; r < C; ++r) out[i * C + r] = topk[i * C + r].first;
+      for (uint32_t r = 0; r < C; ++r) out[i * C + r] = to_pos(topk[i * C + r].first);
     });
     return out;
   }
@@ -154,6 +157,41 @@ class MVClustering8BTQ {
   inline bool has_vector_cache_() const noexcept {
     return vec_cache_.model != nullptr && vec_cache_.q_data != nullptr &&
            pc_vec_offsets_ != nullptr;
+  }
+
+  // Callers treat cluster ids as *positions* in `centers`, but the 8BTQ
+  // encoder copies the point-cloud ids of `centers` into the encoded DB and
+  // ManyToMany reports those stored ids (see EncodedSet::get_id). The two
+  // coincide only when `centers` carries no ids -- which is the case from the
+  // first Lloyd iteration onwards, where `centers` is rebuilt as an id-less
+  // PointCloudSet(k, s, d). The seeded centers from UniformlyRandomMV instead
+  // inherit the sampled points' original ids, so with niters == 0 (no Lloyd
+  // iteration ever runs) the reported ids are point ids in [0, n), which then
+  // index `centers` out of bounds in IndexMVIVF::recursive_build_.
+  //
+  // Returns a callable mapping a reported id to its center position. When
+  // `centers` has no ids the reported value is already a position and the
+  // mapping is the identity, so niters >= 1 is unaffected.
+  auto center_id_to_pos_() const {
+    std::unordered_map<uint32_t, uint32_t> by_id;
+    auto center_ids = centers.get_ids();
+    if (center_ids.size() == centers.size()) {
+      by_id.reserve(center_ids.size());
+      // Duplicate ids are possible (the same point can be sampled as two
+      // centers); first position wins, and the clouds are identical anyway.
+      for (size_t i = 0; i < center_ids.size(); ++i) {
+        by_id.emplace(center_ids[i], static_cast<uint32_t>(i));
+      }
+    }
+    const uint32_t num_centers = static_cast<uint32_t>(centers.size());
+    return [by_id = std::move(by_id), num_centers](uint32_t reported) -> uint32_t {
+      if (by_id.empty()) return reported;
+      auto it = by_id.find(reported);
+      // Fall back to a clamped value rather than indexing out of bounds if an
+      // id ever escapes the map.
+      if (it == by_id.end()) return (reported < num_centers) ? reported : 0;
+      return it->second;
+    };
   }
 
 
