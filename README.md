@@ -15,12 +15,15 @@ MVSIC provides implementations of several state-of-the-art algorithms and also i
 
 ## Algorithms
 
-MVSIC includes the following multi-vector indexing algorithms:
+MVSIC implements the following multi-vector indexing algorithms natively:
 
-*   **MVIVF:** A novel Multi-Vector Inverted File index that uses a k-means-like tree structure built on ``centroids'' point clouds.
-*   **MUVERA:** A recent method that first encodes point clouds into single vectors using Fixed-Dimensional Encodings (FDEs) and then uses a fast Vamana graph for retrieval.
+*   **MVIVF:** A novel Multi-Vector Inverted File index that uses a k-means-like tree structure built on ``centroids'' point clouds. Also available in `Flat` and `Spill` variants.
+*   **MUVERA:** Encodes point clouds into single vectors using Fixed-Dimensional Encodings (FDEs) and then uses a fast Vamana graph for retrieval.
 *   **Multi-Vector Vamana:** A baseline implementation of the graph-based DiskANN algorithm that uses direct Chamfer distance for comparisons.
 *   **MPool:** A baseline that performs mean-pooling over the point clouds to produce single vectors and indexes them with a Vamana graph.
+*   **SVH (IVF and Graph):** Baselines that index single-vector heuristics (SVHIVF, SVHGraph) derived from the point clouds.
+
+The `experiments/` benchmarking suite additionally compares against several **external baselines** (not implemented in this repo, but built/run as separate dependencies): **FastPlaid**, **IGP**, **hnswlib**, and **GEM**. See `experiments/README.md` for how these are configured and run.
 
 ## Setup & Installation
 
@@ -61,29 +64,25 @@ The data for the i-th point cloud (0-indexed) is located in the `vectors` array 
 
 ## Usage Examples
 
-*(Note: These examples will be updated with more detail.)*
+Runnable Python examples for the core library live under `examples/`:
 
-### Python API (Retrieval)
-*(A Python example will be added here to demonstrate direct usage of the core library for clustering or building an index.)*
-
-
-### C++ API (Clustering/Indexing)
-
-*(A C++ example will be added here to demonstrate direct usage of the core library for clustering or building an index.)*
+*   `examples/mvivf_example.py` — build and search an MVIVF index directly via the Python API.
+*   `examples/muvera_example.py` — build and search a MUVERA index.
+*   `examples/vamana_example.py` — build and search a Multi-Vector Vamana index.
+*   `examples/fast_plaid_benchmark.py` — compare against the external FastPlaid baseline.
 
 ## Benchmarking
 
-The `benchmarks/` directory contains a comprehensive suite for evaluating the performance of the different algorithms.
+There are two ways to benchmark MVSIC's algorithms:
 
-To run a benchmark:
-1.  Configure the desired dataset and methods in the YAML files under `benchmarks/configs`.
-2.  Run the main benchmark script:
+*   **`benchmarks/`** — lower-level scripts (`benchmark_build.py`, `benchmark_search.py`) driven by YAML configs under `benchmarks/configs/` and `benchmarks/plot_configs/`. These are the scripts the higher-level runners below wrap.
+*   **`experiments/`** (recommended) — the full suite used to produce the paper's results: build indices, sweep search parameters (latency and batch/throughput modes), and generate Pareto (recall vs. QPS) plots, including comparisons against external baselines. From the repo root:
 
-```bash
-python benchmarks/benchmark.py --config_path benchmarks/configs/beir.yaml
-```
-3.  To generate QPS vs Recall plots, configure the desired methods to consider by the plotting script in the YAML files under `benchmarks/plot_configs`. Then, run the plotting script as follows:
+    ```bash
+    experiments/builds/scripts/run_builds.sh --dataset beir5
+    experiments/latency/scripts/run_latency.sh --dataset beir5
+    experiments/batch/scripts/run_batch.sh --dataset beir5
+    experiments/plot_all.sh
+    ```
 
-```bash
-python benchmarks/plot_qps_recall.py --config_path benchmarks/plot_configs/beir.yaml
-```
+    See `experiments/README.md` for the full parameter cheatsheet, dataset aliases, and per-method configuration details.
