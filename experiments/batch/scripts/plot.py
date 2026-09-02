@@ -42,6 +42,19 @@ def main() -> int:
         dest="include_external", action="store_true",
         help="Deprecated alias for --include-external.",
     )
+    p.add_argument(
+        "--paper-recall-k-pair", "--paper_recall_k_pair",
+        dest="paper_recall_k_pair", default=None,
+        help=(
+            "Comma-separated dataset names (2+) to additionally render as a "
+            "Recall-k@k-only 'paper' figure with the external methods "
+            "(mvivf, svh_graph, igp, fastplaid): per-dataset PDFs plus one "
+            "combined multi-panel PDF, each panel titled by dataset name. "
+            "Requires --include-external; run without --k so the PDFs land "
+            "in the top-level _plots/ dir alongside the other *_paper_pareto "
+            "PDFs."
+        ),
+    )
     args = p.parse_args()
 
     cmd = [
@@ -58,6 +71,8 @@ def main() -> int:
         cmd += ["--search", f"k={args.k}"]
     if args.include_external:
         cmd += ["--include-external"]
+    if args.paper_recall_k_pair:
+        cmd += ["--paper-recall-k-pair", args.paper_recall_k_pair]
     return subprocess.call(cmd)
 
 

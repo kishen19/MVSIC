@@ -34,6 +34,7 @@ from typing import Optional
 
 try:
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
     import numpy as np
     import pandas as pd
     import yaml
@@ -73,18 +74,19 @@ _METHOD_ORDER = ["mvivf", "mvivf_spill", "muvera", "vamana", "svh_graph",
 _PLOTTED_METHOD_ORDER = [m for m in _METHOD_ORDER
                          if m not in ("mvivf_spill", "igp", "fastplaid", "gem", "hnswlib")]
 _OPTIONAL_BASELINE_METHODS = ("igp", "fastplaid", "gem", "hnswlib")
+# The external-baseline overlay pass only draws MV-IVF + SVH from the core
+# methods (drops muvera / vamana) alongside the external baselines, so the
+# comparison stays focused on the two strongest in-house methods.
+_EXTERNAL_METHOD_ORDER = ["mvivf", "svh_graph", "igp", "fastplaid", "gem", "hnswlib"]
 _EXTERNAL_SUFFIX = "_external"
 _IGP_FP_SUFFIX = "_external"
 
 
 def _methods_for_plot(include_external: bool) -> list[str]:
     """Return the ordered method list the panel renderers should iterate."""
-    methods = list(_PLOTTED_METHOD_ORDER)
     if include_external:
-        for m in _OPTIONAL_BASELINE_METHODS:
-            if m not in methods:
-                methods.append(m)
-    return methods
+        return list(_EXTERNAL_METHOD_ORDER)
+    return list(_PLOTTED_METHOD_ORDER)
 
 
 def _suffix_for(include_external: bool) -> str:
@@ -955,6 +957,100 @@ def _plot_paper_four_panel(
     print(f"  wrote {out_path}")
 
 
+def _plot_paper_recall_k_individual(
+    df: pd.DataFrame,
+    stage: str,
+    dataset: str,
+    out_path: pathlib.Path,
+    *,
+    k_eval: int = 10,
+    methods_override: Optional[list[str]] = None,
+) -> None:
+    """Single-panel 'paper' figure: Recall-``k_eval``@``k_eval`` vs QPS only,
+    titled by the plain dataset name (no ``Recall vs Throughput`` suptitle).
+    ``df`` may span multiple search configs (e.g. k=10 and k=100); rows are
+    filtered down to ``k == k_eval`` here.
+    """
+    qps = _qps_column(stage)
+    if qps not in df.columns or "recall_k_k" not in df.columns or "k" not in df.columns:
+        print(f"  [skip paper recall-k@k for {dataset}: missing columns]")
+        return
+    sub = df[df["k"].astype(int) == k_eval].dropna(subset=["recall_k_k", qps])
+    if sub.empty:
+        print(f"  [skip paper recall-k@k for {dataset}: no k={k_eval} rows]")
+        return
+    fig, ax = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+    _plot_pareto_panel(
+        ax, sub, stage, qps, "recall_k_k", _recall_xlabel("k", k_eval),
+        show_ylabel=True, show_legend=True, methods_override=methods_override,
+    )
+    ax.set_title(dataset, fontsize=17)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def _plot_paper_recall_k_combined(
+    dfs: "dict[str, pd.DataFrame]",
+    stage: str,
+    out_path: pathlib.Path,
+    *,
+    k_eval: int = 10,
+    methods_override: Optional[list[str]] = None,
+) -> None:
+    """Multi-panel 'paper' figure: one Recall-``k_eval``@``k_eval``-vs-QPS
+    panel per dataset, each titled by its plain dataset name (no
+    figure-level suptitle)."""
+    qps = _qps_column(stage)
+    datasets = list(dfs.keys())
+    n = len(datasets)
+    if n == 0:
+        return
+    fig, axes = plt.subplots(1, n, figsize=(5.7 * n, 4.4), sharey=True)
+    if n == 1:
+        axes = [axes]
+    for i, ds in enumerate(datasets):
+        df = dfs[ds]
+        sub = df[df["k"].astype(int) == k_eval] if "k" in df.columns else df.iloc[0:0]
+        _plot_pareto_panel(
+            axes[i], sub, stage, qps, "recall_k_k", _recall_xlabel("k", k_eval),
+            show_ylabel=(i == 0), show_legend=False, methods_override=methods_override,
+        )
+        axes[i].xaxis.set_major_locator(mticker.MaxNLocator(nbins=4, prune=None))
+        axes[i].xaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
+        axes[i].set_title(ds, fontsize=17, pad=10)
+    _show_y_tick_labels(axes)
+    handles, labels = _dedup_legend_handles(axes)
+    if handles:
+        ncols = _top_legend_ncols(len(labels))
+        legend_rows = (len(labels) + ncols - 1) // ncols
+        axes_top = 0.74 if legend_rows == 1 else 0.62
+        fig.subplots_adjust(left=0.08, right=0.975, bottom=0.16, top=axes_top, wspace=0.10)
+        fig.legend(
+            handles, labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.985),
+            ncol=ncols,
+            fontsize=17,
+            frameon=True,
+            framealpha=0.95,
+            facecolor="white",
+            edgecolor="0.35",
+            borderpad=0.4,
+            handlelength=2.0,
+            handletextpad=0.5,
+            columnspacing=1.1,
+            labelspacing=0.3,
+        )
+    else:
+        fig.subplots_adjust(left=0.08, right=0.975, bottom=0.16, top=0.88, wspace=0.28)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.10)
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
 def _best_per_group(df: pd.DataFrame, recall_col: str = "recall_k_k") -> pd.DataFrame:
     if recall_col not in df.columns:
         return pd.DataFrame()
@@ -1126,6 +1222,19 @@ def main() -> int:
         action="store_true", dest="include_external",
         help="Deprecated alias for --include-external.",
     )
+    p.add_argument(
+        "--paper-recall-k-pair", "--paper_recall_k_pair",
+        dest="paper_recall_k_pair", default=None,
+        help=(
+            "Comma-separated dataset names (2+) to additionally render as a "
+            "Recall-k@k-only 'paper' figure using the external method set "
+            "(mvivf, svh_graph, igp, fastplaid): one single-panel PDF per "
+            "dataset (``<ds>_paper_pareto_external.pdf``) plus one combined "
+            "multi-panel PDF (``<ds1>_<ds2>..._paper_pareto_external.pdf``) "
+            "with each panel titled by its plain dataset name. Requires "
+            "--include-external and --stage batch; skipped otherwise."
+        ),
+    )
     args = p.parse_args()
 
     prefix = _PREFIX_FOR_STAGE[args.stage]
@@ -1198,6 +1307,12 @@ def main() -> int:
             return None
         return df
 
+    paper_recall_k_pair = (
+        [d.strip() for d in args.paper_recall_k_pair.split(",") if d.strip()]
+        if args.paper_recall_k_pair else []
+    )
+    paper_recall_k_dfs: dict[str, pd.DataFrame] = {}
+
     for ds in datasets:
         # ---- Default pass: canonical core methods only. -----------------
         try:
@@ -1239,6 +1354,36 @@ def main() -> int:
             methods_override=_methods_for_plot(True),
             file_suffix=_EXTERNAL_SUFFIX,
         )
+        if ds in paper_recall_k_pair:
+            paper_recall_k_dfs[ds] = df_ext
+
+    if paper_recall_k_pair:
+        if args.stage != "batch" or not args.include_external:
+            print(
+                "[skip paper-recall-k-pair] requires --stage batch and "
+                "--include-external"
+            )
+        else:
+            missing = [d for d in paper_recall_k_pair if d not in paper_recall_k_dfs]
+            if missing:
+                print(
+                    f"[skip paper-recall-k-pair] no external data for: {missing}"
+                )
+            else:
+                methods_override = _methods_for_plot(True)
+                for ds in paper_recall_k_pair:
+                    _plot_paper_recall_k_individual(
+                        paper_recall_k_dfs[ds], args.stage, ds,
+                        out_dir / f"{ds}_paper_pareto_r10_external.pdf",
+                        methods_override=methods_override,
+                    )
+                ordered = {d: paper_recall_k_dfs[d] for d in paper_recall_k_pair}
+                combo_name = "_".join(paper_recall_k_pair)
+                _plot_paper_recall_k_combined(
+                    ordered, args.stage,
+                    out_dir / f"{combo_name}_paper_pareto_r10_external.pdf",
+                    methods_override=methods_override,
+                )
     return 0
 
 
