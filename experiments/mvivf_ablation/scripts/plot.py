@@ -31,6 +31,16 @@ try:
 except ImportError:
     sys.exit("pip install pandas matplotlib to use this script")
 
+# Share styling helpers with the main latency / batch plots so ablations look
+# identical (fonts, legend box, spine visibility, Pareto x-axis limits, etc.).
+HERE = pathlib.Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent.parent.parent
+_BUILD_SCRIPTS = REPO_ROOT / "experiments" / "builds" / "scripts"
+if str(_BUILD_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_BUILD_SCRIPTS))
+
+import plot_stage as ps  # noqa: E402
+
 plt.rcParams.update({
     "font.size": 15,
     "axes.titlesize": 18,
@@ -42,6 +52,76 @@ plt.rcParams.update({
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
 })
+
+_FAMILY_LABEL = {
+    "mvivf":        "MV-IVF",
+    "mvivf_spill":  "MV-IVF-Spill",
+    "mvivf_flat":   "MV-IVF-Flat",
+}
+
+# Pretty math symbols for ablation knobs, used in titles + legend entries.
+# ``None`` means "render as plain text, no $...$ wrapping" (e.g. niters).
+_PARAM_SYMBOL: dict[str, str | None] = {
+    "k_per_level": r"b",
+    "max_leaf_size": r"\ell_{\max}",
+    "niters": None,
+}
+
+
+def _param_display(group_col: str) -> str:
+    """Pretty title fragment for a group column, e.g. ``$b$`` or ``niters``."""
+    if group_col not in _PARAM_SYMBOL:
+        return group_col
+    sym = _PARAM_SYMBOL[group_col]
+    return group_col if sym is None else f"${sym}$"
+
+
+def _param_value_label(group_col: str, value) -> str:
+    """Pretty legend entry for one swept value, e.g. ``$b=10$`` or ``niters=5``."""
+    sym = _PARAM_SYMBOL.get(group_col)
+    if sym is None:
+        return f"{group_col}={value}"
+    return f"${sym}={value}$"
+
+
+# Cool -> warm along the sorted sweep values (same convention as
+# experiments/optimizations/scripts/plot.py's ``_stage_color``), so e.g.
+# k_per_level=0 is always the darkest curve and the largest value is always
+# the brightest, consistently across every ablation plot.
+def _ordered_color(i: int, n: int) -> tuple:
+    cmap = plt.colormaps.get_cmap("viridis")
+    if n <= 1:
+        return cmap(0.5)
+    t = 0.12 + 0.76 * (i / (n - 1))
+    return cmap(t)
+
+
+# Fixed legend corner per y-metric (instead of matplotlib's per-axes "best"),
+# so e.g. the fiqa and hotpotqa panels for the *same* stage/param put the
+# legend in the same place -- "best" independently picks whichever corner is
+# locally emptiest and disagrees across datasets even for the same knob.
+# Chosen from the metrics' monotonic shape: latency/cmps rise with recall
+# (empty top-left), QPS Pareto falls with recall (empty top-right).
+_LEGEND_LOC_BY_YCOL = {
+    "latency_ms": "upper left",
+    "avg_cmps": "upper left",
+    "QPS_seq": "upper right",
+}
+
+
+def _legend(ax, loc: str = "best") -> None:
+    ax.legend(
+        loc=loc,
+        fontsize=15,
+        frameon=True,
+        framealpha=0.95,
+        facecolor="white",
+        edgecolor="0.35",
+        borderpad=0.3,
+        handlelength=1.6,
+        handletextpad=0.35,
+        labelspacing=0.2,
+    )
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -229,12 +309,17 @@ def _series_keys(df: pd.DataFrame, group_col: str,
 
 
 def _series_label(key, group_col: str, extra_label_col: str | None) -> str:
+    # pandas' ``groupby(<list-of-columns>)`` always returns a tuple matching
+    # the length of that list -- even for a single-column list -- so a plain
+    # scalar ``k_per_level=0`` group key arrives here as ``(0,)``. Normalize
+    # first so single-knob ablations never render as e.g. ``k_per_level=(0,)``.
+    if not isinstance(key, tuple):
+        key = (key,)
     if extra_label_col is None:
-        return f"{group_col}={key}"
-    extra_val, group_val = (key if isinstance(key, tuple) else (None, key))
-    if extra_val is None:
-        return f"{group_col}={group_val}"
-    return f"{extra_val} / {group_col}={group_val}"
+        (group_val,) = key
+        return _param_value_label(group_col, group_val)
+    extra_val, group_val = key
+    return f"{extra_val} / {_param_value_label(group_col, group_val)}"
 
 
 # Recall window every ablation plot zooms into. Anything outside this band
@@ -261,28 +346,90 @@ def _recall_k_k_label(df: pd.DataFrame) -> str:
     return r"Recall-$k$@$k$"
 
 
+def _min_envelope(xs: pd.Series, ys: pd.Series,
+                  min_recall_spacing: float = 0.005) -> tuple[pd.Series, pd.Series]:
+    """Lower envelope of (recall, cost) points: for each recall, keep min y.
+
+    Symmetric to :func:`_pareto_curve` but for cost metrics (latency, bytes
+    accessed) where lower is better. Guarantees a monotone curve so the
+    plotted line doesn't zigzag through overlapping sweeps (e.g. different
+    ``num_rerank`` values at the same nprobes)."""
+    if xs.empty:
+        return xs, ys
+    tmp = pd.DataFrame({"x": xs.astype(float), "y": ys.astype(float)}).dropna()
+    if tmp.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    tmp = tmp.loc[tmp.groupby("x")["y"].idxmin()]
+
+    tmp = tmp.sort_values(by=["x", "y"], ascending=[False, True])
+    front_rows = []
+    best_y = float("inf")
+    for _, r in tmp.iterrows():
+        if float(r["y"]) < best_y:
+            front_rows.append(r)
+            best_y = float(r["y"])
+    if not front_rows:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    front = pd.DataFrame(front_rows).sort_values("x")
+
+    if min_recall_spacing > 0 and len(front) > 2:
+        simplified = [front.iloc[0]]
+        for i in range(1, len(front) - 1):
+            if abs(float(front.iloc[i]["x"]) - float(simplified[-1]["x"])) > min_recall_spacing:
+                simplified.append(front.iloc[i])
+        simplified.append(front.iloc[-1])
+        front = pd.DataFrame(simplified).drop_duplicates(subset=["x", "y"], keep="first")
+    return front["x"], front["y"]
+
+
+def _plot_xy_panel(
+    ax,
+    df: pd.DataFrame,
+    group_col: str,
+    x_col: str,
+    y_col: str,
+    *,
+    extra_label_col: str | None = None,
+    show_scatter: bool = False,
+) -> int:
+    """Draw the per-swept-value min-envelope curves for one (dataset, stage)
+    onto ``ax``. Shared by the standalone ``_plot_xy`` and the grid plots so
+    both stay pixel-identical for the curves they have in common. Returns
+    the number of series actually plotted.
+    """
+    keys = _series_keys(df, group_col, extra_label_col)
+    df = _filter_to_recall_window(df, x_col, *_RECALL_XLIM)
+    groups = list(df.groupby(keys))
+    n = len(groups)
+    plotted = 0
+    for i, (key, sub) in enumerate(groups):
+        sub = sub.dropna(subset=[x_col, y_col])
+        if sub.empty:
+            continue
+        color = _ordered_color(i, n)
+        if show_scatter:
+            ax.scatter(sub[x_col], sub[y_col], s=20, alpha=0.25, zorder=1, color=color)
+        fx, fy = _min_envelope(sub[x_col], sub[y_col])
+        if len(fx) == 0:
+            continue
+        ax.plot(fx, fy, marker="o", markersize=5.4, linewidth=2.8, zorder=3,
+                color=color, label=_series_label(key, group_col, extra_label_col))
+        plotted += 1
+    ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    return plotted
+
+
 def _plot_xy(df: pd.DataFrame, group_col: str, x_col: str, y_col: str,
              x_label: str, y_label: str, title: str, out_path: pathlib.Path,
              extra_label_col: str | None = None) -> None:
     fig, ax = plt.subplots(figsize=(7, 5))
-    keys = _series_keys(df, group_col, extra_label_col)
-    df = _filter_to_recall_window(df, x_col, *_RECALL_XLIM)
-    for key, sub in df.groupby(keys):
-        sub = sub.sort_values(x_col)
-        ax.plot(sub[x_col], sub[y_col], marker="o",
-                label=_series_label(key, group_col, extra_label_col))
+    _plot_xy_panel(ax, df, group_col, x_col, y_col, extra_label_col=extra_label_col)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
-    ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend(
-        loc="best",
-        fontsize=13,
-        frameon=True,
-        framealpha=0.95,
-        facecolor="white",
-        edgecolor="0.35",
-    )
+    _legend(ax, loc=_LEGEND_LOC_BY_YCOL.get(y_col, "best"))
     ax.set_title(title)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -332,30 +479,27 @@ def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path,
     fig, ax = plt.subplots(figsize=(7, 5))
     keys = _series_keys(df, group_col, extra_label_col)
     df = _filter_to_recall_window(df, "recall_k_k", *_RECALL_XLIM)
-    for key, sub in df.groupby(keys):
+    groups = list(df.groupby(keys))
+    n = len(groups)
+    for i, (key, sub) in enumerate(groups):
         sub = sub.dropna(subset=["recall_k_k", "QPS_seq"])
         if sub.empty:
             continue
-        ax.scatter(sub["recall_k_k"], sub["QPS_seq"], s=20, alpha=0.25)
+        color = _ordered_color(i, n)
         fx, fy = _pareto_curve(sub["recall_k_k"], sub["QPS_seq"])
         if len(fx) == 0:
             continue
-        ax.plot(fx, fy, marker="o",
-                label=_series_label(key, group_col, extra_label_col))
+        ax.plot(fx, fy, marker="o", markersize=5.4, linewidth=2.8, zorder=3,
+                color=color, label=_series_label(key, group_col, extra_label_col))
     ax.set_xlim(_RECALL_XLIM[0], _RECALL_XLIM_PAD_RIGHT)
 
     ax.set_xlabel(_recall_k_k_label(df))
-    ax.set_ylabel("QPS (per-query)")
+    ax.set_ylabel("QPS")
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(
-        loc="best",
-        fontsize=13,
-        frameon=True,
-        framealpha=0.95,
-        facecolor="white",
-        edgecolor="0.35",
-    )
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    _legend(ax, loc=_LEGEND_LOC_BY_YCOL.get("QPS_seq", "best"))
     ax.set_title(title)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,8 +508,26 @@ def _plot_qps_pareto(df: pd.DataFrame, group_col: str, out_path: pathlib.Path,
     plt.close(fig)
 
 
+def _ablation_title(dataset: str | None, method_label: str, group_col: str,
+                    extra_label_col: str | None) -> str:
+    """Uniform ablation title matching latency-plot style.
+
+    e.g. ``hotpotqa: MV-IVF Ablation (niters)`` or
+    ``hotpotqa: MV-IVF Ablation (index_name x query_compression)``.
+    """
+    param = (
+        _param_display(group_col)
+        if extra_label_col is None
+        else f"{extra_label_col} x {_param_display(group_col)}"
+    )
+    head = f"{method_label} Ablation ({param})"
+    return f"{dataset}: {head}" if dataset else head
+
+
 def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
-         prefix: str = "stage1", extra_label_col: str | None = None) -> None:
+         prefix: str = "stage1", extra_label_col: str | None = None,
+         *, dataset: str | None = None,
+         method_label: str = "MV-IVF") -> None:
     if "QPS_seq" in df.columns:
         df = df.assign(latency_ms=1000.0 / df["QPS_seq"])
     else:
@@ -379,16 +541,12 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
     if recall_x not in df.columns:
         raise SystemExit("Missing recall_k_k column in merged CSVs.")
 
-    title_suffix = (
-        f"grouped by {group_col}"
-        if extra_label_col is None
-        else f"grouped by {extra_label_col} \u00d7 {group_col}"
-    )
+    title = _ablation_title(dataset, method_label, group_col, extra_label_col)
     _plot_qps_pareto(
         df,
         group_col=group_col,
         out_path=out_dir / f"{prefix}_pareto.pdf",
-        title=f"{prefix}: QPS vs recall Pareto ({title_suffix})",
+        title=title,
         extra_label_col=extra_label_col,
     )
     _plot_xy(
@@ -398,7 +556,7 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
         y_col="latency_ms",
         x_label=_recall_k_k_label(df),
         y_label="Latency (ms)",
-        title=f"{prefix}: latency vs recall ({title_suffix})",
+        title=title,
         out_path=out_dir / f"{prefix}_latency.pdf",
         extra_label_col=extra_label_col,
     )
@@ -408,16 +566,126 @@ def plot(df: pd.DataFrame, group_col: str, out_dir: pathlib.Path,
         x_col=recall_x,
         y_col="avg_cmps",
         x_label=_recall_k_k_label(df),
-        y_label="Average bytes accessed per query",
-        title=f"{prefix}: bytes accessed vs recall ({title_suffix})",
+        y_label="Bytes accessed per query",
+        title=title,
         out_path=out_dir / f"{prefix}_cmps.pdf",
         extra_label_col=extra_label_col,
     )
 
 
+# Stage -> swept knob, for the grid plots (matches
+# scripts/run_ablation.sh:default_group_by_for_stage).
+_STAGE_GROUP_COL = {
+    "stage1": "k_per_level",
+    "stage2": "max_leaf_size",
+    "stage4": "niters",
+}
+
+
+def _load_stage_df(
+    results_root: pathlib.Path, dataset: str, stage: str, method: str = "mvivf",
+) -> pd.DataFrame:
+    base = results_root / dataset / stage / method
+    df = load_csvs(base)
+    df = df.assign(latency_ms=1000.0 / df["QPS_seq"])
+    df = _ensure_group_col(df, _STAGE_GROUP_COL[stage])
+    return df
+
+
+def _plot_ablation_grid(
+    results_root: pathlib.Path,
+    datasets: list[str],
+    stages: list[str],
+    out_path: pathlib.Path,
+    *,
+    transpose: bool = False,
+    method: str = "mvivf",
+) -> None:
+    """Grid of latency-vs-recall ablation panels, one column per stage-knob
+    sweep and one row per dataset (``transpose=True`` swaps the two).
+
+    Colors/legend/curve style exactly match the standalone ``*_latency.pdf``
+    plots (both call ``_plot_xy_panel``). Column headers carry the "Ablating
+    {param}" title, row headers (rotated) carry whichever axis isn't the
+    column -- dataset name or the other stage's param -- so both orientations
+    stay self-describing without repeating the same label six times.
+    """
+    dfs: dict[tuple[str, str], pd.DataFrame] = {}
+    for ds in datasets:
+        for stage in stages:
+            try:
+                dfs[(ds, stage)] = _load_stage_df(results_root, ds, stage, method)
+            except SystemExit as e:
+                print(f"  [skip grid cell {ds}/{stage}: {e}]")
+
+    if not dfs:
+        print(f"  [skip {out_path.name}: no ablation data loaded]")
+        return
+
+    row_is_dataset = not transpose
+    row_keys, col_keys = (datasets, stages) if row_is_dataset else (stages, datasets)
+    n_rows, n_cols = len(row_keys), len(col_keys)
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(4.4 * n_cols, 3.7 * n_rows),
+        squeeze=False,
+    )
+
+    for r, row_key in enumerate(row_keys):
+        for c, col_key in enumerate(col_keys):
+            ds, stage = (row_key, col_key) if row_is_dataset else (col_key, row_key)
+            ax = axes[r][c]
+            df = dfs.get((ds, stage))
+            if df is None:
+                ax.axis("off")
+                continue
+            group_col = _STAGE_GROUP_COL[stage]
+            _plot_xy_panel(ax, df, group_col, "recall_k_k", "latency_ms")
+            if r == n_rows - 1:
+                ax.set_xlabel(_recall_k_k_label(df))
+            if c == 0:
+                ax.set_ylabel("Latency (ms)")
+            if r == 0:
+                col_title = f"Ablating {_param_display(group_col)}" if row_is_dataset else ds
+                ax.set_title(col_title, fontsize=15)
+            _legend(ax, loc=_LEGEND_LOC_BY_YCOL["latency_ms"])
+
+    fig.tight_layout(rect=(0.018, 0.0, 1.0, 1.0))
+
+    for r, row_key in enumerate(row_keys):
+        label = row_key if row_is_dataset else f"Ablating {_param_display(_STAGE_GROUP_COL[row_key])}"
+        pos = axes[r][0].get_position()
+        fig.text(
+            0.004, (pos.y0 + pos.y1) / 2, label,
+            rotation=90, va="center", ha="center", fontsize=15,
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.08)
+    plt.close(fig)
+    print(f"  wrote {out_path} ({n_rows}x{n_cols}: rows={row_keys}, cols={col_keys})")
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--results", type=pathlib.Path, required=True)
+    p.add_argument(
+        "--grid", action="store_true",
+        help=("Generate the multi-dataset x multi-stage latency ablation "
+              "grid(s) instead of the single --results/--group-by plot. "
+              "Writes both the default orientation and its transpose."),
+    )
+    p.add_argument("--grid-datasets", default="fiqa,hotpotqa")
+    p.add_argument("--grid-stages", default="stage1,stage2,stage4")
+    p.add_argument(
+        "--grid-results", type=pathlib.Path, default=None,
+        help="Ablation results root (default: experiments/mvivf_ablation/results).",
+    )
+    p.add_argument(
+        "--grid-out-dir", type=pathlib.Path, default=None,
+        help="Output dir for the grid PDFs (default: <grid-results>/_plots).",
+    )
+    p.add_argument("--results", type=pathlib.Path, default=None)
     p.add_argument("--group-by", default="build_config",
                    help="CSV column to group curves by.")
     p.add_argument(
@@ -439,11 +707,49 @@ def main() -> int:
         default="stage1",
         help="Output filename prefix (default: stage1).",
     )
+    p.add_argument(
+        "--dataset",
+        default=None,
+        help="Dataset name to include in plot titles (e.g. 'hotpotqa').",
+    )
+    p.add_argument(
+        "--method-label",
+        default="MV-IVF",
+        help="Method label for plot titles (default: MV-IVF; e.g. MV-IVF-Spill).",
+    )
     args = p.parse_args()
+
+    if args.grid:
+        grid_results = (
+            args.grid_results if args.grid_results is not None
+            else HERE.parent / "results"
+        )
+        grid_out_dir = (
+            args.grid_out_dir if args.grid_out_dir is not None
+            else grid_results / "_plots"
+        )
+        datasets = [d.strip() for d in args.grid_datasets.split(",") if d.strip()]
+        stages = [s.strip() for s in args.grid_stages.split(",") if s.strip()]
+        tag = "_".join(datasets)
+        _plot_ablation_grid(
+            grid_results, datasets, stages,
+            grid_out_dir / f"{tag}_mvivf_ablation_grid.pdf",
+            transpose=False,
+        )
+        _plot_ablation_grid(
+            grid_results, datasets, stages,
+            grid_out_dir / f"{tag}_mvivf_ablation_grid_transpose.pdf",
+            transpose=True,
+        )
+        return 0
+
+    if args.results is None:
+        p.error("--results is required unless --grid is passed.")
     df = load_csvs(args.results)
     out_dir = args.out_dir if args.out_dir is not None else args.results
     plot(df, args.group_by, out_dir, prefix=args.prefix,
-         extra_label_col=args.label_by)
+         extra_label_col=args.label_by,
+         dataset=args.dataset, method_label=args.method_label)
     return 0
 
 

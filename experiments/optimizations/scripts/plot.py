@@ -6,6 +6,11 @@ Per dataset under ``experiments/optimizations/results/<dataset>/``:
   1. ``<dataset>_pareto.pdf`` — Recall (k@k) vs latency ms (1000/QPS_seq), Pareto
      curves only (no scatter "ghost" points).
 
+  1b. ``<ds1>_<ds2>..._paper_pareto.pdf`` (once, not per dataset) — the same
+      Pareto panels side by side, one column per loaded dataset, with a
+      single shared stage legend on top. Written whenever >=2 datasets load
+      successfully in one invocation.
+
   2. ``<dataset>_ladder_r{90,95,99}.pdf`` — one latency ladder per recall regime.
   3. ``<dataset>_ladder_combined.pdf`` — row of vertical-bar panels per recall regime
      (independent y-scales), legend for stages, latency (ms) on bar tops.
@@ -27,6 +32,7 @@ from typing import Optional
 try:
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as mticker
     import numpy as np
     import pandas as pd
 except ImportError:
@@ -173,16 +179,30 @@ def _stage_pareto_xy(sub: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     return ps._pareto_curve_recall_latency_ms(xs, qv)
 
 
-def _plot_pareto(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None:
+def _plot_pareto_panel(
+    ax,
+    df: pd.DataFrame,
+    dataset: str,
+    *,
+    show_ylabel: bool = True,
+    show_legend: bool = True,
+    show_title: bool = False,
+) -> list[str]:
+    """Draw the per-stage viridis Pareto curves for one dataset onto ``ax``.
+
+    Shared by the single-dataset plot and the multi-dataset side-by-side
+    plot so both stay pixel-identical for the stages they have in common.
+    Returns the stage keys actually plotted (empty if none).
+    """
     stages = [s for s in _STAGE_ORDER if s in df["variant"].unique()]
     if not stages:
-        print(f"  [skip pareto for {dataset}: no known stage variants]")
-        return
+        return []
 
     k_val = int(df["k"].dropna().iloc[0]) if "k" in df.columns and not df["k"].dropna().empty else 10
-    fig, ax = plt.subplots(figsize=(7.2, 5.2))
     n = len(stages)
 
+    plotted_min_recall: float | None = None
+    plotted_max_recall: float | None = None
     for i, stage in enumerate(stages):
         sub = df[df["variant"] == stage]
         fx, fy = _stage_pareto_xy(sub)
@@ -200,18 +220,60 @@ def _plot_pareto(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None
             label=_STAGE_LABELS.get(stage, stage),
             zorder=3,
         )
+        xmin = float(np.nanmin(fx))
+        xmax = float(np.nanmax(fx))
+        plotted_min_recall = xmin if plotted_min_recall is None else min(plotted_min_recall, xmin)
+        plotted_max_recall = xmax if plotted_max_recall is None else max(plotted_max_recall, xmax)
 
     ax.set_xlabel(ps._recall_xlabel("k", k_val))
-    ax.set_ylabel("Latency (ms)")
+    if show_ylabel:
+        ax.set_ylabel("Latency (ms)")
     ax.set_yscale("log")
-    ax.set_xlim(*_XLIM)
+    # Default: high-recall zoom (0.82 .. 1.002). If a stage's Pareto tops out
+    # below that (e.g. hotpotqa's raw baseline maxes near 0.60 recall), widen
+    # left so the shorter curve is still visible for comparison.
+    left, right = _XLIM
+    if plotted_max_recall is not None and plotted_max_recall < left:
+        # Every curve is below the zoom window; fall back to the plotted range.
+        assert plotted_min_recall is not None
+        left = max(0.0, plotted_min_recall - 0.02)
+        right = min(1.002, plotted_max_recall + 0.02)
+    elif plotted_min_recall is not None and plotted_min_recall < left:
+        # At least one stage is short; drop the left edge to that stage's max
+        # recall so its whole Pareto is visible.
+        stage_max_below_zoom = None
+        for stage in stages:
+            fx, _ = _stage_pareto_xy(df[df["variant"] == stage])
+            if fx.size == 0:
+                continue
+            mx = float(np.nanmax(fx))
+            if mx < _XLIM[0]:
+                stage_max_below_zoom = mx if stage_max_below_zoom is None else max(stage_max_below_zoom, mx)
+        if stage_max_below_zoom is not None:
+            left = max(0.0, min(_XLIM[0], stage_max_below_zoom - 0.02))
+    ax.set_xlim(left, right)
+    ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=5, steps=[1, 2, 5, 10]))
+    ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
     ax.grid(True, which="both", alpha=0.3)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ps._legend(ax)
+    if show_title:
+        ax.set_title(dataset, fontsize=15)
+    if show_legend:
+        ps._legend(ax)
+    return stages
+
+
+def _plot_pareto(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None:
+    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    stages = _plot_pareto_panel(ax, df, dataset, show_ylabel=True, show_legend=True)
+    if not stages:
+        print(f"  [skip pareto for {dataset}: no known stage variants]")
+        plt.close(fig)
+        return
 
     fig.suptitle(
-        f"{dataset}: {ps._stage_title('latency', latency_ms=True)}",
+        f"{dataset}: MV-IVF Optimizations (Recall vs Latency)",
         fontsize=17,
         y=0.97,
     )
@@ -220,6 +282,67 @@ def _plot_pareto(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> None
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
+
+
+def _plot_pareto_combined(
+    dfs: dict[str, pd.DataFrame], datasets: list[str], out_path: pathlib.Path,
+) -> None:
+    """Side-by-side Pareto panels (one column per dataset) for the paper.
+
+    Same two-row-gridspec "dedicated legend band" convention as
+    ``_plot_ladder_combined`` below — a shared stage legend on top, then one
+    panel per dataset underneath, each keeping its own x-limits / y-scale
+    (datasets differ enough in latency range that forcing a shared y-axis
+    would flatten the shorter curves). Color scheme (viridis per stage) is
+    untouched — only the layout is new.
+    """
+    plot_datasets = [d for d in datasets if d in dfs]
+    if len(plot_datasets) < 2:
+        print(f"  [skip combined pareto: need >=2 loaded datasets, got {len(plot_datasets)}]")
+        return
+
+    n = len(plot_datasets)
+    fig = plt.figure(figsize=(6.6 * n, 5.25))
+    gs = fig.add_gridspec(
+        2, n,
+        height_ratios=[0.17, 1.0],
+        hspace=0.14,
+        wspace=0.12,
+        left=0.08, right=0.98, bottom=0.12, top=0.99,
+    )
+
+    axes = []
+    plotted_any = False
+    for i, dataset in enumerate(plot_datasets):
+        ax = fig.add_subplot(gs[1, i])
+        stages = _plot_pareto_panel(
+            ax, dfs[dataset], dataset,
+            show_ylabel=(i == 0), show_legend=False, show_title=True,
+        )
+        plotted_any = plotted_any or bool(stages)
+        axes.append(ax)
+
+    if not plotted_any:
+        print("  [skip combined pareto: no dataset had known stage variants]")
+        plt.close(fig)
+        return
+
+    leg_ax = fig.add_subplot(gs[0, :])
+    leg_ax.axis("off")
+    handles, labels = ps._dedup_legend_handles(axes)
+    wrapped_labels = [_wrap_legend_label(lbl) for lbl in labels]
+    leg_kwargs = {**_legend_kwargs(len(labels)), "fontsize": 14, "handlelength": 2.2, "markerscale": 1.3}
+    leg_ax.legend(
+        handles,
+        wrapped_labels,
+        loc="center",
+        **leg_kwargs,
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight", pad_inches=0.04)
+    plt.close(fig)
+    print(f"  wrote {out_path} ({n} panel(s): {', '.join(plot_datasets)})")
 
 
 def _compute_latency_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -588,6 +711,7 @@ def main() -> int:
         print(f"[warn] no datasets under {args.results}; nothing to plot.")
         return 0
 
+    loaded: dict[str, pd.DataFrame] = {}
     for ds in datasets:
         try:
             df = _load_dataset(args.results, ds)
@@ -595,9 +719,14 @@ def main() -> int:
             print(f"[skip {ds}] {e}")
             continue
         print(f"[{ds}] {len(df)} rows, {df['variant'].nunique()} stages")
+        loaded[ds] = df
         _plot_pareto(df, ds, out_dir / f"{ds}_pareto.pdf")
         lat_tab = _plot_waterfall_ladders(df, ds, out_dir)
         _write_table(lat_tab, ds, out_dir / f"{ds}_speedup_table.md")
+
+    if len(loaded) >= 2:
+        combined_name = "_".join(loaded.keys()) + "_paper_pareto.pdf"
+        _plot_pareto_combined(loaded, list(loaded.keys()), out_dir / combined_name)
     return 0
 
 
