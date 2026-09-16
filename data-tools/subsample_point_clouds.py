@@ -6,7 +6,7 @@ import random
 
 def read_point_cloud_data(filename):
     """Reads a .pcs file (see mvsic/core/types/point_cloud_set.h and
-    data-tools/compute_ground_truth.py): uint64 dim, n, num_vectors; then
+    embed/formats.py): uint64 dim, n, num_vectors; then
     float32[num_vectors * dim]; then uint64 num_offsets; then uint64 offsets
     where each offset is a cumulative *float* count (same as C++), not a
     row index into the (num_vectors, dim) view.
@@ -72,7 +72,7 @@ def main():
         start_f = int(offsets[i])
         end_f = int(offsets[i + 1])
         # Offsets are cumulative float32 counts; row slice is // dim (see
-        # compute_ground_truth._read_offsets_vec).
+        # embed.formats.read_pcs_layout).
         if start_f % dim != 0 or end_f % dim != 0:
             raise ValueError(
                 f"Offsets not aligned to dim={dim}: "
