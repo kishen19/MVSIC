@@ -52,6 +52,15 @@ cc_binary(
 )
 
 cc_binary(
+    name = "quant_bench",
+    srcs = ["quant_bench.cpp"],
+    deps = [
+        ":vamana",
+        "//mvsic/core:stats",
+    ],
+)
+
+cc_binary(
     name = "bench_build",
     srcs = ["bench_build.cpp"],
     deps = [

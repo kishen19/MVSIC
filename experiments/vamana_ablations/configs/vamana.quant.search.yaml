@@ -1,0 +1,63 @@
+name: "Vamana Ablation (search: TQ-4bit vs Rand-1bit leaf quant, R=64, alpha=1.0)"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/vamana_ablations/indices/arguana
+    results_dir: experiments/vamana_ablations/results/arguana
+  - name: fiqa
+    path: data/beir/fiqa
+    index_dir: results/vamana_ablations/indices/fiqa
+    results_dir: experiments/vamana_ablations/results/fiqa
+  - name: hotpotqa
+    path: data/beir/hotpotqa
+    index_dir: results/vamana_ablations/indices/hotpotqa
+    results_dir: experiments/vamana_ablations/results/hotpotqa
+  - name: nfcorpus
+    path: data/beir/nfcorpus
+    index_dir: results/vamana_ablations/indices/nfcorpus
+    results_dir: experiments/vamana_ablations/results/nfcorpus
+  - name: nq
+    path: data/beir/nq
+    index_dir: results/vamana_ablations/indices/nq
+    results_dir: experiments/vamana_ablations/results/nq
+  - name: nq500k
+    path: data/beir/nq500k
+    index_dir: results/vamana_ablations/indices/nq500k
+    results_dir: experiments/vamana_ablations/results/nq500k
+  - name: quora
+    path: data/beir/quora
+    index_dir: results/vamana_ablations/indices/quora
+    results_dir: experiments/vamana_ablations/results/quora
+  - name: scidocs
+    path: data/beir/scidocs
+    index_dir: results/vamana_ablations/indices/scidocs
+    results_dir: experiments/vamana_ablations/results/scidocs
+  - name: scifact
+    path: data/beir/scifact
+    index_dir: results/vamana_ablations/indices/scifact
+    results_dir: experiments/vamana_ablations/results/scifact
+
+indices:
+  - name: vamana
+    metric: ip
+    builds:
+      - build_name: vamana_R64_a1.0
+        build_params:
+          R: 64
+          L: 128
+          alpha: 1.0
+          two_pass: false
+        variants:
+          - { name: tq4, quantizer: TQ }
+          - { name: tq1, quantizer: OneBitTQ }
+        search_configs:
+          - name: k=10
+            params:
+              tq8_rerank: [true]
+              L: [64, 128, 256, 512, 1024, 2048, 4096]
+              k: [10]
+              config:
+                - { name: nr0, num_rerank: 0 }
+                - { name: nr20, num_rerank: 20 }
+                - { name: nr40, num_rerank: 40 }

@@ -7,11 +7,14 @@
 #   experiments/vamana_ablations/scripts/run_ablation.sh --task search
 #   experiments/vamana_ablations/scripts/run_ablation.sh --task plot
 #   experiments/vamana_ablations/scripts/run_ablation.sh --dataset fiqa
+#   experiments/vamana_ablations/scripts/run_ablation.sh --quant --dataset fiqa --task search
 #
-# Build sweep:
-#   R in {64, 200}, alpha in {1.0, 1.2}
+# Default build sweep:
+#   R=64, alpha in {1.0, 1.1, 1.2}
 # Search:
 #   TQ4 variant, L sweep, num_rerank sweep.
+# --quant selects vamana.quant.{build,search}.yaml: one R64/alpha1 graph,
+#   with TQ4 and 1-bit TQ leaf variants at search time.
 #
 # Query subsampling: search delegates to benchmarks/benchmark_search.py, which
 # defaults to --query_subsample 1000 --query_subsample_seed 42 (cap on
@@ -25,6 +28,7 @@ CONFIGS_DIR="$REPO_ROOT/experiments/vamana_ablations/configs"
 FILTER_PY="$REPO_ROOT/experiments/builds/scripts/filter_config.py"
 
 TASK="all"           # all | build | search | plot
+CONFIG_PREFIX="vamana"
 CONFIG_DATASET=""    # optional single dataset filter
 EXTRA_ARGS=()
 TEMP_YAMLS=()
@@ -42,6 +46,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --task)    TASK="$2"; shift 2;;
     --dataset) CONFIG_DATASET="$2"; shift 2;;
+    --quant)   CONFIG_PREFIX="vamana.quant"; shift;;
     *)         EXTRA_ARGS+=("$1"); shift;;
   esac
 done
@@ -66,7 +71,7 @@ _register_filtered_config() {
 
 config_resolve() {
   local kind="$1" # build|search
-  local cfg="$CONFIGS_DIR/vamana.${kind}.yaml"
+  local cfg="$CONFIGS_DIR/${CONFIG_PREFIX}.${kind}.yaml"
   AB_CONFIG_PATH=""
   if [[ ! -f "$cfg" ]]; then
     echo "[error] missing config: $cfg" >&2
@@ -103,11 +108,16 @@ plot_run() {
     return 2
   fi
   if [[ -n "$CONFIG_DATASET" ]]; then
-    python3 "$plot_py" --datasets "$CONFIG_DATASET" "${EXTRA_ARGS[@]}"
+    python3 "$plot_py" --datasets "$CONFIG_DATASET" "${PLOT_ARGS[@]}" "${EXTRA_ARGS[@]}"
   else
-    python3 "$plot_py" "${EXTRA_ARGS[@]}"
+    python3 "$plot_py" "${PLOT_ARGS[@]}" "${EXTRA_ARGS[@]}"
   fi
 }
+
+PLOT_ARGS=()
+if [[ "$CONFIG_PREFIX" == "vamana.quant" ]]; then
+  PLOT_ARGS+=(--build vamana_R64_a1.0)
+fi
 
 case "$TASK" in
   build)  build_run;;

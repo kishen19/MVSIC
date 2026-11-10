@@ -163,21 +163,29 @@ def _plot_dataset(df: pd.DataFrame, dataset: str, out_path: pathlib.Path) -> Non
         return
 
     builds = sorted(sub["build"].unique(), key=_build_sort_key)
+    variants = sorted(sub["variant"].unique())
+    curves = [(b, v) for b in builds for v in variants
+              if not sub[(sub["build"] == b) & (sub["variant"] == v)].empty]
     cmap = plt.colormaps.get_cmap("tab10")
-    colors = {b: cmap(i % 10) for i, b in enumerate(builds)}
+    colors = {curve: cmap(i % 10) for i, curve in enumerate(curves)}
 
     fig, ax = plt.subplots(figsize=(7, 5))
-    for b in builds:
-        s = sub[sub["build"] == b]
+    for b, v in curves:
+        s = sub[(sub["build"] == b) & (sub["variant"] == v)]
         xs = s["recall_k_k"].to_numpy(dtype=float)
         ys = s["QPS_seq"].to_numpy(dtype=float)
-        ax.scatter(xs, ys, s=20, color=colors[b], alpha=0.25, zorder=1)
+        color = colors[(b, v)]
+        ax.scatter(xs, ys, s=20, color=color, alpha=0.25, zorder=1)
         fx, fy = _pareto_curve(xs, ys)
         if fx.size == 0:
             continue
+        label = _build_label(b)
+        if len(variants) > 1:
+            quantizer_label = {"tq4": "TQ 4-bit", "tq1": "TQ 1-bit"}.get(v, v)
+            label = f"{label}, {quantizer_label}"
         ax.plot(
             fx, fy, marker="o", markersize=5.4, linewidth=2.8,
-            color=colors[b], label=_build_label(b), zorder=3
+            color=color, label=label, zorder=3
         )
 
     parts = [
@@ -224,6 +232,7 @@ def main() -> int:
         default=REPO_ROOT / "experiments" / "vamana_ablations" / "results",
     )
     p.add_argument("--out-dir", type=pathlib.Path, default=None, help="default: <results>/_plots")
+    p.add_argument("--build", default=None, help="Filter to one build name")
     _ = p.add_argument("--methods", default=None)  # accepted for compatibility
     args = p.parse_args()
 
@@ -235,7 +244,10 @@ def main() -> int:
         except SystemExit as e:
             print(f"[skip {ds}] {e}")
             continue
-        _plot_dataset(df, ds, out_dir / f"{ds}_pareto.pdf")
+        if args.build:
+            df = df[df["build"] == args.build]
+        suffix = "_quant" if args.build else ""
+        _plot_dataset(df, ds, out_dir / f"{ds}_pareto{suffix}.pdf")
     return 0
 
 
