@@ -1,0 +1,33 @@
+# GEM search smoke for arguana — run after gem_arguana.build.yaml.
+#
+#   python3 benchmarks/benchmark_search.py \
+#     --config benchmarks/configs/gem_arguana.search.yaml \
+#     --mode latency --QPS_thresh 0
+#
+# ``--QPS_thresh 0`` disables early sweep exit (recommended for short grids).
+
+name: "GEM search — arguana"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/beir/arguana/indices
+    results_dir: results/beir/arguana/results
+
+indices:
+  - name: gem
+    metric: ip
+    builds:
+      - build_name: gem_smoke_m8_ef20
+        build_params:
+          num_doc_shards: 1
+          m_index: 8
+          ef_construction: 20
+        search_configs:
+          - name: k=10
+            params:
+              ef_search: [40, 80]          # ef_search (smoke grid; paper k=10 point: 800 on MSMARCO)
+              nprobe: [4]                    # t — cluster filter (paper §5.1.3: 4)
+              k: [10]
+              config:
+                - { name: nr32, rerank_k: 32 }  # #rerank (smoke; paper sweeps larger pools)

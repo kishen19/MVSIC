@@ -146,9 +146,14 @@ inline __m512i tq8_dpbusd(__m512i acc, __m512i a_unsigned, __m512i b_signed) {
 #ifdef __AVX512VNNI__
   return _mm512_dpbusd_epi32(acc, a_unsigned, b_signed);
 #else
-  const __m512i prod16 = _mm512_maddubs_epi16(a_unsigned, b_signed);
-  const __m512i prod32 = _mm512_madd_epi16(prod16, _mm512_set1_epi16(1));
-  return _mm512_add_epi32(acc, prod32);
+  // maddubs saturates pairs to int16. Split the unsigned byte so each
+  // partial pair fits, then widen before adding the two contributions.
+  const __m512i lo = _mm512_and_si512(a_unsigned, _mm512_set1_epi8(0x7f));
+  const __m512i hi = _mm512_and_si512(a_unsigned, _mm512_set1_epi8(char(0x80)));
+  const __m512i ones = _mm512_set1_epi16(1);
+  const __m512i p0 = _mm512_madd_epi16(_mm512_maddubs_epi16(lo, b_signed), ones);
+  const __m512i p1 = _mm512_madd_epi16(_mm512_maddubs_epi16(hi, b_signed), ones);
+  return _mm512_add_epi32(acc, _mm512_add_epi32(p0, p1));
 #endif
 }
 
@@ -238,6 +243,12 @@ inline void vnni_chamfer_epilogue(__m512i acc, int32_t byte_sum, float q_nsf, fl
     dist = _mm512_add_ps(sqn_v, _mm512_add_ps(_mm512_add_ps(neg_dot, neg_dot), sqn_qv));
   } else {
     dist = neg_dot;
+    // Padding is not an actual zero vector: exclude it even when every
+    // real vector has negative similarity (positive negative-dot distance).
+    const __mmask16 valid = _mm512_cmp_ps_mask(
+        _mm512_loadu_ps(db_sqn), _mm512_set1_ps(std::numeric_limits<float>::infinity()),
+        _CMP_LT_OQ);
+    dist = _mm512_mask_mov_ps(_mm512_set1_ps(std::numeric_limits<float>::max()), valid, dist);
   }
   running_min = _mm512_min_ps(running_min, dist);
 }
@@ -637,6 +648,10 @@ class Quantized_Point_Cloud_Set {
     read_seq(unquantized_squared_norms);
     read_seq(cloud_sizes);
     read_seq(ids);
+    // Upgrade padding metadata from older saved encodings as well.
+    for (size_t c = 0; c < cloud_sizes.size(); ++c)
+      for (size_t p = point_offsets[c] + cloud_sizes[c]; p < point_offsets[c + 1]; ++p)
+        unquantized_squared_norms[p] = std::numeric_limits<float>::infinity();
   }
 };
 
@@ -781,11 +796,7 @@ class Model {
 
     enc.panel_data.resize(cur_panel_bytes, 0);
     enc.norm_scaling_factors.resize(cur_padded_pts, 0.0f);
-    if constexpr (Metric) {
-      enc.unquantized_squared_norms.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
-    } else {
-      enc.unquantized_squared_norms.resize(cur_padded_pts, 0.0f);
-    }
+    enc.unquantized_squared_norms.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
 
     auto pcs_ids = pcs.get_ids();
     enc.ids = parlay::sequence<uint32_t>(pcs_ids.begin(), pcs_ids.end());
@@ -1439,6 +1450,30 @@ class SingleCloudArgmin {
   }
 #endif
 };
+
+// Shared document reranker. `candidates` must already be ordered by the
+// coarse scorer and store document ids in `.first`; only the first
+// `num_rerank` entries are considered.
+template <bool Metric, class CandidateRange>
+std::pair<parlay::sequence<std::pair<uint32_t, float>>, size_t> rerank_candidates(
+    const Quantized_Query_Point_Cloud<Metric>& query,
+    const Quantized_Point_Cloud_Set<Metric>& db,
+    const CandidateRange& candidates, size_t num_rerank, size_t k) {
+  num_rerank = std::min(num_rerank, candidates.size());
+  auto scored = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_rerank);
+  auto bytes = parlay::sequence<size_t>::uninitialized(num_rerank);
+  const size_t per_vec_bytes =
+      db.num_bytes_per_datapoint + sizeof(float) + (Metric ? sizeof(float) : 0);
+  parlay::parallel_for(0, num_rerank, [&](size_t i) {
+    const uint32_t id = candidates[i].first;
+    scored[i] = {id, turboquant_8bit_mv_chamfer_distance<Metric>(query, db, id)};
+    bytes[i] = db.cloud_size(id) * per_vec_bytes;
+  });
+  parlay::sort_inplace(scored,
+                       [](const auto& a, const auto& b) { return a.second < b.second; });
+  if (scored.size() > k) scored.resize(k);
+  return {std::move(scored), parlay::reduce(bytes)};
+}
 
 }  // namespace turboquant_8bit_mv
 }  // namespace mvsic

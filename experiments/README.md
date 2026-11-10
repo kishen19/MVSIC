@@ -1,5 +1,10 @@
 # Main experiments
 
+This directory contains the paper experiment suite. Exploratory EMDIVF
+scripts and their consolidated findings live in
+[`../emdivf_experiments/`](../emdivf_experiments/README.md); the method's
+C++ implementation lives in [`../mvsic/emdivf/`](../mvsic/emdivf/README.md).
+
 ## Layout
 
 ```

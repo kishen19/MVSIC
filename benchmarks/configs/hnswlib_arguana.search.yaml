@@ -1,0 +1,29 @@
+# hnswlib search smoke for arguana — run after hnswlib_arguana.build.yaml.
+#
+#   python3 benchmarks/benchmark_search.py \
+#     --config benchmarks/configs/hnswlib_arguana.search.yaml \
+#     --mode latency --QPS_thresh 0
+
+name: "hnswlib search — arguana"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/beir/arguana/indices
+    results_dir: results/beir/arguana/results
+
+indices:
+  - name: hnswlib
+    metric: ip
+    builds:
+      - build_name: hnswlib_smoke_m8_ef20
+        build_params:
+          m_index: 8
+          ef_construction: 20
+        search_configs:
+          - name: k=10
+            params:
+              ef_search: [40, 80]
+              k: [10]
+              config:
+                - { name: nr32, rerank_k: 32 }

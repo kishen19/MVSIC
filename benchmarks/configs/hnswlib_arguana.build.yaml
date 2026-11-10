@@ -1,0 +1,25 @@
+# hnswlib build smoke for arguana (BEIR).
+#
+#   cd <repo-root>
+#   bash setup_external.sh --hnswlib
+#   python3 benchmarks/benchmark_build.py --config benchmarks/configs/hnswlib_arguana.build.yaml
+#
+# Artifacts: <index_dir>/hnswlib/<build_name>/{hnswlib_data/,index.bin,hnswlib_meta.json,_BUILD_OK,...}
+
+name: "hnswlib build — arguana"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/beir/arguana/indices
+    results_dir: results/beir/arguana/results
+
+indices:
+  - name: hnswlib
+    metric: ip
+    build_configs:
+      - name: hnswlib_smoke_m8_ef20
+        params:
+          m_index: 8
+          ef_construction: 20
+          build_threads: 4

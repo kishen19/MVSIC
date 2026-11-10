@@ -1,0 +1,3 @@
+# Local EMDIVF data and historical BUILD files are outside the source graph.
+emdivf_experiments/artifacts
+emdivf_experiments/results

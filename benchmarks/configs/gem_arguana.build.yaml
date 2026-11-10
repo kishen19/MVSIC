@@ -1,0 +1,33 @@
+# GEM build smoke for arguana (BEIR).
+#
+#   cd <repo-root>
+#   bash setup_external.sh --gem
+#   python3 benchmarks/benchmark_build.py --config benchmarks/configs/gem_arguana.build.yaml
+#
+# Requires: faiss in the active Python (preprocess), MVSIC deps for torch/utils.
+# Artifacts: <index_dir>/gem/<build_name>/{gem_data/,0.bin,gem_meta.json,_BUILD_OK,...}
+
+name: "GEM build — arguana"
+
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/beir/arguana/indices
+    results_dir: results/beir/arguana/results
+
+indices:
+  - name: gem
+    metric: ip
+    build_configs:
+      # Smoke only — paper §5.1.3 uses M=24, ef_construction=80 (see beir5.build.yaml).
+      - name: gem_smoke_m8_ef20
+        params:
+          num_doc_shards: 1
+          m_index: 8                       # M (smoke; paper: 24)
+          ef_construction: 20              # ef_construction (smoke; paper: 80)
+          num_fine_clusters: 1024          # |C_quant| / k1 (fixed for fast smoke)
+          num_coarse_clusters: 64          # |C_index| / k2 (fixed for fast smoke)
+          top_r: 4                         # r — TF-IDF top-r coarse clusters per doc
+          kmeans_niter: 15
+          kmeans_seed: 123
+          kmeans_sample_max: 2000000

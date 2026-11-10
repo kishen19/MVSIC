@@ -17,25 +17,6 @@ bazel_dep(name = "pybind11_bazel", version = "3.0.0")
 bazel_dep(name = "rules_python", version = "1.7.0")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
-
-# System-installed Intel oneAPI MKL.  Exposes only the headers; libraries are
-# linked via `linkopts` in cc_binary rules (linker -L paths are allowed to
-# reference outside the execution root, but -isystem isn't).  Used by
-# //data-tools:compute_ground_truth.
-new_local_repository(
-    name = "mkl",
-    path = "/opt/intel/oneapi/mkl/latest",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "mkl_headers",
-    hdrs = glob(["include/**/*.h"]),
-    includes = ["include"],
-)
-""",
-)
 
 http_archive(
     name = "parlaylib",
@@ -64,12 +45,15 @@ cc_library(
     # runtime CPU-feature dispatch, so the library is no longer header-only.
     # Without these the bindings link but fail to import with undefined
     # rabitqlib::simd::* symbols.
-    srcs = glob(["src/**/*.cpp", "src/**/*.hpp"]),
+    srcs = glob(
+        ["src/**/*.cpp", "src/**/*.hpp"],
+        exclude = ["src/**/*neon.cpp"],
+    ),
 
     # Add 'include' to path so "rabitqlib/..." works
     includes = ["include"],
 
-    copts = ["-Ofast", "-march=native", "-fopenmp", "-w"],
+    copts = ["-Ofast", "-march=native", "-fopenmp", "-mavx512vpopcntdq", "-w"],
     linkopts = ["-fopenmp"],
     
     # DEPENDENCY: Force it to use the external Eigen
@@ -81,7 +65,7 @@ cc_library(
     # instead of the original dim. This allows small dims (e.g. D=16) that are
     # padded up to 64 to work with FhtKacRotator.
     patch_cmds = [
-        "find include -type f \\( -name '*.hpp' -o -name '*.h' \\) -exec sed -i 's|rabitqlib/third/Eigen/|Eigen/|g' {} +",
+        "find include src -type f \\( -name '*.hpp' -o -name '*.h' \\) -exec sed -i 's|rabitqlib/third/Eigen/|Eigen/|g' {} +",
         "sed -i 's/size_t bottom_log_dim = floor_log2(dim);/size_t bottom_log_dim = floor_log2(padded_dim);/g' include/rabitqlib/utils/rotator.hpp",
         """python3 - <<'PY'
 from pathlib import Path

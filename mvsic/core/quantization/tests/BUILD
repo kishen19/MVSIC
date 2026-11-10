@@ -3,6 +3,35 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_binary(
+    name = "tq8_dataset_audit",
+    srcs = ["tq8_dataset_audit.cc"],
+    linkstatic = True,
+    deps = [
+        "//mvsic/core:stats",
+        "//mvsic/core/quantization:turboquant_8bit_mv",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:point_cloud_set",
+        "@parlaylib//parlay:primitives",
+    ],
+)
+
+cc_test(
+    name = "tq_dot_product_test",
+    linkstatic = True,
+    srcs = ["tq_dot_product_test.cc"],
+    copts = ["-mno-avx512vnni"],
+    deps = [
+        "//mvsic/core/quantization:turboquant_8bit_mv",
+        "//mvsic/core/quantization:turboquant_mv",
+        "//mvsic/core/types:chamfer_ip_point",
+        "//mvsic/core/types:chamfer_l2_point",
+        "//mvsic/core/types:point_cloud_set",
+        "@parlaylib//parlay:primitives",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
     name = "fastscan_test",
     srcs = ["fastscan_test.cpp"],
     linkopts = [

@@ -30,3 +30,14 @@ experiments/**/_plots/k=100/*
 /data
 /results
 /logs
+
+# EMDIVF exploratory artifacts are local (this path can be a symlink).
+# Keep source, the exploration report, and selected figures in Git.
+/emdivf_experiments/artifacts
+/emdivf_experiments/results/
+/emdivf_experiments/**/*.idx
+/emdivf_experiments/**/*.bin
+/emdivf_experiments/**/*.pcs
+/emdivf_experiments/**/*.gt
+/emdivf_experiments/**/*.state
+/emdivf_experiments/**/*.journal

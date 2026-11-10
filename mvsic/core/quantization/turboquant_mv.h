@@ -149,9 +149,13 @@ inline __m512i tq_dpbusd(__m512i acc, __m512i a_unsigned, __m512i b_signed) {
 #ifdef __AVX512VNNI__
   return _mm512_dpbusd_epi32(acc, a_unsigned, b_signed);
 #else
-  const __m512i prod16 = _mm512_maddubs_epi16(a_unsigned, b_signed);
-  const __m512i prod32 = _mm512_madd_epi16(prod16, _mm512_set1_epi16(1));
-  return _mm512_add_epi32(acc, prod32);
+  // Avoid signed-int16 saturation in maddubs before widening to int32.
+  const __m512i lo = _mm512_and_si512(a_unsigned, _mm512_set1_epi8(0x7f));
+  const __m512i hi = _mm512_and_si512(a_unsigned, _mm512_set1_epi8(char(0x80)));
+  const __m512i ones = _mm512_set1_epi16(1);
+  const __m512i p0 = _mm512_madd_epi16(_mm512_maddubs_epi16(lo, b_signed), ones);
+  const __m512i p1 = _mm512_madd_epi16(_mm512_maddubs_epi16(hi, b_signed), ones);
+  return _mm512_add_epi32(acc, _mm512_add_epi32(p0, p1));
 #endif
 }
 

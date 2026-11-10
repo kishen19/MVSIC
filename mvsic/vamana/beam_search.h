@@ -88,7 +88,17 @@ beam_search_impl(const ChPoint& p, GT& G, const PC& Points,
   // not in table when it is)
   int bits = std::max<int>(10, std::ceil(std::log2(params.L * params.L)) - 2);
   std::vector<indexType> hash_filter(1 << bits, -1);
+  // Tiny graphs are common for secondary routing structures. An exact seen
+  // table is cheaper here and avoids repeated expensive distance evaluations
+  // when hash-filter entries collide.
+  std::vector<uint8_t> exact_seen;
+  if (G.size() <= 4096) exact_seen.resize(G.size());
   auto has_been_seen = [&](indexType a) -> bool {
+    if (!exact_seen.empty()) {
+      const bool seen = exact_seen[a];
+      exact_seen[a] = 1;
+      return seen;
+    }
     int loc = parlay::hash64_2(a) & ((1 << bits) - 1);
     if (hash_filter[loc] == a) return true;
     hash_filter[loc] = a;
@@ -107,6 +117,7 @@ beam_search_impl(const ChPoint& p, GT& G, const PC& Points,
   std::vector<std::pair<indexType, distanceType>> frontier;
   frontier.reserve(params.L);
   for (auto q : starting_points) {
+    if (!exact_seen.empty()) exact_seen[q] = 1;
     auto [dist, bytes_acc] = p.distance_w_cmps(Points[q]);
     bytes_accessed += bytes_acc;
     frontier.push_back(std::pair<indexType, distanceType>(q, dist));

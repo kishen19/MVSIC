@@ -116,7 +116,10 @@ class ColBERTEncoder(Encoder):
                     list(values),
                     bsize=len(values),
                     keep_dims=False,
-                    to_cpu=True,
+                    # Ragged ColBERT output is a list; some releases call
+                    # .cpu() on that list when to_cpu=True. clean_embedding
+                    # below transfers each tensor safely and individually.
+                    to_cpu=False,
                     showprogress=False,
                 )
         return [

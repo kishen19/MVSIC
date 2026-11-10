@@ -895,22 +895,10 @@ class IndexMVIVF : public Index<metric> {
     ensure_tq8_rerank_db_(points);
     const auto& db = *tq8_rerank_db_;
     auto q8 = tq8_rerank_model_->quantize_query(query);
-
-    auto scored = parlay::sequence<std::pair<uint32_t, float>>::uninitialized(num_rerank);
-    auto bytes = parlay::sequence<size_t>::uninitialized(num_rerank);
-    const size_t per_vec_bytes =
-        db.num_bytes_per_datapoint + sizeof(float) + (metric ? sizeof(float) : 0);
-    parlay::parallel_for(0, num_rerank, [&](size_t i) {
-      const uint32_t id = candidates[i].first;
-      const float d = ::mvsic::turboquant_8bit_mv::turboquant_8bit_mv_chamfer_distance<metric>(
-          q8, db, static_cast<size_t>(id));
-      scored[i] = {id, d};
-      bytes[i] = db.cloud_size(static_cast<size_t>(id)) * per_vec_bytes;
-    });
-
-    parlay::sort_inplace(scored, [](const auto& a, const auto& b) { return a.second < b.second; });
-    parlay::parallel_for(0, out_results.size(), [&](size_t i) { out_results[i] = scored[i]; });
-    return parlay::reduce(bytes);
+    auto [scored, bytes] = ::mvsic::turboquant_8bit_mv::rerank_candidates<metric>(
+        q8, db, candidates, num_rerank, out_results.size());
+    for (size_t i = 0; i < out_results.size(); ++i) out_results[i] = scored[i];
+    return bytes;
   }
 
   // ---------------------------------------------------------------------------

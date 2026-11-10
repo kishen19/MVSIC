@@ -5,12 +5,18 @@ fast_plaid~=1.4.4.290
 
 # Hugging Face Ecosystem
 accelerate==1.11.0
+datasets~=4.2.0
+transformers~=4.57.1
 
 # Evaluation
 beir==2.2.0
+ir-datasets~=0.5.11
 
 # Data Handling & Plotting
+numpy~=2.2.0
 matplotlib~=3.10.6
 seaborn~=0.13.2
+threadpoolctl~=3.6.0
+tqdm~=4.67.0
 
 # Local Wheel Dependency
