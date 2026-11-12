@@ -1,3 +1,5 @@
+"""Legacy API example; requires the original multi-family Python extension."""
+
 import mvsic
 import numpy as np
 import argparse

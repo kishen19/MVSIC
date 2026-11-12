@@ -33,6 +33,7 @@
 // kVnniMq is set to 6 to match the SPR sweet spot identified in the reference
 // (24 acc + 4 panel B + 1 broadcast Q + spill room = ~30 ZMM live registers).
 
+#include "mvsic/core/kernels/panels_avx2.h"
 #include <vector>
 #include <cstdint>
 #include <immintrin.h>
@@ -40,6 +41,7 @@
 #include <algorithm>
 #include <cstring>
 #include <queue>
+#include <stdexcept>
 
 #include "parlay/parallel.h"
 #include "parlay/sequence.h"
@@ -245,6 +247,11 @@ inline void vnni_chamfer_epilogue(__m512i acc, int32_t byte_sum, float q_nsf, fl
     dist = _mm512_add_ps(sqn_v, _mm512_add_ps(_mm512_add_ps(neg_dot, neg_dot), sqn_qv));
   } else {
     dist = neg_dot;
+    // Padding is not a real zero vector. Encoders mark only padding with a
+    // negative scale; a valid zero vector retains scale zero and participates.
+    const __mmask16 valid = _mm512_cmp_ps_mask(db_norm_v, _mm512_setzero_ps(), _CMP_GE_OQ);
+    running_min = _mm512_mask_min_ps(running_min, valid, running_min, dist);
+    return;
   }
   running_min = _mm512_min_ps(running_min, dist);
 }
@@ -439,6 +446,11 @@ inline float chamfer_panels_scalar(const int8_t* q_flat_data, const float* q_nor
                                    const float* padded_norms, const float* padded_sqn,
                                    size_t total_tiles, size_t panel_bytes, size_t n_panels,
                                    size_t cloud_size) {
+#if defined(__AVX2__) && !defined(__AVX512F__)
+  return ::mvsic::cpu::chamfer_panels_avx2<Metric>(q_flat_data, q_norms, q_sqns, q_bsums,
+      q_stride, num_queries, panel_data, padded_norms, padded_sqn, total_tiles,
+      panel_bytes, n_panels, cloud_size);
+#else
   constexpr size_t N = kVnniPoints * 4;
   float total = 0.0f;
   for (size_t qi = 0; qi < num_queries; ++qi) {
@@ -469,6 +481,7 @@ inline float chamfer_panels_scalar(const int8_t* q_flat_data, const float* q_nor
     total += min_d;
   }
   return total;
+#endif
 }
 
 }  // namespace internal
@@ -667,6 +680,22 @@ class Quantized_Point_Cloud_Set {
     read_seq(unquantized_squared_norms);
     read_seq(cloud_sizes);
     read_seq(ids);
+    // Older encoded blobs used zero scales for padding, which incorrectly
+    // won IP minima when every real vector had negative similarity.
+    if constexpr (!Metric) {
+      if (!in || point_offsets.size() != cloud_sizes.size() + 1 ||
+          point_offsets.empty() || point_offsets[0] != 0 ||
+          point_offsets.back() != norm_scaling_factors.size())
+        throw std::runtime_error("Invalid TQ4 point offsets");
+      for (size_t c = 0; c < cloud_sizes.size(); ++c) {
+        if (point_offsets[c] > point_offsets[c + 1] ||
+            point_offsets[c + 1] > norm_scaling_factors.size() ||
+            cloud_sizes[c] > point_offsets[c + 1] - point_offsets[c])
+          throw std::runtime_error("Invalid TQ4 cloud size");
+        for (size_t p = point_offsets[c] + cloud_sizes[c]; p < point_offsets[c + 1]; ++p)
+          norm_scaling_factors[p] = -1.0f;
+      }
+    }
   }
 };
 
@@ -767,7 +796,9 @@ class Model {
     enc.point_offsets[n_clouds] = cur_padded_pts;
 
     enc.panel_data.resize(cur_panel_bytes, 0);
-    enc.norm_scaling_factors.resize(cur_padded_pts, 0.0f);
+    // Real scales are nonnegative, including zero vectors. A negative scale
+    // marks IP padding without adding another metadata load to the epilogue.
+    enc.norm_scaling_factors.resize(cur_padded_pts, Metric ? 0.0f : -1.0f);
     if constexpr (Metric) {
       // Padding lanes get +inf so they can never win the min.
       enc.unquantized_squared_norms.assign(cur_padded_pts, std::numeric_limits<float>::infinity());
@@ -792,11 +823,14 @@ class Model {
       std::vector<uint8_t> p_codes(enc.num_bytes_per_datapoint);
       std::vector<float> ws(encoder.padded_dim);
 
-      const size_t src_start = float_offsets[c] / encoder.dim;
+      const float* cloud = [&] {
+        if constexpr (requires { pcs.data(c); }) return pcs.data(c);
+        else return pcs.data() + float_offsets[c];
+      }();
       const size_t pt_off = enc.point_offsets[c];
 
       for (size_t i = 0; i < n_vecs; ++i) {
-        const float* p = reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
+        const float* p = cloud + i * encoder.dim;
         auto [sqn, nsf] = encoder.encode_single(p, p_codes.data(), ws);
 
         enc.norm_scaling_factors[pt_off + i] = nsf;
@@ -1129,7 +1163,7 @@ class ManyToMany {
 
           if (heaps[i].size() < k) {
             heaps[i].push({chamfer_dist, B.get_id(c)});
-          } else if (chamfer_dist < heaps[i].top().first) {
+          } else if (std::pair<float, uint32_t>{chamfer_dist, B.get_id(c)} < heaps[i].top()) {
             heaps[i].pop();
             heaps[i].push({chamfer_dist, B.get_id(c)});
           }

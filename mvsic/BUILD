@@ -1,30 +1,23 @@
+load("@pybind11_bazel//:build_defs.bzl", "pybind_extension")
 load("@rules_python//python:defs.bzl", "py_library")
-load("@rules_python//python:packaging.bzl", "py_wheel")
 
-package(
-    default_visibility = ["//visibility:public"],
+package(default_visibility = ["//visibility:public"])
+
+# The installed wheel is built by PEP 517/CMake. Bazel remains useful for native
+# development; it does not label a CPython extension as a pure-Python wheel.
+pybind_extension(
+    name = "_mvsic",
+    srcs = ["//mvsic/python:bindings.cpp"],
+    deps = [
+        "//mvsic/algorithms/mvivf:mvivf",
+        "//mvsic/algorithms/mvivf/mvclustering:mvclustering",
+        "//mvsic/algorithms:benchmark",
+        "//mvsic/core/kernels:capabilities",
+    ],
 )
-
-licenses(["notice"])
 
 py_library(
     name = "mvsic_py",
-    srcs = ["__init__.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//mvsic/python:mvsic",
-        "//mvsic/python:python_pkg",
-    ],
-)
-
-py_wheel(
-    name = "mvsic_wheel",
-    distribution = "mvsic",
-    python_tag = "py3",
-    version = "0.0.1",
-    deps = [
-        ":mvsic_py",
-        "//mvsic/python:mvsic",
-        "//mvsic/python:python_pkg",
-    ],
+    srcs = ["__init__.py", "cli.py"],
+    deps = [":_mvsic", "//mvsic/benchmark:python"],
 )

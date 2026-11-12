@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "name": "ArguAna inner-training pilot, fixed IP serving",
+  "dataset": {
+    "name": "arguana",
+    "points": "/ssd2/kishen/multivector/beir/arguana/arguana_points.pcs",
+    "queries": "/ssd2/kishen/multivector/beir/arguana/arguana_queries.pcs",
+    "ground_truth": "/ssd2/kishen/multivector/beir/arguana/arguana_chamfer_neighbors.gt",
+    "mmap": true
+  },
+  "index": {
+    "name": "mvivf",
+    "metric": "ip",
+    "quantizer": "OneBitTQ",
+    "quantize_centers": true,
+    "params": {
+      "max_leaf_size": 100,
+      "niters": 5,
+      "assignment_quantizer": "None",
+      "seed": 0,
+      "inner_metric": "same",
+      "inner_init": "default",
+      "inner_backend": "legacy",
+      "use_weighted_inner_kmeans": true
+    }
+  },
+  "build": {
+    "output": "/ssd2/kishen/mvsic_new/build-quality/placeholder.idx",
+    "threads": 8
+  },
+  "search": {
+    "k": 10,
+    "nprobes": [
+      4,
+      8,
+      16,
+      32
+    ],
+    "num_rerank": [
+      50
+    ],
+    "tq8_rerank": true,
+    "query_compression": "Wards",
+    "query_compression_threshold": 0.5,
+    "root_m2m": true
+  },
+  "measurement": {
+    "mode": "latency_single",
+    "threads": 1,
+    "warmup_queries": 10,
+    "repeats": 3,
+    "query_limit": 128,
+    "query_seed": 42,
+    "python_timing": false
+  },
+  "output": {
+    "directory": "/ssd2/kishen/mvsic_new/build-quality/placeholder"
+  }
+}

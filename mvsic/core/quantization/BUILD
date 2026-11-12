@@ -6,7 +6,7 @@ cc_library(
     name = "fastscan",
     hdrs = ["fastscan.h"],
     deps = [
-        "//mvsic/core/utils:kmeans_util",
+        "//mvsic/core/kmeans:kmeans_util",
         "@eigen",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
@@ -17,7 +17,7 @@ cc_library(
     name = "fastscan_mv",
     hdrs = ["fastscan_mv.h"],
     deps = [
-        "//mvsic/core/utils:kmeans_util",
+        "//mvsic/core/kmeans:kmeans_util",
         "@eigen",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
@@ -28,7 +28,7 @@ cc_library(
     name = "pq",
     hdrs = ["pq.h"],
     deps = [
-        "//mvsic/core/utils:kmeans_util",
+        "//mvsic/core/kmeans:kmeans_util",
         "@eigen",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
@@ -39,7 +39,7 @@ cc_library(
     name = "pq_mv",
     hdrs = ["pq_mv.h"],
     deps = [
-        "//mvsic/core/utils:kmeans_util",
+        "//mvsic/core/kmeans:kmeans_util",
         "@eigen",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
@@ -86,8 +86,10 @@ cc_library(
         "turboquant_utils.h",
     ],
     deps = [
+        "//mvsic/core/kernels:panels_avx2",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
+        "@rabitq//:rabitqlib",
     ],
 )
 
@@ -124,6 +126,7 @@ cc_library(
         "turboquant_utils.h",
     ],
     deps = [
+        "//mvsic/core/kernels:panels_avx2",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
         "@rabitq//:rabitqlib",
@@ -187,7 +190,9 @@ cc_library(
         "turboquant_utils.h",
     ],
     deps = [
+        "//mvsic/core/kernels:panels_avx2",
         "@parlaylib//parlay:parallel",
+        "@parlaylib//parlay:primitives",
         "@parlaylib//parlay:sequence",
         "@rabitq//:rabitqlib",
     ],

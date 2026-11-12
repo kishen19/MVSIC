@@ -321,7 +321,8 @@ class BaseEncoder1Bit {
   void train(size_t input_dim) {
     dim = input_dim;
     if (dim == 0) return;
-    rotator.reset(rabitqlib::choose_rotator<float>(dim, rotator_type));
+    rotator.reset(rabitqlib::choose_rotator<float>(dim, rotator_type, 0,
+                                                 static_cast<uint32_t>(seed_)));
     if (!rotator) return;
     padded_dim = rotator->size();
     num_bytes_per_datapoint = (padded_dim + 7) / 8;

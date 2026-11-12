@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "base_config": "clustering_arguana_pilot_base.json",
+  "model_seeds": [
+    0
+  ],
+  "build_repetitions": 1,
+  "build_threads": 8,
+  "build_cpus": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28
+  ],
+  "recall_tolerance": 0.001,
+  "training_variants": [
+    {
+      "name": "ip_uniform",
+      "changes": {
+        "inner_init": "uniform"
+      }
+    },
+    {
+      "name": "l2_uniform",
+      "parent": "ip_uniform",
+      "changes": {
+        "inner_metric": "l2"
+      }
+    },
+    {
+      "name": "ip_kmeanspp",
+      "parent": "ip_uniform",
+      "changes": {
+        "inner_init": "kmeans++"
+      }
+    },
+    {
+      "name": "ip_prefix",
+      "parent": "ip_uniform",
+      "changes": {
+        "inner_init": "prefix_doubling"
+      }
+    },
+    {
+      "name": "ip_adaptive",
+      "parent": "ip_uniform",
+      "changes": {
+        "inner_backend": "adaptive"
+      }
+    },
+    {
+      "name": "l2_adaptive",
+      "parent": "l2_uniform",
+      "changes": {
+        "inner_backend": "adaptive"
+      }
+    },
+    {
+      "name": "ip_kmeanspp_adaptive",
+      "parent": "ip_kmeanspp",
+      "changes": {
+        "inner_backend": "adaptive"
+      }
+    },
+    {
+      "name": "l2_prefix",
+      "parent": "l2_uniform",
+      "changes": {
+        "inner_init": "prefix_doubling"
+      }
+    },
+    {
+      "name": "l2_prefix_adaptive",
+      "parent": "l2_prefix",
+      "changes": {
+        "inner_backend": "adaptive"
+      }
+    }
+  ],
+  "schedules": [
+    {
+      "name": "single",
+      "mode": "latency_single",
+      "threads": 1,
+      "cpus": [
+        0
+      ]
+    },
+    {
+      "name": "batch8",
+      "mode": "throughput_batch",
+      "threads": 8,
+      "cpus": [
+        0,
+        4,
+        8,
+        12,
+        16,
+        20,
+        24,
+        28
+      ]
+    }
+  ],
+  "assignment_quantizers": [
+    "TQ8",
+    "TQ4",
+    "TQ1"
+  ]
+}

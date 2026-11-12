@@ -43,7 +43,7 @@
 #include "mvsic/core/quantization/turboquant_1bit_asym.h"
 #include "mvsic/core/quantization/turboquant_1bit_ref.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/stats.h"
 
 using namespace mvsic;
 

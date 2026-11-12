@@ -25,7 +25,7 @@
 #include "parlay/sequence.h"
 
 #include "rabitqlib/utils/rotator.hpp"
-#include "mvsic/core/utils/kmeans_util.h"
+#include "mvsic/core/kmeans/kmeans_util.h"
 
 namespace mvsic {
 namespace turboquant_pq_4bit_dd {

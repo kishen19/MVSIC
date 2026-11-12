@@ -7,7 +7,7 @@
 #include <unordered_set>
 #include <vector>
 #include "parlay/primitives.h"
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/stats.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/point_cloud_set.h"

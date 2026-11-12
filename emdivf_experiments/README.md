@@ -1,6 +1,6 @@
 # EMDIVF exploratory work
 
-The runnable method is in [`mvsic/emdivf`](../mvsic/emdivf/README.md).
+The runnable method is in [`mvsic/algorithms/emdivf`](../mvsic/algorithms/emdivf/README.md).
 This directory contains selected exploratory tools, separate from the paper
 experiments in `experiments/`.
 
@@ -12,7 +12,7 @@ benchmark measurements were made during the cleanup.
 ## Layout
 
 ```text
-mvsic/emdivf/              C++ method, builder, graph/search CLI, EMD tests
+mvsic/algorithms/emdivf/              C++ method, builder, graph/search CLI, EMD tests
 emdivf_experiments/
   EXPLORATION.md           consolidated research record
   figures/                selected portable result plots
@@ -52,7 +52,7 @@ repository tools for maintained entry points. No old measurements were deleted.
 
 ## Useful commands
 
-Follow the method's [build/search instructions](../mvsic/emdivf/README.md)
+Follow the method's [build/search instructions](../mvsic/algorithms/emdivf/README.md)
 for a fresh run. Dataset preparation reuses the existing `embed` package:
 
 ```bash

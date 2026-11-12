@@ -1,0 +1,6 @@
+# Unified patches contain literal whitespace in their context lines.
+*.patch -whitespace
+# Keep the pinned upstream header bodies intact, including their whitespace.
+mvsic/core/kmeans/lloyds/*.h -whitespace
+mvsic/core/kmeans/lloyds_weighted/*.h -whitespace
+mvsic/core/kmeans/seeding/*.h -whitespace

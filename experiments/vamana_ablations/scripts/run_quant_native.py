@@ -36,7 +36,7 @@ def write_json(path, value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset', default='fiqa')
-    default_binary = ROOT / 'bazel-bin/mvsic/vamana/quant_bench'
+    default_binary = ROOT / 'bazel-bin/mvsic/algorithms/vamana/quant_bench'
     if not default_binary.is_file():
         default_binary = ROOT / 'experiments/vamana_ablations/quantization/bin/bench'
     parser.add_argument('--binary', type=Path,

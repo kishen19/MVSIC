@@ -30,6 +30,10 @@ http_archive(
 
 http_archive(
     name = "rabitq",
+    # Pin the layout consumed by MVSIC; upstream main now has a different API.
+    sha256 = "19e58dad0ad48f7f64c4ad5abbdb96045a231b56e91289f705ad62e05a5f2115",
+    patches = ["//third_party/rabitq:seeded_rotator.patch"],
+    patch_args = ["-p1"],
     build_file_content = """
 package(default_visibility = ["//visibility:public"])
 
@@ -85,14 +89,20 @@ insert = (
     "            case 14:\\n"
     "                this->fht_float_ = helper_float_14;\\n"
     "                break;\\n"
+    "            case 15:\\n"
+    "                this->fht_float_ = helper_float_15;\\n"
+    "                break;\\n"
+    "            case 16:\\n"
+    "                this->fht_float_ = helper_float_16;\\n"
+    "                break;\\n"
 )
 if "case 12:" not in s and needle in s:
     s = s.replace(needle, insert)
     p.write_text(s)
 PY""",
     ],
-    strip_prefix = "RaBitQ-Library-main",
-    urls = ["https://github.com/VectorDB-NTU/RaBitQ-Library/archive/refs/heads/main.zip"],
+    strip_prefix = "RaBitQ-Library-abd9ddb61c9267b547e7486a3f526336fd1177e2",
+    urls = ["https://github.com/VectorDB-NTU/RaBitQ-Library/archive/abd9ddb61c9267b547e7486a3f526336fd1177e2.zip"],
 )
 
 git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
@@ -115,18 +125,6 @@ git_repository(
     ],
     # remote = "https://github.com/cmuparlay/parlayann.git",
     remote = "https://github.com/kishen19/ParlayANN.git",
-)
-
-git_repository(
-    name = "kmeans",
-    branch = "mvsic",
-    # Add `inline` to header-defined free functions for ODR compliance under
-    # multi-TU includes. The symmetrize() return type spans two lines, so we
-    # insert `inline` on the line above the std::pair<...> declaration.
-    patch_cmds = [
-        "sed -i 's|^std::pair<parlay::sequence<size_t>,$|inline std::pair<parlay::sequence<size_t>,|' seeding/ksetcover.h",
-    ],
-    remote = "git@github.com:ParAlg/Parallel-KMeans.git",
 )
 
 # GEM (SIGMOD'26 graph-based multi-vector retrieval) source dependency.

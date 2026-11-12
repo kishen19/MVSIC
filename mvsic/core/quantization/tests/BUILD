@@ -7,7 +7,7 @@ cc_binary(
     srcs = ["tq8_dataset_audit.cc"],
     linkstatic = True,
     deps = [
-        "//mvsic/core:stats",
+        "//mvsic/algorithms:stats",
         "//mvsic/core/quantization:turboquant_8bit_mv",
         "//mvsic/core/types:chamfer_ip_point",
         "//mvsic/core/types:point_cloud_set",

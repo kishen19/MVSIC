@@ -13,10 +13,10 @@
 #include <tuple>
 #include <vector>
 
-#include "mvsic/emdivf/index.h"
+#include "mvsic/algorithms/emdivf/index.h"
 #include "mvsic/core/search_params.h"
-#include "mvsic/vamana/beam_search.h"
-#include "mvsic/vamana/graph.h"
+#include "mvsic/algorithms/vamana/beam_search.h"
+#include "mvsic/algorithms/vamana/graph.h"
 
 namespace {
 

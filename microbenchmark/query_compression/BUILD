@@ -7,7 +7,7 @@ cc_binary(
     srcs = ["sweep_ball_carving.cpp"],
     deps = [
         ":sweep_impl",
-        "//mvsic/core:bench_utils",
+        "//mvsic/algorithms:bench_utils",
     ],
 )
 
@@ -16,7 +16,7 @@ cc_binary(
     srcs = ["sweep_wards.cpp"],
     deps = [
         ":sweep_impl",
-        "//mvsic/core:bench_utils",
+        "//mvsic/algorithms:bench_utils",
     ],
 )
 
@@ -24,9 +24,9 @@ cc_library(
     name = "sweep_impl",
     hdrs = ["sweep_impl.h"],
     deps = [
-        "//mvsic/flat:flat",
+        "//mvsic/algorithms/flat:flat",
         "//mvsic/core:query_compression",
-        "//mvsic/core:stats",
+        "//mvsic/algorithms:stats",
         "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/utils:parse_command_line",
     ],

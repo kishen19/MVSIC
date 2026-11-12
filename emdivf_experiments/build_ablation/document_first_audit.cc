@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "mvsic/emdivf/index.h"
+#include "mvsic/algorithms/emdivf/index.h"
 #include "mvsic/core/quantization/turboquant_8bit_mv.h"
 #include "parlay/primitives.h"
 

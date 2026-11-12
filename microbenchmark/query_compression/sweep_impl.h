@@ -16,10 +16,10 @@
 #include "parlay/primitives.h"
 
 #include "mvsic/core/query_compression.h"
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/stats.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/flat/flat.h"
+#include "mvsic/algorithms/flat/flat.h"
 
 namespace mvsic {
 namespace query_compression_sweep {

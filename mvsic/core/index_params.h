@@ -1,8 +1,9 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 #include <iostream>
-#include "mvsic/core/mvclustering/mvclustering_config.h"
+#include "mvsic/algorithms/mvivf/mvclustering/mvclustering_config.h"
 
 namespace mvsic {
 
@@ -15,12 +16,10 @@ struct IndexParams {
 
   // mvivf (and other IVF-style) structural params.
   uint32_t k_per_level = 0;      // Number of clusters at each node. [0 = 4*sqrt(n)]
-  uint32_t max_leaf_size = 500;  // Maximum size of leaves (enforced)
-  uint32_t max_depth = 0;  // Maximum tree depth. 0 = exhaustive (stop when leaves <= max_leaf_size)
+  uint32_t max_leaf_size = 500;  // Leaf size target; collapsed clusters/depth limits can exceed it
+  uint32_t max_depth = 0;  // Maximum tree depth. 0 = continue until leaves meet target or cannot split
 
-  // Legacy: used only by svh_ivf's runtime quantize_centers check; MVIVF selects
-  // center compression at compile time via the CompressCenters template param.
-  // TODO: get rid of once obsolete
+  // Store MVIVF centers as TQ4 when true, float otherwise.
   bool quantize_centers = true;
 
   // MVIVFSpill: (a, b) spill strategy.
@@ -73,10 +72,8 @@ struct IndexParams {
   double alpha = 1.2;
   bool two_pass = false;
 
-  // Quantizer enum. MVIVF family indices pick their leaf quantizer at compile time
-  // via the LeafModel template parameter; this enum is only tagged onto `pq.method`
-  // by the single-vector graph families (MUVERA, MPool, SVH_Graph, SVH_IVF) so the
-  // legacy variant-based helpers on `Index<metric>` keep dispatching correctly.
+  // MVIVF selects its prepared leaf representation through pq.method. Other
+  // quantizers remain available to the optional legacy algorithm families.
   enum class QuantizerType {
     None,
     PQ,
@@ -113,6 +110,7 @@ struct IndexParams {
                            uint32_t max_depth = 0, bool build_with_8btq = false) {
     IndexParams params;
     params.method = "mvivf";
+    params.pq.method = QuantizerType::OneBitTQ;
     params.k_per_level = k_per_level;
     params.max_leaf_size = max_leaf_size;
     params.max_depth = max_depth;

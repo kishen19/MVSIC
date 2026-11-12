@@ -25,6 +25,7 @@
 // `chamfer_panels_multi`, `FusedQueryBatch`, `ManyToMany`) is identical to
 // `turboquant_mv.h`. Reference C/Highway kernels are in `8bit_code/`.
 
+#include "mvsic/core/kernels/panels_avx2.h"
 #include <vector>
 #include <cstdint>
 #include <immintrin.h>
@@ -34,6 +35,7 @@
 #include <queue>
 
 #include "parlay/parallel.h"
+#include "parlay/primitives.h"
 #include "parlay/sequence.h"
 #include "mvsic/core/quantization/turboquant_utils.h"
 
@@ -436,6 +438,11 @@ inline float chamfer_panels_scalar(const int8_t* q_flat_data, const float* q_nor
                                    const float* padded_norms, const float* padded_sqn,
                                    size_t total_tiles, size_t panel_bytes, size_t n_panels,
                                    size_t cloud_size) {
+#if defined(__AVX2__) && !defined(__AVX512F__)
+  return ::mvsic::cpu::chamfer_panels_avx2<Metric>(q_flat_data, q_norms, q_sqns, q_bsums,
+      q_stride, num_queries, panel_data, padded_norms, padded_sqn, total_tiles,
+      panel_bytes, n_panels, cloud_size);
+#else
   constexpr size_t N = kVnniPoints * 4;
   float total = 0.0f;
   for (size_t qi = 0; qi < num_queries; ++qi) {
@@ -466,6 +473,7 @@ inline float chamfer_panels_scalar(const int8_t* q_flat_data, const float* q_nor
     total += min_d;
   }
   return total;
+#endif
 }
 
 }  // namespace internal
@@ -817,11 +825,14 @@ class Model {
       std::vector<uint8_t> p_codes(enc.num_bytes_per_datapoint);
       std::vector<float> ws(encoder.padded_dim);
 
-      const size_t src_start = float_offsets[c] / encoder.dim;
+      const float* cloud = [&] {
+        if constexpr (requires { pcs.data(c); }) return pcs.data(c);
+        else return pcs.data() + float_offsets[c];
+      }();
       const size_t pt_off = enc.point_offsets[c];
 
       for (size_t i = 0; i < n_vecs; ++i) {
-        const float* p = reinterpret_cast<const float*>(pcs.data() + (src_start + i) * encoder.dim);
+        const float* p = cloud + i * encoder.dim;
         auto [sqn, nsf] = encode_single(p, p_codes.data(), ws);
 
         enc.norm_scaling_factors[pt_off + i] = nsf;
@@ -1124,7 +1135,7 @@ class ManyToMany {
 
           if (heaps[i].size() < k) {
             heaps[i].push({chamfer_dist, B.get_id(c)});
-          } else if (chamfer_dist < heaps[i].top().first) {
+          } else if (std::pair<float, uint32_t>{chamfer_dist, B.get_id(c)} < heaps[i].top()) {
             heaps[i].pop();
             heaps[i].push({chamfer_dist, B.get_id(c)});
           }
@@ -1171,14 +1182,13 @@ class ManyToMany {
 //
 // The kernel returns, per query, the *lane index* in [0, k) of the closest
 // center.  This requires extending the standard chamfer epilogue to track an
-// argmin lane: alongside running_min we keep running_argmin_panel, the panel
-// index that produced each lane's current best.  Final reduction picks the
-// lane with the global min and combines (winner_lane, winner_panel) into the
-// flat center index.
+// argmin lane: alongside each running minimum we retain the center position
+// that produced it. AVX-512 tracks panel indices; AVX2 tracks flat center IDs.
+// Final reduction chooses the smallest flat center ID among equal minima.
 //
-// Mq=6 query-batched for panel reuse (load each panel once, dot it against 6
-// queries).  Padded lanes in the last partial panel are masked to +inf so they
-// can't beat real centers under IP (where their natural distance is 0).
+// AVX-512 batches six queries per panel; AVX2 batches two queries against
+// eight-center half-panels to fit its smaller register file. Padded lanes
+// are masked to +inf so they cannot beat real centers under IP.
 // =========================================================================
 template <bool Metric>
 class SingleCloudArgmin {
@@ -1212,10 +1222,12 @@ class SingleCloudArgmin {
   }
 
   // Faster entry: queries provided as flat parallel arrays (no per-query
-  // struct).  This is what TQ8LloydsBackend uses in the inner-kmeans hot path.
+  // struct). TQ4 and TQ8 share this decoded byte-panel layout and epilogue;
+  // their models supply different encoded center bytes and norm factors.
+  template<class EncodedSet>
   static void RunFlat(const int8_t* q_flat_data, const float* q_nsf, const float* q_sqn,
                       const int32_t* q_bsum, size_t q_stride, size_t N,
-                      const Quantized_Point_Cloud_Set<Metric>& centers_db,
+                      const EncodedSet& centers_db,
                       uint32_t* out_argmin) {
     if (N == 0) return;
     if (centers_db.num_clouds() != 1) {
@@ -1395,6 +1407,63 @@ class SingleCloudArgmin {
       }
       out_argmin[qi] = ExtractArgmin_(running_min, running_argmin_panel);
     }
+#elif defined(__AVX2__)
+    const size_t k_total = (n_panels - 1) * internal::kVnniPoints + valid_in_last;
+    const __m256 infinity = _mm256_set1_ps(std::numeric_limits<float>::max());
+    const __m256i lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    // Two queries reuse each byte panel while limiting AVX2 register pressure.
+    // Specialize the one-query tail outside the scoring loops.
+    auto process_queries = [&]<size_t Mq>(size_t qi) {
+      const int8_t* q_ptrs[Mq];
+      __m256 mins[Mq];
+      __m256i argmin_ids[Mq];
+      for (size_t q = 0; q < Mq; ++q) {
+        q_ptrs[q] = q_flat_data + (qi + q) * q_stride;
+        mins[q] = infinity;
+        argmin_ids[q] = _mm256_setzero_si256();
+      }
+      for (size_t point = 0; point < k_total; point += 8) {
+        const uint8_t* base = panel_data + (point / internal::kVnniPoints) * panel_bytes +
+                              (point % internal::kVnniPoints) * 4;
+        __m256i accs[Mq];
+        for (size_t q = 0; q < Mq; ++q) accs[q] = _mm256_setzero_si256();
+        for (size_t t = 0; t < total_tiles; ++t) {
+          const __m256i bytes = _mm256_loadu_si256(
+              reinterpret_cast<const __m256i*>(base + t * (internal::kVnniPoints * 4)));
+          for (size_t q = 0; q < Mq; ++q) {
+            int32_t word;
+            std::memcpy(&word, q_ptrs[q] + t * 4, sizeof(word));
+            accs[q] = cpu::panel_dot_avx2(accs[q], bytes, _mm256_set1_epi32(word));
+          }
+        }
+        const __m256 norms = _mm256_loadu_ps(db_norms + point);
+        __m256 squared_norms;
+        if constexpr (Metric) squared_norms = _mm256_loadu_ps(db_sqn + point);
+        const __m256i ids = _mm256_add_epi32(_mm256_set1_epi32(static_cast<int>(point)), lanes);
+        for (size_t q = 0; q < Mq; ++q) {
+          const __m256i dot = _mm256_sub_epi32(accs[q], _mm256_set1_epi32(128 * q_bsum[qi + q]));
+          __m256 negative = _mm256_mul_ps(_mm256_cvtepi32_ps(dot), norms);
+          negative = _mm256_mul_ps(negative, _mm256_set1_ps(q_nsf[qi + q]));
+          negative = _mm256_sub_ps(_mm256_setzero_ps(), negative);
+          __m256 distance = negative;
+          if constexpr (Metric)
+            distance = _mm256_add_ps(squared_norms,
+                _mm256_add_ps(_mm256_add_ps(negative, negative), _mm256_set1_ps(q_sqn[qi + q])));
+          if (k_total - point < 8) {
+            const __m256i valid = _mm256_cmpgt_epi32(_mm256_set1_epi32(int(k_total - point)), lanes);
+            distance = _mm256_blendv_ps(infinity, distance, _mm256_castsi256_ps(valid));
+          }
+          const __m256 better = _mm256_cmp_ps(distance, mins[q], _CMP_LT_OQ);
+          mins[q] = _mm256_blendv_ps(mins[q], distance, better);
+          argmin_ids[q] = _mm256_blendv_epi8(argmin_ids[q], ids, _mm256_castps_si256(better));
+        }
+      }
+      for (size_t q = 0; q < Mq; ++q)
+        out_argmin[qi + q] = ExtractArgmin_(mins[q], argmin_ids[q]);
+    };
+    size_t qi = q_start;
+    for (; qi + 2 <= q_end; qi += 2) process_queries.template operator()<2>(qi);
+    if (qi < q_end) process_queries.template operator()<1>(qi);
 #else
     // Scalar fallback.
     for (size_t qi = q_start; qi < q_end; ++qi) {
@@ -1439,14 +1508,29 @@ class SingleCloudArgmin {
 
 #ifdef __AVX512F__
   // Combine running_min[16] + running_argmin_panel[16] into a flat lane index
-  // in [0, k).  Picks the lowest set bit on ties (deterministic).
+  // in [0, k). Ties use the lowest center ID across all panels, matching the
+  // scalar loop; lane order alone could prefer center 16 over center 1.
   static inline uint32_t ExtractArgmin_(__m512 mins, __m512i argmin_panels) {
     const float gmin = _mm512_reduce_min_ps(mins);
     const __mmask16 winner = _mm512_cmp_ps_mask(mins, _mm512_set1_ps(gmin), _CMP_EQ_OQ);
-    const uint32_t winner_lane = static_cast<uint32_t>(__builtin_ctz(static_cast<uint32_t>(winner)));
-    alignas(64) uint32_t panels[internal::kVnniPoints];
-    _mm512_store_si512(reinterpret_cast<__m512i*>(panels), argmin_panels);
-    return panels[winner_lane] * static_cast<uint32_t>(internal::kVnniPoints) + winner_lane;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7,
+                                           8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i ids = _mm512_add_epi32(_mm512_slli_epi32(argmin_panels, 4), lanes);
+    return _mm512_mask_reduce_min_epu32(winner, ids);
+  }
+#elif defined(__AVX2__)
+  static inline uint32_t ExtractArgmin_(__m256 mins, __m256i argmin_ids) {
+    __m128 best = _mm_min_ps(_mm256_castps256_ps128(mins), _mm256_extractf128_ps(mins, 1));
+    best = _mm_min_ps(best, _mm_shuffle_ps(best, best, _MM_SHUFFLE(1, 0, 3, 2)));
+    best = _mm_min_ps(best, _mm_shuffle_ps(best, best, _MM_SHUFFLE(2, 3, 0, 1)));
+    const __m256 winners = _mm256_cmp_ps(mins, _mm256_set1_ps(_mm_cvtss_f32(best)), _CMP_EQ_OQ);
+    const __m256i ids = _mm256_blendv_epi8(_mm256_set1_epi32(-1), argmin_ids,
+                                         _mm256_castps_si256(winners));
+    // Lowest flat center ID wins, including ties across halves and panels.
+    __m128i lowest = _mm_min_epu32(_mm256_castsi256_si128(ids), _mm256_extracti128_si256(ids, 1));
+    lowest = _mm_min_epu32(lowest, _mm_shuffle_epi32(lowest, _MM_SHUFFLE(1, 0, 3, 2)));
+    lowest = _mm_min_epu32(lowest, _mm_shuffle_epi32(lowest, _MM_SHUFFLE(2, 3, 0, 1)));
+    return static_cast<uint32_t>(_mm_cvtsi128_si32(lowest));
   }
 #endif
 };

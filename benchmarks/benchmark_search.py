@@ -231,7 +231,7 @@ def _subsample_gt_via_temp(gt_path, indices, gt_loader=None):
     file with the selected rows, and let ``gt_loader`` (default the C++
     ``mvsic.ReadGT``) parse it.
 
-    GT file layout (matches mvsic/core/stats.h::ReadGT):
+    GT file layout (matches mvsic/algorithms/stats.h::ReadGT):
 
         int32 num_neighbors,
         for each query: num_neighbors * (float32 dist, uint32 docid)
@@ -546,7 +546,7 @@ def _build_search_params(method_name: str, p: dict):
     sp = f(**p)
 
     if qc_name is not None:
-        # The pybind11 enum (see mvsic/python/register_common.cc) exposes
+        # The legacy Python extension enum exposes
         # NONE / CARVE / WARDS (all caps); accept any case in the YAML.
         qc_enum = {
             'NONE':  mvsic.SearchParams.QueryCompression.NONE,

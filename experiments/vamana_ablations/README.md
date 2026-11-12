@@ -30,9 +30,9 @@ The dedicated native driver `scripts/run_quant_native.py` runs the complete quan
 
 ```bash
 # Compile the native harness if needed:
-bazel build -c opt //mvsic/vamana:quant_bench
+bazel build -c opt //mvsic/algorithms/vamana:quant_bench
 python3 experiments/vamana_ablations/scripts/run_quant_native.py --dataset fiqa \
-  --binary bazel-bin/mvsic/vamana/quant_bench \
+  --binary bazel-bin/mvsic/algorithms/vamana/quant_bench \
   --output-root experiments/vamana_ablations/quantization_reproduction
 python3 experiments/vamana_ablations/scripts/plot_quant.py --dataset fiqa \
   --results-root experiments/vamana_ablations/quantization_reproduction
@@ -44,4 +44,4 @@ Both leaf variants share a serialized rotation, and every positive rerank budget
 
 Plots and measurement summaries are written under `quantization/fiqa/plots/`. The three-panel recall-versus-mean-latency figure compares bit depths separately at rerank budgets 0, 20, and 40. It uses measured points without interpolation; the target table marks unreached recalls explicitly.
 
-The completed November 5, 2026 FiQA run contains all 42 operating points. Its report, raw measurements, plots, saved models, provenance, logs, validation records, and native binary were archived before local cleanup in [mvivf-fern-experiments-dump.zip](/ssd2/kishen/mvsic/mvivf-fern-experiments-dump.zip). The archive includes all experiment files and the FiQA graph at their original relative paths. Restore `experiments/vamana_ablations/quantization/` to inspect the run locally; large embedding datasets remain under `/ssd2/kishen/multivector/`. Historical commands and hashes remain as recorded, including source paths from the subsequently retired experimental harness.
+The completed November 5, 2026 FiQA run contains all 42 operating points. Its report, raw measurements, plots, saved models, provenance, logs, validation records, and native binary were archived before local cleanup in [mvivf-fern-experiments-dump.zip](/ssd2/kishen/mvsic/algorithms/mvivf/legacy-fern-experiments-dump.zip). The archive includes all experiment files and the FiQA graph at their original relative paths. Restore `experiments/vamana_ablations/quantization/` to inspect the run locally; large embedding datasets remain under `/ssd2/kishen/multivector/`. Historical commands and hashes remain as recorded, including source paths from the subsequently retired experimental harness.

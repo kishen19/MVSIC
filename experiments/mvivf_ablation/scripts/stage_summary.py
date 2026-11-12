@@ -3,8 +3,6 @@
 
 Default behavior:
 1) Generate stage plots (delegates to plot.py).
-2) Compute tree-quality for each build_config present in the stage results.
-3) Write tree-quality tables.
 
 Optional behavior:
 - Compute budget-based winner tables (disabled by default).
@@ -26,9 +24,7 @@ To also compute budget winners:
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
-import subprocess
 import sys
 from typing import Iterable
 
@@ -106,41 +102,6 @@ def _select_winners(df: pd.DataFrame, group_col: str, budgets_ms: Iterable[float
     return pd.DataFrame(rows)
 
 
-def _run_tree_quality(
-    tree_quality_script: pathlib.Path,
-    index_path: pathlib.Path,
-    db: pathlib.Path,
-    queries: pathlib.Path,
-    gt: pathlib.Path,
-    k: int,
-    metric: str,
-    out_json: pathlib.Path,
-    family: str,
-) -> dict:
-    cmd = [
-        sys.executable,
-        str(tree_quality_script),
-        "--index",
-        str(index_path),
-        "--db",
-        str(db),
-        "--queries",
-        str(queries),
-        "--gt",
-        str(gt),
-        "--k",
-        str(k),
-        "--metric",
-        metric,
-        "--family",
-        family,
-        "--out",
-        str(out_json),
-    ]
-    subprocess.run(cmd, check=True)
-    return json.loads(out_json.read_text())
-
-
 def _to_markdown_table(df: pd.DataFrame) -> str:
     if df.empty:
         return "_No rows._\n"
@@ -162,7 +123,7 @@ def _to_markdown_table(df: pd.DataFrame) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Compute stage plots + tree quality (+ optional winners).")
+    ap = argparse.ArgumentParser(description="Compute stage plots and optional budget winners.")
     ap.add_argument("--results", type=pathlib.Path, required=True,
                     help="Results root (e.g. experiments/.../results/nq500k/mvivf)")
     ap.add_argument("--indices-root", type=pathlib.Path, required=True,
@@ -192,9 +153,6 @@ def main() -> int:
                          "(default: --stage-label). Use a dataset/variant/stage "
                          "compound prefix when many runs share --plots-out-dir.")
     ap.add_argument("--plot-script", type=pathlib.Path, default=HERE / "plot.py")
-    ap.add_argument("--tree-quality-script", type=pathlib.Path, default=HERE / "tree_quality.py")
-    ap.add_argument("--skip-tree-quality", action="store_true",
-                    help="Skip tree-quality computation.")
     ap.add_argument("--with-budget-winners", action="store_true",
                     help="Also compute budget-based winner tables.")
     args = ap.parse_args()
@@ -232,71 +190,10 @@ def main() -> int:
     df = df.assign(latency_ms=1000.0 / df["QPS_seq"])
     df = plot_mod._ensure_group_col(df, args.group_by)  # noqa: SLF001
 
-    # 2) Tree quality for all build configs in this stage.
-    # tree_stats_by_build = {}
-    # if not args.skip_tree_quality and "build_config" in df.columns:
-    #     if family != "mvivf":
-    #         print(
-    #             f"[warn] tree_quality currently supports only regular mvivf, "
-    #             f"but family={family}; skipping tree-quality for this run."
-    #         )
-    #         build_cfgs = []
-    #     else:
-    #         build_cfgs = sorted(set(df["build_config"].dropna().astype(str)))
-    #     for build_cfg in build_cfgs:
-    #         index_path = args.indices_root / build_cfg / "index.bin"
-    #         if not index_path.exists():
-    #             print(f"[warn] missing index for tree-quality: {index_path}")
-    #             continue
-    #         out_json = out_dir / f"tree_quality_{build_cfg}.json"
-    #         try:
-    #             tree_stats_by_build[build_cfg] = _run_tree_quality(
-    #                 tree_quality_script=args.tree_quality_script,
-    #                 index_path=index_path,
-    #                 db=args.db,
-    #                 queries=args.queries,
-    #                 gt=args.gt,
-    #                 k=args.k,
-    #                 metric=args.metric,
-    #                 out_json=out_json,
-    #                 family=family,
-    #             )
-    #         except subprocess.CalledProcessError as e:
-    #             print(f"[warn] tree_quality failed for {build_cfg}: {e}")
-
-    # tree_rows = []
-    # for b in sorted(tree_stats_by_build):
-    #     row = {"build_config": b}
-    #     row.update(tree_stats_by_build[b])
-    #     tree_rows.append(row)
-    # tree_df = pd.DataFrame(tree_rows)
-    # tree_csv = out_dir / f"{args.stage_label}_tree_quality.csv"
-    # tree_md = out_dir / f"{args.stage_label}_tree_quality.md"
-    # if not tree_df.empty:
-    #     tree_df.to_csv(tree_csv, index=False)
-    #     tree_md.write_text(_to_markdown_table(tree_df))
-    #     print(f"Wrote {tree_csv}")
-    #     print(f"Wrote {tree_md}")
-
-    # 3) Optional budget-based winner table.
+    # 2) Optional budget-based winner table.
     if args.with_budget_winners:
         budgets = _parse_budgets(args.budgets)
         winners = _select_winners(df, args.group_by, budgets)
-        if tree_stats_by_build and "build_config" in winners.columns:
-            for key in [
-                "num_internal_nodes",
-                "num_leaves",
-                "height",
-                "leaf_avg",
-                "leaf_median",
-                "root_child_avg",
-                "greedy_leaf_cover_avg",
-                "best_leaf_count_avg",
-            ]:
-                winners[key] = winners["build_config"].map(
-                    lambda b: tree_stats_by_build.get(str(b), {}).get(key)
-                )
-
         winners_csv = out_dir / f"{args.stage_label}_winners.csv"
         winners_md = out_dir / f"{args.stage_label}_winners.md"
         winners.to_csv(winners_csv, index=False)

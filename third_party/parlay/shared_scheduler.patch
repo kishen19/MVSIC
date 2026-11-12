@@ -1,0 +1,59 @@
+--- a/parlay/scheduler.h
++++ b/parlay/scheduler.h
+@@ -92,7 +92,13 @@
+   // before it goes to sleep to save CPU time.
+   constexpr static std::chrono::microseconds STEAL_TIMEOUT{PARLAY_ELASTIC_STEAL_TIMEOUT};
+ 
++#ifdef PARLAY_SHARED_SCHEDULER
++  // One exported TLS instance is defined in the embedding library. ISA-isolated
++  // DSOs must see the same current scheduler when nesting parallel operations.
++  static thread_local __attribute__((visibility("default"), tls_model("global-dynamic"))) workerInfo worker_info;
++#else
+   static inline thread_local workerInfo worker_info{};
++#endif
+ 
+  public:
+ 
+@@ -336,6 +342,13 @@
+   // Fork two thunks and wait until they both finish.
+   template <typename L, typename R>
+   static void pardo(scheduler_t& scheduler, L&& left, R&& right, bool conservative = false) {
++    // With one worker no other task can steal the right branch. Match the
++    // sequential plugin without publishing a job or waiting on its state.
++    if (scheduler.num_workers() == 1) {
++      std::forward<L>(left)();
++      std::forward<R>(right)();
++      return;
++    }
+     auto execute_right = [&]() { std::forward<R>(right)(); };
+     auto right_job = make_job(right);
+     scheduler.spawn(&right_job);
+@@ -354,6 +367,12 @@
+   template <typename F>
+   static void parfor(scheduler_t& scheduler, size_t start, size_t end, F&& f, size_t granularity = 0, bool conservative = false) {
+     if (end <= start) return;
++    // Skip adaptive clock sampling and recursive jobs for a one-worker pool.
++    // Granularity and conservative waiting cannot add parallelism here.
++    if (scheduler.num_workers() == 1) {
++      for (size_t i = start; i < end; ++i) f(i);
++      return;
++    }
+     if (granularity == 0) {
+       size_t done = get_granularity(start, end, f);
+       granularity = std::max(done, (end - start) / static_cast<size_t>(128 * scheduler.num_threads));
+@@ -398,6 +417,15 @@
+ 
+ };
+ 
++#ifdef PARLAY_SHARED_SCHEDULER
++// A declaration (no initializer), preceding parallel.h's first use, prevents
++// each DSO from instantiating its own copy of the default scheduler TLS.
++template <>
++thread_local __attribute__((visibility("default"), tls_model("global-dynamic")))
++scheduler<WorkStealingJob>::workerInfo
++scheduler<WorkStealingJob>::worker_info;
++#endif
++
+ }  // namespace parlay
+ 
+ #endif  // PARLAY_SCHEDULER_H_

@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "parlay/primitives.h"
-#include "mvsic/core/utils/kmeans_util.h"
+#include "mvsic/core/kmeans/kmeans_util.h"
 
 namespace mvsic {
 namespace fastscan {

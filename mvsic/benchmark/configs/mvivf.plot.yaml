@@ -1,0 +1,7 @@
+name: mvivf
+k: 10
+datasets:
+  - name: arguana
+    results: results/search/arguana
+results:
+  - [mvivf, mvivf_k0_l100, tq1, tq4]

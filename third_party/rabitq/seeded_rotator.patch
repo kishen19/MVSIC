@@ -1,0 +1,52 @@
+--- a/include/rabitqlib/utils/rotator.hpp
++++ b/include/rabitqlib/utils/rotator.hpp
+@@ -8,6 +8,7 @@
+ #include <fstream>
+ #include <functional>
+ #include <iostream>
++#include <optional>
+ #include <random>
+ 
+ #include "rabitqlib/defines.hpp"
+@@ -128,11 +129,17 @@
+     static constexpr size_t kByteLen = 8;
+ 
+    public:
+-    explicit FhtKacRotator(size_t dim, size_t padded_dim)
++    explicit FhtKacRotator(size_t dim, size_t padded_dim,
++                           std::optional<uint32_t> explicit_seed = std::nullopt)
+         : Rotator<float>(dim, padded_dim), flip_(4 * padded_dim / kByteLen) {
+-        std::random_device rd;
+-        std::seed_seq seed{rd(), rd(), rd(), rd()};
+-        std::mt19937 gen(seed);
++        std::mt19937 gen;
++        if (explicit_seed.has_value()) {
++            gen.seed(*explicit_seed);
++        } else {
++            std::random_device rd;
++            std::seed_seq seed{rd(), rd(), rd(), rd()};
++            gen.seed(seed);
++        }
+ 
+         // Uniform distribution in the range [0, 255]
+         std::uniform_int_distribution<int> dist(0, 255);
+@@ -271,7 +278,8 @@
+ // for given dim & type, set rotator, return padded dimension
+ template <typename T>
+ Rotator<T>* choose_rotator(
+-    size_t dim, RotatorType type = RotatorType::FhtKacRotator, size_t padded_dim = 0
++    size_t dim, RotatorType type = RotatorType::FhtKacRotator, size_t padded_dim = 0,
++    std::optional<uint32_t> explicit_seed = std::nullopt
+ ) {
+     if (padded_dim == 0) {
+         padded_dim = rotator_impl::padding_requirement(dim, type);
+@@ -294,7 +302,7 @@
+             exit(1);
+         }
+         std::cerr << "FhtKacRotator is selected\n";
+-        return ::new rotator_impl::FhtKacRotator(dim, padded_dim);
++        return ::new rotator_impl::FhtKacRotator(dim, padded_dim, explicit_seed);
+     }
+ 
+     if (type == RotatorType::MatrixRotator) {
+

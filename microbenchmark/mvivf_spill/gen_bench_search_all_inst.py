@@ -5,8 +5,8 @@ under bench_search_all_inst/ for the mvivf_spill microbenchmark target.
 Run from anywhere:
     python3 microbenchmark/mvivf_spill/gen_bench_search_all_inst.py
 
-Mirrors microbenchmark/mvivf/gen_bench_search_all_inst.py but typed against
-IndexMVIVFSpill instead of IndexMVIVF.  The dispatch logic in
+The retained IP-only IndexMVIVFSpill diagnostics use separate kernel cells.
+The dispatch logic in
 bench_search_all.cpp must be updated separately if quantizers are added.
 """
 import os
@@ -18,7 +18,6 @@ HEADER_PATH = os.path.join(ROOT, "bench_search_all_inst.h")
 # (tag, ChPoint type, metric value as C++ literal)
 METRICS = [
     ("ip", "ChamferIP_Point", "false"),
-    ("l2", "ChamferL2_Point", "true"),
 ]
 
 # (tag, model template — {m} substitutes the metric literal)
@@ -79,9 +78,8 @@ HEADER_PRELUDE = """\
 #include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
-#include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
-#include "mvsic/mvivf/mvivf_spill.h"
+#include "mvsic/algorithms/mvivf/legacy/mvivf_spill.h"
 
 namespace mvsic {
 

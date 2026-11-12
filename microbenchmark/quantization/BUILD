@@ -121,7 +121,7 @@ cc_binary(
     name = "bench_singlevector_overretrieve",
     srcs = ["bench_singlevector_overretrieve.cpp"],
     deps = [
-        "//mvsic/core:stats",
+        "//mvsic/algorithms:stats",
         "//mvsic/core/quantization:fastscan",
         "//mvsic/core/quantization:rabitq",
         "//mvsic/core/quantization:turboquant",

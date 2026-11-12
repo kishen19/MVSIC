@@ -23,9 +23,8 @@
 #include "mvsic/core/quantization/turboquant_1bit_asym_mv.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
-#include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
-#include "mvsic/mvivf/mvivf_spill.h"
+#include "mvsic/algorithms/mvivf/legacy/mvivf_spill.h"
 
 namespace mvsic {
 
@@ -80,22 +79,5 @@ extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, false, turboquant_1bit_asym_mv::Model<false>>>(MicroSpillSearchAllCtx<ChamferIP_Point>&);
 extern template void run_one<ChamferIP_Point, false, IndexMVIVFSpill<false, true , turboquant_1bit_asym_mv::Model<false>>>(MicroSpillSearchAllCtx<ChamferIP_Point>&);
 extern template void build_skeleton_if_missing<ChamferIP_Point, false>(PointCloudSet<ChamferIP_Point>&, const IndexParams&, const std::string&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, NoQuantizer<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , NoQuantizer<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, pq_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , pq_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, fastscan_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , fastscan_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, rabitq_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , rabitq_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, pqtq_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , pqtq_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_1bit_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_1bit_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, false, turboquant_1bit_asym_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void run_one<ChamferL2_Point, true, IndexMVIVFSpill<true, true , turboquant_1bit_asym_mv::Model<true>>>(MicroSpillSearchAllCtx<ChamferL2_Point>&);
-extern template void build_skeleton_if_missing<ChamferL2_Point, true>(PointCloudSet<ChamferL2_Point>&, const IndexParams&, const std::string&);
 
 }  // namespace mvsic

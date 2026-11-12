@@ -3,7 +3,7 @@
 This consolidates the FiQA and HotpotQA experiments and the later build ideas.
 Results below come from saved measurements. The repository cleanup did not run
 new experiments. The current method is documented in
-[`mvsic/emdivf/README.md`](../mvsic/emdivf/README.md); selected exploratory
+[`mvsic/algorithms/emdivf/README.md`](../mvsic/algorithms/emdivf/README.md); selected exploratory
 tools live beside this report. Original trial scripts, full CSVs, logs,
 indexes, and older notes remain under the ignored [`artifacts/`](artifacts/)
 link, whose local target is `/ssd2/kishen/emdivf`.
@@ -387,7 +387,7 @@ or D-squared selection result.
 
 ## Retention and migration
 
-- `mvsic/emdivf/` contains the runnable C++ method and its build declarations.
+- `mvsic/algorithms/emdivf/` contains the runnable C++ method and its build declarations.
 - `emdivf_experiments/` contains selected maintained exploratory source,
   embedding helpers, this report, and the selected figures above.
 - The old `emdivf` and `experiments/emdivf` directory symlinks are replaced by

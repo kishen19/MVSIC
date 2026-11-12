@@ -1,4 +1,4 @@
-#include "mvsic/core/bench_utils.h"
+#include "mvsic/algorithms/bench_utils.h"
 #include "sweep_impl.h"
 
 using namespace mvsic;

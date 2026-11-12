@@ -3,8 +3,8 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
-    name = "index",
-    hdrs = ["index.h"],
+    name = "legacy_index",
+    hdrs = ["legacy_index.h"],
     deps = [
         ":index_params",
         ":search_params",
@@ -51,7 +51,7 @@ cc_library(
     name = "index_params",
     hdrs = ["index_params.h"],
     deps = [
-        "//mvsic/core/mvclustering:mvclustering_config",
+        "//mvsic/algorithms/mvivf/mvclustering:mvclustering_config",
     ],
 )
 
@@ -60,28 +60,22 @@ cc_library(
     hdrs = ["search_params.h"],
 )
 
+
+
 cc_library(
-    name = "stats",
-    hdrs = ["stats.h"],
-    deps = [
-        ":search_params",
-        "//mvsic/core/utils:csvfile",
-        "@parlaylib//parlay:primitives",
-    ],
+    name = "types",
+    hdrs = ["types.h"],
 )
 
 cc_library(
-    name = "bench_utils",
-    hdrs = ["bench_utils.h"],
-    deps = [
-        ":query_compression",
-        ":search_params",
-        ":stats",
-        "//mvsic/core/types:chamfer_ip_point",
-        "//mvsic/core/types:chamfer_l2_point",
-        "//mvsic/core/types:point_cloud_set",
-        "//mvsic/core/utils:parse_command_line",
-        "@eigen",
-        "@parlaylib//parlay:primitives",
-    ],
+    name = "data",
+    srcs = ["data.cc"],
+    hdrs = ["data.h"],
+)
+
+cc_library(
+    name = "index",
+    srcs = ["index.cc"],
+    hdrs = ["index.h"],
+    deps = [":data", ":types", ":index_params", ":search_params"],
 )

@@ -1,0 +1,32 @@
+name: MVIVF search
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/indices/arguana
+    results_dir: results/search/arguana
+    is_mmap: true
+indices:
+  - name: mvivf
+    metric: ip
+    builds:
+      - build_name: mvivf_k0_l100
+        build_params:
+          k_per_level: 0
+          max_leaf_size: 100
+          niters: 5
+          seed: 0
+          assignment_quantizer: TQ8
+        variants:
+          - {name: tq1, compress: true, quantizer: OneBitTQ}
+          - {name: tq4, compress: true, quantizer: TQ}
+        search_configs:
+          - name: k=10
+            params:
+              k: [10]
+              nprobes: [1, 2, 4, 8, 16, 32, 64]
+              tq8_rerank: [true]
+              query_compression: [Wards]
+              query_compression_threshold: [0.5]
+              config:
+                - {name: nr20, num_rerank: 20}
+                - {name: nr50, num_rerank: 50}

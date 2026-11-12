@@ -1,3 +1,34 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=3.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "mvsic"
+version = "0.1.0"
+description = "Compiled multi-vector IVF search"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "PyYAML>=6"]
+
+[project.optional-dependencies]
+benchmark = ["PyYAML>=6"]
+plot = ["matplotlib>=3.7"]
+test = ["pytest>=8", "PyYAML>=6"]
+
+[project.scripts]
+mvsic = "mvsic.cli:main"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = []
+build-dir = "build/{wheel_tag}"
+sdist.exclude = ["data", "results", "bazel-*", ".git", "build", "dist"]
+
+[tool.scikit-build.cmake.define]
+MVSIC_BUILD_PYTHON = "ON"
+MVSIC_WHEEL = "ON"
+BUILD_TESTING = "OFF"
+
 [tool.black]
 line-length = 150
 skip-string-normalization = true

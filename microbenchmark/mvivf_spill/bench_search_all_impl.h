@@ -12,9 +12,9 @@
 
 #include "parlay/primitives.h"
 
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/stats.h"
 #include "mvsic/core/types/point_cloud_set.h"
-#include "mvsic/mvivf/mvivf_spill.h"
+#include "mvsic/algorithms/mvivf/legacy/mvivf_spill.h"
 #include "microbenchmark/mvivf_spill/bench_search_all_inst.h"
 
 namespace mvsic {

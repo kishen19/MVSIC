@@ -1,0 +1,75 @@
+{
+  "original": "/home/kishen/MVSIC-new/MVSIC/build/refactor-clang/mvsic_baseline_bench",
+  "refactor": "/home/kishen/MVSIC-new/MVSIC/build/refactor-clang/mvsic_native_bench",
+  "original_source": "/home/kishen/MVSIC",
+  "refactor_source": "/home/kishen/MVSIC-new/MVSIC",
+  "points": "/ssd2/kishen/multivector/beir/arguana/arguana_points.pcs",
+  "queries": "/ssd2/kishen/multivector/beir/arguana/arguana_queries.pcs",
+  "ground_truth": "/ssd2/kishen/multivector/beir/arguana/arguana_chamfer_neighbors.gt",
+  "metric": "ip",
+  "leaf_size": 100,
+  "branching": 0,
+  "depth": 0,
+  "niters": 5,
+  "s": 0,
+  "seed": 0,
+  "assignment": "float",
+  "build_threads": 8,
+  "build_cpus": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28
+  ],
+  "cpus": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28
+  ],
+  "threads": [
+    1,
+    8
+  ],
+  "modes": [
+    "latency",
+    "batch"
+  ],
+  "k": 10,
+  "nprobes": [
+    4,
+    8,
+    16,
+    32
+  ],
+  "rerank": [
+    50
+  ],
+  "root_m2m": [
+    true
+  ],
+  "compression": [
+    "Wards"
+  ],
+  "threshold": 0.5,
+  "tq8_rerank": true,
+  "query_limit": 128,
+  "query_seed": 42,
+  "warmup": 10,
+  "repeats": 3,
+  "build_blocks": 1,
+  "search_blocks": 1,
+  "recall_tolerance": 0.001,
+  "search_scopes": [
+    "shared_original",
+    "independent_build"
+  ]
+}

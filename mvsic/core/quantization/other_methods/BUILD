@@ -37,7 +37,7 @@ cc_library(
     hdrs = ["turboquant_pq_4bit_dd.h"],
     deps = [
         ":turboquant_pq_4bit",
-        "//mvsic/core/utils:kmeans_util",
+        "//mvsic/core/kmeans:kmeans_util",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:sequence",
     ],
@@ -47,7 +47,7 @@ cc_library(
     name = "fastscan",
     hdrs = ["fastscan.h"],
     deps = [
-        "//mvsic/core/utils:kmeans_util",
+        "//mvsic/core/kmeans:kmeans_util",
         "@eigen",
         "@parlaylib//parlay:parallel",
         "@parlaylib//parlay:primitives",

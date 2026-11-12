@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <stdexcept>
 
 namespace mvsic {
 
@@ -9,15 +12,15 @@ struct SearchParams {
  public:
   // Common Params
   std::string method;  // Index name
-  size_t k;            // Number of nearest neighbors
-  size_t num_rerank;   // Number of candidates to rerank: 0 if no reranking
+  size_t k = 10;            // Number of nearest neighbors
+  size_t num_rerank = 0;   // Number of candidates to rerank: 0 if no reranking
 
   // mvivf
-  size_t nprobes;  // Number of leaf-level nodes probed
+  size_t nprobes = 1;  // Number of leaf-level nodes probed
 
   // ANN (muvera, mpool, vamana) Params
-  size_t L;
-  double cut;
+  size_t L = 0;
+  double cut = 1.35;
 
   // muvera, mpool, vamana
   bool norerank = false;
@@ -64,6 +67,8 @@ struct SearchParams {
                             QueryCompression query_compression = QueryCompression::None,
                             float query_compression_threshold = 0.7f,
                             bool compress_rerank = false) {
+    if (!k || !nprobes || (num_rerank && num_rerank < k))
+      throw std::invalid_argument("Require k > 0, nprobes > 0 and num_rerank == 0 or >= k");
     SearchParams params;
     params.method = "mvivf";
     params.k = k;

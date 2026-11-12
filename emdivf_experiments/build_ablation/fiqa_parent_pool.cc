@@ -13,9 +13,9 @@
 #include <unordered_set>
 #include <vector>
 
-#include "mvsic/emdivf/emd.h"
-#include "mvsic/emdivf/index.h"
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/emdivf/emd.h"
+#include "mvsic/algorithms/emdivf/index.h"
+#include "mvsic/algorithms/stats.h"
 #include "parlay/primitives.h"
 
 namespace {

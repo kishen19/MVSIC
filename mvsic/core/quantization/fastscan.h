@@ -50,7 +50,7 @@
 #include "parlay/parallel.h"
 #include "parlay/sequence.h"
 
-#include "mvsic/core/utils/kmeans_util.h"
+#include "mvsic/core/kmeans/kmeans_util.h"
 
 namespace mvsic {
 namespace fastscan {

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <fstream>
+#include <limits>
+#include <stdexcept>
 #include "parlay/primitives.h"
 #include "mvsic/core/utils/mmap.h"
 #include "mvsic/core/utils/util.h"
@@ -22,6 +24,19 @@ struct PointCloudSet {
 
  public:
   PointCloudSet() noexcept {}
+  // Synchronous internal adapter. This view never writes through values; its
+  // caller retains the source storage for the complete operation.
+  static PointCloudSet borrow(uint32_t count, uint32_t dimensions, const float* data,
+                              const size_t* scalar_offsets, const uint32_t* source_ids = nullptr) {
+    PointCloudSet out;
+    out.n = count;
+    out.dims = dimensions;
+    out.values = std::shared_ptr<float[]>(const_cast<float*>(data), [](float*) {});
+    out.offsets = parlay::sequence<size_t>(scalar_offsets, scalar_offsets + count + 1);
+    if (source_ids) out.ids = parlay::sequence<uint32_t>(source_ids, source_ids + count);
+    return out;
+  }
+
   // Load point clouds from file
   PointCloudSet(const char* filename, bool is_mmap = false);
   // Input in array format (values_ has offsets_[n] elts, offsets_ has n+1 elts,
@@ -165,9 +180,14 @@ struct PointCloudSet {
   void set_point_cloud(size_t i, Seq& point_cloud) {
     assert(point_cloud.size() <= get_size(i));
     auto values_i = values.get() + offsets[i];
-    parlay::parallel_for(0, point_cloud.size(), [&](size_t j) {
+    // A fixed-size centroid may have fewer distinct input vectors than slots.
+    // Repeat actual vectors: duplicates preserve directed min/MaxSim semantics
+    // and avoid leaving uninitialized coordinates or inventing a zero center.
+    assert(point_cloud.size() > 0);
+    parlay::parallel_for(0, get_size(i), [&](size_t j) {
+      const size_t source = j % point_cloud.size();
       for (size_t t = 0; t < dims; ++t) {
-        values_i[j * dims + t] = point_cloud[j][t];
+        values_i[j * dims + t] = point_cloud[source][t];
       }
     });
   }
@@ -353,10 +373,14 @@ PointCloudSet<ChPoint>::PointCloudSet(const seqA<seqB<seqC<float>>>& point_cloud
 template<typename ChPoint>
 PointCloudSet<ChPoint>::PointCloudSet(uint32_t n, uint32_t k, uint32_t d) :
     n(n), dims(d), aligned_dims(d) {
-  size_t total_coords = n * k * dims;
+  const size_t vectors = static_cast<size_t>(n) * k;
+  if (dims && vectors > std::numeric_limits<size_t>::max() / dims / sizeof(float))
+    throw std::length_error("Point cloud centroid storage size overflows");
+  size_t total_coords = vectors * dims;
   values = std::shared_ptr<float[]>(
       static_cast<float*>(parlay::p_malloc(total_coords * sizeof(float))), parlay::p_free);
-  offsets = parlay::sequence<size_t>::from_function(n + 1, [&](size_t i) { return i * k * dims; });
+  offsets = parlay::sequence<size_t>::from_function(static_cast<size_t>(n) + 1,
+                                                   [&](size_t i) { return i * k * dims; });
 }
 
 template<typename ChPoint>
@@ -368,8 +392,10 @@ parlay::sequence<parlay::sequence<float>> PointCloudSet<ChPoint>::filter_flatten
   size_t total_size;
   parlay::sequence<size_t> csizes;
   std::tie(csizes, total_size) = parlay::scan(sizes);
-  auto result = parlay::sequence<parlay::sequence<float>>(
-      total_size, parlay::sequence<float>::uninitialized(dims));
+  // Construct each owning row directly; copying an uninitialized prototype
+  // would copy its indeterminate payload before the memcpy below replaces it.
+  auto result = parlay::sequence<parlay::sequence<float>>::from_function(
+      total_size, [&](size_t) { return parlay::sequence<float>::uninitialized(dims); });
   parlay::parallel_for(0, num, [&](size_t i) {
     auto ind = cluster_ids[i];
     size_t offset = csizes[i];

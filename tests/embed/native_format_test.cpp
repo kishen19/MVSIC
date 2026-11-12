@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "gtest/gtest.h"
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/stats.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
 

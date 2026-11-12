@@ -1,0 +1,18 @@
+name: MVIVF build
+datasets:
+  - name: arguana
+    path: data/beir/arguana
+    index_dir: results/indices/arguana
+    is_mmap: true
+indices:
+  - name: mvivf
+    metric: ip
+    build_configs:
+      - name: mvivf_k0_l100
+        params:
+          k_per_level: 0
+          max_leaf_size: 100
+          niters: 5
+          seed: 0
+          # Independent of serving quantization; float centroid updates.
+          assignment_quantizer: TQ8

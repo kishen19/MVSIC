@@ -4,13 +4,12 @@
 
 #include "parlay/primitives.h"
 
-#include "mvsic/core/bench_utils.h"
-#include "mvsic/core/stats.h"
+#include "mvsic/algorithms/bench_utils.h"
+#include "mvsic/algorithms/stats.h"
 #include "mvsic/core/types/chamfer_ip_point.h"
-#include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/utils/parse_command_line.h"
-#include "mvsic/mvivf/mvivf_spill.h"
+#include "mvsic/algorithms/mvivf/legacy/mvivf_spill.h"
 #include "microbenchmark/mvivf_spill/bench_search_all_inst.h"
 
 using namespace mvsic;
@@ -127,7 +126,7 @@ void run_benchmark(mvsic::commandLine& P) {
         "Search:\n"
         "  -gt <gt>                       Ground-truth file for recall reporting\n"
         "  -mm                            Memory-map points\n"
-        "  -dist_func IP|L2               Distance metric (default IP)\n"
+        "  -dist_func IP               Retrieval metric (IP only)\n"
         "  -k <K>                         Top-k (default 10)\n"
         "  -nprobes <N|csv>               Probes; single value or CSV like \"32,128,256\" "
         "(default 100)\n"
@@ -218,7 +217,7 @@ void run_benchmark(mvsic::commandLine& P) {
 int main(int argc, char* argv[]) {
   mvsic::commandLine P(argc, argv,
                        "-i <points> -q <queries> -index <skeleton> "
-                       "[-gt <gt>] [-mm] [-dist_func IP|L2] "
+                       "[-gt <gt>] [-mm] [-dist_func IP] "
                        "[-k <K>] [-nprobes <N>] [-num_rerank <N>] "
                        "[-mode old|new|both] [-qc 0|1] "
                        "[-quant_method None|PQ|FS|RQ|TQ|SPQTQ|1BTQ|1BTQA] "
@@ -230,14 +229,11 @@ int main(int argc, char* argv[]) {
                        "[-build_8btq 0|1] [-v <level>]");
   std::string df = P.getOptionValue("-dist_func", "IP");
 
-  if (df == "L2") {
-    using ChPoint = ChamferL2_Point;
-    run_benchmark<ChPoint, true>(P);
-  } else if (df == "IP") {
+  if (df == "IP") {
     using ChPoint = ChamferIP_Point;
     run_benchmark<ChPoint, false>(P);
   } else {
-    std::cerr << "Unknown distance function: " << df << std::endl;
+    std::cerr << "Retrieval supports only IP/MaxSim; L2 is available for clustering\n";
     return 1;
   }
   return 0;
