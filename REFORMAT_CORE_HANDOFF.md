@@ -1,4 +1,160 @@
-# Parlay recovery validated under Clang
+# Core and compiled API handoff
+
+## Current work
+
+Subsequent root-final quantization, TQ8 shortlist and exact Float batching
+screens fail latency or build-assignment cost gates. None changes production.
+The next phase prepares the original raw SVHIVF oracle and concrete port;
+the staged MVIVF source and installed runtime below remain unchanged.
+
+The six-file change is validated and staged: exact row views, inner TQ1 input
+cache reuse, and Parlay request grouping in the existing search file. Source
+78d7c073 retains the opaque public API and restores flat parallel requests,
+sorting and packed group boundaries with the same query order and scatter
+offsets. Final GCC and installed-package checks pass. Installation:
+`/tmp/mvsic-parlay-requests-env`, wheel SHA
+`5a1eff7d85111b44920dd88f4d1fe15c1a2aa695a957b3f72ffa4690d069d66e`.
+
+Source 78d7c073 passes 24 Clang/GCC native suite invocations across both host
+ISAs, 12 prediction cases, installed 48 tests plus 36 subtests per ISA and both
+external consumers. It changes only the facade search object on top of the
+validated 65ed65ad foundation, whose combined FiQA trees retain exact Float
+e174fc03 and TQ1 dad38138 bytes. The wheel replaces only the facade and RECORD
+from a158c659; executable sections, relocations and layout match the performance
+variant apart from runtime paths.
+The staged-source audit matches all 348 compiled source files plus three
+packaging READMEs exactly and excludes the unaccepted Flat integration.
+AVX2/AVX-512 hardware tests pass; VNNI is compile/ELF-only
+and AMX is unimplemented. The prior foundation is installed at
+`/tmp/mvsic-selected-view-cache-env`, wheel a158c659.
+
+The latest balanced ArguAna comparison passes the criteria declared before
+timing. Original→CSR serial mean/p95/p99 are 2.932927→2.817973,
+3.631704→3.532138 and 3.897579→3.797675 ms (−3.92%/−2.74%/−2.56%). Median-repeat
+batch QPS is 15,004.961→15,010.251: essentially parity (+0.035%), and 5.09% above
+source 65ed65ad's 14,283.200. Mean-repeat batch QPS remains lower than original:
+14,830.733 versus 15,112.118 (−1.86%). CSR serial is also 1.93%/1.38%/1.55%
+slower than the 65ed65ad control. These are bounded observations, not a universal
+speedup. Recall .943954 exceeds .940967; all current prediction bytes retain
+1fff7a92. Evidence: `selected-view-cache-parlay-grouping-serving192-01`.
+
+Keep the earlier adverse source-65ed blocks: −3.35% batch versus original and
+−1.63% in runtime isolation. The Parlay grouping change is separately validated;
+it does not erase those observations or establish a cause for the earlier
+code-placement differences. Correctness evidence: `parlay-requests-01`.
+
+The panel-alignment screen is closed below its 10% microbenchmark threshold.
+Privately aligning functions to 64-byte boundaries worsens serial latency by
+5–7% and is rejected.
+Neither changed production code. The preceding staged checkpoint was 89ee99ff.
+
+## Earlier checkpoint evidence
+
+The preceding staged private-kernel optimization uses constant four-byte TQ1 query
+loads under the established64-byte zero-padding invariant. FiQA TQ1 build falls
+35.494→24.352 s with exact tree bytes. Both compiler/host-ISA native matrices,
+installed API/YAML/consumer checks and12 prediction-byte cases pass in
+`tq1-queryword-validation-01`. New environment `/tmp/mvsic-queryword-env`;
+selected staged inventory89ee99ff. VNNI compile/ELF-only; AMX unimplemented.
+Float defaults and quantized-training quality are unchanged. See the main
+handoff/checkpoint report for incremental build/wheel provenance.
+
+Earlier permanent-runtime192-worker checks pass: shared-tree mean latency
+1.834→1.816ms and median batch QPS19,088→19,579, with exact current prediction
+bytes. Fresh own-model p32 serial mean/p95/p99 also pass at higher current recall;
+batch median QPS improves1.96%. Fresh ArguAna build is6.890→6.387s with15.37% lower peak
+RSS. These are bounded shared-host acceptance blocks, not universal guarantees.
+See the main handoff/checkpoint report for exact scope and old-original defects.
+
+Confirmed runtime defect (`waiter-runtime-build-01`): ISA isolation with
+`-Bsymbolic` also isolates libstdc++'s atomic-wait fallback table, although the
+scheduler TLS is shared. An idle four-worker pool then receives cross-library
+notifications using another table. The same compiled object runs32 jobs on
+one worker before a targeted diagnostic relink and all four afterward, with
+all outputs preserved. All three actual backend relinks pass static binding
+checks; VNNI has no hardware execution. Production now centralizes scheduler
+wait/notify in existing `core/kernels/runtime.cc`, preserving private numeric
+symbols without depending on libstdc++ mangling. The new regression passes both
+compilers and fails against the old runtime. `wrapper-timer-validation-01` passes
+seven native suites on AVX2/AVX-512 under Clang/GCC, twelve saved-tree byte cases,
+installed 63 tests plus 42 subtests per ISA, original YAML and the external C++
+consumer. New environment `/tmp/mvsic-runtime-checkpoint-env`; compiled source
+04b9a413 plus a README-only packaging supplement, with all code/native payloads
+unchanged. Installed performance remains separate. Earlier parallel timing
+comparisons may contain this defect.
+
+Latest 192-worker diagnostics and the borrowed-row experiment are in the main
+handoff. The latter uses a Parlay container of const spans, preserving scan/fill,
+sampling and backend float storage while avoiding unselected row ownership.
+It passes exact Float/TQ1 tree hashes and all18 clustering tests, but is not
+promoted because its one TQ1 wall-time pair is adverse despite lower CPU/memory.
+Its preload also shares the waiter table; those wall/CPU measurements cannot
+isolate copy elimination. No public API or production numeric code changed.
+
+Fresh default build confirmation is complete in `mvivf-default-build-pair16-01`:
+22.058 versus 22.472 s at 16 workers, with GNU-time peak RSS 1,980.73 versus
+1,431.19 MiB. Common-runtime full-query recall is lower by 22/7 correct neighbors
+at 16/32 probes, so this is not an unconditional performance pass. Refactor tree
+bytes match both earlier builds. The fresh original has nonunit saved centers;
+one exact short-document padding failure is proven in root center 59. Details
+and source scope are in the main handoff and checkpoint report.
+
+Latest applied worktree validation is `flat-integration-validation-01`, source
+`d52f30771a654738fcf1e4ad101203571a91ab65dd4b8a9538065a899a0e0c8f`.
+Seven native suites pass under Clang/GCC on AVX2/AVX-512; twelve MVIVF saved-tree
+byte pairs match. The installed wheel passes 63 tests and 42 subtests per ISA,
+the external CMake consumer passes, all 160 public-ID cases pass and all 40
+implicit byte controls match on each host ISA. The installation is `/tmp/mvsic-flat-env`;
+previous environments are preserved. Flat is applied and correctness-validated
+in the worktree, but its changes remain unstaged pending performance acceptance.
+VNNI is compile-only; AMX is unimplemented.
+
+The actual installed default-float check (`flat-installed-checkpoint-01`) matches
+IDs/score bits and recall, but its mean, p95 and p99 are 0.64%, 0.83% and 0.89%
+slower than the original. It stops at that strict gate; TQ1 and full-query quality were not
+run. Do not describe the installed Flat port as performance-accepted. MPool is
+preparation-only.
+
+The f1-to-d52 MVIVF component block (`mvivf-two-method-component-performance-01`)
+preserves every prediction byte, with serial mean 2.573 to 2.308 ms and batch
+5,982 to 5,886 QPS (-1.61%). Peak-memory deltas are below 1 MiB. This compares
+two refactor runtimes, not the original baseline, and does not clear the earlier
+shared-host or full-machine performance limits. The previous f1-only correctness
+checkpoint remains archived in `public-id-final-validation-01`.
+
+The corrected worker policy defaults ancillary library threads to1 while Parlay
+uses configured workers; serial latency forces all1, with explicit provenance.
+
+Earlier installed correctness checkpoint: `public-id-validation-01`, source
+`a37e5d5080286544af3836801638906359d7d03e251398a1183d505550dd09d3`.
+All six suites pass under Clang/GCC on AVX2/AVX-512, twelve saved-tree default
+prediction-byte pairs match, and each installed ISA passes45 tests plus29
+subtests. The external installed consumer passes both. The new isolated
+environment is `/tmp/mvsic-public-id-env`; older environments remain preserved.
+Custom-ID labels now survive pruning/rerank correctly. Default implicit-ID
+controls retain identical ID/score bytes; separate performance acceptance
+remains open. VNNI remains compile-only and AMX is unimplemented.
+
+`SearchResultWithStats` field2 is estimated database bytes, as in all original
+methods. Logical comparison counts belong to method-specific statistics;
+do not silently reinterpret the installed YAML's historical `avg_cmps` column.
+
+`public-client-compile-cost-01` completes the frozen original/installed-refactor
+client compile comparison: Clang15/O3/AVX-512, one compiler,103.94→.87 s wall,
+1,181,900→138,224 KiB compiler peak RSS and8,012,008→11,968-byte objects.
+Both clients construct/configure and use build/search/save/load. This measures
+client header parsing/codegen, excluding link and shared-library build costs;
+it is not a119x whole-library build claim. Source/dependency/symbol checks pass.
+
+November 12 API update: the public `Metric` enum and `Index::metric()` are retired.
+`IndexMVIVF` now takes `(uint32_t d, const IndexParams& params)`; MVClustering
+also has a concrete IP API and no `inner_metric` field. Shared private L2
+k-means/codebook math remains. The original YAML accepts `metric: ip`, while
+L2 requests fail at Python/config boundaries. `ip-api-validation-01` passes all
+six native suites under Clang/GCC on AVX2/AVX-512, twelve saved-tree prediction
+byte comparisons, both installed API/YAML suites and an external CMake consumer.
+The new isolated installation is `/tmp/mvsic-ip-api-env`; both research envs
+remain unchanged. Historical signatures below describe earlier snapshots.
 
 Prepared owning query and probe containers now use correctly constructed Parlay
 sequences for parallel destruction. Large-batch boundary validation transports

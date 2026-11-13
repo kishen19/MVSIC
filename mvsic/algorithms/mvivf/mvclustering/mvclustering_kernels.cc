@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include "mvsic/algorithms/mvivf/mvclustering/mvclustering_impl.h"
 #include "mvsic/core/quantization/turboquant_mv.h"
@@ -19,12 +20,16 @@
 
 namespace mvsic {
 namespace {
-template<bool metric>
-using CloudSet = PointCloudSet<std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>>;
+using CloudSet = PointCloudSet<ChamferIP_Point>;
 
-template<bool metric>
-CloudSet<metric> Borrow(const PointCloudSetView& x) {
-  return CloudSet<metric>::borrow(x.n, x.d, x.values, x.offsets, x.ids);
+
+struct OneBitInputCache {
+  const turboquant_1bit::Model<false>* model = nullptr;
+  std::span<const turboquant_1bit::Quantized_Query<false>> queries;
+};
+
+CloudSet Borrow(const PointCloudSetView& x) {
+  return CloudSet::borrow(x.n, x.d, x.values, x.offsets, x.ids);
 }
 
 // Rotation depends only on dimensions and seed, not the training values.
@@ -45,9 +50,7 @@ const Model& SharedModel(uint32_t d, uint32_t seed) {
   return *it->second;
 }
 
-// Flat per-vector input encoding has identical bytes/norms for L2 and IP.
-// Keeping this view independent of the outer metric avoids duplicating every
-// inner implementation when outer and inner objectives differ.
+// Flat per-vector input encodings shared by outer clouds and inner k-means.
 struct PreparedVectors {
   explicit PreparedVectors(const PointCloudSetView& input) : root(input) {}
   PointCloudSetView root;
@@ -57,17 +60,17 @@ struct PreparedVectors {
   std::vector<int32_t> vector_byte_sums;
 };
 
-template<bool metric>
 struct PreparedAssignment : PreparedVectors {
-  std::vector<typename turboquant_8bit_mv::Model<metric>::EncodedQuery> tq8;
-  std::vector<typename turboquant_mv::Model<metric>::EncodedQuery> tq4;
-  std::vector<turboquant_1bit::Quantized_Query<metric>> tq1;
+  std::vector<typename turboquant_8bit_mv::Model<false>::EncodedQuery> tq8;
+  std::vector<typename turboquant_mv::Model<false>::EncodedQuery> tq4;
+  std::vector<turboquant_1bit::Quantized_Query<false>> tq1;
+  const turboquant_1bit::Model<false>* tq1_model = nullptr;
 
   PreparedAssignment(const PointCloudSetView& input, ClusteringQuantizer codec, uint32_t seed) :
       PreparedVectors(input) {
-    auto points = Borrow<metric>(root);
+    auto points = Borrow(root);
     if (codec == ClusteringQuantizer::TQ8) {
-      const auto& model = SharedModel<turboquant_8bit_mv::Model<metric>>(root.d, seed);
+      const auto& model = SharedModel<turboquant_8bit_mv::Model<false>>(root.d, seed);
       tq8.resize(root.n);
       parlay::parallel_for(0, root.n, [&](size_t i) { tq8[i] = model.quantize_query(points[i]); });
       const size_t stride = (model.encoder.padded_dim + 3) & ~size_t{3};
@@ -91,11 +94,12 @@ struct PreparedAssignment : PreparedVectors {
       });
       vector_stride = stride;
     } else if (codec == ClusteringQuantizer::TQ4) {
-      const auto& model = SharedModel<turboquant_mv::Model<metric>>(root.d, seed);
+      const auto& model = SharedModel<turboquant_mv::Model<false>>(root.d, seed);
       tq4.resize(root.n);
       parlay::parallel_for(0, root.n, [&](size_t i) { tq4[i] = model.quantize_query(points[i]); });
     } else if (codec == ClusteringQuantizer::TQ1) {
-      const auto& model = SharedModel<turboquant_1bit::Model<metric>>(root.d, seed);
+      const auto& model = SharedModel<turboquant_1bit::Model<false>>(root.d, seed);
+      tq1_model = &model;
       tq1.resize(root.total_size());
       parlay::parallel_for(0, tq1.size(), [&](size_t i) {
         tq1[i] = model.quantize_query(root.values + i * root.d);
@@ -104,21 +108,20 @@ struct PreparedAssignment : PreparedVectors {
   }
 };
 
-template<bool metric>
 class Assignment {
  public:
   virtual ~Assignment() = default;
-  virtual void run(const CloudSet<metric>& points, const CloudSet<metric>& centers,
+  virtual void run(const CloudSet& points, const CloudSet& centers,
                    parlay::sequence<uint32_t>& out) = 0;
 };
 
-template<bool metric, class Model, template<class> class Batch>
-class PanelAssignment final : public Assignment<metric> {
+template<class Model, template<class> class Batch>
+class PanelAssignment final : public Assignment {
  public:
   explicit PanelAssignment(uint32_t seed,
                            const std::vector<typename Model::EncodedQuery>* prepared) :
       seed_(seed), prepared_(prepared) {}
-  void run(const CloudSet<metric>& points, const CloudSet<metric>& centers,
+  void run(const CloudSet& points, const CloudSet& centers,
            parlay::sequence<uint32_t>& out) override {
     if (!model_) model_ = &SharedModel<Model>(points.get_dims(), seed_);
     // Cache immutable query encodings over all Lloyd iterations. A distinct
@@ -143,8 +146,8 @@ class PanelAssignment final : public Assignment<metric> {
     // Seeded centers inherit source IDs and may duplicate them. Stripping IDs
     // makes the batch kernel report center POSITIONS deterministically.
     const auto offsets = centers.get_offsets();
-    auto positional = CloudSet<metric>::borrow(centers.size(), centers.get_dims(), centers.data(),
-                                               offsets.begin());
+    auto positional =
+        CloudSet::borrow(centers.size(), centers.get_dims(), centers.data(), offsets.begin());
     auto db = model_->encode(positional);
     parlay::sequence<std::pair<uint32_t, float>> top(points.size());
     Batch<typename Model::EncodedSet>::TopKIntoUninitialized(pointers_, db, 1, top.data());
@@ -170,7 +173,7 @@ struct OneBitPanels {
   size_t tiles, bytes, dimension;
   std::vector<size_t> first, count;
   std::vector<uint32_t> words;
-  std::vector<float> norms, squared;
+  std::vector<float> norms;
 
   template<class Database, class Clouds>
   OneBitPanels(const Database& db, const Clouds& centers, bool singleton) :
@@ -187,14 +190,12 @@ struct OneBitPanels {
     // Padding is read by SIMD before masking, so its bytes/norms must be zero.
     words.resize(first.back() * tiles * 16);
     norms.resize(first.back() * 16);
-    squared.resize(norms.size());
     const auto offsets = centers.get_offsets();
     parlay::parallel_for(0, n, [&](size_t c) {
       const size_t begin = singleton ? 0 : offsets[c] / centers.get_dims();
       for (size_t v = 0; v < count[c]; ++v) {
         const size_t from = begin + v, panel = first[c] + v / 16, lane = v % 16;
         norms[panel * 16 + lane] = db.norm_scaling_factors[from];
-        squared[panel * 16 + lane] = db.unquantized_squared_norms[from];
         for (size_t tile = 0; tile < tiles; ++tile)
           std::memcpy(&words[(panel * tiles + tile) * 16 + lane],
                       db.packed_codes.data() + from * bytes + tile * 4,
@@ -204,6 +205,7 @@ struct OneBitPanels {
   }
 };
 
+// Model queries zero-pad to 64 bytes, so each four-byte query-word load is in bounds.
 struct OneBitKernel {
 #if defined(__AVX512F__)
   static constexpr size_t Width = 16;
@@ -221,13 +223,12 @@ struct OneBitKernel {
   static void store(uint32_t* out, Integer value) {
     _mm512_storeu_si512(out, value);
   }
-  template<bool Metric>
-  static Float scores(const turboquant_1bit::Quantized_Query<Metric>& q, const OneBitPanels& db,
+  static Float scores(const turboquant_1bit::Quantized_Query<false>& q, const OneBitPanels& db,
                       size_t panel, size_t half, size_t valid) {
     Integer counts = _mm512_setzero_si512();
     for (size_t tile = 0; tile < db.tiles; ++tile) {
       uint32_t word = 0;
-      std::memcpy(&word, q.query_data.data() + tile * 4, std::min<size_t>(4, db.bytes - tile * 4));
+      std::memcpy(&word, q.query_data.data() + tile * 4, sizeof(word));
       const auto data = _mm512_loadu_si512(db.words.data() + (panel * db.tiles + tile) * 16 + half);
       counts = _mm512_add_epi32(counts, turboquant_1bit_mv::internal::popcnt_d32(
                                             _mm512_xor_si512(data, _mm512_set1_epi32(word))));
@@ -240,10 +241,6 @@ struct OneBitKernel {
         _mm512_mul_ps(_mm512_mul_ps(_mm512_xor_ps(dot, _mm512_set1_ps(-0.0f)),
                                     _mm512_loadu_ps(db.norms.data() + panel * 16 + half)),
                       _mm512_set1_ps(q.norm_scaling_factor));
-    if constexpr (Metric)
-      distance = _mm512_add_ps(_mm512_add_ps(_mm512_loadu_ps(db.squared.data() + panel * 16 + half),
-                                             _mm512_mul_ps(_mm512_set1_ps(2), distance)),
-                               _mm512_set1_ps(q.unquantized_squared_norm));
     return _mm512_mask_mov_ps(infinity(), __mmask16((uint32_t(1) << valid) - 1), distance);
   }
   static Integer indices(size_t base) {
@@ -272,13 +269,12 @@ struct OneBitKernel {
   static void store(uint32_t* out, Integer value) {
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(out), value);
   }
-  template<bool Metric>
-  static Float scores(const turboquant_1bit::Quantized_Query<Metric>& q, const OneBitPanels& db,
+  static Float scores(const turboquant_1bit::Quantized_Query<false>& q, const OneBitPanels& db,
                       size_t panel, size_t half, size_t valid) {
     Integer counts = _mm256_setzero_si256();
     for (size_t tile = 0; tile < db.tiles; ++tile) {
       uint32_t word = 0;
-      std::memcpy(&word, q.query_data.data() + tile * 4, std::min<size_t>(4, db.bytes - tile * 4));
+      std::memcpy(&word, q.query_data.data() + tile * 4, sizeof(word));
       const auto data = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(
           db.words.data() + (panel * db.tiles + tile) * 16 + half));
       counts = _mm256_add_epi32(
@@ -292,10 +288,6 @@ struct OneBitKernel {
         _mm256_mul_ps(_mm256_mul_ps(_mm256_xor_ps(dot, _mm256_set1_ps(-0.0f)),
                                     _mm256_loadu_ps(db.norms.data() + panel * 16 + half)),
                       _mm256_set1_ps(q.norm_scaling_factor));
-    if constexpr (Metric)
-      distance = _mm256_add_ps(_mm256_add_ps(_mm256_loadu_ps(db.squared.data() + panel * 16 + half),
-                                             _mm256_mul_ps(_mm256_set1_ps(2), distance)),
-                               _mm256_set1_ps(q.unquantized_squared_norm));
     const auto mask = _mm256_cmpgt_epi32(_mm256_set1_epi32(int(valid)),
                                          _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
     return _mm256_blendv_ps(infinity(), distance, _mm256_castsi256_ps(mask));
@@ -316,9 +308,8 @@ struct OneBitKernel {
 // Assignment keeps the single-vector codec's general-norm semantics. Reuse
 // across-center SIMD popcount, but never the unit-norm minimum-Hamming shortcut.
 // Float means, weighting and normalization remain in the existing Lloyd backend.
-template<bool metric>
-class OneBitAssignment final : public Assignment<metric> {
-  using Model = turboquant_1bit::Model<metric>;
+class OneBitAssignment final : public Assignment {
+  using Model = turboquant_1bit::Model<false>;
   struct VectorView {
     const float* values;
     size_t n;
@@ -329,14 +320,29 @@ class OneBitAssignment final : public Assignment<metric> {
   };
 
  public:
-  explicit OneBitAssignment(uint32_t seed, const PreparedAssignment<metric>* prepared,
-                            bool singleton) :
+  explicit OneBitAssignment(uint32_t seed, const PreparedAssignment* prepared, bool singleton) :
       seed_(seed), prepared_(prepared), singleton_(singleton) {}
-  void run(const CloudSet<metric>& points, const CloudSet<metric>& centers,
+  OneBitAssignment(uint32_t seed, OneBitInputCache cache,
+                   std::span<const uint32_t> vector_ids) :
+      model_(cache.model), seed_(seed), prepared_(nullptr), singleton_(true), vector_cache_(true) {
+    if (!model_ || model_->encoder.seed_ != seed || cache.queries.empty())
+      throw std::invalid_argument("TQ1 input cache model mismatch");
+    // Consume the index view now; only pointers to build-lifetime queries survive.
+    pointers_.resize(vector_ids.size());
+    for (size_t i = 0; i < vector_ids.size(); ++i) {
+      if (vector_ids[i] >= cache.queries.size())
+        throw std::invalid_argument("TQ1 input cache index out of range");
+      pointers_[i] = &cache.queries[vector_ids[i]];
+    }
+  }
+  void run(const CloudSet& points, const CloudSet& centers,
            parlay::sequence<uint32_t>& out) override {
     if (!model_) model_ = &SharedModel<Model>(points.get_dims(), seed_);
-    if (source_ != points.data() || source_rows_ != points.size() ||
-        source_offsets_ != points.get_offsets().begin()) {
+    if (vector_cache_ && (points.total_size() != pointers_.size() ||
+                          points.get_dims() != model_->encoder.dim))
+      throw std::invalid_argument("TQ1 input cache geometry mismatch");
+    if (!vector_cache_ && (source_ != points.data() || source_rows_ != points.size() ||
+                           source_offsets_ != points.get_offsets().begin())) {
       pointers_.resize(points.total_size());
       if (prepared_) {
         const size_t d = points.get_dims();
@@ -449,59 +455,64 @@ class OneBitAssignment final : public Assignment<metric> {
   const float* source_ = nullptr;
   const size_t* source_offsets_ = nullptr;
   size_t source_rows_ = 0;
-  const PreparedAssignment<metric>* prepared_;
+  const PreparedAssignment* prepared_;
   bool singleton_;
-  std::vector<const turboquant_1bit::Quantized_Query<metric>*> pointers_;
-  std::vector<turboquant_1bit::Quantized_Query<metric>> query_;
+  bool vector_cache_ = false;
+  std::vector<const turboquant_1bit::Quantized_Query<false>*> pointers_;
+  std::vector<turboquant_1bit::Quantized_Query<false>> query_;
 };
 
-template<bool metric>
-std::unique_ptr<Assignment<metric>> MakeAssignment(
-    ClusteringQuantizer quantizer, uint32_t seed,
-    const PreparedAssignment<metric>* prepared = nullptr, bool singleton = false) {
+std::unique_ptr<Assignment> MakeAssignment(ClusteringQuantizer quantizer, uint32_t seed,
+                                           const PreparedAssignment* prepared = nullptr,
+                                           bool singleton = false,
+                                           OneBitInputCache cache = {},
+                                           std::span<const uint32_t> vector_ids = {}) {
   switch (quantizer) {
     case ClusteringQuantizer::None: return {};
     case ClusteringQuantizer::TQ8:
-      return std::make_unique<PanelAssignment<metric, turboquant_8bit_mv::Model<metric>,
-                                              turboquant_8bit_mv::ManyToMany>>(
+      return std::make_unique<
+          PanelAssignment<turboquant_8bit_mv::Model<false>, turboquant_8bit_mv::ManyToMany>>(
           seed, prepared ? &prepared->tq8 : nullptr);
     case ClusteringQuantizer::TQ4:
       return std::make_unique<
-          PanelAssignment<metric, turboquant_mv::Model<metric>, turboquant_mv::ManyToMany>>(
+          PanelAssignment<turboquant_mv::Model<false>, turboquant_mv::ManyToMany>>(
           seed, prepared ? &prepared->tq4 : nullptr);
     case ClusteringQuantizer::TQ1:
-      return std::make_unique<OneBitAssignment<metric>>(seed, prepared, singleton);
+      if (cache.model) return std::make_unique<OneBitAssignment>(seed, cache, vector_ids);
+      return std::make_unique<OneBitAssignment>(seed, prepared, singleton);
   }
   throw std::invalid_argument("Unknown clustering quantizer");
 }
 
 // Reuse the existing float seeding/mean/weighted-mean backend, overriding
 // only its assignment operation. This keeps the update arithmetic float.
-template<bool metric>
-class QuantizedInnerBackend : public lloyds::FloatLloydsBackend<metric> {
-  using Base = lloyds::FloatLloydsBackend<metric>;
-  using TQ4Model = turboquant_mv::Model<metric>;
+class QuantizedInnerBackend : public lloyds::FloatLloydsBackend<false> {
+  using Base = lloyds::FloatLloydsBackend<false>;
+  using TQ4Model = turboquant_mv::Model<false>;
 
  public:
-  QuantizedInnerBackend(const parlay::sequence<parlay::sequence<float>>& data, uint32_t d,
-                        ClusteringQuantizer codec, uint32_t seed, bool adaptive) :
+  template<typename Seq>
+  QuantizedInnerBackend(const Seq& data, uint32_t d,
+                        ClusteringQuantizer codec, uint32_t seed, bool adaptive,
+                        OneBitInputCache cache = {},
+                        std::span<const uint32_t> vector_ids = {}) :
       Base(data, d, adaptive),
       d_(d),
       values_(data.size() * d),
       offsets_(data.size() + 1),
-      assignment_(codec == ClusteringQuantizer::TQ4
-                      ? nullptr
-                      : MakeAssignment<metric>(codec, seed, nullptr, true)) {
+      assignment_(codec == ClusteringQuantizer::TQ4 ? nullptr
+                                                    : MakeAssignment(codec, seed, nullptr, true,
+                                                                      cache, vector_ids)) {
     parlay::parallel_for(0, data.size(), [&](size_t i) {
       std::copy(data[i].begin(), data[i].end(), values_.begin() + i * d_);
       offsets_[i] = i * d_;
     });
     offsets_.back() = values_.size();
-    points_ = CloudSet<metric>::borrow(data.size(), d_, values_.data(), offsets_.data());
+    points_ = CloudSet::borrow(data.size(), d_, values_.data(), offsets_.data());
     if (codec == ClusteringQuantizer::TQ4) {
       tq4_model_ = &SharedModel<TQ4Model>(d, seed);
       const size_t offsets[] = {0, values_.size()};
-      const auto packed = CloudSet<metric>::borrow(1, d, values_.data(), offsets);
+      const auto packed = CloudSet::borrow(1, d, values_.data(), offsets);
       tq4_queries_ = tq4_model_->quantize_query(packed[0]);
     }
   }
@@ -510,10 +521,10 @@ class QuantizedInnerBackend : public lloyds::FloatLloydsBackend<metric> {
       // Pack centers into full panels, as in TQ8 inner assignment. Treating
       // every center as its own cloud leaves 15 of 16 panel lanes unused.
       const size_t offsets[] = {0, centers.size() * d_};
-      const auto packed = CloudSet<metric>::borrow(1, d_, centers.data(), offsets);
+      const auto packed = CloudSet::borrow(1, d_, centers.data(), offsets);
       const auto db = tq4_model_->encode(packed);
       out.resize(points_.size());
-      turboquant_8bit_mv::SingleCloudArgmin<metric>::RunFlat(
+      turboquant_8bit_mv::SingleCloudArgmin<false>::RunFlat(
           tq4_queries_.flat_query_data.data(), tq4_queries_.norm_scaling_factors.data(),
           tq4_queries_.unquantized_squared_norms.data(), tq4_queries_.byte_sums.data(),
           tq4_queries_.q_stride, points_.size(), db, out.data());
@@ -522,7 +533,7 @@ class QuantizedInnerBackend : public lloyds::FloatLloydsBackend<metric> {
     std::vector<size_t> offsets(centers.size() + 1);
     for (size_t i = 0; i <= centers.size(); ++i)
       offsets[i] = i * d_;
-    auto cs = CloudSet<metric>::borrow(centers.size(), d_, centers.data(), offsets.data());
+    auto cs = CloudSet::borrow(centers.size(), d_, centers.data(), offsets.data());
     assignment_->run(points_, cs, out);
   }
 
@@ -530,22 +541,46 @@ class QuantizedInnerBackend : public lloyds::FloatLloydsBackend<metric> {
   uint32_t d_;
   std::vector<float> values_;
   std::vector<size_t> offsets_;
-  CloudSet<metric> points_;
-  std::unique_ptr<Assignment<metric>> assignment_;
+  CloudSet points_;
+  std::unique_ptr<Assignment> assignment_;
   const TQ4Model* tq4_model_ = nullptr;
   typename TQ4Model::EncodedQuery tq4_queries_;
 };
 
-template<bool metric>
-lloyds::CenterSet Inner(const parlay::sequence<parlay::sequence<float>>& data,
+// Match filter_flattened's document/vector order and Inner's existing hash32 sample.
+parlay::sequence<uint32_t> TQ1SampledRootVectors(const PreparedAssignment& prepared,
+                                                std::span<const uint32_t> document_ids,
+                                                size_t vectors, size_t sampled) {
+  auto root_vectors = parlay::sequence<uint32_t>::uninitialized(vectors);
+  size_t cursor = 0;
+  for (uint32_t row : document_ids) {
+    if (row >= prepared.root.n) throw std::invalid_argument("TQ1 cache document out of range");
+    const size_t begin = prepared.root.offsets[row] / prepared.root.d;
+    const size_t end = prepared.root.offsets[row + 1] / prepared.root.d;
+    if (end - begin > vectors - cursor)
+      throw std::invalid_argument("TQ1 cache flattened geometry mismatch");
+    for (size_t i = begin; i < end; ++i) root_vectors[cursor++] = static_cast<uint32_t>(i);
+  }
+  if (cursor != vectors) throw std::invalid_argument("TQ1 cache flattened geometry mismatch");
+  auto sampled_vectors = parlay::sequence<uint32_t>::uninitialized(sampled);
+  for (size_t i = 0; i < sampled; ++i) {
+    const size_t row = vectors == sampled ? i : parlay::hash32(static_cast<uint32_t>(i)) % vectors;
+    sampled_vectors[i] = root_vectors[row];
+  }
+  return sampled_vectors;
+}
+
+template<typename Seq>
+lloyds::CenterSet Inner(const Seq& data,
                         const parlay::sequence<float>* weights, uint32_t k, uint32_t limit,
                         bool verbose, ClusteringQuantizer codec, const MVClusteringConfig& config,
-                        const PreparedVectors* prepared,
+                        const PreparedAssignment* prepared,
                         const parlay::sequence<uint32_t>& document_ids) {
   // Keep the original hash32 sample aligned with document weights and cached
   // root encodings. Full samples borrow the already materialized input rows.
   const size_t n = std::min(data.size(), static_cast<size_t>(limit) * k);
-  parlay::sequence<parlay::sequence<float>> sampled;
+  using Row = std::remove_cvref_t<decltype(data[0])>;
+  parlay::sequence<Row> sampled;
   parlay::sequence<float> sampled_weights;
   if (n != data.size()) {
     sampled.resize(n);
@@ -563,20 +598,19 @@ lloyds::CenterSet Inner(const parlay::sequence<parlay::sequence<float>>& data,
   std::optional<lloyds::LloydsInitialization> initialization;
   if (config.inner_init != "default")
     initialization =
-        lloyds::initialize_inner<metric>(points, k, config.inner_init, config.seed, point_weights,
-                                         codec == ClusteringQuantizer::None);
+        lloyds::initialize_inner<false>(points, k, config.inner_init, config.seed, point_weights,
+                                        codec == ClusteringQuantizer::None);
   auto run = [&](auto& backend) {
-    return lloyds::lloyds_kmeans(backend, k, metric ? "PrefixDoubling" : "UniformlyRandom", 10,
-                                 verbose, point_weights,
+    return lloyds::lloyds_kmeans(backend, k, "UniformlyRandom", 10, verbose, point_weights,
                                  initialization ? &*initialization : nullptr);
   };
   if (codec == ClusteringQuantizer::None) {
-    lloyds::FloatLloydsBackend<metric> backend(points, d, adaptive);
+    lloyds::FloatLloydsBackend<false> backend(points, d, adaptive);
     return run(backend);
   }
   if (codec == ClusteringQuantizer::TQ8) {
     // Pack all centers in one cloud so SingleCloudArgmin fills every SIMD lane.
-    std::unique_ptr<lloyds::TQ8LloydsBackend<metric>> backend;
+    std::unique_ptr<lloyds::TQ8LloydsBackend<false>> backend;
     if (prepared && prepared->root.total_size() <= std::numeric_limits<uint32_t>::max()) {
       // document_ids follow filter_flattened's order and cover each data row.
       auto root_vectors = parlay::sequence<uint32_t>::uninitialized(data.size());
@@ -593,31 +627,42 @@ lloyds::CenterSet Inner(const parlay::sequence<parlay::sequence<float>>& data,
             n == data.size() ? i : parlay::hash32(static_cast<uint32_t>(i)) % data.size();
         sampled_vectors[i] = root_vectors[row];
       }
-      // Query encoding is metric-independent and always retains squared norms.
-      // The inner objective gets its own typed model with the same seeded
-      // rotation, sharing immutable bytes without a cast or second encoding.
-      const auto& model = SharedModel<turboquant_8bit_mv::Model<metric>>(d, config.seed);
-      const lloyds::TQ8VectorCache<metric> cache{&model,
-                                                 prepared->vector_stride,
-                                                 prepared->vector_data.data(),
-                                                 prepared->vector_norms.data(),
-                                                 prepared->vector_squared_norms.data(),
-                                                 prepared->vector_byte_sums.data()};
+      // Reuse the same seeded rotation and immutable root query encodings.
+      const auto& model = SharedModel<turboquant_8bit_mv::Model<false>>(d, config.seed);
+      const lloyds::TQ8VectorCache<false> cache{&model,
+                                                prepared->vector_stride,
+                                                prepared->vector_data.data(),
+                                                prepared->vector_norms.data(),
+                                                prepared->vector_squared_norms.data(),
+                                                prepared->vector_byte_sums.data()};
       backend =
-          std::make_unique<lloyds::TQ8LloydsBackend<metric>>(points, d, cache, sampled_vectors);
+          std::make_unique<lloyds::TQ8LloydsBackend<false>>(points, d, cache, sampled_vectors);
     } else {
-      backend = std::make_unique<lloyds::TQ8LloydsBackend<metric>>(points, d, config.seed);
+      backend = std::make_unique<lloyds::TQ8LloydsBackend<false>>(points, d, config.seed);
     }
     return run(*backend);
   }
-  QuantizedInnerBackend<metric> backend(points, d, codec, config.seed, adaptive);
+  if (codec == ClusteringQuantizer::TQ1 && prepared && prepared->tq1_model &&
+      prepared->root.d == d && prepared->tq1_model->encoder.dim == d &&
+      prepared->tq1_model->encoder.seed_ == config.seed &&
+      prepared->tq1.size() == prepared->root.total_size() &&
+      prepared->root.total_size() <= std::numeric_limits<uint32_t>::max()) {
+    auto vector_ids = TQ1SampledRootVectors(
+        *prepared, std::span<const uint32_t>(document_ids.data(), document_ids.size()), data.size(), n);
+    const OneBitInputCache cache{
+        prepared->tq1_model,
+        std::span<const turboquant_1bit::Quantized_Query<false>>(prepared->tq1.data(), prepared->tq1.size())};
+    QuantizedInnerBackend backend(points, d, codec, config.seed, adaptive, cache,
+                                  std::span<const uint32_t>(vector_ids.data(), vector_ids.size()));
+    return run(backend);
+  }
+  QuantizedInnerBackend backend(points, d, codec, config.seed, adaptive);
   return run(backend);
 }
 
-template<bool metric>
 ClusteringResult Cluster(const PointCloudSetView& input, uint32_t k, uint32_t s,
                          const MVClusteringConfig& original,
-                         const PreparedAssignment<metric>* prepared = nullptr,
+                         const PreparedAssignment* prepared = nullptr,
                          std::span<const uint32_t> root_rows = {}) {
   if (static_cast<size_t>(k) * s > std::numeric_limits<size_t>::max() / input.d / sizeof(float))
     throw std::invalid_argument("Clustering center storage size overflows");
@@ -625,30 +670,24 @@ ClusteringResult Cluster(const PointCloudSetView& input, uint32_t k, uint32_t s,
   auto codec = config.assignment_quantizer;
   if (codec == ClusteringQuantizer::None && config.build_with_8btq)
     codec = ClusteringQuantizer::TQ8;
-  auto assignment = MakeAssignment<metric>(codec, config.seed, prepared);
+  auto assignment = MakeAssignment(codec, config.seed, prepared);
   config.build_with_8btq = codec == ClusteringQuantizer::TQ8;
-  MVClustering<metric> trainer(input.d, k, s, config);
+  MVClustering trainer(input.d, k, s, config);
   if (assignment) {
     trainer.assignment_function = [&](const auto& points, const auto& centers, auto& ids) {
       assignment->run(points, centers, ids);
     };
   }
-  if (assignment || config.inner_metric != "same" || config.inner_init != "default" ||
-      config.inner_backend != "legacy") {
-    const bool inner_l2 = config.inner_metric == "l2" || (config.inner_metric == "same" && metric);
-    trainer.inner_function = [codec, config, prepared, inner_l2](
-                                 const auto& data, const auto* weights, auto count, auto limit,
-                                 bool verbose, const auto& document_ids) {
-      if (inner_l2)
-        return Inner<true>(data, weights, count, limit, verbose, codec, config, prepared,
-                           document_ids);
-      return Inner<false>(data, weights, count, limit, verbose, codec, config, prepared,
-                          document_ids);
+  if (assignment || config.inner_init != "default" || config.inner_backend != "legacy") {
+    trainer.inner_function = [codec, config, prepared](const auto& data, const auto* weights,
+                                                       auto count, auto limit, bool verbose,
+                                                       const auto& document_ids) {
+      return Inner(data, weights, count, limit, verbose, codec, config, prepared, document_ids);
     };
   }
-  auto points = prepared ? CloudSet<metric>::borrow(input.n, input.d, input.values, input.offsets,
-                                                    root_rows.data())
-                         : Borrow<metric>(input);
+  auto points =
+      prepared ? CloudSet::borrow(input.n, input.d, input.values, input.offsets, root_rows.data())
+               : Borrow(input);
   trainer.train(points);
   // Validate the published float centers once before the final assignment.
   // Input norm bounds and float means establish the invariant inside Lloyd.
@@ -664,7 +703,7 @@ ClusteringResult Cluster(const PointCloudSetView& input, uint32_t k, uint32_t s,
       throw std::runtime_error("Clustering produced a center outside float scoring range");
   }
   auto assignments = trainer.get_clustering(points);
-  auto centers = std::make_shared<CloudSet<metric>>(std::move(trainer.centers));
+  auto centers = std::make_shared<CloudSet>(std::move(trainer.centers));
   const auto offsets = centers->get_offsets();
   ClusteringResult result;
   result.centers = {static_cast<uint32_t>(centers->size()),
@@ -684,50 +723,48 @@ ClusteringResult Cluster(const PointCloudSetView& input, uint32_t k, uint32_t s,
   return result;
 }
 
-template<bool metric>
 std::vector<uint32_t> Assign(const PointCloudSetView& input, const PointCloudSetView& centers,
                              ClusteringQuantizer quantizer, uint32_t seed) {
-  auto points = Borrow<metric>(input);
-  auto cs = Borrow<metric>(centers);
+  auto points = Borrow(input);
+  auto cs = Borrow(centers);
   parlay::sequence<uint32_t> ids;
   // Inputs are nonempty, so total vector count equal to cloud count means
   // every cloud is a singleton. This is an assignment-boundary decision.
   const bool singleton = points.total_size() == points.size() && cs.total_size() == cs.size();
-  auto assignment = MakeAssignment<metric>(quantizer, seed, nullptr, singleton);
+  auto assignment = MakeAssignment(quantizer, seed, nullptr, singleton);
   if (assignment)
     assignment->run(points, cs, ids);
   else {
-    auto top = ManyToMany<CloudSet<metric>>::Top(points, cs);
+    auto top = ManyToMany<CloudSet>::Top(points, cs);
     ids.resize(points.size());
     for (size_t i = 0; i < points.size(); ++i)
       ids[i] = top[i].first;
   }
   return {ids.begin(), ids.end()};
 }
-template<bool metric>
-class MetricClusteringKernels final : public ClusteringKernels {
+class IPClusteringKernels final : public ClusteringKernels {
  public:
-  MetricClusteringKernels(const PointCloudSetView& root, const MVClusteringConfig& config,
-                          bool prepare_root) :
+  IPClusteringKernels(const PointCloudSetView& root, const MVClusteringConfig& config,
+                      bool prepare_root) :
       config_(config) {
     if (config_.assignment_quantizer == ClusteringQuantizer::None && config_.build_with_8btq)
       config_.assignment_quantizer = ClusteringQuantizer::TQ8;
     if (prepare_root && config_.assignment_quantizer != ClusteringQuantizer::None)
-      prepared_ = std::make_unique<PreparedAssignment<metric>>(root, config_.assignment_quantizer,
-                                                               config_.seed);
+      prepared_ =
+          std::make_unique<PreparedAssignment>(root, config_.assignment_quantizer, config_.seed);
   }
   ClusteringResult cluster(const PointCloudSetView& local, std::span<const uint32_t> root_rows,
                            uint32_t k, uint32_t s) const override {
-    return Cluster<metric>(local, k, s, config_, prepared_.get(), root_rows);
+    return Cluster(local, k, s, config_, prepared_.get(), root_rows);
   }
   std::vector<uint32_t> assign(const PointCloudSetView& points,
                                const PointCloudSetView& centers) const override {
-    return Assign<metric>(points, centers, config_.assignment_quantizer, config_.seed);
+    return Assign(points, centers, config_.assignment_quantizer, config_.seed);
   }
 
  private:
   MVClusteringConfig config_;
-  std::unique_ptr<PreparedAssignment<metric>> prepared_;
+  std::unique_ptr<PreparedAssignment> prepared_;
 };
 }  // namespace
 
@@ -735,14 +772,7 @@ class MetricClusteringKernels final : public ClusteringKernels {
 #define MVSIC_CLUSTERING_FACTORY make_clustering_kernels
 #endif
 __attribute__((visibility("default"))) std::unique_ptr<ClusteringKernels> MVSIC_CLUSTERING_FACTORY(
-    const PointCloudSetView& root, Metric metric, const MVClusteringConfig& config,
-    bool prepare_root) {
-  switch (metric) {
-    case Metric::IP:
-      return std::make_unique<MetricClusteringKernels<false>>(root, config, prepare_root);
-    case Metric::L2:
-      return std::make_unique<MetricClusteringKernels<true>>(root, config, prepare_root);
-  }
-  throw std::invalid_argument("Unknown metric");
+    const PointCloudSetView& root, const MVClusteringConfig& config, bool prepare_root) {
+  return std::make_unique<IPClusteringKernels>(root, config, prepare_root);
 }
 }  // namespace mvsic

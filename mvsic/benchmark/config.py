@@ -17,7 +17,7 @@ BUILD_DEFAULTS = {
     "max_points_per_centroid_inner_kmeans": 20, "init": "Random", "seed": 0,
     "use_weighted_inner_kmeans": True, "s": 0,
     "build_with_8btq": False, "assignment_quantizer": "None",
-    "inner_metric": "same", "inner_init": "default", "inner_backend": "legacy",
+    "inner_init": "default", "inner_backend": "legacy",
 }
 SEARCH_DEFAULTS = {
     "k": 10, "nprobes": [1, 2, 4, 8, 16, 32], "num_rerank": [0, 20, 40],
@@ -158,13 +158,18 @@ def resolve_config(raw, source):
     index.setdefault("quantize_centers", True)
     _choice(index["name"], ("mvivf",), "index.name")
     if index["metric"] != "ip":
-        raise ValueError("MVIVF retrieval supports only ip (MaxSim); use inner_metric for L2 clustering")
+        raise ValueError("MVIVF supports only ip (MaxSim); L2 is retired")
     _boolean(index["quantize_centers"], "index.quantize_centers")
     aliases = {"float": "None", "TQ4": "TQ", "TurboQuant": "TQ", "TQ1": "OneBitTQ", "TQ8": "EightBitTQ"}
     _string(index["quantizer"], "index.quantizer")
     index["quantizer"] = aliases.get(index["quantizer"], index["quantizer"])
     _choice(index["quantizer"], ("None", "TQ", "OneBitTQ", "EightBitTQ"), "index.quantizer")
     params = _object(index.setdefault("params", {}), "index.params")
+    # Old experimental plans may spell the fixed inner objective explicitly.
+    # Canonical plans and the compiled API have no metric selection.
+    if "inner_metric" in params:
+        if params.pop("inner_metric") not in ("same", "ip"):
+            raise ValueError("MVClustering inner training supports only ip; L2 is retired")
     _keys(params, BUILD_PARAMS, "index.params")
     for key, default in BUILD_DEFAULTS.items():
         params.setdefault(key, default)
@@ -175,7 +180,6 @@ def resolve_config(raw, source):
     for key in ("compress_input", "use_weighted_inner_kmeans", "build_with_8btq"):
         _boolean(params[key], f"index.params.{key}")
     _choice(params["init"], ("Random",), "index.params.init")
-    _choice(params["inner_metric"], ("same", "l2", "ip"), "index.params.inner_metric")
     _choice(params["inner_init"], ("default", "uniform", "kmeans++", "prefix_doubling"), "index.params.inner_init")
     _choice(params["inner_backend"], ("legacy", "adaptive"), "index.params.inner_backend")
     if params["assignment_quantizer"] == "float":

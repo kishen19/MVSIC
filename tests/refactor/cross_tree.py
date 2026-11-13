@@ -210,7 +210,7 @@ def diagnostic_worker(job):
     ip.quantize_centers = True
     params = native.SearchParams.mvivf(10, 16, 50, True, native.QueryCompression.Wards, 0.5)
     params.root_m2m = True
-    index = native.IndexMVIVF(points.dims, native.Metric.IP, ip)
+    index = native.IndexMVIVF(points.dims, ip)
     index.load(job["tree"], points)
     for q in range(min(10, len(queries))):
         index.search(queries[q], params)

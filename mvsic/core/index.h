@@ -9,16 +9,17 @@
 
 #include "mvsic/core/data.h"
 #include "mvsic/core/search_params.h"
-#include "mvsic/core/types.h"
 
 namespace mvsic {
 
 using Neighbor = std::pair<uint32_t, float>;
 using Neighbors = std::vector<Neighbor>;
 using BatchNeighbors = std::vector<Neighbors>;
+// Neighbors, estimated database bytes accessed, and method-specific statistics.
+// Logical comparison counts belong in the statistics, not the byte estimate.
 using SearchResultWithStats = std::tuple<Neighbors, size_t, std::vector<double>>;
 
-/* Common index interface. Implementations and numerical kernels are compiled. */
+/* Common IP/MaxSim index interface. Numerical kernels are compiled. */
 class Index {
  public:
   virtual ~Index();
@@ -34,7 +35,6 @@ class Index {
                                     const SearchParams& params) const = 0;
   virtual void save(const std::string& filename) const = 0;
   virtual void load(const std::string& filename, const PointCloudSetView& points) = 0;
-  virtual Metric metric() const noexcept = 0;
   virtual uint32_t get_dims() const noexcept = 0;
 };
 

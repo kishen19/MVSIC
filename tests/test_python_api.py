@@ -20,11 +20,11 @@ def dataset(n=24, vectors=3, d=32):
     return values
 
 
-def raw_index(points, metric):
+def raw_index(points):
     params = mvsic.IndexParams.mvivf(max_leaf_size=1000)
     params.quantizer = mvsic.QuantizerType.None_
     params.quantize_centers = False
-    index = mvsic.IndexMVIVF(points.dims, metric, params)
+    index = mvsic.IndexMVIVF(points.dims, params)
     index.build(points)
     return index
 
@@ -35,7 +35,7 @@ def test_exact_ragged_oracle(tmp_path):
     offsets = np.array([0, 2, 7, 12, 18, 25, 34, 42, 56, 72], dtype=np.uint64) * raw.shape[-1]
     ids = (np.arange(len(offsets) - 1, dtype=np.uint32) * 13) + 8
     points = mvsic.PointCloudSet(values, offsets, ids)
-    index = raw_index(points, mvsic.Metric.IP)
+    index = raw_index(points)
     query = dataset(n=1, vectors=4)[0]
     distances = []
     for row in range(len(points)):
@@ -48,28 +48,82 @@ def test_exact_ragged_oracle(tmp_path):
     np.testing.assert_allclose(scores, np.array(distances)[order], atol=2e-6)
     path = str(tmp_path / "index.mvivf")
     index.save(path)
-    reloaded = raw_index(points, mvsic.Metric.IP)
+    reloaded = raw_index(points)
     reloaded.load(path, points)
     np.testing.assert_array_equal(reloaded.search(query, params)[0], found)
 
 
-def test_l2_is_clustering_only():
+@pytest.mark.parametrize("codec", ["None_", "OneBitTQ", "TQ", "EightBitTQ"])
+def test_public_id_ties_are_canonical_before_leaf_pruning(tmp_path, codec):
+    n, d, k = 8, 128, 4
+    public_ids = np.array([2**32 - 2, 0, 78, 4, 56, 7, 34, 2], dtype=np.uint32)
+    query = np.zeros((1, d), dtype=np.float32)
+    query[:, 0] = 1
+    queries = mvsic.PointCloudSet(np.repeat(query[None, :, :], 64, axis=0))
+    params = mvsic.IndexParams.mvivf(max_leaf_size=n)
+    params.quantizer = getattr(mvsic.QuantizerType, codec)
+    params.quantize_centers = False
+
+    def make_index(ids, filename=None):
+        values = np.repeat(query[None, :, :], n, axis=0)
+        points = mvsic.PointCloudSet(values, ids=ids)
+        index = mvsic.IndexMVIVF(d, params)
+        if filename is None:
+            index.build(points)
+        else:
+            index.load(str(filename), points)
+        return index
+
+    original = make_index(public_ids)
+    reordered = make_index(public_ids[::-1].copy())
+    filename = tmp_path / "public-id-ties.mvivf"
+    original.save(str(filename))
+    reloaded = make_index(public_ids[::-1].copy(), filename)
+    implicit = make_index(None)
+    identity = make_index(np.arange(n, dtype=np.uint32))
+    gc.collect()  # Only the indexes retain their original corpus owners.
+    for rerank, tq8 in [(0, False), (n, False), (n, True), (k + 2, False), (k + 2, True)]:
+        request = mvsic.SearchParams.mvivf(k, 3, rerank, tq8)
+        control_ids, control_scores = implicit.search(query, request)
+        np.testing.assert_array_equal(control_ids, np.arange(k, dtype=np.uint32))
+        for index in [original, reordered, reloaded, implicit, identity]:
+            expected = (np.arange(k, dtype=np.uint32) if index is implicit or index is identity
+                        else np.sort(public_ids)[:k])
+            found, scores = index.search(query, request)
+            batch_ids, batch_scores = index.search_all(queries, request)
+            np.testing.assert_array_equal(found, expected)
+            np.testing.assert_array_equal(scores.view(np.uint32), control_scores.view(np.uint32))
+            np.testing.assert_array_equal(batch_ids, np.tile(expected, (64, 1)))
+            np.testing.assert_array_equal(batch_scores.view(np.uint32),
+                                          np.tile(scores.view(np.uint32), (64, 1)))
+
+
+def test_public_api_is_maxsim_only():
+    assert not hasattr(mvsic, "Metric")
     with pytest.raises(ValueError, match="MaxSim"):
-        mvsic.IndexMVIVF(2, mvsic.Metric.L2)
+        mvsic.IndexMVIVF(2, metric="l2")
     values = np.array([[[2., 0.]], [[4., 0.]]], dtype=np.float32)
+    points = mvsic.PointCloudSet(values)
     config = mvsic.MVClusteringConfig()
+    assert not hasattr(config, "inner_metric")
+    with pytest.raises(AttributeError):
+        config.inner_metric = "l2"
+    with pytest.raises(ValueError, match="MaxSim"):
+        mvsic.cluster_point_clouds(points, 1, 1, config, metric="l2")
     config.niters = 1
-    centers, assignments, _ = mvsic.cluster_point_clouds(
-        mvsic.PointCloudSet(values), 1, 1, mvsic.Metric.L2, config)
-    np.testing.assert_allclose(centers[0], [[3., 0.]], atol=1e-6)
+    centers, assignments, _ = mvsic.cluster_point_clouds(points, 1, 1, config)
+    np.testing.assert_allclose(centers[0], [[1., 0.]], atol=1e-6)
     np.testing.assert_array_equal(assignments, [0, 0])
+    # The Python-only compatibility spelling does not select another kernel.
+    assert isinstance(mvsic.IndexMVIVF(2, metric="ip"), mvsic.Index)
+    assert not hasattr(mvsic.IndexMVIVF(2), "metric")
 
 
 def test_numpy_ownership_copy_and_views():
     raw = dataset()
     ref = weakref.ref(raw)
     points = mvsic.PointCloudSet(raw)
-    index = raw_index(points, mvsic.Metric.IP)
+    index = raw_index(points)
     query = raw[0].copy()
     view = points[0]
     assert not view.flags.writeable
@@ -103,7 +157,7 @@ def test_array_boundaries():
         mvsic.PointCloudSet(np.empty((2**32, 0, 1), dtype=np.float32))
     points = mvsic.PointCloudSet(raw[:, :, ::2], copy=True)
     assert points.dims == raw.shape[-1] // 2
-    index = raw_index(points, mvsic.Metric.IP)
+    index = raw_index(points)
     query = points[0].copy()
     query[0, 0] = np.nan
     with pytest.raises(ValueError):
@@ -116,7 +170,7 @@ def test_batch_rerank_and_native_benchmark(codec):
     points = mvsic.PointCloudSet(raw)
     params = mvsic.IndexParams.mvivf(k_per_level=4, max_leaf_size=12, niters=2, s=3)
     params.quantizer = getattr(mvsic.QuantizerType, codec)
-    index = mvsic.IndexMVIVF(128, mvsic.Metric.IP, params)
+    index = mvsic.IndexMVIVF(128, params)
     index.build(points)
     queries = mvsic.PointCloudSet(raw[:8])
     search = mvsic.SearchParams.mvivf(5, 100, num_rerank=20, tq8_rerank=True)
@@ -138,7 +192,7 @@ def test_reject_unavailable_backend():
             continue
         code = """import mvsic, numpy as np
 p=mvsic.IndexParams.mvivf()
-i=mvsic.IndexMVIVF(32,mvsic.Metric.IP,p)
+i=mvsic.IndexMVIVF(32,p)
 x=np.ones((2,1,32),dtype=np.float32)/np.sqrt(np.float32(32))
 try:
     i.build(mvsic.PointCloudSet(x))

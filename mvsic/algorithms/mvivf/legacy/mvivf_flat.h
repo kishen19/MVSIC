@@ -29,7 +29,8 @@ namespace mvivf_flat_internal { struct Empty {}; }
 template<bool metric, bool CompressCenters = false,
          class LeafModel = NoQuantizer<metric>>
 class IndexMVIVFFlat : public LegacyIndex<metric> {
-  static_assert(!metric, "MVIVF retrieval supports only IP/MaxSim; L2 is available for clustering");
+  static_assert(!metric, "MVIVF retrieval supports only IP/MaxSim; L2 retrieval is retired");
+
  public:
   using ChPoint = typename LegacyIndex<metric>::ChPoint;
   using QT = typename LegacyIndex<metric>::QT;
@@ -140,12 +141,12 @@ class IndexMVIVFFlat : public LegacyIndex<metric> {
     t.start();
     parlay::sequence<uint32_t> cluster_ids;
     if (params.build_with_8btq) {
-      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      MVClustering8BTQ Clus(d, num_clusters, params.s, params.mvclus);
       Clus.train(points);
       cluster_ids = Clus.get_clustering(points);
       centers = std::move(Clus.get_centers());
     } else {
-      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      MVClustering Clus(d, num_clusters, params.s, params.mvclus);
       Clus.train(points);
       cluster_ids = Clus.get_clustering(points);
       centers = std::move(Clus.get_centers());

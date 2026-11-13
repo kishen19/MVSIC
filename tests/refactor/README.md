@@ -7,11 +7,12 @@ first. The controller also watches the marker while a command runs and terminate
 its process group if the original experiment becomes active. Run only in an
 agreed idle window; the marker check does not reserve the machine.
 
-MVIVF retrieval supports IP only. L2 remains available for clustering; native
-and installed API tests must reject an L2 retrieval request. Old IP/L2 parity
+MVIVF retrieval and MVClustering support IP only. The compiled API has no metric
+selector; Python/config boundaries reject L2 requests. Private L2 k-means for
+quantizer codebooks remains tested. Old IP/L2 parity
 artifacts document earlier coverage and do not describe the current build scope.
 
-For construction changes, including inner IP/L2 objectives, initialization,
+For construction changes, including inner initialization,
 adaptive kernels and assignment quantization, use
 [`build_quality.py`](build_quality.py) and the
 [training-quality experiment](clustering_experiment.md). That study independently

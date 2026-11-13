@@ -10,6 +10,7 @@
 
 #include "mvsic/core/utils/interval_heap.h"
 #include "parlay/parallel.h"
+#include "parlay/primitives.h"
 #include "parlay/sequence.h"
 
 namespace mvsic {
@@ -128,7 +129,6 @@ Neighbors IndexMVIVF::Impl::finish(const PreparedQuery& query, std::span<Neighbo
     if (stats) { stats->bytes += bytes; stats->rerank_seconds += seconds(start); }
   }
   Neighbors result(candidates.begin(), candidates.end());
-  for (auto& candidate : result) candidate.first = points.get_id(candidate.first);
   return result;
 }
 
@@ -237,7 +237,7 @@ BatchNeighbors IndexMVIVF::search_all(const PointCloudSetView& queries, const Se
   const size_t bytes_per_query = candidate_bytes + root_bytes;
   const size_t batch_size = std::max<size_t>(1, std::min<size_t>(queries.n,
       (size_t(512) << 20) / std::max<size_t>(bytes_per_query, 1)));
-  struct Request { uint32_t query; size_t offset; };
+  struct Request { uint32_t node, query; size_t offset; };
   for (size_t first = 0; first < queries.n; first += batch_size) {
     const size_t count = std::min(batch_size, size_t(queries.n) - first);
     // Construct owning elements normally; Parlay also destroys them in parallel.
@@ -256,22 +256,45 @@ BatchNeighbors IndexMVIVF::search_all(const PointCloudSetView& queries, const Se
       const Neighbor* root = root_distances.empty() ? nullptr : root_distances.data() + i * impl_->nodes[0].children.size();
       probes[i] = impl_->find_probes(*prepared[i], params.nprobes, root, nullptr);
     });
-    std::vector<std::vector<Request>> requests(impl_->nodes.size());
+    // Query-local ranges preserve probe order without serial per-leaf growth.
+    // Check the flat allocation bound before scans or uninitialized storage.
+    const size_t max_requests = checked_product(count, probes_per_query);
+    (void)checked_product(max_requests, sizeof(Request));
+    auto request_offsets = parlay::sequence<size_t>::uninitialized(count + 1);
     auto candidate_offsets = parlay::sequence<size_t>::uninitialized(count + 1);
-    candidate_offsets[0] = 0;
-    for (size_t i = 0; i < count; ++i) {
-      size_t offset = 0;
+    parlay::parallel_for(0, count, [&](size_t i) {
+      request_offsets[i] = probes[i].size();
+      size_t size = 0;
+      for (const auto& probe : probes[i])
+        size += std::min(wanted, impl_->nodes[probe.node].rows.size());
+      candidate_offsets[i] = size;
+    });
+    request_offsets[count] = candidate_offsets[count] = 0;
+    parlay::scan_inplace(request_offsets);
+    parlay::scan_inplace(candidate_offsets);
+    auto requests = parlay::sequence<Request>::uninitialized(request_offsets.back());
+    parlay::parallel_for(0, count, [&](size_t i) {
+      size_t request = request_offsets[i], offset = 0;
       for (const auto& probe : probes[i]) {
-        requests[probe.node].push_back({uint32_t(i), offset});
+        parlay::assign_uninitialized(requests[request++], Request{probe.node, uint32_t(i), offset});
         offset += std::min(wanted, impl_->nodes[probe.node].rows.size());
       }
-      candidate_offsets[i + 1] = candidate_offsets[i] + offset;
-    }
+    });
+    // Preserve ascending query order within each leaf, including group8
+    // blocks. Offset retains probe order if a leaf occurs more than once.
+    parlay::sort_inplace(requests, [](const Request& a, const Request& b) {
+      if (a.node != b.node) return a.node < b.node;
+      return a.query != b.query ? a.query < b.query : a.offset < b.offset;
+    });
+    auto group_offsets = parlay::pack_index(parlay::delayed_tabulate(requests.size(), [&](size_t i) {
+      return i == 0 || requests[i].node != requests[i - 1].node;
+    }));
     auto candidates = parlay::sequence<Neighbor>::uninitialized(candidate_offsets.back());
-    parlay::parallel_for(0, impl_->leaves.size(), [&](size_t leaf_index) {
-      const uint32_t node = impl_->leaves[leaf_index];
-      const auto& jobs = requests[node];
-      if (jobs.empty()) return;
+    parlay::parallel_for(0, group_offsets.size(), [&](size_t group) {
+      const size_t begin = group_offsets[group];
+      const size_t end = group + 1 == group_offsets.size() ? requests.size() : group_offsets[group + 1];
+      const auto jobs = parlay::make_slice(requests.begin() + begin, requests.begin() + end);
+      const uint32_t node = jobs[0].node;
       const size_t k = std::min(wanted, impl_->nodes[node].rows.size());
       auto pointers = parlay::sequence<const PreparedQuery*>::uninitialized(jobs.size());
       for (size_t i = 0; i < jobs.size(); ++i) pointers[i] = prepared[jobs[i].query].get();

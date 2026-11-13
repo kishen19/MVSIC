@@ -18,7 +18,6 @@
       "niters": 5,
       "assignment_quantizer": "None",
       "seed": 0,
-      "inner_metric": "same",
       "inner_init": "default",
       "inner_backend": "legacy",
       "use_weighted_inner_kmeans": true

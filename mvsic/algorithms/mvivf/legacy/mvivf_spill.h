@@ -50,7 +50,8 @@ namespace mvivf_spill_internal { struct Empty {}; }
 template<bool metric, bool CompressCenters = false,
          class LeafModel = NoQuantizer<metric>>
 class IndexMVIVFSpill : public LegacyIndex<metric> {
-  static_assert(!metric, "MVIVF retrieval supports only IP/MaxSim; L2 is available for clustering");
+  static_assert(!metric, "MVIVF retrieval supports only IP/MaxSim; L2 retrieval is retired");
+
  public:
   using ChPoint = typename LegacyIndex<metric>::ChPoint;
   using QT = typename LegacyIndex<metric>::QT;
@@ -187,10 +188,10 @@ class IndexMVIVFSpill : public LegacyIndex<metric> {
       centers = std::move(Clus.get_centers());
     };
     if (params.build_with_8btq) {
-      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      MVClustering8BTQ Clus(d, num_clusters, params.s, params.mvclus);
       run_clus(Clus);
     } else {
-      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      MVClustering Clus(d, num_clusters, params.s, params.mvclus);
       run_clus(Clus);
     }
 
@@ -282,10 +283,10 @@ class IndexMVIVFSpill : public LegacyIndex<metric> {
       centers = std::move(Clus.get_centers());
     };
     if (params.build_with_8btq) {
-      MVClustering8BTQ<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      MVClustering8BTQ Clus(d, num_clusters, params.s, params.mvclus);
       run_clus(Clus);
     } else {
-      MVClustering<metric> Clus(d, num_clusters, params.s, params.mvclus);
+      MVClustering Clus(d, num_clusters, params.s, params.mvclus);
       run_clus(Clus);
     }
     auto id_pt = parlay::sequence<std::pair<uint32_t, uint32_t>>::uninitialized(n * k_spill);

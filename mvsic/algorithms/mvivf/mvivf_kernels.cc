@@ -1,10 +1,12 @@
 #include "mvsic/algorithms/mvivf/mvivf_internal.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "mvsic/core/distance_measures/one_to_many.h"
 #include "mvsic/core/distance_measures/many_to_many.h"
@@ -35,21 +37,29 @@ struct TypedView : PointCloudSetView {
   ChPoint operator[](size_t i) const noexcept { return typed_point(PointCloudSetView::operator[](i)); }
 };
 
-// Quantized leaves read original clouds directly. Only their small offset
-// table is materialized; no temporary float corpus is needed for encoding.
+// Quantized leaves read original clouds directly. Only small offsets and
+// optional public IDs are materialized; no temporary float corpus is needed.
 struct SubsetView {
   const PointCloudSetView& points;
   std::span<const uint32_t> rows;
   parlay::sequence<size_t> offsets;
+  parlay::sequence<uint32_t> ids;
   SubsetView(const PointCloudSetView& points, std::span<const uint32_t> rows)
       : points(points), rows(rows), offsets(parlay::sequence<size_t>::uninitialized(rows.size() + 1)) {
     offsets[0] = 0;
     for (size_t i = 0; i < rows.size(); ++i)
       offsets[i + 1] = offsets[i] + (points.offsets[rows[i] + 1] - points.offsets[rows[i]]);
+    if (points.ids) {
+      ids = parlay::sequence<uint32_t>::uninitialized(rows.size());
+      for (size_t i = 0; i < rows.size(); ++i) ids[i] = points.get_id(rows[i]);
+    }
   }
   uint32_t get_dims() const noexcept { return points.d; }
   std::span<const size_t> get_offsets() const noexcept { return {offsets.data(), offsets.size()}; }
-  std::span<const uint32_t> get_ids() const noexcept { return rows; }
+  // Encoders copy these labels before the temporary subset goes away.
+  std::span<const uint32_t> get_ids() const noexcept {
+    return ids.empty() ? rows : std::span<const uint32_t>(ids.data(), ids.size());
+  }
   const float* data(size_t i) const noexcept { return points.data(rows[i]); }
 };
 
@@ -60,7 +70,7 @@ struct Query final : PreparedQuery {
   turboquant_8bit_mv::Quantized_Query_Point_Cloud<false> eightbit;
 };
 
-class IPKernels final : public Kernels {
+class IPKernels : public Kernels {
   using QT = IndexParams::QuantizerType;
   using TQ4 = turboquant_mv::Model<false>;
   using TQ1 = turboquant_1bit_mv::Model<false>;
@@ -111,13 +121,24 @@ class IPKernels final : public Kernels {
         return;
       }
       if (params_.pq.method == QT::None) {
-        auto raw = gather_point_clouds(points_, node.rows, false);
-        raw.ids = node.rows.data();
-        out.raw_leaf = raw;
-        out.leaf_bytes = raw.num_bytes();
+        if (points_.ids) {
+          // Float M2M prunes ties by local position. Order custom-ID leaves
+          // once so that position has the same ordering as the public ID.
+          auto rows = node.rows;
+          std::sort(rows.begin(), rows.end(), [&](uint32_t a, uint32_t b) {
+            return points_.get_id(a) < points_.get_id(b);
+          });
+          out.raw_leaf = gather_point_clouds(points_, rows, true);
+        } else {
+          auto raw = gather_point_clouds(points_, node.rows, false);
+          // Prepared nodes retain their immutable rows for this view's lifetime.
+          raw.ids = node.rows.data();
+          out.raw_leaf = raw;
+        }
+        out.leaf_bytes = out.raw_leaf.num_bytes();
         return;
       }
-      // Encoded IDs always address rows, independent of public document IDs.
+      // Leaf selectors prune by public IDs; implicit IDs are already rows.
       const SubsetView subset(points_, node.rows);
       switch (params_.pq.method) {
         case QT::OneBitTQ: {
@@ -195,7 +216,7 @@ class IPKernels final : public Kernels {
   }
 
   void leaf_distances(const EncodedNode& leaf, const PreparedQuery& prepared,
-                      Neighbor* output) const override {
+                      Neighbor* output) const final override {
     const auto& query = static_cast<const Query&>(prepared);
     switch (params_.pq.method) {
       case QT::None: {
@@ -238,7 +259,7 @@ class IPKernels final : public Kernels {
       const PointCloudSetView batch{uint32_t(queries.size()), points_.d, values.data(), offsets.data(), nullptr, {}};
       ManyToMany<TypedView>::TopKIntoUninitialized(TypedView(batch), TypedView(leaf.raw_leaf), uint32_t(k), output);
       // The float M2M primitive returns local positions, unlike encoded
-      // scorers. Translate once per result to the index's dense corpus rows.
+      // scorers. Translate once per result to the prepared leaf's labels.
       for (size_t i = 0; i < queries.size() * k; ++i)
         output[i].first = leaf.raw_leaf.get_id(output[i].first);
       return;
@@ -297,6 +318,32 @@ class IPKernels final : public Kernels {
   }
 };
 
+class CustomIDKernels final : public IPKernels {
+  std::unordered_map<uint32_t, uint32_t> public_rows_;
+
+ public:
+  CustomIDKernels(const IndexParams& params, const PointCloudSetView& points)
+      : IPKernels(params, points) {
+    // Corpus IDs are validated before kernel construction and remain immutable.
+    public_rows_.reserve(points.n);
+    for (uint32_t row = 0; row < points.n; ++row)
+      public_rows_.emplace(points.get_id(row), row);
+  }
+
+  size_t rerank(const PreparedQuery& prepared, std::span<Neighbor> candidates, bool tq8) const override {
+    auto dense = parlay::sequence<Neighbor>::uninitialized(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      const auto found = public_rows_.find(candidates[i].first);
+      assert(found != public_rows_.end());  // Selectors only publish validated corpus IDs.
+      dense[i].first = found->second;
+    }
+    // The original reranker writes every score; public labels stay in candidates.
+    const size_t bytes = IPKernels::rerank(prepared, {dense.data(), dense.size()}, tq8);
+    for (size_t i = 0; i < candidates.size(); ++i) candidates[i].second = dense[i].second;
+    return bytes;
+  }
+};
+
 }  // namespace
 
 #ifndef MVSIC_KERNEL_FACTORY
@@ -305,6 +352,7 @@ class IPKernels final : public Kernels {
 __attribute__((visibility("default")))
 std::unique_ptr<Kernels> MVSIC_KERNEL_FACTORY(const IndexParams& params,
                                       const PointCloudSetView& points) {
+  if (points.ids) return std::make_unique<CustomIDKernels>(params, points);
   return std::make_unique<IPKernels>(params, points);
 }
 

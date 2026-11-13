@@ -6,7 +6,6 @@
 #include "parlay/primitives.h"
 
 #include "mvsic/core/types/chamfer_ip_point.h"
-#include "mvsic/core/types/chamfer_l2_point.h"
 #include "mvsic/core/types/point_cloud_set.h"
 #include "mvsic/core/kmeans/lloyds_kmeans.h"
 #include "mvsic/core/utils/util.h"
@@ -22,13 +21,13 @@ namespace mvsic {
    is represented by a centroid point cloud with s points each.
  - The clustering is done via a Lloyd's style algorithm, with an inner k-means
    algorithm to compute the centroid point clouds.
- - The distance function used is the Chamfer distance (L2 or IP).
+ - The distance function used is the directed IP/MaxSim distance.
 */
 
-template<bool metric>
 class MVClustering {
  public:
-  using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
+  using ChPoint = ChamferIP_Point;
+  using InnerRows = PointCloudSet<ChPoint>::FlatRows;
 
   uint32_t d;  // Dimension of vectors
   uint32_t k;  // Number of centroid-point_clouds
@@ -54,24 +53,24 @@ class MVClustering {
       const PointCloudSet<ChPoint>&, const PointCloudSet<ChPoint>&,
       parlay::sequence<uint32_t>&)>;
   using InnerFunction = std::function<lloyds::CenterSet(
-      const parlay::sequence<parlay::sequence<float>>&,
+      const InnerRows&,
       const parlay::sequence<float>*, uint32_t, uint32_t, bool,
       const parlay::sequence<uint32_t>&)>;
   AssignmentFunction assignment_function;
   InnerFunction inner_function;
 
   lloyds::CenterSet inner_kmeans_(
-      const parlay::sequence<parlay::sequence<float>>& data, uint32_t count,
+      const InnerRows& data, uint32_t count,
       uint32_t limit, bool verbose, bool tq8, const parlay::sequence<uint32_t>& document_ids) {
     if (inner_function) return inner_function(data, nullptr, count, limit, verbose, document_ids);
-    return kmeans_subsample<metric>(data, count, limit, verbose, tq8);
+    return kmeans_subsample<false>(data, count, limit, verbose, tq8);
   }
   lloyds::CenterSet inner_weighted_kmeans_(
-      const parlay::sequence<parlay::sequence<float>>& data,
+      const InnerRows& data,
       const parlay::sequence<float>& weights, uint32_t count, uint32_t limit,
       bool verbose, bool tq8, const parlay::sequence<uint32_t>& document_ids) {
     if (inner_function) return inner_function(data, &weights, count, limit, verbose, document_ids);
-    return kmeans_weighted_subsample<metric>(data, weights, count, limit, verbose, tq8);
+    return kmeans_weighted_subsample<false>(data, weights, count, limit, verbose, tq8);
   }
 
   MVClustering(uint32_t d, uint32_t k, MVClusteringConfig params) noexcept :
@@ -148,8 +147,7 @@ class MVClustering {
 /* =======================================Implementation======================================= */
 
 // Data given as a PointCloudSet Object: Main Implementation
-template<bool metric>
-void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
+inline void MVClustering::train(const PointCloudSet<ChPoint>& points_) {
   std::optional<PointCloudSet<ChPoint>> subsampled_points;
   const PointCloudSet<ChPoint>* points_ptr;
   // Subsample if dataset is too large
@@ -223,6 +221,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
     compute_cluster_ids(points, cluster_ids);
     _it_timer.stop();
     _iteration_stats[it].assignment_time = _it_timer.total_time();
+    _it_timer.reset();
     if (params.verbose >= 2) {
       _iteration_stats[it].cost = compute_cost(points, cluster_ids);
     }
@@ -236,7 +235,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
     parlay::parallel_for(0, grouped.size(), [&](size_t i) {
       auto del_group = parlay::delayed_tabulate(grouped[i].size(),
                                                 [&](size_t j) { return grouped[i][j].second; });
-      auto data = points.filter_flattened(del_group);
+      auto data = points.filter_flattened_view(del_group);
       parlay::sequence<uint32_t> document_ids;
       if (inner_function) {
         document_ids = parlay::tabulate(grouped[i].size(), [&](size_t j) {
@@ -300,7 +299,7 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
       }
       parlay::parallel_for(grouped.size(), k, [&](size_t i) {
         parlay::sequence<size_t> id = {parlay::hash32(params.seed + i - grouped.size()) % n};
-        auto data = points.filter_flattened(id);
+        auto data = points.filter_flattened_view(id);
         parlay::sequence<uint32_t> document_ids;
         if (inner_function) document_ids = {points.get_id(id[0])};
         if (s >= data.size()) {
@@ -355,9 +354,8 @@ void MVClustering<metric>::train(const PointCloudSet<ChPoint>& points_) {
 
 // Computes cluster ids for each doc point cloud given centroid-point clouds
 // Naive Approach: Independently run one-to-one chamfer computation, and find best for each doc.
-template<bool metric>
-void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint>& points,
-                                                     parlay::sequence<uint32_t>& cluster_ids) {
+inline void MVClustering::compute_cluster_ids_naive(const PointCloudSet<ChPoint>& points,
+                                                    parlay::sequence<uint32_t>& cluster_ids) {
   size_t n = points.size();
   parlay::parallel_for(0, n, [&](uint32_t i) {
     auto dist =
@@ -369,9 +367,8 @@ void MVClustering<metric>::compute_cluster_ids_naive(const PointCloudSet<ChPoint
 // Optimized (eigen)
 // TODO: Need to auto optimize this. Useful function to have for many-to-one and many-to-many
 // chamfer computation.
-template<bool metric>
-void MVClustering<metric>::compute_cluster_ids_old(const PointCloudSet<ChPoint>& points,
-                                                   parlay::sequence<uint32_t>& cluster_ids) {
+inline void MVClustering::compute_cluster_ids_old(const PointCloudSet<ChPoint>& points,
+                                                  parlay::sequence<uint32_t>& cluster_ids) {
   const size_t n = points.size();
   auto points_offsets = points.get_offsets();
   auto centers_offsets = centers.get_offsets();
@@ -392,10 +389,6 @@ void MVClustering<metric>::compute_cluster_ids_old(const PointCloudSet<ChPoint>&
 
     Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> P_block(
         points.data() + p_float_start_offset, num_p_vectors_in_block, d);
-    Eigen::Matrix<float, Eigen::Dynamic, 1> P_block_sq_norms;
-    if constexpr (metric) {  // Only for L2
-      P_block_sq_norms = P_block.rowwise().squaredNorm();
-    }
 
     // Create a matrix to store all chamfer distances for this block.
     Eigen::MatrixXf chamfer_dists_block(num_docs_in_block, k);
@@ -413,15 +406,7 @@ void MVClustering<metric>::compute_cluster_ids_old(const PointCloudSet<ChPoint>&
           centers.data() + centers_offsets[j], center_vec_count, d);
       Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic> dist_matrix_block_j(
           num_p_vectors_in_block, center_vec_count);
-      if constexpr (metric) {  // L2
-        dist_matrix_block_j.noalias() = -2 * (P_block * C_j.transpose());
-        dist_matrix_block_j.colwise() += P_block_sq_norms;
-        Eigen::Matrix<float, 1, Eigen::Dynamic> c_j_sq_norms = C_j.rowwise().squaredNorm();
-        dist_matrix_block_j.rowwise() += c_j_sq_norms;
-        dist_matrix_block_j = dist_matrix_block_j.cwiseMax(0.0);
-      } else {  // IP
-        dist_matrix_block_j.noalias() = -1 * (P_block * C_j.transpose());
-      }
+      dist_matrix_block_j.noalias() = -1 * (P_block * C_j.transpose());
 
       for (size_t i = 0; i < num_docs_in_block; ++i) {
         const size_t doc_vec_offset_in_block =
@@ -442,9 +427,8 @@ void MVClustering<metric>::compute_cluster_ids_old(const PointCloudSet<ChPoint>&
   });
 }
 
-template<bool metric>
-void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& points,
-                                               parlay::sequence<uint32_t>& cluster_ids) {
+inline void MVClustering::compute_cluster_ids(const PointCloudSet<ChPoint>& points,
+                                              parlay::sequence<uint32_t>& cluster_ids) {
   if (assignment_function) {
     assignment_function(points, centers, cluster_ids);
     return;
@@ -455,15 +439,11 @@ void MVClustering<metric>::compute_cluster_ids(const PointCloudSet<ChPoint>& poi
 
 // Computes the k-median cost with chamfer distances, given cluster ids
 // Not optimized with many-to-many computations, since not necessary for optimized runs.
-template<bool metric>
-float MVClustering<metric>::compute_cost(const PointCloudSet<ChPoint>& points,
-                                         const parlay::sequence<uint32_t>& cluster_ids) const {
+inline float MVClustering::compute_cost(const PointCloudSet<ChPoint>& points,
+                                        const parlay::sequence<uint32_t>& cluster_ids) const {
   auto distances = parlay::delayed_tabulate(
       points.size(), [&](size_t i) { return points[i].distance(centers[cluster_ids[i]]); });
   return parlay::reduce(distances);
 }
-
-using MVClusteringL2 = MVClustering<true>;   // Instantiates for L2 metric (metric = true)
-using MVClusteringIP = MVClustering<false>;  // Instantiates for MIPS      (metric = false)
 
 }  // namespace mvsic

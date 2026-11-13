@@ -20,23 +20,21 @@ kernels::CpuIsa selected_isa() {
 }
 }  // namespace
 
-std::unique_ptr<ClusteringKernels> make_clustering_kernels_avx2(const PointCloudSetView&, Metric,
+std::unique_ptr<ClusteringKernels> make_clustering_kernels_avx2(const PointCloudSetView&,
                                                                 const MVClusteringConfig&, bool);
-std::unique_ptr<ClusteringKernels> make_clustering_kernels_avx512(const PointCloudSetView&, Metric,
+std::unique_ptr<ClusteringKernels> make_clustering_kernels_avx512(const PointCloudSetView&,
                                                                   const MVClusteringConfig&, bool);
-std::unique_ptr<ClusteringKernels> make_clustering_kernels_vnni(const PointCloudSetView&, Metric,
+std::unique_ptr<ClusteringKernels> make_clustering_kernels_vnni(const PointCloudSetView&,
                                                                 const MVClusteringConfig&, bool);
 
 std::unique_ptr<ClusteringKernels> make_clustering_kernels(const PointCloudSetView& root,
-                                                           Metric metric,
                                                            const MVClusteringConfig& config,
                                                            bool prepare_root) {
   switch (selected_isa()) {
     case kernels::CpuIsa::AVX512VNNI:
-      return make_clustering_kernels_vnni(root, metric, config, prepare_root);
-    case kernels::CpuIsa::AVX512:
-      return make_clustering_kernels_avx512(root, metric, config, prepare_root);
-    default: return make_clustering_kernels_avx2(root, metric, config, prepare_root);
+      return make_clustering_kernels_vnni(root, config, prepare_root);
+    case kernels::CpuIsa::AVX512: return make_clustering_kernels_avx512(root, config, prepare_root);
+    default: return make_clustering_kernels_avx2(root, config, prepare_root);
   }
 }
 

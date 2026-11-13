@@ -5,8 +5,10 @@ import copy
 import csv
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -26,7 +28,7 @@ class WorkflowTests(unittest.TestCase):
             "name": "original YAML", "datasets": [{"name": "tiny", "path": "data/tiny", "is_mmap": True,
                                                       "index_dir": "indices/tiny", "results_dir": "results/tiny"}],
             "indices": [{"name": "mvivf", "metric": "ip", "builds": [{
-                "build_name": "tree", "build_params": {"max_leaf_size": 8, "inner_metric": "l2"},
+                "build_name": "tree", "build_params": {"max_leaf_size": 8, "inner_init": "uniform"},
                 "variants": [{"name": "tq1", "compress": True, "quantizer": "OneBitTQ"},
                              {"name": "tq4", "compress": False, "quantizer": "TQ"}],
                 "search_configs": [{"name": "k=2", "params": {
@@ -45,7 +47,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertTrue(all(point["num_rerank"] == 4 for point in jobs[1]["points"]))
         self.assertEqual(jobs[0]["legacy"]["csv"], str(self.root / "results/tiny/mvivf/tree/tq1/k=2/latency_results_nr0.csv"))
         self.assertEqual(jobs[0]["config"]["build"]["output"], str(self.root / "indices/tiny/mvivf/tree/index.bin"))
-        self.assertEqual(jobs[0]["config"]["index"]["params"]["inner_metric"], "l2")
+        self.assertEqual(jobs[0]["config"]["index"]["params"]["inner_init"], "uniform")
         self.assertEqual(jobs[0]["config"]["measurement"]["repeats"], 1)
         build = self.jobs("build", build_threads=2)
         self.assertEqual(len(build), 1)
@@ -80,6 +82,7 @@ class WorkflowTests(unittest.TestCase):
     def test_retired_methods_codecs_metrics_and_output_collisions_fail(self):
         for mutate in (lambda raw: raw["indices"][0].update(name="muvera"),
                        lambda raw: raw["indices"][0].update(metric="l2"),
+                       lambda raw: raw["indices"][0]["builds"][0]["build_params"].update(inner_metric="l2"),
                        lambda raw: raw["indices"][0]["builds"][0]["variants"][0].update(quantizer="FastScan"),
                        lambda raw: raw["indices"][0]["builds"][0]["variants"][1].update(name="tq1")):
             with self.subTest(mutate=mutate):
@@ -130,6 +133,38 @@ class WorkflowTests(unittest.TestCase):
             self.raw["indices"][0]["builds"][0]["search_configs"][0]["params"]["nprobes"].append(32)
             second = run("search", self.raw, self.root / "a.yaml", base_dir=self.root, mode="latency")
         self.assertEqual(first, second, "adding sweep points must preserve completed raw records")
+
+    def test_original_yaml_workers_resolve_independent_parlay_and_library_limits(self):
+        data = self.root / "data/tiny"
+        data.mkdir(parents=True)
+        for suffix in ("points.pcs", "queries.pcs", "chamfer_neighbors.gt"):
+            (data / f"tiny_{suffix}").write_bytes(b"identity-only fixture")
+        runtime = {"native": {"sha256": "binary"}, "package_version": "test"}
+        libraries = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                     "VECLIB_MAXIMUM_THREADS", "RAYON_NUM_THREADS")
+        cases = [("batch", {}, 16, {}),
+                 ("multi_latency", {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "2"}, 16, {"MKL_NUM_THREADS": "2"}),
+                 ("latency", {name: "8" for name in libraries}, 1, {})]
+        for mode, provided, threads, expected in cases:
+            with self.subTest(mode=mode), patch.dict(os.environ, {"PARLAY_NUM_THREADS": "99", **provided}, clear=True), \
+                 patch("mvsic.benchmark.workflow.runtime_identity", return_value=runtime), \
+                 patch("mvsic.benchmark.workflow._check_artifact", return_value=("tree", None)), \
+                 patch("mvsic.benchmark.runner.subprocess.run", return_value=SimpleNamespace(returncode=0)) as process, \
+                 patch("builtins.print"):
+                directories = run("search", self.raw, self.root / "a.yaml", base_dir=self.root,
+                                  mode=mode, num_threads=16, build_threads=16)
+                self.assertEqual(len(directories), 2, "named sweeps still share one process per serving variant")
+                for call in process.call_args_list:
+                    env = call.kwargs["env"]
+                    self.assertEqual(env["PARLAY_NUM_THREADS"], str(threads))
+                    for name in libraries:
+                        self.assertEqual(env[name], expected.get(name, "1"))
+                for directory in directories:
+                    metadata = json.loads((directory / "search-process.json").read_text())["thread_environment"]
+                    self.assertEqual(metadata["provided"]["OMP_NUM_THREADS"], provided.get("OMP_NUM_THREADS"))
+                    limits = json.loads((directory / "manifest.json").read_text())["runtime"]["thread_environment"]
+                    self.assertEqual(limits["search"], metadata["effective"])
+                    self.assertEqual(limits["build"]["PARLAY_NUM_THREADS"], "16")
 
     def test_csv_precision_resume_tampering_and_stopping(self):
         options = {"csv": str(self.root / "latency_results_nr4.csv"), "mode": "latency", "both_modes": False,

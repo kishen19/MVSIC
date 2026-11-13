@@ -14,8 +14,7 @@ namespace mvsic {
  */
 class IndexMVIVF final : public Index {
  public:
-  // L2 is available to clustering, but is not a retrieval metric.
-  IndexMVIVF(uint32_t d, Metric metric, const IndexParams& params = IndexParams::mvivf());
+  explicit IndexMVIVF(uint32_t d, const IndexParams& params = IndexParams::mvivf());
   ~IndexMVIVF() override;
   IndexMVIVF(IndexMVIVF&&) noexcept;
   IndexMVIVF& operator=(IndexMVIVF&&) noexcept;
@@ -35,7 +34,6 @@ class IndexMVIVF final : public Index {
                            const SearchParams& params) const override;
   void save(const std::string& filename) const override;
   void load(const std::string& filename, const PointCloudSetView& points) override;
-  Metric metric() const noexcept override;
   uint32_t get_dims() const noexcept override;
   size_t get_height() const noexcept;
   size_t mean_cluster_size() const noexcept;

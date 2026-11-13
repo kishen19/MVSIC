@@ -8,8 +8,8 @@ reranking of 50 candidates, and probes 4/8/16/32. Native latency and batch use
 one and eight workers on physical CPUs 0/4/8/12/16/20/24/28, all on NUMA node 0
 on this host. No experimental inner-training options are enabled.
 
-Retrieval is IP-only in both comparison drivers; L2 remains a clustering objective
-in the training recipes below. Rebuild the drivers after retiring L2 retrieval: the
+Retrieval and MVClustering are IP-only in both comparison drivers. Rebuild the
+drivers after public API changes: the
 original comparison now instantiates one IP TQ4-center/TQ1-leaf variant, so earlier
 two-metric compilation measurements are a different scope. The original source
 repository is unchanged.
@@ -61,7 +61,16 @@ initial curves. Compilation cost requires separate clean/incremental plans.
 inner-training study documented in [clustering_experiment.md](../clustering_experiment.md).
 They use eight build/batch workers and three model seeds. The smaller
 `clustering_arguana_pilot_base.json` and `clustering_arguana_pilot.json` retain the
-same ten parent-child recipes with one seed, 128 queries, probes 4/8/16/32 and
+same IP parent-child recipes with one seed, 128 queries, probes 4/8/16/32 and
 rerank 50. They measure float assignment first; after explicit recipe selection,
 the quantization phase rebuilds float/TQ8/TQ4/TQ1 with fixed IP serving. Do not
 run this construction study concurrently with the native serving pilot.
+
+The completed historical ten-recipe pilot also included L2 inner objectives.
+Those recipes and the metric API were retired after the L2 screens found no
+benefit for MVIVF. The archived result directories retain their original plans.
+
+Current work retains automatic representative sizing (`s: 0`). Fixed-size,
+fractional-size and per-level sizing experiments are closed at the user's
+request. Their measurements remain archived in the training study; no tuned
+dataset-specific size recipes are shipped with this checkpoint.

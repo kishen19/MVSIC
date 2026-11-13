@@ -19,7 +19,6 @@ class ClusteringKernels {
 };
 
 std::unique_ptr<ClusteringKernels> make_clustering_kernels(const PointCloudSetView& root,
-                                                           Metric metric,
                                                            const MVClusteringConfig& config,
                                                            bool prepare_root);
 
@@ -27,7 +26,7 @@ std::unique_ptr<ClusteringKernels> make_clustering_kernels(const PointCloudSetVi
 // public document IDs. Prepared encodings are immutable; calls own their scratch.
 class ClusteringContext {
  public:
-  ClusteringContext(const PointCloudSetView& root, Metric metric, const MVClusteringConfig& config);
+  ClusteringContext(const PointCloudSetView& root, const MVClusteringConfig& config);
   ~ClusteringContext();
   ClusteringResult cluster(const PointCloudSetView& local, std::span<const uint32_t> root_rows,
                            uint32_t k, uint32_t s) const;

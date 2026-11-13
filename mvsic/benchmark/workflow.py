@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from .config import SEARCH_DEFAULTS, digest, resolve_config
-from .runner import atomic_json, build_identity, file_identity, runtime_identity, writer_lock, _worker
+from .runner import atomic_json, build_identity, execution_runtime, file_identity, runtime_identity, writer_lock, _worker
 
 
 MODES = {"latency": "latency_single", "multi_latency": "latency_parallel", "batch": "throughput_batch"}
@@ -170,7 +170,7 @@ def prepare(raw, source, action, **options):
             if index.get("name") != "mvivf":
                 raise ValueError(f"installed benchmark supports mvivf; method {index.get('name')!r} is not installed")
             if str(index.get("metric", "ip")).lower() != "ip":
-                raise ValueError("MVIVF retrieval supports only ip; L2 remains a clustering objective")
+                raise ValueError("MVIVF supports only ip (MaxSim); L2 is retired")
             if "builds" in index and "build_configs" in index:
                 raise ValueError("use builds or build_configs, not both in one index")
             combined = "build_configs" in index
@@ -290,10 +290,11 @@ def run(action, raw, source, **options):
                 if filename not in cached_inputs:
                     cached_inputs[filename] = file_identity(filename)
                 inputs[key] = cached_inputs[filename]
-            context = {"schema_version": 1, "inputs": inputs, "runtime": runtime,
-                       "config_fingerprint": digest(value), "build_fingerprint": build_identity(value, inputs, runtime)}
+            job_runtime = execution_runtime(runtime, value, os.environ)
+            context = {"schema_version": 1, "inputs": inputs, "runtime": job_runtime,
+                       "config_fingerprint": digest(value), "build_fingerprint": build_identity(value, inputs, job_runtime)}
             stable = {key: val for key, val in value.items() if key != "search"}
-            directory = Path(value["output"]["directory"]) / ".mvsic" / digest({"config": stable, "runtime": runtime, "inputs": inputs})
+            directory = Path(value["output"]["directory"]) / ".mvsic" / digest({"config": stable, "runtime": job_runtime, "inputs": inputs})
             directory.mkdir(parents=True, exist_ok=True)
             with writer_lock(directory / ".lock"), writer_lock(Path(value["build"]["output"] + ".lock")):
                 if action == "search":
@@ -316,7 +317,7 @@ def run(action, raw, source, **options):
                     structural = {key: params[key] for key in ("k_per_level", "max_leaf_size", "max_depth", "s", "compress_input")}
                     structural.update(method="MVIVF", num_spill=1, num_spill_l2=1,
                                       build_with_8btq=params["assignment_quantizer"] == "TQ8",
-                                      mvclus={key: params[key] for key in ("niters", "max_point_clouds_per_cluster", "max_points_per_centroid_inner_kmeans", "init", "seed", "use_weighted_inner_kmeans", "assignment_quantizer", "inner_metric", "inner_init", "inner_backend")})
+                                      mvclus={key: params[key] for key in ("niters", "max_point_clouds_per_cluster", "max_points_per_centroid_inner_kmeans", "init", "seed", "use_weighted_inner_kmeans", "assignment_quantizer", "inner_init", "inner_backend")})
                     atomic_json(target / "index_params.json", structural)
                     atomic_json(target / "build_stats.json", {"build_time_sec": record["build_seconds"],
                                 "index_size_mb": record["artifact"]["bytes"] / 2**20, "build_params": params,

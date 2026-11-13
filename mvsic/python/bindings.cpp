@@ -121,8 +121,7 @@ py::tuple Arrays(const BatchNeighbors& values, size_t k) {
 
 PYBIND11_MODULE(_mvsic, m) {
   using namespace mvsic;
-  m.doc() = "Compiled MaxSim MVIVF with independent IP/L2 clustering";
-  py::enum_<Metric>(m, "Metric").value("IP", Metric::IP).value("L2", Metric::L2);
+  m.doc() = "Compiled MaxSim MVIVF with independent clustering assignment quantization";
   py::enum_<ClusteringQuantizer>(m, "ClusteringQuantizer")
       .value("None_", ClusteringQuantizer::None)
       .value("TQ8", ClusteringQuantizer::TQ8)
@@ -176,7 +175,6 @@ PYBIND11_MODULE(_mvsic, m) {
   FIELD(mvclus, use_weighted_inner_kmeans);
   FIELD(mvclus, assignment_quantizer);
   FIELD(mvclus, build_with_8btq);
-  FIELD(mvclus, inner_metric);
   FIELD(mvclus, inner_init);
   FIELD(mvclus, inner_backend);
 #undef FIELD
@@ -225,8 +223,15 @@ PYBIND11_MODULE(_mvsic, m) {
 
   py::class_<Index, std::unique_ptr<Index>>(m, "Index");
   py::class_<IndexMVIVF, Index>(m, "IndexMVIVF")
-      .def(py::init<uint32_t, Metric, const IndexParams&>(), py::arg("d"),
-           py::arg("metric") = Metric::IP, py::arg("params") = IndexParams::mvivf())
+      .def(py::init<uint32_t, const IndexParams&>(), py::arg("d"),
+           py::arg("params") = IndexParams::mvivf())
+      // Accept the original config spelling at the Python boundary only.
+      .def(py::init([](uint32_t d, const std::string& metric, const IndexParams& params) {
+             if (metric != "ip")
+               throw std::invalid_argument("MVIVF supports only ip (MaxSim); L2 is retired");
+             return IndexMVIVF(d, params);
+           }),
+           py::arg("d"), py::arg("metric"), py::arg("params") = IndexParams::mvivf())
       .def("build", &IndexMVIVF::build, py::call_guard<py::gil_scoped_release>())
       .def("load", &IndexMVIVF::load, py::call_guard<py::gil_scoped_release>())
       .def("save", &IndexMVIVF::save, py::call_guard<py::gil_scoped_release>())
@@ -266,8 +271,7 @@ PYBIND11_MODULE(_mvsic, m) {
       .def("get_height", &IndexMVIVF::get_height)
       .def("mean_cluster_size", &IndexMVIVF::mean_cluster_size)
       .def("max_cluster_size", &IndexMVIVF::max_cluster_size)
-      .def("get_flat_clustering", &IndexMVIVF::get_flat_clustering)
-      .def_property_readonly("metric", &IndexMVIVF::metric);
+      .def("get_flat_clustering", &IndexMVIVF::get_flat_clustering);
 
   m.def(
       "benchmark",
@@ -324,12 +328,14 @@ PYBIND11_MODULE(_mvsic, m) {
 
   m.def(
       "cluster_point_clouds",
-      [](const PointCloudSetView& points, uint32_t k, uint32_t s, Metric metric,
-         const MVClusteringConfig& config) {
+      [](const PointCloudSetView& points, uint32_t k, uint32_t s, const MVClusteringConfig& config,
+         const std::string& metric) {
+        if (metric != "ip")
+          throw std::invalid_argument("MVClustering supports only ip (MaxSim); L2 is retired");
         ClusteringResult result;
         {
           py::gil_scoped_release gil;
-          result = cluster_point_clouds(points, k, s, metric, config);
+          result = cluster_point_clouds(points, k, s, config);
         }
         py::array_t<uint32_t> assignments(result.assignments.size());
         std::copy(result.assignments.begin(), result.assignments.end(), assignments.mutable_data());
@@ -347,6 +353,6 @@ PYBIND11_MODULE(_mvsic, m) {
         stats["iterations"] = iterations;
         return py::make_tuple(result.centers, assignments, stats);
       },
-      py::arg("points"), py::arg("k"), py::arg("s"), py::arg("metric") = Metric::IP,
-      py::arg("config") = MVClusteringConfig{});
+      py::arg("points"), py::arg("k"), py::arg("s"), py::arg("config") = MVClusteringConfig{},
+      py::kw_only(), py::arg("metric") = "ip");
 }

@@ -166,7 +166,7 @@ indices:
     metric: ip
     build_configs:
       - name: tree
-        params: &settings {max_leaf_size: 64, niters: 2, seed: 0, inner_metric: l2}
+        params: &settings {max_leaf_size: 64, niters: 2, seed: 0, inner_init: uniform}
       - name: second_tree
         params: {<<: *settings, seed: 7}
 """)
@@ -181,7 +181,8 @@ indices:
         assert (directory / "index.bin").is_file()
         stats = json.loads((directory / "build_stats.json").read_text())
         assert stats["build_time_sec"] > 0
-        assert stats["build_params"]["inner_metric"] == "l2"
+        assert stats["build_params"]["inner_init"] == "uniform"
+        assert "inner_metric" not in stats["build_params"]
         assert (directory / "index_params.json").is_file()
     artifact = tmp_path / "indices/tiny/mvivf/tree/index.bin"
     built_time = artifact.stat().st_mtime_ns
@@ -191,7 +192,7 @@ indices:
         "datasets": [{"name": "tiny", "path": "data/tiny", "index_dir": "indices/tiny",
                       "results_dir": "results/tiny", "is_mmap": True}],
         "indices": [{"name": "mvivf", "metric": "ip", "builds": [{
-            "build_name": "tree", "build_params": {"max_leaf_size": 64, "niters": 2, "seed": 0, "inner_metric": "l2"},
+            "build_name": "tree", "build_params": {"max_leaf_size": 64, "niters": 2, "seed": 0, "inner_init": "uniform"},
             "variants": [{"name": "", "compress": False, "quantizer": "None"},
                          {"name": "tq8", "compress": True, "quantizer": "EightBitTQ"}],
             "search_configs": [{"name": "k=3", "params": {

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <barrier>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <exception>
@@ -99,7 +100,7 @@ void verify_retrieval(const std::filesystem::path& path) {
   auto params = IndexParams::mvivf(4, 6, false, 0, 2, 100, 20, "Random", 3, true, 2);
   params.quantize_centers = false;
   params.pq.method = IndexParams::QuantizerType::None;
-  IndexMVIVF index(corpus.d, Metric::IP, params);
+  IndexMVIVF index(corpus.d, params);
   index.build(corpus);
   check(index.get_height() > 1, "Tree did not split");
   auto search = SearchParams::mvivf(10, 1000, 0, false);
@@ -113,7 +114,7 @@ void verify_retrieval(const std::filesystem::path& path) {
   for (size_t i = 0; i < many_queries.n; ++i)
     equal(many[i], oracle(many_queries[i], corpus, search.k));
   index.save(path.string());
-  IndexMVIVF loaded(corpus.d, Metric::IP, params);
+  IndexMVIVF loaded(corpus.d, params);
   loaded.load(path.string(), corpus);
   equal(loaded.search(queries[2], search), batch[2]);
   auto changed = sample(corpus.n, corpus.d, 5);
@@ -159,7 +160,7 @@ void verify_retrieval(const std::filesystem::path& path) {
                      IndexParams::QuantizerType::EightBitTQ}) {
     params.pq.method = codec;
     params.quantize_centers = true;
-    IndexMVIVF quantized(corpus.d, Metric::IP, params);
+    IndexMVIVF quantized(corpus.d, params);
     quantized.load(path.string(), corpus);
     search.num_rerank = corpus.n;
     auto exact = quantized.search_all(queries, search);
@@ -205,7 +206,7 @@ void verify_retrieval(const std::filesystem::path& path) {
     search.query_compression = SearchParams::QueryCompression::None;
     // Reload after first TQ8 use must replace both its once_flag and corpus.
     quantized.load(path.string(), changed);
-    IndexMVIVF fresh(corpus.d, Metric::IP, params);
+    IndexMVIVF fresh(corpus.d, params);
     fresh.load(path.string(), changed);
     search.tq8_rerank = true;
     equal(quantized.search(queries[0], search), fresh.search(queries[0], search));
@@ -215,7 +216,7 @@ void verify_retrieval(const std::filesystem::path& path) {
   // A leaf-only root, moved index and released caller owner all remain usable.
   auto tiny = sample(3, 128, 12);
   params.pq.method = IndexParams::QuantizerType::None;
-  IndexMVIVF single(128, Metric::IP, params);
+  IndexMVIVF single(128, params);
   single.build(tiny);
   check(single.get_height() == 1, "Leaf-only root has incorrect height");
   auto expected = oracle(queries[0], tiny, 10);
@@ -229,13 +230,13 @@ void verify_retrieval(const std::filesystem::path& path) {
   search.num_rerank = scaled.n;
   equal(moved.search(queries[0], search), oracle(queries[0], scaled, search.k));
   params.pq.method = IndexParams::QuantizerType::OneBitTQ;
-  IndexMVIVF unit_only(128, Metric::IP, params);
+  IndexMVIVF unit_only(128, params);
   rejects([&] { unit_only.build(scaled); });
   auto duplicate = sample(6, 128, 6);
   std::vector<float> same(6 * 128, 0); for (size_t i = 0; i < 6; ++i) same[i * 128] = 1;
   duplicate = own_point_clouds(std::move(same), {0,128,256,384,512,640,768}, 128);
   params.max_leaf_size = 1;
-  IndexMVIVF collapsed(128, Metric::IP, params);
+  IndexMVIVF collapsed(128, params);
   collapsed.build(duplicate);
   check(collapsed.get_height() == 1, "Collapsed cluster recursed");
   check(collapsed.search(queries[0], search).size() == 6, "Collapsed root omitted documents");
@@ -281,7 +282,7 @@ void verify_concurrent_search(const std::filesystem::path& path) {
     const auto queries = sample(11, 128, 62);
     auto params = IndexParams::mvivf(4, 6, false, 0, 2, 100, 20, "Random", 3, true, 2);
     params.quantize_centers = true;
-    IndexMVIVF skeleton(128, Metric::IP, params);
+    IndexMVIVF skeleton(128, params);
     skeleton.build(corpus);
     check(skeleton.get_height() > 1, "Concurrent fixture needs an internal root");
     skeleton.save(path.string());
@@ -291,11 +292,11 @@ void verify_concurrent_search(const std::filesystem::path& path) {
     // already trained, but the shared full-corpus rerank cache is still lazy.
     for (auto codec : {IndexParams::QuantizerType::OneBitTQ, IndexParams::QuantizerType::EightBitTQ}) {
       params.pq.method = codec;
-      IndexMVIVF reference(128, Metric::IP, params);
+      IndexMVIVF reference(128, params);
       reference.load(path.string(), corpus);
       const auto expected = reference.search_all(queries, search);
 
-      IndexMVIVF shared(128, Metric::IP, params);
+      IndexMVIVF shared(128, params);
       shared.load(path.string(), corpus);  // Deliberately no warmup on this index.
       constexpr size_t callers = 3;
       std::barrier<> start(static_cast<std::ptrdiff_t>(callers));
@@ -463,7 +464,7 @@ TEST(MVIVF, GroupedLeafTopKPreservesEqualScoreBoundary) {
       auto params = IndexParams::mvivf(0, n);
       params.quantize_centers = false;
       params.pq.method = codec;
-      IndexMVIVF index(d, Metric::IP, params);
+      IndexMVIVF index(d, params);
       index.build(points);
       auto request = SearchParams::mvivf(25, 1);
       const auto single = index.search(queries[0], request);
@@ -480,6 +481,81 @@ TEST(MVIVF, GroupedLeafTopKPreservesEqualScoreBoundary) {
   });
 }
 
+TEST(MVIVF, PublicIdTiesSurviveLeafSelectionAndReorderedLoad) {
+  constexpr uint32_t n = 8, d = 128, k = 4, query_count = 64;
+  const std::vector<uint32_t> ids{UINT32_MAX - 1, 0, 78, 4, 56, 7, 34, 2};
+  auto reversed_ids = ids;
+  std::reverse(reversed_ids.begin(), reversed_ids.end());
+  std::vector<uint32_t> identity_ids(n);
+  for (uint32_t i = 0; i < n; ++i) identity_ids[i] = i;
+  auto corpus = [&](const std::vector<uint32_t>& labels) {
+    std::vector<float> values(size_t(n) * d, 0);
+    std::vector<size_t> offsets(n + 1);
+    for (size_t i = 0; i < n; ++i) values[i * d] = 1;
+    for (size_t i = 0; i <= n; ++i) offsets[i] = i * d;
+    return own_point_clouds(std::move(values), std::move(offsets), d, labels);
+  };
+  std::vector<float> query_values(size_t(query_count) * d, 0);
+  std::vector<size_t> query_offsets(query_count + 1);
+  for (size_t i = 0; i < query_count; ++i) query_values[i * d] = 1;
+  for (size_t i = 0; i <= query_count; ++i) query_offsets[i] = i * d;
+  const auto queries = own_point_clouds(std::move(query_values), std::move(query_offsets), d);
+  TemporaryFiles files("public-id-ties");
+  parlay::execute_with_scheduler(1, [&] {
+    for (auto codec : {IndexParams::QuantizerType::None, IndexParams::QuantizerType::OneBitTQ,
+                       IndexParams::QuantizerType::TurboQuant, IndexParams::QuantizerType::EightBitTQ}) {
+      auto params = IndexParams::mvivf(0, n);
+      params.quantize_centers = false;
+      params.pq.method = codec;
+      // Temporary corpus views release their callers' owners after each call.
+      IndexMVIVF original(d, params), reordered(d, params), loaded(d, params);
+      IndexMVIVF implicit(d, params), identity(d, params);
+      original.build(corpus(ids));
+      reordered.build(corpus(reversed_ids));
+      original.save(files.base.string() + ".mvif");
+      loaded.load(files.base.string() + ".mvif", corpus(reversed_ids));
+      implicit.build(corpus({}));
+      identity.build(corpus(identity_ids));
+      for (const auto [rerank, tq8] : std::array<std::pair<uint32_t, bool>, 5>{
+               {{0, false}, {n, false}, {n, true}, {k + 2, false}, {k + 2, true}}}) {
+        // Force fused leaf selection while keeping every document in one leaf.
+        const auto request = SearchParams::mvivf(k, 3, rerank, tq8);
+        const auto control = implicit.search(queries[0], request);
+        const auto explicit_identity = identity.search(queries[0], request);
+        ASSERT_EQ(control.size(), k);
+        ASSERT_EQ(explicit_identity.size(), k);
+        for (size_t i = 0; i < k; ++i) {
+          EXPECT_EQ(control[i].first, i);
+          EXPECT_EQ(explicit_identity[i].first, control[i].first);
+          EXPECT_EQ(std::bit_cast<uint32_t>(explicit_identity[i].second),
+                    std::bit_cast<uint32_t>(control[i].second));
+        }
+        for (const auto* index : {&original, &reordered, &loaded, &implicit, &identity}) {
+          const auto single = index->search(queries[0], request);
+          const auto batch = index->search_all(queries, request);
+          const std::array<uint32_t, k> expected = index == &implicit || index == &identity
+              ? std::array<uint32_t, k>{0, 1, 2, 3} : std::array<uint32_t, k>{0, 2, 4, 7};
+          ASSERT_EQ(single.size(), k);
+          ASSERT_EQ(batch.size(), query_count);
+          for (size_t i = 0; i < k; ++i) {
+            EXPECT_EQ(single[i].first, expected[i]);
+            EXPECT_EQ(std::bit_cast<uint32_t>(single[i].second),
+                      std::bit_cast<uint32_t>(control[i].second));
+          }
+          for (const auto& row : batch) {
+            ASSERT_EQ(row.size(), k);
+            for (size_t i = 0; i < k; ++i) {
+              EXPECT_EQ(row[i].first, single[i].first);
+              EXPECT_EQ(std::bit_cast<uint32_t>(row[i].second),
+                        std::bit_cast<uint32_t>(single[i].second));
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
 TEST(MVIVF, RetrievalOwnershipAndPersistence) {
   TemporaryFiles files("retrieval-test");
   ASSERT_NO_THROW(verify_retrieval(files.base.string() + ".mvif"));
@@ -491,7 +567,7 @@ TEST(MVIVF, BatchValidationReportsFirstInputErrorOnCaller) {
   params.pq.method = IndexParams::QuantizerType::OneBitTQ;
   params.quantize_centers = false;
   const auto corpus = sample(8, d, 12);
-  IndexMVIVF index(d, Metric::IP, params);
+  IndexMVIVF index(d, params);
   index.build(corpus);
   for (unsigned workers : {1, 4})
     parlay::execute_with_scheduler(workers, [&] {
@@ -523,15 +599,6 @@ TEST(MVIVF, BatchValidationReportsFirstInputErrorOnCaller) {
         }
       }
     });
-}
-
-TEST(MVIVF, RejectsL2Retrieval) {
-  bool rejected_l2 = false;
-  try { IndexMVIVF unsupported(128, Metric::L2); }
-  catch (const std::invalid_argument& error) {
-    rejected_l2 = std::string(error.what()).find("IP/MaxSim") != std::string::npos;
-  }
-  EXPECT_TRUE(rejected_l2);
 }
 
 TEST(MVIVF, PointCloudStorageAndMalformedFiles) {

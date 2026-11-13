@@ -19,12 +19,42 @@ from .config import digest
 
 
 RESULT_VERSION = 1
+THREAD_POLICY_VERSION = 1
+LIBRARY_THREAD_ENVIRONMENT = (
+    "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS", "RAYON_NUM_THREADS",
+)
+THREAD_ENVIRONMENT = ("PARLAY_NUM_THREADS", *LIBRARY_THREAD_ENVIRONMENT)
 KERNEL_ENVIRONMENT = (
     "MVSIC_CPU_ISA", "MVIVF_SUBBATCH", "TSC_GHZ", "LD_LIBRARY_PATH", "LD_PRELOAD",
     "OMP_PROC_BIND", "OMP_PLACES", "OMP_DYNAMIC", "OMP_WAIT_POLICY", "OMP_MAX_ACTIVE_LEVELS",
     "KMP_AFFINITY", "KMP_BLOCKTIME", "GOMP_CPU_AFFINITY", "MKL_DYNAMIC", "OPENBLAS_CORETYPE",
     "GLIBC_TUNABLES", "MALLOC_CONF", "MALLOC_ARENA_MAX",
 )
+
+
+def worker_environment(action, config, environment):
+    """Resolve limits before importing any native library in the child process."""
+    env = dict(environment)
+    provided = {name: env.get(name) for name in THREAD_ENVIRONMENT}
+    execution = config["build"] if action == "build" else config["measurement"]
+    env["PARLAY_NUM_THREADS"] = str(execution["threads"])
+    single = action == "search" and execution["mode"] == "latency_single"
+    for name in LIBRARY_THREAD_ENVIRONMENT:
+        if single:
+            env[name] = "1"
+        else:
+            env.setdefault(name, "1")
+    return env, {"policy_version": THREAD_POLICY_VERSION, "provided": provided,
+                 "effective": {name: env[name] for name in THREAD_ENVIRONMENT}}
+
+
+def execution_runtime(runtime, config, environment):
+    # Both limits are retained: search concurrency must not change a build's identity.
+    return {**runtime, "thread_environment": {
+        "policy_version": THREAD_POLICY_VERSION,
+        **{action: worker_environment(action, config, environment)[1]["effective"]
+           for action in ("build", "search")}}}
 
 
 def atomic_json(path, value):
@@ -124,6 +154,8 @@ def build_identity(config, inputs, runtime):
                    "execution": {key: config["build"][key] for key in ("threads", "cpu")},
                    "native": runtime["native"], "native_libraries": runtime.get("native_libraries", {}),
                    "environment": runtime.get("environment", {}),
+                   "thread_environment": {"policy_version": THREAD_POLICY_VERSION,
+                                          "limits": runtime.get("thread_environment", {}).get("build", {})},
                    "numpy_version": runtime.get("numpy_version"), "package_version": runtime["package_version"]})
 
 
@@ -158,19 +190,15 @@ def _worker(action, config, context, directory, force, **extra):
     job.update(extra)
     job_path = directory / f"{action}-job.json"
     atomic_json(job_path, job)
-    env = os.environ.copy()
-    execution = config["build"] if action == "build" else config["measurement"]
-    threads = str(execution["threads"])
-    for name in ("PARLAY_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "RAYON_NUM_THREADS"):
-        env[name] = threads
+    env, thread_environment = worker_environment(action, config, os.environ)
     log_path = directory / f"{action}.log"
     with log_path.open("w") as log:
         result = subprocess.run([sys.executable, "-m", "mvsic.benchmark.worker", str(job_path)],
                                 env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
     atomic_json(directory / f"{action}-process.json",
                 {"status": "complete" if result.returncode == 0 else "failed",
-                 "returncode": result.returncode, "log": str(log_path)})
+                 "returncode": result.returncode, "log": str(log_path),
+                 "thread_environment": thread_environment})
     if result.returncode:
         raise RuntimeError(f"{action} failed (exit {result.returncode}); see {log_path}")
 
@@ -185,7 +213,7 @@ def run(action, config, force=False):
         raise ValueError("search requires dataset.queries")
     inputs = {key: file_identity(dataset[key]) for key in ("points", "queries", "ground_truth")
               if key in dataset and (key == "points" or action == "search")}
-    runtime = runtime_identity()
+    runtime = execution_runtime(runtime_identity(), value, os.environ)
     context = {"schema_version": RESULT_VERSION, "inputs": inputs, "runtime": runtime,
                "config_fingerprint": config.fingerprint}
     context["build_fingerprint"] = build_identity(value, inputs, runtime)

@@ -1,6 +1,6 @@
 #pragma once
 
-// 8-bit TurboQuant clustering: drop-in replacement for `MVClustering<metric>`
+// 8-bit TurboQuant clustering: drop-in replacement for `MVClustering`
 // used by the Flat/Spill implementations. Assignment uses the integer panel
 // kernels from `turboquant_8bit_mv.h`; centroid updates remain float.
 //
@@ -37,11 +37,10 @@
 
 namespace mvsic {
 
-template<bool metric>
 class MVClustering8BTQ {
  public:
-  using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
-  using QModel = ::mvsic::turboquant_8bit_mv::Model<metric>;
+  using ChPoint = ChamferIP_Point;
+  using QModel = ::mvsic::turboquant_8bit_mv::Model<false>;
   using EncSet = typename QModel::EncodedSet;
   using EncQuery = typename QModel::EncodedQuery;
 
@@ -90,7 +89,7 @@ class MVClustering8BTQ {
   // skips its own rotate+quantize step too: the TQ8 backend gathers each
   // row's encoded state directly out of `vec_*` using indices computed from
   // `pc_vec_offsets[points_to_root_[local_pc]]`.
-  void set_shared_vector_cache(::mvsic::lloyds::TQ8VectorCache<metric> vec_cache,
+  void set_shared_vector_cache(::mvsic::lloyds::TQ8VectorCache<false> vec_cache,
                                const parlay::sequence<size_t>& pc_vec_offsets) noexcept {
     vec_cache_ = vec_cache;
     pc_vec_offsets_ = &pc_vec_offsets;
@@ -116,7 +115,7 @@ class MVClustering8BTQ {
   }
 
   // Top-C centers per input point cloud. Returns flat array of size n*C in
-  // best-first order, mirroring MVClustering<metric>::get_topC.
+  // best-first order, mirroring MVClustering::get_topC.
   parlay::sequence<uint32_t> get_topC(const PointCloudSet<ChPoint>& points, uint32_t C) {
     const size_t n = points.size();
     C = std::min(C, k);
@@ -144,7 +143,7 @@ class MVClustering8BTQ {
 
   // Optional per-vector cache for the *inner* kmeans. See
   // set_shared_vector_cache().
-  ::mvsic::lloyds::TQ8VectorCache<metric> vec_cache_{};
+  ::mvsic::lloyds::TQ8VectorCache<false> vec_cache_{};
   const parlay::sequence<size_t>* pc_vec_offsets_ = nullptr;
 
   inline bool has_shared_cache_() const noexcept {
@@ -234,9 +233,8 @@ class MVClustering8BTQ {
   }
 };
 
-template<bool metric>
-void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
-  // ----- Optional subsample (mirror MVClustering<metric>::train).
+inline void MVClustering8BTQ::train(const PointCloudSet<ChPoint>& points_) {
+  // ----- Optional subsample (mirror MVClustering::train).
   // When a shared cache is provided, the subsample picks a subset of the
   // *local* indices into points_; we just propagate those local indices into
   // the cache via points_to_root_ at lookup time.
@@ -471,10 +469,9 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
           });
         }
 
-        ::mvsic::lloyds::TQ8LloydsBackend<metric> B(std::move(data_flat),
-                                                    row_count, d, vec_cache_,
-                                                    vec_root_indices);
-        const char* seed_algo = metric ? "PrefixDoubling" : "UniformlyRandom";
+        ::mvsic::lloyds::TQ8LloydsBackend<false> B(std::move(data_flat), row_count, d, vec_cache_,
+                                                   vec_root_indices);
+        const char* seed_algo = "UniformlyRandom";
         ::mvsic::lloyds::CenterSet new_centers =
             need_weights
                 ? ::mvsic::lloyds::lloyds_kmeans(B, s, seed_algo, /*niters=*/10,
@@ -538,7 +535,7 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
         });
       }
 
-      const ::mvsic::lloyds::TQ8VectorCache<metric>* cache_ptr =
+      const ::mvsic::lloyds::TQ8VectorCache<false>* cache_ptr =
           emit_vec_indices ? &vec_cache_ : nullptr;
       const parlay::sequence<uint32_t>* idx_ptr =
           emit_vec_indices ? &vec_root_indices : nullptr;
@@ -546,14 +543,14 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
       if (s >= row_count) {
         centers.set_point_cloud(i, data);
       } else if (need_weights) {
-        auto new_centers = kmeans_weighted_subsample<metric>(
-            data, weights, s, params.max_points_per_centroid_inner_kmeans,
-            params.verbose >= 3, params.build_with_8btq, cache_ptr, idx_ptr);
+        auto new_centers = kmeans_weighted_subsample<false>(
+            data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
+            params.build_with_8btq, cache_ptr, idx_ptr);
         centers.set_point_cloud(i, new_centers);
       } else {
-        auto new_centers = kmeans_subsample<metric>(
-            data, s, params.max_points_per_centroid_inner_kmeans,
-            params.verbose >= 3, params.build_with_8btq, cache_ptr, idx_ptr);
+        auto new_centers = kmeans_subsample<false>(
+            data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
+            params.build_with_8btq, cache_ptr, idx_ptr);
         centers.set_point_cloud(i, new_centers);
       }
     });
@@ -579,7 +576,7 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
             vec_root_indices[t] = static_cast<uint32_t>(base + t);
           }
         }
-        const ::mvsic::lloyds::TQ8VectorCache<metric>* cache_ptr =
+        const ::mvsic::lloyds::TQ8VectorCache<false>* cache_ptr =
             emit_vec_indices ? &vec_cache_ : nullptr;
         const parlay::sequence<uint32_t>* idx_ptr =
             emit_vec_indices ? &vec_root_indices : nullptr;
@@ -593,12 +590,12 @@ void MVClustering8BTQ<metric>::train(const PointCloudSet<ChPoint>& points_) {
             float w = 1.0f / static_cast<float>(doc_size);
             weights = parlay::sequence<float>(data.size(), w);
           }
-          auto new_centers = kmeans_weighted_subsample<metric>(
+          auto new_centers = kmeans_weighted_subsample<false>(
               data, weights, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
               params.build_with_8btq, cache_ptr, idx_ptr);
           centers.set_point_cloud(i, new_centers);
         } else {
-          auto new_centers = kmeans_subsample<metric>(
+          auto new_centers = kmeans_subsample<false>(
               data, s, params.max_points_per_centroid_inner_kmeans, params.verbose >= 3,
               params.build_with_8btq, cache_ptr, idx_ptr);
           centers.set_point_cloud(i, new_centers);

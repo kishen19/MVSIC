@@ -149,6 +149,7 @@ if(BUILD_TESTING)
   mvsic_target(runtime_test)
   target_link_libraries(runtime_test PRIVATE mvsic_core runtime_test_one runtime_test_two)
   add_test(NAME shared_scheduler COMMAND runtime_test)
+  set_tests_properties(shared_scheduler PROPERTIES TIMEOUT 30)
 endif()
 
 if(MVSIC_BUILD_COMPARISON)

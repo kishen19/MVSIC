@@ -125,6 +125,13 @@ latency. `--mode latency` always uses one worker; multi-latency and batch use
 `--num_threads`, `PARLAY_NUM_THREADS`, or the available CPU count in that order.
 Construction uses `--build-threads`, then `PARLAY_NUM_THREADS`, then available CPUs.
 
+These counts select Parlay concurrency. OpenMP, MKL, OpenBLAS, NumExpr, VecLib
+and Rayon limits default to1; builds and parallel measurements preserve explicit
+environment settings. Single-query latency forces all limits to1. Process
+metadata records provided and effective limits. Build fingerprints include
+effective construction limits, so changing only search concurrency does not
+invalidate a reusable index.
+
 The original stopping policy is retained per named sweep: stop at recall 1.0,
 on the original three-equal-recall plateau rule after more than three points, on
 a recall drop, or below `--QPS_thresh` (default 10; nonpositive disables it).
@@ -174,9 +181,11 @@ float/TQ configs. Serving TQ1 retains its native norm checks.
 Assignment quantization is independent: `assignment_quantizer` accepts `None`
 (float), `TQ8`, `TQ4`, `TQ1`; centroid updates remain float. `build_with_8btq` is
 an existing alias for TQ8 assignment. Both build and search `build_params` must
-state the same training choices. `inner_metric` (`same`, `l2`, `ip`), `inner_init`
-(`default`, `uniform`, `kmeans++`, `prefix_doubling`) and `inner_backend`
-(`legacy`, `adaptive`) control clustering while serving remains IP.
+state the same training choices. `inner_init` (`default`, `uniform`, `kmeans++`,
+`prefix_doubling`) and `inner_backend` (`legacy`, `adaptive`) control spherical
+IP clustering. There is no metric selector in the compiled API. Original YAML
+`metric: ip` is accepted. Older experimental `inner_metric: same` or `ip` fields
+are discarded during validation; `l2` fails explicitly before native work.
 
 Plotting accepts both original top-level `results` and named `plots` groups,
 including group-level `k`, with existing `--affix`, `--style` and `--format`

@@ -22,9 +22,6 @@ void ValidateValues(const PointCloudSetView& points) {
       throw std::invalid_argument("Clustering vector norms must be finite and fit float scoring");
   }
 }
-void ValidateMetric(Metric metric) {
-  if (metric != Metric::IP && metric != Metric::L2) throw std::invalid_argument("Unknown metric");
-}
 void ValidateQuantizer(ClusteringQuantizer quantizer) {
   switch (quantizer) {
     case ClusteringQuantizer::None:
@@ -44,8 +41,6 @@ void validate_clustering_config(const MVClusteringConfig& config) {
   if (config.build_with_8btq && config.assignment_quantizer != ClusteringQuantizer::None &&
       config.assignment_quantizer != ClusteringQuantizer::TQ8)
     throw std::invalid_argument("build_with_8btq conflicts with assignment_quantizer");
-  if (config.inner_metric != "same" && config.inner_metric != "l2" && config.inner_metric != "ip")
-    throw std::invalid_argument("inner_metric must be same, l2 or ip");
   if (config.inner_init != "default" && config.inner_init != "uniform" &&
       config.inner_init != "kmeans++" && config.inner_init != "prefix_doubling")
     throw std::invalid_argument("inner_init must be default, uniform, kmeans++ or prefix_doubling");
@@ -57,12 +52,12 @@ struct ClusteringContext::Impl {
   std::unique_ptr<ClusteringKernels> kernels;
 };
 
-ClusteringContext::ClusteringContext(const PointCloudSetView& root, Metric metric,
+ClusteringContext::ClusteringContext(const PointCloudSetView& root,
                                      const MVClusteringConfig& config) :
     impl_(std::make_unique<Impl>()) {
   // Index build has already checked root values and configuration. Selection
   // and preparation happen once; recursive calls reuse immutable encodings.
-  impl_->kernels = make_clustering_kernels(root, metric, config, true);
+  impl_->kernels = make_clustering_kernels(root, config, true);
 }
 ClusteringContext::~ClusteringContext() = default;
 ClusteringResult ClusteringContext::cluster(const PointCloudSetView& local,
@@ -72,25 +67,23 @@ ClusteringResult ClusteringContext::cluster(const PointCloudSetView& local,
 }
 
 ClusteringResult cluster_point_clouds(const PointCloudSetView& points, uint32_t k, uint32_t s,
-                                      Metric metric, const MVClusteringConfig& config) {
+                                      const MVClusteringConfig& config) {
   points.validate();
   ValidateValues(points);
-  ValidateMetric(metric);
   validate_clustering_config(config);
   if ((config.assignment_quantizer != ClusteringQuantizer::None || config.build_with_8btq) &&
       points.d > 65535)
     throw std::invalid_argument("Quantized clustering supports at most 65535 dimensions");
   if (k == 0 || k > points.size()) throw std::invalid_argument("Clustering requires 1 <= k <= n");
-  auto kernels = make_clustering_kernels(points, metric, config, false);
+  auto kernels = make_clustering_kernels(points, config, false);
   return kernels->cluster(points, {}, k, s);
 }
 
 std::vector<uint32_t> assign_point_clouds(const PointCloudSetView& points,
-                                          const PointCloudSetView& centers, Metric metric,
+                                          const PointCloudSetView& centers,
                                           ClusteringQuantizer quantizer, uint32_t seed) {
   points.validate();
   centers.validate();
-  ValidateMetric(metric);
   ValidateValues(points);
   ValidateValues(centers);
   ValidateQuantizer(quantizer);
@@ -100,7 +93,7 @@ std::vector<uint32_t> assign_point_clouds(const PointCloudSetView& points,
   MVClusteringConfig config;
   config.assignment_quantizer = quantizer;
   config.seed = seed;
-  auto kernels = make_clustering_kernels(points, metric, config, false);
+  auto kernels = make_clustering_kernels(points, config, false);
   return kernels->assign(points, centers);
 }
 }  // namespace mvsic

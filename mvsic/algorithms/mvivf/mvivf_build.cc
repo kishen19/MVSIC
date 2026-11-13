@@ -166,9 +166,7 @@ void IndexMVIVF::Impl::prepare() {
   kernels->prepare_nodes(nodes, encoded);
 }
 
-IndexMVIVF::IndexMVIVF(uint32_t d, Metric metric, const IndexParams& params) {
-  if (metric != Metric::IP)
-    throw std::invalid_argument("MVIVF retrieval supports only IP/MaxSim; L2 is available for clustering");
+IndexMVIVF::IndexMVIVF(uint32_t d, const IndexParams& params) {
   impl_ = std::make_unique<Impl>(d, params);
 }
 IndexMVIVF::~IndexMVIVF() = default;
@@ -183,7 +181,7 @@ void IndexMVIVF::build(const PointCloudSetView& points) {
   std::iota(rows.begin(), rows.end(), 0);
   std::unique_ptr<ClusteringContext> clustering;
   if (points.n > next->params.max_leaf_size)
-    clustering = std::make_unique<ClusteringContext>(points, Metric::IP, next->params.mvclus);
+    clustering = std::make_unique<ClusteringContext>(points, next->params.mvclus);
   auto root = recursive_build(points, std::move(rows), 0, clustering.get(), next->params);
   flatten(root, next->nodes);
   root = {};
@@ -305,7 +303,6 @@ void IndexMVIVF::load(const std::string& filename, const PointCloudSetView& poin
   impl_ = std::move(next);
 }
 
-Metric IndexMVIVF::metric() const noexcept { return Metric::IP; }
 uint32_t IndexMVIVF::get_dims() const noexcept { return impl_->d; }
 size_t IndexMVIVF::get_height() const noexcept { return impl_->height; }
 const IndexParams& IndexMVIVF::params() const noexcept { return impl_->params; }

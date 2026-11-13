@@ -1,6 +1,26 @@
 --- a/parlay/scheduler.h
 +++ b/parlay/scheduler.h
-@@ -92,7 +92,13 @@
+@@ -50,6 +50,19 @@
+ 
+ namespace parlay {
+ 
++#if defined(PARLAY_SHARED_SCHEDULER) && PARLAY_ELASTIC_PARALLELISM
++namespace internal {
++// Sleep and wake operations share one implementation even when the caller and
++// the pool's workers belong to different ISA-isolated libraries.
++__attribute__((visibility("default")))
++void shared_scheduler_wait(const std::atomic<size_t>* counter, size_t value);
++__attribute__((visibility("default")))
++void shared_scheduler_notify_one(std::atomic<size_t>* counter);
++__attribute__((visibility("default")))
++void shared_scheduler_notify_all(std::atomic<size_t>* counter);
++}  // namespace internal
++#endif
++
+ 
+ template <typename Job>
+ struct scheduler {
+@@ -92,7 +105,13 @@
    // before it goes to sleep to save CPU time.
    constexpr static std::chrono::microseconds STEAL_TIMEOUT{PARLAY_ELASTIC_STEAL_TIMEOUT};
  
@@ -14,7 +34,42 @@
  
   public:
  
-@@ -336,6 +342,13 @@
+@@ -281,7 +300,11 @@
+   void wake_up_a_worker() {
+     if (num_awake_workers.load(std::memory_order_acquire) < num_threads) {
+       wake_up_counter.fetch_add(1);
++#ifdef PARLAY_SHARED_SCHEDULER
++      internal::shared_scheduler_notify_one(&wake_up_counter);
++#else
+       parlay::atomic_notify_one(&wake_up_counter);
++#endif
+     }
+   }
+   
+@@ -289,14 +312,22 @@
+   void wake_up_all_workers() {
+     if (num_awake_workers.load(std::memory_order_acquire) < num_threads) {
+       wake_up_counter.fetch_add(1);
++#ifdef PARLAY_SHARED_SCHEDULER
++      internal::shared_scheduler_notify_all(&wake_up_counter);
++#else
+       parlay::atomic_notify_all(&wake_up_counter);
++#endif
+     }
+   }
+   
+   // Wait until notified to wake up
+   void wait_for_work() {
+     num_awake_workers.fetch_sub(1);
++#ifdef PARLAY_SHARED_SCHEDULER
++    internal::shared_scheduler_wait(&wake_up_counter, wake_up_counter.load());
++#else
+     parlay::atomic_wait(&wake_up_counter, wake_up_counter.load());
++#endif
+     num_awake_workers.fetch_add(1);
+   }
+ 
+@@ -336,6 +367,13 @@
    // Fork two thunks and wait until they both finish.
    template <typename L, typename R>
    static void pardo(scheduler_t& scheduler, L&& left, R&& right, bool conservative = false) {
@@ -28,7 +83,7 @@
      auto execute_right = [&]() { std::forward<R>(right)(); };
      auto right_job = make_job(right);
      scheduler.spawn(&right_job);
-@@ -354,6 +367,12 @@
+@@ -354,6 +392,12 @@
    template <typename F>
    static void parfor(scheduler_t& scheduler, size_t start, size_t end, F&& f, size_t granularity = 0, bool conservative = false) {
      if (end <= start) return;
@@ -41,7 +96,7 @@
      if (granularity == 0) {
        size_t done = get_granularity(start, end, f);
        granularity = std::max(done, (end - start) / static_cast<size_t>(128 * scheduler.num_threads));
-@@ -398,6 +417,15 @@
+@@ -398,6 +442,15 @@
  
  };
  

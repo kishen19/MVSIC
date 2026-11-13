@@ -1,5 +1,177 @@
 # MVClustering and CPU kernels handoff — compiled and correctness checked
 
+## Current work
+
+New bounded screens remain private. Root-final-only TQ1 top16 plus Float16
+retains exact Float C5 centers, changes37/57,638 final labels, and improves
+FiQA p32 hits3711→3729. Its balanced serial mean/p95/p99 regress
+0.94%/1.52%/2.23%, so it is stopped without batch or promotion. Its44.771 s
+build is unmatched, not a speedup. The genuine-C1 TQ8 top8 plus Float/previous
+screen matches4096/4096 labels and score bits but takes1.035914 s versus
+Float.714573 s, failing cost before a whole build. The exact Float batching
+follow-up preserves the original single-center kernel and passes12 fixtures
+plus4096 C1 labels/score bits, but streaming is16.48% slower; existing AllPairs
+gains only4.35%, below10%. No grid, full build or promotion. These branches are
+closed; the next phase is raw SVHIVF reference/port work. See REFORMAT_PLAN.md
+and the main handoff for artifacts. Staged MVIVF source remains unchanged.
+
+Exact row views, inner TQ1 input cache reuse and Parlay batch request grouping
+are validated and staged as source 78d7c073. The grouping change is confined to
+the existing search file. Final GCC and installed-package checks pass, and all
+six-file checkpoint is staged. The source/index audit matches all 348 compiled
+files plus three packaging READMEs and excludes the unaccepted Flat integration.
+Installation: `/tmp/mvsic-parlay-requests-env`,
+wheel 5a1eff7d.
+Views remove ownership copies before sampling while retaining Parlay scan/fill
+order. Inner assignments consume root-vector selections immediately and retain
+only pointers to build-lifetime codes; changing centers are still encoded and
+scored. Individual FiQA pairs improve Float 49.101→45.761 s (peak −23.29%) and
+TQ1 28.107→25.867 s, with exact e174fc03/dad38138 trees. The cache avoids
+21.98 million repeated input encodings. These are separate pairs, not additive
+gains. Final source 78d7c073 passes 24 Clang/GCC suite invocations across both
+host ISAs, 12 saved predictions, installed 48 tests plus 36 subtests per ISA and
+both external consumers. Clustering has 21 cases per MC run. The foundation
+65ed65ad exact FiQA tree gates remain valid; only the facade and RECORD change
+in the new wheel, with performance-tested code/relocations/layout preserved
+apart from runtime paths.
+
+The latest source-78d7 comparison passes its declared serial and median-batch
+gates. Original→CSR mean/p95/p99 are 2.932927→2.817973, 3.631704→3.532138 and
+3.897579→3.797675 ms (−3.92%/−2.74%/−2.56%). Median-repeat batch QPS is
+15,004.961→15,010.251 (+0.035%, essentially parity), 5.09% above the source-65ed
+control. Mean-repeat batch QPS remains 1.86% below original (14,830.733 versus
+15,112.118). CSR serial is 1.93%/1.38%/1.55% slower than the source-65ed control;
+do not call every metric an improvement. Recall .943954 exceeds .940967, and
+all current predictions retain exact 1fff7a92 bytes. Six AVX512 suites and six
+saved prediction cases pass for the grouping change. Evidence:
+`selected-view-cache-parlay-grouping-serving192-01` and `parlay-requests-01`.
+The earlier −3.35% original-relative and −1.63% runtime-isolation batch results
+remain retained. VNNI is compile/ELF-only; AMX is unimplemented.
+
+The private policy with float inner training and TQ1/Float8 outer assignment
+achieves Float-quality FiQA recall in 40.925 s, but fails the matched-recall
+p99 gate (+2.93%). It remains
+unpromoted. Completed five-query attribution shows extra routing and about 27%
+more scored leaf documents for queries 38 and 282; all diagnostic predictions
+match prior score/ID bytes. These software counts support work attribution;
+instrumented phase timings are not acceptance measurements.
+
+The genuine previous-center ANN test is complete: mapped previous-plus-entry0
+starts improve assignment agreement 81.52%→95.61%, below dense TQ1+Float4's
+97.58%; quality and total-cost gates fail. FHT encoding is already used, and
+root query code reuse is now implemented and timed above. No graph parameter grid or
+representative-size tuning is pending. Panel alignment is closed below its 10%
+microbenchmark threshold; aligning functions to 64-byte boundaries is rejected
+after 5–7% worse serial latency. Neither experiment changed production code.
+
+## Earlier checkpoint evidence
+
+The exact TQ1 query-word optimization is now staged: FiQA192-worker TQ1 build
+35.494→24.352 s, identical dad38138 saved tree. It removes runtime-sized memcpy
+calls in both ISA scoring loops using existing padded-query ownership; no
+arithmetic, masks, DB-tail handling or assignment policy changes. Full native/
+installed validation passes; current environment `/tmp/mvsic-queryword-env`.
+The TQ1 quality deficit remains and Float remains default.
+
+Latest ArguAna default Float192-worker original/current build pair is6.890/6.387s,
+peak RSS3,570/3,021MiB. Current tree keeps exact SHA62487820 across16/192-worker
+builds; the original changes and has341zero center rows. Current p16 recall is
+lower, p32 higher. Own-model p32 serial mean/p95/p99 and recall gates pass, then
+batch improves1.96% by median-repeat QPS. This accepts the tested refactor
+checkpoint, not a new quantized training default or universal quality dominance.
+
+Current priority is automatic sizing and exact work reduction; fixed-size,
+ratio and per-level tuning is closed at the user's request. Quantization's large
+within-codec speedups must not be confused with float-relative gains: at eight
+workers Float/TQ4/TQ1 build times were37.831/38.664/31.005 s, with lower quantized
+recall. No large equal-recall build win is established.
+
+The earlier cross-library worker-wakeup investigation used the same compiled
+tiny owner object and observed one versus four workers
+for 32 callbacks before/after sharing libstdc++'s waiter table, while scheduler
+TLS is shared in both (`waiter-runtime-build-01`). Three backend relinks change
+only this relocation. Production shared-core wait/notify wrappers are applied;
+`wrapper-timer-validation-01` passes the full Clang/GCC native, saved-tree,
+installed API/YAML and C++ consumer matrix. New environment
+`/tmp/mvsic-runtime-checkpoint-env` includes the corrected timer. VNNI is
+compile/ELF-only; permanent-runtime performance is being checked separately.
+The borrowed-row preload accidentally shares this table too, so its apparent
+copy-only timing comparisons are confounded. Per-node evidence shows44 baseline
+calls on one thread versus43 threads with the preload, with exact TQ1 trees.
+The subsequent no-preload real build gate (`waiter-runtime-arguana-01`) matches
+Float/TQ1 trees exactly. Its one pair shows similar wall/CPU/memory, not a large
+normal-build speedup; the long diagnostic stall does not occur in that pair.
+
+At192, FiQA AUTO float stops at a180-second cap and a separate TQ1 diagnostic at
+60 seconds, neither producing an index. Old TQ1 root clocks show11.66587 s
+assignment and14.27718 s INCLUSIVE updates. The timer was restarted without
+resetting after assignment, so exclusive updates are about2.61131 s; measured
+root iteration phases total about14.27718 s, not25.94305 s. The source reset and
+regression pass19 tests on AVX2/AVX-512; the old trainer fails the focused timer
+case as expected (`clustering-timer-validation-01`). Earlier installed numeric
+DSOs retain the old timer; the current checkpoint is corrected. Assignment is
+about82% of those historical FiQA phases,
+making outer ANN a higher priority after the exact-copy investigation.
+No failed-run quality or
+completed-build ratio is available. Worker count/affinity/quota are verified;
+source/ELF checks find no accidental sequential compilation or split scheduler
+TLS. Logs alone cannot establish actual descendant concurrency.
+
+The temporary borrowed-row prototype uses Parlay-owned const-span descriptors
+in the same scan/fill order, with only selected rows copied into unchanged
+backend float storage. All18 clustering tests, direct zero-copy/order checks
+and exact Float/TQ1 tree hashes pass. Float wall/CPU/peak improve10.0%/9.4%/37.2%;
+TQ1 CPU/peak improve5.8%/35.0% but wall worsens18.2% in one pair. It is not yet
+applied. Per-node clocks and scheduling evidence come before further large runs.
+
+Outer ANN over expensive multivector representatives is a separate hypothesis
+from the failed inner-vector ANN settings. A graph must be rebuilt for every
+center state, preserve directed MaxSim/norm semantics and count graph-build,
+encoding, traversal and refinement costs. Exact duplicate seed clouds require
+canonical routing positions; equal quantized codes are insufficient. The
+current source assessment is preparation only, not a performance result.
+
+The fresh 16-worker default pair (`mvivf-default-build-pair16-01`) reproduces
+the earlier refactor tree exactly. The original tree changes and contains 468
+nonunit center vectors in seven clouds. The offline tree audit proves one
+specific cause: both root representative 59 clouds represent the same 19-vector
+document, but the original leaves 121 zero tail slots; current code repeats real
+vectors through all 140 slots. Original process-global reseed counters are a
+separate source-confirmed race, without per-center attribution in this run.
+The full-query recall delta is 22/7 fewer hits out of 14,060 at 16/32 probes;
+do not label it timer noise or attribute the whole delta to one padding case.
+Build is 22.058 versus 22.472 s; peak RSS falls 27.74%. See the pair's
+`REPORT.md` and `tree-content-audit/REPORT.md` before another training change.
+
+Latest center-size gate: `arguana-center-ratio-01` improves build and matched-
+recall serial latency with half-local-average budgets rounded to16. The same
+rule fails `quora-center-ratio-01`: p40 exceeds baseline p32 recall but increases
+mean/p95/p99 latency; at p32 its recall is lower. Do not promote it globally.
+Production automatic-average sizing remains. The aligned minimum repeats real
+input directions when there are fewer vectors than slots, preserving historical
+PointCloudSet semantics and MaxSim; it does not insert zero/fabricated vectors.
+The corrected independent oracle verifies this explicitly. Details and negative
+findings are in `tests/refactor/TRAINING_EXPLORATION.md`.
+
+November 12 scope update: MVClustering now uses IP for outer clouds and inner
+vectors. The public `Metric` enum/arguments and `inner_metric` field are retired;
+private L2 k-means still trains Euclidean quantizer codebooks. This follows the
+completed ArguAna four-cell outer/inner screen: outer IP/L2 with spherical IP
+centers produced identical tree/prediction bytes; L2 inner means reduced recall.
+The cleanup preserves weighting, norm-aware assignment and float spherical
+updates. Current configs retain IP initializer/backend experiments.
+`ip-api-validation-01` passes the six native suites under Clang/GCC on both host
+ISAs, twelve strict prediction-byte pairs, installed API/YAML tests and the
+external CMake consumer. Research decisions and current priority are in
+`tests/refactor/TRAINING_EXPLORATION.md`; production training defaults remain.
+The older results below remain historical.
+
+Serving-only exact TQ1 duplicate-code counts are now rejected as a compaction
+target: actual padded leaf payload would shrink only 0.035% on ArguAna and
+0.045% on FiQA (`tq1-duplicates-counts-01`). Integer-minimum/encoding oracles
+pass, but savings miss the 3% feasibility gate. No compaction or default change
+was implemented; this does not alter norm-aware training quantization or weights.
+
 Work tree: `/home/kishen/MVSIC-new/MVSIC`, branch `reformat`. This replaces the
 initial pre-compilation handoff. Root owns final staging and acceptance. No
 commit or push has been made. Performance acceptance and experimental default
@@ -91,8 +263,8 @@ Neither is hardware validated. AMX remains a capability/design placeholder.
 ## Completed clustering implementation
 
 The public non-template facade is in
-`mvsic/algorithms/mvivf/mvclustering/mvclustering.h/.cc`. It accepts runtime
-`Metric`, returns owned center storage and center-position assignments, and
+`mvsic/algorithms/mvivf/mvclustering/mvclustering.h/.cc`. It accepts
+IP/MaxSim input, returns owned center storage and center-position assignments, and
 exposes `assign_point_clouds` for assignment checks. Existing template trainer,
 configuration and seeding files moved from `core/mvclustering` to that same
 method directory; the live internal trainer is `mvclustering_impl.h`

@@ -27,8 +27,8 @@ class BuildQualityTests(unittest.TestCase):
         self.spec = {"version": 1, "base_config": "base.json", "model_seeds": [0, 1], "build_repetitions": 2,
                      "build_cpus": [3], "build_threads": 1,
                      "schedules": [{"name": "single", "mode": "latency_single", "threads": 1, "cpus": [3]}],
-                     "training_variants": [{"name": "l2", "changes": {"inner_metric": "l2"}},
-                                           {"name": "l2_seed", "parent": "l2", "changes": {"inner_init": "kmeans++"}}]}
+                     "training_variants": [{"name": "adaptive", "changes": {"inner_backend": "adaptive"}},
+                                           {"name": "adaptive_seed", "parent": "adaptive", "changes": {"inner_init": "kmeans++"}}]}
 
     def test_each_recipe_seed_repeat_gets_own_artifact(self):
         plan = quality.create_plan(self.spec, self.base, self.root / "out", "training")
@@ -45,12 +45,12 @@ class BuildQualityTests(unittest.TestCase):
                 self.assertEqual(search["config"]["measurement"]["query_seed"], self.base["measurement"]["query_seed"])
         self.assertEqual(self.base["index"]["params"]["assignment_quantizer"], "TQ8")
         self.assertEqual([trial["recipe"] for trial in plan["trials"][:6]],
-                         ["reference", "l2", "l2_seed", "l2_seed", "l2", "reference"])
+                         ["reference", "adaptive", "adaptive_seed", "adaptive_seed", "adaptive", "reference"])
 
     def test_quantization_phase_only_changes_assignment_codec(self):
         with self.assertRaisesRegex(ValueError, "selected_training"):
             quality.recipes(self.spec, self.base, "quantization")
-        self.spec["selected_training"] = "l2_seed"
+        self.spec["selected_training"] = "adaptive_seed"
         recipes = quality.recipes(self.spec, self.base, "quantization")
         self.assertEqual([row["name"] for row in recipes], ["float", "TQ8", "TQ4", "TQ1"])
         reference = recipes[0]["params"]
@@ -61,7 +61,8 @@ class BuildQualityTests(unittest.TestCase):
 
     def test_training_variants_cannot_change_serving_or_outer_fields(self):
         for changes in ({"seed": 4}, {"assignment_quantizer": "TQ1"},
-                        {"inner_metric": "l2", "inner_init": "kmeans++"}):
+                        {"inner_metric": "l2"},
+                        {"inner_backend": "adaptive", "inner_init": "kmeans++"}):
             self.spec["training_variants"] = [{"name": "invalid", "changes": changes}]
             with self.assertRaises(ValueError):
                 quality.recipes(self.spec, self.base, "training")
@@ -85,13 +86,13 @@ class BuildQualityTests(unittest.TestCase):
 
     def test_matching_is_paired_by_seed_and_recall(self):
         plan = {"phase": "training", "spec": {}, "recipes": [{"name": "reference", "parent": None},
-                 {"name": "l2", "parent": "reference"}]}
+                 {"name": "adaptive", "parent": "reference"}]}
         point = {"k": 10, "nprobes": 8, "num_rerank": 20}
         def row(recipe, seed, recall, qps):
             return {"recipe": recipe, "seed": seed, "repetition": 0, "schedule": "single",
                     "record": {"params": point, "recall_at_k": recall, "qps": qps}}
-        report = quality.summarize(plan, [], [row("reference", 0, .95, 100), row("l2", 0, .9, 1000),
-                                             row("l2", 1, .99, 1000), row("l2", 0, .951, 110)])
+        report = quality.summarize(plan, [], [row("reference", 0, .95, 100), row("adaptive", 0, .9, 1000),
+                                             row("adaptive", 1, .99, 1000), row("adaptive", 0, .951, 110)])
         self.assertEqual(report["paired_recall_matches"][0]["qps_ratio"], 1.1)
         self.assertFalse(report["automatic_selection"])
 

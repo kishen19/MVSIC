@@ -28,7 +28,7 @@ def _memory():
 def _index_params(native, config):
     params = dict(config["index"]["params"])
     assignment = params.pop("assignment_quantizer")
-    inner = {key: params.pop(key) for key in ("inner_metric", "inner_init", "inner_backend")}
+    inner = {key: params.pop(key) for key in ("inner_init", "inner_backend")}
     ip = native.IndexParams.mvivf(**params)
     for key, value in inner.items():
         setattr(ip.mvclus, key, value)
@@ -40,8 +40,7 @@ def _index_params(native, config):
 
 
 def _index(native, points, config):
-    return native.IndexMVIVF(points.dims, getattr(native.Metric, config["index"]["metric"].upper()),
-                             _index_params(native, config))
+    return native.IndexMVIVF(points.dims, _index_params(native, config))
 
 
 def _params(native, point):

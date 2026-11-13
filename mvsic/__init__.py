@@ -3,7 +3,7 @@
 from importlib import import_module
 
 __version__ = "0.1.0"
-__all__ = ["Metric", "ClusteringQuantizer", "QuantizerType", "QueryCompression",
+__all__ = ["ClusteringQuantizer", "QuantizerType", "QueryCompression",
            "PointCloudSet", "IndexParams", "SearchParams", "MVClusteringConfig", "Index", "IndexMVIVF",
            "capabilities", "cluster_point_clouds", "benchmark_native"]
 

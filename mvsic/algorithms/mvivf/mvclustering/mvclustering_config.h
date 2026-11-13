@@ -26,9 +26,8 @@ struct MVClusteringConfig {
   // old build_with_8btq flag aliases TQ8 when this field is None.
   ClusteringQuantizer assignment_quantizer = ClusteringQuantizer::None;
 
-  // Experimental inner training choices; outer assignment/serving metric is
-  // unchanged. Defaults retain the original objective, seeding and backend.
-  std::string inner_metric = "same";     // same, l2, ip (spherical centroids)
+  // Experimental inner training choices. Inner/outer scores use IP/MaxSim;
+  // defaults retain the original spherical updates, seeding and backend.
   std::string inner_init = "default";    // default, uniform, kmeans++, prefix_doubling
   std::string inner_backend = "legacy";  // legacy, adaptive (float tiles/means)
 

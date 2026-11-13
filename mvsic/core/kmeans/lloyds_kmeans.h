@@ -108,8 +108,8 @@ struct LloydsInitialization {
 // on directions; raw vector lengths and document weights still govern updates.
 // Sampling distances are updated incrementally and never carried across a
 // centroid move. The optional assignment output uses the actual inner metric.
-template<bool metric>
-LloydsInitialization initialize_inner(const parlay::sequence<parlay::sequence<float>>& points,
+template<bool metric, typename Seq>
+LloydsInitialization initialize_inner(const Seq& points,
                                       uint32_t k, std::string_view algorithm, uint32_t seed,
                                       const parlay::sequence<float>* weights,
                                       bool reuse_assignments) {
@@ -1078,9 +1078,9 @@ namespace mvsic {
 // was produced by quantizing `data[i]` under `tq8_cache->model`'s rotator.
 // When the inner loop subsamples to m < n rows, the same hash-map is applied
 // to vec_root_indices so the alignment is preserved.
-template<bool metric>
+template<bool metric, typename Seq>
 ::mvsic::lloyds::CenterSet kmeans_subsample(
-    const parlay::sequence<parlay::sequence<float>>& data, uint32_t k,
+    const Seq& data, uint32_t k,
     uint32_t max_points_per_centroid, bool verbose = false, bool use_tq8 = false,
     const ::mvsic::lloyds::TQ8VectorCache<metric>* tq8_cache = nullptr,
     const parlay::sequence<uint32_t>* tq8_vec_root_indices = nullptr) {
@@ -1131,9 +1131,9 @@ template<bool metric>
 // using the same random indices.  The optional TQ8 cache args mirror the
 // non-weighted version: when supplied, the backend skips per-row
 // rotate+quantize and gathers from `*tq8_cache` via `*tq8_vec_root_indices`.
-template<bool metric>
+template<bool metric, typename Seq>
 ::mvsic::lloyds::CenterSet kmeans_weighted_subsample(
-    const parlay::sequence<parlay::sequence<float>>& data, const parlay::sequence<float>& weights,
+    const Seq& data, const parlay::sequence<float>& weights,
     uint32_t k, uint32_t max_points_per_centroid, bool verbose = false, bool use_tq8 = false,
     const ::mvsic::lloyds::TQ8VectorCache<metric>* tq8_cache = nullptr,
     const parlay::sequence<uint32_t>* tq8_vec_root_indices = nullptr) {

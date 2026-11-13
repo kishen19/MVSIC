@@ -2,8 +2,10 @@
 
 #include <fstream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include "parlay/primitives.h"
+#include "parlay/utilities.h"
 #include "mvsic/core/utils/mmap.h"
 #include "mvsic/core/utils/util.h"
 #include "mvsic/core/distance_measures/one_to_many.h"
@@ -174,6 +176,13 @@ struct PointCloudSet {
   // point clouds whose indices are given in sequence cluster_ids
   template<typename Seq>
   parlay::sequence<parlay::sequence<float>> filter_flattened(const Seq& cluster_ids) const;
+
+  using FlatRow = std::span<const float>;
+  using FlatRows = parlay::sequence<FlatRow>;
+  // Borrowed rows retain the same document/vector order as filter_flattened.
+  // The source storage must stay unchanged throughout the consuming operation.
+  template<typename Seq>
+  FlatRows filter_flattened_view(const Seq& cluster_ids) const;
 
   // Mutating Functions
   template<typename Seq>
@@ -402,6 +411,29 @@ parlay::sequence<parlay::sequence<float>> PointCloudSet<ChPoint>::filter_flatten
     auto coords = data(ind);
     parlay::parallel_for(0, get_size(ind), [&](size_t j) {
       std::memcpy(result[offset + j].begin(), coords + j * dims, dims * sizeof(float));
+    });
+  });
+  return result;
+}
+
+template<typename ChPoint>
+template<typename Seq>
+typename PointCloudSet<ChPoint>::FlatRows PointCloudSet<ChPoint>::filter_flattened_view(
+    const Seq& cluster_ids) const {
+  const size_t num = cluster_ids.size();
+  auto sizes = parlay::delayed_seq<size_t>(num, [&](size_t i) { return get_size(cluster_ids[i]); });
+  size_t total_size;
+  parlay::sequence<size_t> csizes;
+  std::tie(csizes, total_size) = parlay::scan(sizes);
+  // Each row view is written once before the parallel loops join. Only the
+  // subsequently selected inner sample is copied into backend float storage.
+  auto result = FlatRows::uninitialized(total_size);
+  parlay::parallel_for(0, num, [&](size_t i) {
+    const auto ind = cluster_ids[i];
+    const size_t offset = csizes[i];
+    const float* coords = data(ind);
+    parlay::parallel_for(0, get_size(ind), [&](size_t j) {
+      parlay::assign_uninitialized(result[offset + j], FlatRow(coords + j * dims, dims));
     });
   });
   return result;

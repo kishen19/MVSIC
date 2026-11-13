@@ -1,5 +1,366 @@
 # MVIVF refactor handoff — branch `reformat`
 
+## Active work resumed
+
+The final-root-only TQ1 top16 plus Float16 screen passes its fixed-state gate,
+but its one whole FiQA candidate is **not promoted**. The44.771-second build
+retains byte-identical Float C5 centers and changes37/57,638 final root labels.
+Full648-query p32 hits improve3711→3729 with identical shared-ID score bits.
+Balanced serial mean/p95/p99 regress0.94%/1.52%/2.23%, and median full-sweep
+time regresses1.23%; all four local pairs are slower. No batch, alternate probe
+or retry. Evidence: `final-root-float16-screen-01` and
+`root-final-float16-build-01`. The subsequent genuine-C1 TQ8 top8 plus Float
+screen matches every4096 Float label and score bit but fails cost:1.035914 s
+versus Float.714573 s. No whole build or grid follows. Exact Float query batching
+also fails cost: after preserving the original single-center kernel, all12
+fixtures and4096 C1 labels/score bits match, but streaming is16.48% slower.
+Existing AllPairs gains only4.35%, below10%. Both batching attempts are archived
+under `exact-batched-float-c1-screen-{01,02}`; no full build or production change.
+These branches are closed. Active next phase is raw SVHIVF: freeze the original
+typed oracle and v3 fixture, then port the concrete API and prove output parity
+before fresh-build or performance runs. Scratch preparation is under
+`/tmp/mvsic_svh_raw_oracle` and `/tmp/mvsic_svh_raw_port`.
+The six-file source78d7 checkpoint below remains staged and unchanged.
+
+The user pointed out that the validated low-recall TQ1 checkpoint was not the
+end of the optimization task. Continue toward Float-quality build speed.
+Two exact screens pass: borrowed rows reduce a FiQA Float pair49.101→45.761 s
+with23.29% lower peak, and root-query reuse reduces a TQ1 pair28.107→25.867 s,
+avoiding21.98M inner encodings. Trees remain exactly e174fc/dad381 respectively.
+The five-file patch plus two existing-suite regressions and the Parlay grouping
+change below are now staged. Normal selected-source Clang/GCC builds, both host ISAs, installed
+Python/YAML/C++ checks and both combined exact-tree gates pass. Source 65ed65ad
+(348 files plus three packaging READMEs), environment
+`/tmp/mvsic-selected-view-cache-env`, wheel a158c659; no unaccepted Flat port is
+compiled or packaged. Its batch regressions (−3.35% versus original, −1.63%
+versus previous current runtime) remain archived. Alignment screens are closed:
+panel alignment misses its gain threshold; function alignment64 worsens latency.
+
+A current-core probe identifies serial request construction at 1.924 ms. The
+original used flat Parlay grouping. That path is restored in one additional
+existing file, mvivf_search.cc, preserving query/group8/scatter order. Source
+78d7c073 passes correctness and its declared serving gate: median batch QPS
+15,010 versus original 15,005, up5.09% versus source65ed; serial mean/p95/p99
+improve3.92%/2.74%/2.56% versus original at higher recall. Mean batch QPS is
+still1.86% lower than original, and serial mean is1.93% slower than source65ed.
+All current outputs retain exact1fff7a92 bytes. Final GCC/incremental-wheel/
+installed checks pass: 24 native suite invocations, 12 exact predictions,
+48 tests plus36 subtests per host ISA, and both consumers. Current environment
+`/tmp/mvsic-parlay-requests-env`, wheel5a1eff7d. Only the facade plus RECORD
+changes from the prior normal wheel; executable/relocation/layout proof passes.
+The six verified files and reports are staged. All348 selected source blobs
+plus three packaging READMEs match compiled78d7; unaccepted Flat stays unstaged.
+No commit or push. No blanket
+all-metric speedup or additive independent build-gain claim is justified.
+
+The original FiQA Float reference completes in57.064 s. Common-runtime full648
+p32 recall is56.913580% original/57.268519% current Float. A private new outer
+policy builds in40.925 s with57.978395% recall: Float first/final, intermediate
+TQ1 top8 plus Float refinement including mapped genuine previous centers, and
+Float legacy10 inner training. Same-p32 median serial latency is1.20% worse.
+The sole matched-recall p31 point retains3718hits versus Float p32's3711,
+improves mean/median, but worsens p99 by2.93%; the strict gate fails. No batch,
+repeat, alternate probe or public/default change is accepted. A no-preload Python symbol-audit
+preflight failure is preserved separately; the corrected RTLD_NOLOAD ownership
+check passes without loading/promoting any library, and actual quality passes.
+No further graph grid or representative-size tuning. See REFORMAT_PLAN.md and
+the SSD artifacts for current gates. Keep working beyond the checkpoint.
+
+## Previous exact query-load checkpoint
+
+The private TQ1 query-word copy optimization is applied and staged after complete
+validation. FiQA TQ1 at192 workers improves35.494→24.352 s with the exact same
+224,221,500-byte index (SHA dad38138). CPU falls6310→4194 s; peak changes+0.085%.
+This preserves existing TQ1 quality, including its deficit versus Float. Float
+remains default; the six-second result below is ArguAna, not FiQA.
+
+Installation for that checkpoint `/tmp/mvsic-queryword-env`, validated worktree
+source3028d477, selected staged inventory89ee99ff. All Clang/GCC native suites,
+twelve saved-tree prediction-byte cases, installed63 tests plus42 subtests per
+host ISA and external consumers pass. Only changed clustering objects were
+rebuilt; the wheel transparently replaces three ISA libraries plus RECORD,
+with unchanged payload/ELF/loader proofs. VNNI is compile/ELF-only. Evidence:
+SSD `tq1-queryword-{probe,override,boundary,validation}-01` and
+`staged-queryword-checkpoint-audit-01`. No commit or push.
+
+The genuine Float C1 warm-start screen is complete, using C0 labels remapped
+after group compaction. Two empty clusters move32 occupied center positions.
+On4096 query positions, previous-plus-entry0 raises ANN Float4 assignment
+agreement81.52%→95.61%; dense TQ1+Float4 reaches97.58%. It reduces scored centers
+but fails the declared quality and total-cost gates. Query-only speed improves
+3.32x; graph/cache rebuild costs0.138 s on this subset. No full-tree ANN/default
+change is accepted. Offline top4-union-previous Float refinement predicts
+96.46% warm versus98.63% dense agreement, without a new native/timing run.
+Artifacts: `outer-assignment-warm-c1-4096-01`. All training rows, duplicates and
+weights remain unchanged; saved current-state labels never seed search.
+
+Encoding already uses FhtKacRotator, also found in local MV-PiPNN. The private
+`tq1-encoding-profile-01` probe now measures one-time root preparation1.008 s:
+descriptor storage.297 s and bundled encoding.693 s. Root training/final
+assignment envelopes total10.168 s, of which10.076 s (99.09%) is scoring and
+.013 s center encoding; query codes are reused. This isolates clustering root
+assignment, not every encoder in the whole index build. A source audit proves TQ1 inner queries can reuse
+immutable root encodings with the existing TQ8-style root-vector mapping.
+Queries currently encode once per inner call, then reuse those codes across
+Lloyd steps; changing centers still require fresh encoding. Audit/proposed
+measurement: `/tmp/mvsic_tq1_encoding_audit`. Host perf sampling is unavailable
+(`perf_event_paranoid=4`, no profiling capability); one permission probe is
+preserved, no retry. The phase probe passes MC19, exact dad381 tree and actual
+library/factory guards. Inner work re-encodes21.98M query vectors and18.25M center
+vectors; these overlapping task walls cannot establish CPU or end-to-end shares.
+The diagnostic build time is not a speed comparison. No encoding rewrite is
+applied. Source proposal: `/tmp/mvsic_tq1_encoding_audit`.
+
+## Latest applied worktree checkpoint (November 12, 2026)
+
+Current user direction: retain automatic representative sizing (`s=0`), close
+fixed-size/ratio/per-level tuning, and use 192 workers only for necessary tests.
+The previous opt-in fixed64 YAML examples have been removed from this checkpoint.
+Historical size experiments remain archived, not recommended as next work.
+
+The corrected MVIVF checkpoint now passes the tested 192-worker acceptance gate.
+Fresh ArguAna Float build is6.890→6.387 s, peak RSS3,570→3,021 MiB. With each fresh model
+at p32, serial mean/p95/p99 improve1.56%/0.15%/0.94%; median batch QPS improves
+1.96%, and current recall.943954 exceeds maximum original serial recall.940967.
+The predeclared serial gate passes before batch runs. Shared-tree serving also
+passes, with mean latency1.834→1.816 ms and median batch QPS19,088→19,579.
+Both studies retain every sample and actual installed-library identity.
+
+Current outputs are byte-identical across modes/processes. The learned Float
+tree retains SHA62487820 across earlier16/192-worker builds. Fresh original
+trees differ; original zero padding/reseed issues remain, and new p16 build
+recall is lower while p32 is higher. Do not imply dominance at every budget.
+See `tests/refactor/CHECKPOINT_REPORT.md` and SSD reports
+`mvivf-default-build-pair192-01`, `mvivf-own-tree-p32-serving192-01`, and
+`mvivf-wrapper-installed-serving192-01`. Flat remains separately unaccepted.
+
+Current FiQA research reference is complete: Float/TQ1 builds take 45.880/35.618 s
+with the same diagnostic proxy, but p32 recall is .572685/.534568 and TQ1 uses
+more memory. Coupled quantization remains experimental. Float root assignment
+takes 18.652 s versus 2.220 s updating across five measured iterations; final
+assignment remains in the untimed residual. The next ANN screen reuses that
+saved Float root and exact partition labels with 4,096 sampled queries, avoiding
+a new training/capture compile. Native fixtures precede the real data screen;
+the first native pilot passes fixtures and all 4,096 saved Float labels, but its
+stock R8/L16/alpha1 graph stops before queries. A same-binary debugger check
+proves zero cache misses and only 196/241 representatives reachable from entry 0.
+This configuration is parked; no ANN quality/speed result or default change is
+accepted. Next is the bounded exact TQ1 query-word copy microbenchmark, with
+all padding/numerical/sanitizer gates before any production edit.
+
+Highest priority is a confirmed shared-runtime wake-up defect. Sharing Parlay's
+scheduler TLS is insufficient: `-Bsymbolic` gives each ISA library its own
+libstdc++ atomic-wait fallback table. Notifications from another library can
+miss sleeping workers. `waiter-runtime-build-01` reproduces this with the same
+compiled owner object: the old link uses one of four workers for all 32 jobs;
+a narrow diagnostic relink shares the table and uses all four. Both complete
+all jobs and share scheduler TLS. All three actual backends have been relinked
+without recompilation; only the waiter-table relocation changes. VNNI receives
+static ELF checks only. Real build/output gates are now recorded above.
+
+Permanent fix now applied and validated: three scheduler wait/notify wrappers in
+the existing shared core, with ISA `-Bsymbolic` retained. The new idle-pool test
+passes under Clang/GCC and fails against the exact old runtime. The complete
+`wrapper-timer-validation-01` checkpoint passes seven suites on both host ISAs
+under both compilers, twelve saved-tree prediction-byte cases, installed 63 tests
+plus 42 subtests per ISA, original YAML and the external C++ consumer. Current
+environment: `/tmp/mvsic-runtime-checkpoint-env`. Compiled source is04b9a413;
+a separately hashed README packaging supplement leaves every code/binary payload
+unchanged. VNNI is compiled/ELF-checked only. Installed performance gates above pass.
+
+The permanent fix routes scheduler wait/notify through the shared core,
+retaining private codec/Eigen bindings and avoiding a libstdc++ internal-symbol
+dependency. Do not promote borrowed rows or infer a clean copy-only speedup:
+its preload also interposes the waiter table. A per-node diagnostic observed
+44 baseline clustering calls on one thread versus43 threads with that preload,
+despite the same192-worker pool and exact tree bytes. This is a runtime
+confound, not evidence that copying alone changes descendant parallelism.
+
+`mvivf-serving192-01` completes serial1 ABBA then batch192 ABBA on the prior
+shared-original tree. Serial mean/p95/p99 improve 1.876/2.332/2.572 to
+1.768/2.172/2.351 ms. Median-repeat QPS is 19,308 to 19,175 (-0.69%), but
+mean-repeat QPS is 19,136 to 16,248 (-15.09%). Both refactor first timed batches
+take 113–115 ms versus 72–74 ms subsequently despite one full warmup. Preserve
+the adverse samples. Current predictions are byte-identical across all four
+serial/batch processes; shared-ID score bits match the original.
+
+The single caller-only diagnostic `mvivf-batch192-phase-trace-01` reproduces that
+transient and localizes about38 ms to query preparation: 40.197 versus
+2.212/1.799 ms later, with12,874 versus1,562/952 minor faults. Root/leaf scoring,
+reranking and destruction have no comparable excess. Correlation is not a
+causal allocator/fault attribution. No numeric kernel was rebuilt or changed.
+The trace library also has its own local waiter table, so its phase observations
+cannot establish the cause of the uninstrumented transient. Verify the eventual
+runtime fix without a profiling preload.
+
+FiQA AUTO float reaches a180-second worker cap at192 without an index
+(`fiqa-auto192-01`); the paired controller stops before TQ1. One separately
+declared TQ1 stage diagnostic reaches its60-second cap, also without an index.
+Its root five iterations report11.66587 s assigning and14.27718 s on the old
+inclusive update clock. A timer-accounting bug double-counted assignment:
+exclusive updates are about2.61131 s, and measured iteration phases total
+about14.27718 s, not25.94305 s. The reset fix passes all 19 clustering tests on
+AVX2 and AVX-512; the same regression fails against the old timer as expected
+(`clustering-timer-validation-01`). The current checkpoint environment contains
+the corrected timer; earlier environments retain the old timer. No completed FiQA
+build/quality or float-relative speed
+ratio can be inferred. Actual worker192 threads/all192 affinity and unrestricted
+CPU quota were checked; representative-size log lines do not establish
+descendant serialization.
+
+The exact borrowed-row prototype (`borrowed-rows-build-01` and
+`borrowed-rows-arguana-hash-01`) passes18 MVClustering tests, the zero-copy/order
+oracle and exact Float/TQ1 full-tree hashes. One192-worker pair reduces Float
+wall/CPU/peak by 10.0%/9.4%/37.2%. TQ1 CPU/peak drop5.8%/35.0%, while wall rises
+18.2%; retain that adverse point. It remains temporary and unpromoted.
+Its performance attribution is suspended by the wake-up defect above.
+Outer ANN over multivector representatives is a distinct, worthwhile next
+screen; rejected cheap inner-vector ANN settings do not settle it. No outer
+graph implementation or experiment has run yet.
+
+`mvivf-default-build-pair16-01` completes one fresh original/installed default
+ArguAna build pair at 16 workers. End-to-end build/preparation is 22.058 versus
+22.472 s (+1.88%); GNU-time peak RSS is 1,980.73 versus 1,431.19 MiB (-27.74%).
+Both trees load correctly. Common-runtime recall on all 1,406 queries is
+.910740 versus .909175 at 16 probes, and .944452 versus .943954 at 32 probes:
+22 and 7 fewer correct neighbors out of 14,060. This closes the missing fresh
+build measurement, but does not establish unconditional build/quality parity.
+
+The installed tree is byte-identical to both earlier refactor builds; the new
+original tree differs from its earlier builds. Offline inspection proves one
+specific original padding defect in this pair: root center 59 represents the
+same 19-vector document 7264 in both trees. Original stores those 19 vectors
+followed by 121 zero vectors; the refactor repeats the real vectors throughout
+the 140 slots. This preserves that document's directed MaxSim semantics.
+Original saved centers contain 468 nonunit vectors, with norms from 0 to 5.28;
+all refactor centers are unit within 1.17e-7. This is real training-content
+change, not serving/timer noise. It does not apportion the whole recall delta;
+the earlier unsynchronized original reseed counters remain a separate source
+defect, without per-center causal attribution. No source is changed to reproduce
+the original invalid padding. See the new pair's report and tree audit.
+
+The Flat integration is applied and correctness-validated in the worktree;
+its performance acceptance and staging remain pending. `flat-integration-validation-01`
+archives source `d52f30771a654738fcf1e4ad101203571a91ab65dd4b8a9538065a899a0e0c8f`.
+All seven native suites pass under Clang and GCC on AVX2 and AVX-512. Twelve
+MVIVF saved-tree prediction-byte pairs match. The installed wheel passes 63 tests
+and 42 subtests per ISA, the external CMake consumer passes, all 160 public-ID
+cases pass and all 40 implicit-ID byte controls match on each host ISA. The installation
+is `/tmp/mvsic-flat-env`; older environments remain preserved. VNNI is compile-only;
+AMX is unimplemented. Training defaults are unchanged.
+
+`flat-installed-checkpoint-01` tests the actual installed libraries. Default
+float search without compression or reranking preserves all sampled IDs/score
+bits and recall, but fails the strict serial gate: mean, p95 and p99 are 0.64%,
+0.83% and 0.89% slower than the original. The planned TQ1 profile and full-query batch
+quality checks were not run. Flat remains unstaged pending performance review;
+earlier prototype wins do not replace this installed result. MPool/shared graph
+work remains preparation-only under `/tmp/mvsic_mpool_migration`.
+
+The isolated one-document heap bypass passes scalar/codec/ownership and exact
+serial/batch witnesses, but its one whole-query mean/p95/p99 ratios are
+1.0025/1.0096/1.0101 against the original. It is not applied. Both Flat caller
+variants are now stopped; evidence is in `flat-one-block-build-01` and
+`flat-caller-cache-audit-01`.
+
+`mvivf-two-method-component-performance-01` compares the prior f1 refactor with
+the d52 two-method runtime, using one shared tree and all 1,406 queries. Prediction
+bytes match exactly. Serial mean is 2.573 to 2.308 ms; batch throughput is 5,982
+to 5,886 QPS (-1.61%), with overlapping process ranges and peak-memory deltas
+below 1 MiB. This is component validation, not a new comparison with the original
+MVIVF. Earlier original-baseline and full-machine performance limits still apply.
+The task is not finished and unconditional speed parity is not established.
+
+## Earlier MVIVF-only selected-source validation (November 12, 2026)
+
+`public-id-final-validation-01` validates source
+`f1ba2caaf9a5007a1343c1ebcf430caee03a615a22faf94bf5e8781a89dacd5c`:
+six native suites × Clang/GCC × AVX2/AVX-512, twelve saved-tree byte pairs,
+48 installed tests plus36 subtests per ISA, external CMake consumer and the
+160-case public-ID/40-case implicit-byte reproductions all pass. New installed
+environment `/tmp/mvsic-public-id-final-env`; four older environments preserved.
+The custom-ID subclass and benchmark thread-policy fix are included. VNNI is
+compile-only; AMX unimplemented. Keep runtime acceptance scoped to the recorded
+shared-host studies and the adverse batch point estimate below.
+
+## Public-ID correctness and method migration (November 12, 2026)
+
+Custom corpus IDs exposed a real cutoff-tie bug: pruning by dense row before
+translating the surviving neighbors could discard the smallest public ID.
+Prepared leaves now retain public labels; custom-ID float leaves are ordered
+once before local-position pruning, and only selected rerank IDs are resolved
+back to dense rows. Implicit-ID scoring/arithmetic is unchanged.
+`public-id-validation-01` passes the six native suites under Clang/GCC on both
+host ISAs, twelve strict default prediction-byte pairs, 45 installed tests and
+29 subtests per ISA, and the external installed CMake consumer. The 160-case
+public-ID reproducer goes from120 failures to zero on both ISAs; all40 implicit
+ID/score-byte controls stay unchanged. Installation: `/tmp/mvsic-public-id-env`.
+The prior research/API environments are preserved. Correctness is verified;
+the separate shared-host timing investigation is still open.
+
+The document-scaled/aligned half-average center policy improves ArguAna, but
+fails the short-cloud Quora latency gate. It is not a global default. The
+existing automatic-average policy remains. The Quora fixture is an exact
+whole-document subset with proven top10 completeness, not full-corpus recall.
+See `tests/refactor/TRAINING_EXPLORATION.md` and `REFORMAT_PLAN.md`.
+
+Further bounded screens: Wards0.5 post-training center compression fails quality
+and stops without serving expansion (`arguana-tree-compression-gated-01`). FiQA
+fixed64 completes in81.861 s at16 workers and improves full648-query recall/
+serial latency against a retained historical tree (`fiqa-size64-01`). That old
+training provenance is imperfect; a fresh same-source default control is needed
+before attributing the gain to size alone. No192-thread measurement is implied.
+
+The tiny ID-map-layout variant fails whole-query latency despite its micro gain
+and is rejected. The selected subclass implementation restores the original
+implicit kernel layout/rerank body and adapts custom IDs only at construction/
+rerank boundaries. Source SHA is9a7b9cf82202103b87bcf70605ffcfa7279e3def360d266c6daceca44cd220f0.
+All six Clang suites and targeted installed API tests pass on both host ISAs;
+normal-library serial ABBA+BAAB matches every output byte and passes latency.
+The one batch block is2.2% slower with overlapping process ranges; keep that
+adverse result visible. Selected-source wheel/GCC validation has now passed.
+
+Installed benchmark thread policy was corrected: configured workers control
+Parlay; other library limits default to1 and preserve explicit inherited values
+outside serial latency. Serial latency forces all limits to1. Both YAML paths
+record provided/effective limits and fingerprint build/search separately.
+Focused tests pass27 tests plus36 subtests; exact YAML/CLI schemas are unchanged.
+
+Flat's early isolated build/oracles passed (`flat-float-build-01`), while its
+first balanced serial block failed (`flat-float-confirm-01`). Those historical
+results remain visible. The later applied Flat integration now passes native,
+installed API/YAML and consumer correctness checks, but remains unstaged after
+the installed default-float latency failure above. MPool/shared graph work is
+still preparation-only. A method is not accepted merely because its port is
+applied. Preserve method-specific stats: tuple field2 estimates database bytes;
+the historical YAML `avg_cmps` column is a compatibility name.
+
+## IP-only API cleanup (November 12, 2026)
+
+The user retired L2 from MVClustering after the inner-objective pilot and the
+four-cell outer/inner screen found no MVIVF benefit. The public `Metric` enum,
+metric arguments/properties, and `MVClusteringConfig.inner_metric` are removed.
+Use `IndexMVIVF(d, params)` and `cluster_point_clouds(points, k, s, config)`.
+Both outer assignment and inner centroid training use IP, with unchanged float
+updates, document weights and spherical normalization. Private L2 k-means and
+shared Euclidean quantizer math remain. Original YAML `metric: ip` is preserved;
+Python/config boundaries reject L2 clearly. `ip-api-validation-01` passes all
+six native suites on AVX2/AVX-512 under Clang and GCC, twelve strict saved-tree
+prediction-byte pairs, 41 installed API/YAML tests plus 29 subtests on each ISA,
+and an external installed CMake consumer. The isolated installed environment is
+`/tmp/mvsic-ip-api-env`; both older research environments remain unchanged.
+VNNI is compile-only and AMX remains unimplemented.
+
+Research is tracked in `tests/refactor/TRAINING_EXPLORATION.md`. Quantized
+top-2 float refinement is promising; TQ4/TQ8 refinement, the tested ANNS
+settings, L2 and additional EMA variants are paused on the recorded evidence.
+Fixed64 on ArguAna wins matched/higher-recall serial latency by about 12% on
+two seeds, but is not a universal default. Current priority is budgets relative
+to document cloud lengths on ArguAna and short-cloud Quora; center-only vector
+compression is prepared but parked. Experimental sources/results are on SSD;
+production training defaults have not changed. Check the latest session/run
+status before launching another native process.
+
 ## Immediate 16-thread work trace completed
 
 The user explicitly authorized immediate 16-thread execution on the busy host,

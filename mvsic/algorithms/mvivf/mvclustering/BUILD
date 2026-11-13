@@ -26,7 +26,6 @@ cc_library(
         "//mvsic/algorithms/mvivf/mvclustering/seeding:uniformlyrandom",
         "//mvsic/core/quantization:turboquant_8bit_mv",
         "//mvsic/core/types:chamfer_ip_point",
-        "//mvsic/core/types:chamfer_l2_point",
         "//mvsic/core/types:point_cloud_set",
         "//mvsic/core/kmeans:kmeans_util",
         "//mvsic/core/kmeans:lloyds_kmeans",

@@ -51,16 +51,16 @@ isolated checkout. The original vendored headers above remain at their pinned
 revision for baseline comparisons. `lloyds_kmeans.h` identifies the adapted
 sections and retains float centroid updates.
 
-`MVClusteringConfig` provides three independent controls:
+`MVClusteringConfig` provides two independent controls:
 
 | Field | Default | Experimental choices |
 | --- | --- | --- |
-| `inner_metric` | `same` as outer assignment | `l2`, `ip` |
 | `inner_init` | `default` (historical seeding) | `uniform`, `kmeans++`, `prefix_doubling` |
 | `inner_backend` | `legacy` | `adaptive` |
 
-These controls affect inner centroid training; the outer assignment and
-serving metrics remain unchanged. Explicit IP initialization samples directions
+MVClustering uses IP for inner training, outer assignment and serving.
+Private L2 k-means remains available for Euclidean PQ/FastScan codebooks;
+it is not a public MVClustering option. Explicit IP initialization samples directions
 using nonnegative squared chord distances and produces unit initial centers
 (zero vectors remain zero). It retains raw input lengths for assignments and
 weighted float updates. K-means++ and PrefixDoubling sampling include document
@@ -85,18 +85,18 @@ Eigen assignment can round near ties differently; tests compare objective
 values with a tolerance rather than requiring identical labels near ties.
 Quantized assignment always scores its own encoded centers. Every centroid
 update invalidates old distances; no triangle bound or stale assignment cache
-is reused. Immutable TQ8 input bytes, norms and rotations can be shared between
-outer and inner metrics through separately typed models.
+is reused. Immutable TQ8 input bytes, norms and rotations are shared between
+outer cloud assignment and inner vector assignment.
 
 ## Measured training choices
 
 The controlled ArguAna pilot compared ten independent float-assignment builds
 with fixed IP serving. L2 inner training, alternative IP initializers and the
 adaptive backend did not establish a better build/recall tradeoff across the
-observed grid. The default remains float assignment with
-`inner_metric="same"`, `inner_init="default"`, and `inner_backend="legacy"`.
-L2 stays available as a separate training objective; its arithmetic means are
-not interchangeable with spherical IP centers.
+observed grid. A subsequent four-cell outer/inner IP/L2 screen found identical
+trees when the inner centers were spherical, and lower retrieval recall for L2
+inner means. MVClustering therefore exposes IP only. The default remains float
+assignment with `inner_init="default"` and `inner_backend="legacy"`.
 
 The subsequent assignment optimizations preserved exact serialized trees and
 recall: TQ4 whole-build time fell from 82.989 to 38.664 seconds, and TQ1 from

@@ -20,7 +20,7 @@ from compare import DEFAULT_MARKER, RESULT_ROOT, HostGuard, check_marker, identi
 
 
 NAME = re.compile(r"[a-zA-Z0-9_-]+\Z")
-INNER_FIELDS = {"inner_metric", "inner_init", "inner_backend"}
+INNER_FIELDS = {"inner_init", "inner_backend"}
 
 
 def recipes(spec, base, phase):

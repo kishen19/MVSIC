@@ -16,7 +16,7 @@ def main():
     params = mvsic.IndexParams.mvivf(k_per_level=4, max_leaf_size=16, niters=3, s=4)
     params.quantizer = mvsic.QuantizerType.OneBitTQ
     params.mvclus.assignment_quantizer = mvsic.ClusteringQuantizer.TQ8
-    index = mvsic.IndexMVIVF(points.dims, mvsic.Metric.IP, params)
+    index = mvsic.IndexMVIVF(points.dims, params)
     index.build(points)
 
     search = mvsic.SearchParams.mvivf(k=5, nprobes=16, num_rerank=20, tq8_rerank=True)
@@ -31,7 +31,7 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         filename = str(Path(directory) / "example.mvivf")
         index.save(filename)
-        loaded = mvsic.IndexMVIVF(points.dims, mvsic.Metric.IP, params)
+        loaded = mvsic.IndexMVIVF(points.dims, params)
         loaded.load(filename, points)
         np.testing.assert_array_equal(loaded.search(values[0], search)[0], ids)
 

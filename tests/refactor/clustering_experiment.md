@@ -1,5 +1,10 @@
 # MVIVF training-quality experiment
 
+MVClustering now uses IP for both inner and outer training, with no public metric
+selector. Current configs retain the six IP recipes; archived result plans retain
+the historical ten-recipe IP/L2 pilot described below. Private L2 k-means remains
+available for quantizer codebooks.
+
 This experiment changes construction while serving remains IP with the same
 center/leaf codecs, query compression, reranking and search grid. It is separate
 from `parity.py` and `compare.py`, whose shared original skeleton isolates serving
@@ -8,13 +13,13 @@ clustering algorithm's index quality.
 
 The first phase fixes outer and inner assignment quantization to float. Keep the
 corpus, outer seeding, weighting, sampling caps, centroid count, outer iteration
-budget and serving representation fixed. Starting from `same/default/legacy`
+budget and serving representation fixed. Starting from `default/legacy`
 inner training, change one field per parent-child comparison: either the inner
-objective or initialization, or an explicitly selected implementation. A second
+initialization or an explicitly selected implementation. A second
 change needs its own comparison against that parent recipe; comparing only the
 combined change to the original would confound the causes. Explicit `uniform`
 initialization establishes the same IP sampling normalization used by the new
-initializers. Compare IP/L2 objectives and `kmeans++`/`prefix_doubling` against
+initializers. Compare `kmeans++`/`prefix_doubling` against
 that explicit-uniform parent, and compare `adaptive` against its own otherwise
 identical parent. The reference retains the original default behavior.
 
@@ -103,9 +108,9 @@ no implicit winner. Run that new config with `--phase quantization` and another
 fresh output directory. Its float/TQ8/TQ4/TQ1 recipes differ only in assignment
 quantization; each receives new paired builds and serves its own tree.
 
-## Limited ArguAna pilot
+## Historical limited ArguAna pilot
 
-`configs/clustering_arguana_pilot.json` uses the complete ArguAna corpus (8,674
+The original `configs/clustering_arguana_pilot.json` used the complete ArguAna corpus (8,674
 documents, 1,208,012 d128 vectors) and 128 fixed queries selected with seed 42.
 It matches the native serving pilot: leaf size 100, five outer iterations,
 weighted inner updates, TQ4 centers/TQ1 leaves, Wards 0.5, root many-to-many,

@@ -142,7 +142,7 @@ void run(const Args& args) {
 #else
   ip.pq.method = mvsic::IndexParams::QuantizerType::OneBitTQ;
   ip.quantize_centers = true;
-  Index index(points.get_dims(), mvsic::Metric::IP, ip);
+  Index index(points.get_dims(), ip);
 #endif
   const size_t rss_before = rss();
   const auto prepare_start = Clock::now();

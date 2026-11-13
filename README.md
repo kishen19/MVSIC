@@ -34,7 +34,7 @@ when an operation is prepared, outside the scoring loops.
 *   A user-friendly Python API for easy integration into existing workflows, powered by [pybind11](https://github.com/pybind/pybind11).
 *   Implements several novel and baseline multi-vector ANN algorithms.
 *   Compiled MVIVF supports float, TQ8, TQ4 and TQ1 leaves, with independent assignment quantization during training. Optional legacy C++ targets also retain PQ, FastScan and RaBitQ.
-*   Uses **Inner Product / MaxSim** for retrieval. Clustering also supports an independent **L2** objective.
+*   Uses **Inner Product / MaxSim** for retrieval and MVClustering, with spherical inner k-means updates.
 *   Includes a benchmarking suite for comparing the QPS-Recall performance of different indexing methods.
 
 ## Algorithms
@@ -86,7 +86,7 @@ values /= np.linalg.norm(values, axis=-1, keepdims=True)
 points = mvsic.PointCloudSet(values)
 params = mvsic.IndexParams.mvivf(max_leaf_size=20)
 params.mvclus.assignment_quantizer = mvsic.ClusteringQuantizer.TQ8
-index = mvsic.IndexMVIVF(128, mvsic.Metric.IP, params)
+index = mvsic.IndexMVIVF(128, params)
 index.build(points)
 search = mvsic.SearchParams.mvivf(k=10, nprobes=8, num_rerank=20)
 ids, distances = index.search(values[0], search)
@@ -95,13 +95,15 @@ index.save("example.mvivf")
 ```
 
 Retrieval scores are negative directed mean MaxSim; lower scores rank first.
-`IndexMVIVF` accepts `Metric.IP` and rejects L2 retrieval. Standalone MVClustering
-and inner k-means retain L2 as a training objective. Serving supports float (`None_`), TQ4
+`IndexMVIVF` and standalone MVClustering use IP without a metric selector.
+The original YAML `metric: ip` remains supported; L2 requests fail explicitly.
+Private k-means still supports L2 for Euclidean quantizer codebooks.
+Serving supports float (`None_`), TQ4
 (`TQ`), TQ1 (`OneBitTQ`), and TQ8 (`EightBitTQ`) leaves, with float or TQ4 centers.
 TQ1 serving requires unit-norm corpus and original query vectors; the boundary
 rejects other norms. Clustering's independent TQ1 assignment retains general
 norms, including zero vectors, and every assignment mode updates centroids in
-float with the existing weighting and metric normalization rules.
+float with the existing document weights and spherical normalization.
 
 `PointCloudSet` borrows contiguous float32 NumPy values by default and retains
 their owner. Do not modify bound arrays during the index lifetime; `copy=True`

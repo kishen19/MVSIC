@@ -54,7 +54,7 @@ def main():
     else:
         ip.quantizer = native.QuantizerType.OneBitTQ
         ip.quantize_centers = True
-        index = native.IndexMVIVF(dims, native.Metric.IP, ip)
+        index = native.IndexMVIVF(dims, ip)
         compression = getattr(native.QueryCompression, "None_" if params["compression"] == "None" else params["compression"])
     start = time.perf_counter()
     index.load(job["index"], points)

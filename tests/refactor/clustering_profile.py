@@ -43,7 +43,7 @@ def run(job):
     before = _memory()
     start = time.perf_counter()
     centers, assignments, stats = native.cluster_point_clouds(
-        sample, diagnostic["k"], config["index"]["params"]["s"], native.Metric.IP, params)
+        sample, diagnostic["k"], config["index"]["params"]["s"], params)
     seconds = time.perf_counter() - start
     after = _memory()
     iterations = list(stats["iterations"])

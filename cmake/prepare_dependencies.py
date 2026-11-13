@@ -56,6 +56,12 @@ def prepare(parlay, rabitq, parlayann, output, patches):
         scheduler = patched_text(
             scheduler, "parlay/scheduler.h", patches / "parlay/shared_scheduler.patch", output
         )
+    elif any(f"internal::shared_scheduler_{operation}(" not in scheduler
+             for operation in ("wait", "notify_one", "notify_all")):
+        raise RuntimeError(
+            "Parlay override has an outdated shared-scheduler patch; "
+            "use the original pinned Parlay headers rather than a generated overlay"
+        )
     write_changed(output / "parlay/parlay/scheduler.h", scheduler)
 
     # Public interfaces use the existing ParlayANN point range, but its free

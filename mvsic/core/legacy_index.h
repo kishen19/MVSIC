@@ -258,7 +258,8 @@ struct MVQuantTypes {
 // Base Index Class
 template<bool metric>
 class LegacyIndex {
-  static_assert(!metric, "Retrieval supports only IP/MaxSim; L2 is available for clustering");
+  static_assert(!metric, "Retrieval supports only IP/MaxSim; L2 retrieval is retired");
+
  public:
   using ChPoint = std::conditional_t<metric, ChamferL2_Point, ChamferIP_Point>;
   using Point =

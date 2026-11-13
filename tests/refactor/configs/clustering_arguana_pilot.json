@@ -25,13 +25,6 @@
       }
     },
     {
-      "name": "l2_uniform",
-      "parent": "ip_uniform",
-      "changes": {
-        "inner_metric": "l2"
-      }
-    },
-    {
       "name": "ip_kmeanspp",
       "parent": "ip_uniform",
       "changes": {
@@ -53,29 +46,8 @@
       }
     },
     {
-      "name": "l2_adaptive",
-      "parent": "l2_uniform",
-      "changes": {
-        "inner_backend": "adaptive"
-      }
-    },
-    {
       "name": "ip_kmeanspp_adaptive",
       "parent": "ip_kmeanspp",
-      "changes": {
-        "inner_backend": "adaptive"
-      }
-    },
-    {
-      "name": "l2_prefix",
-      "parent": "l2_uniform",
-      "changes": {
-        "inner_init": "prefix_doubling"
-      }
-    },
-    {
-      "name": "l2_prefix_adaptive",
-      "parent": "l2_prefix",
       "changes": {
         "inner_backend": "adaptive"
       }

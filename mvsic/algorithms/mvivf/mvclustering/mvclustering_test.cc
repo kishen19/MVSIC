@@ -2,10 +2,14 @@
 #include "mvsic/algorithms/mvivf/mvclustering/mvclustering_internal.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <random>
 #include <stdexcept>
+#include <thread>
+#include <type_traits>
 #include <vector>
 #include "gtest/gtest.h"
 #include "mvsic/algorithms/mvivf/mvclustering/mvclustering_impl.h"
@@ -30,7 +34,7 @@ PointCloudSetView Rays(const std::vector<float>& scales, uint32_t d = 16) {
   return own_point_clouds(std::move(values), std::move(offsets), d, std::move(ids));
 }
 
-float Distance(PointCloud a, PointCloud b, Metric metric) {
+float Distance(PointCloud a, PointCloud b) {
   float score = 0;
   for (size_t i = 0; i < a.n; ++i) {
     float nearest = std::numeric_limits<float>::infinity();
@@ -38,7 +42,7 @@ float Distance(PointCloud a, PointCloud b, Metric metric) {
       float distance = 0;
       for (size_t t = 0; t < a.d; ++t) {
         const float x = a.data(i)[t], y = b.data(j)[t];
-        distance += metric == Metric::L2 ? (x - y) * (x - y) : -x * y;
+        distance -= x * y;
       }
       nearest = std::min(nearest, distance);
     }
@@ -49,7 +53,6 @@ float Distance(PointCloud a, PointCloud b, Metric metric) {
 
 // Decode bytes directly so the oracle shares neither the assignment panels
 // nor the single-vector distance helper with the compiled implementation.
-template<bool metric>
 std::vector<uint32_t> OneBitOracle(const PointCloudSetView& points,
                                    const PointCloudSetView& centers, uint32_t seed) {
   struct Vectors {
@@ -58,11 +61,11 @@ std::vector<uint32_t> OneBitOracle(const PointCloudSetView& points,
     uint32_t get_dims() const { return points.d; }
     const float* location(size_t i) const { return points.values + i * points.d; }
   };
-  turboquant_1bit::Model<metric> model;
+  turboquant_1bit::Model<false> model;
   model.encoder.seed_ = seed;
   model.train(Vectors{centers});
   const auto db = model.encode(Vectors{centers});
-  std::vector<turboquant_1bit::Quantized_Query<metric>> queries(points.total_size());
+  std::vector<turboquant_1bit::Quantized_Query<false>> queries(points.total_size());
   for (size_t q = 0; q < queries.size(); ++q)
     queries[q] = model.quantize_query(points.values + q * points.d);
   std::vector<uint32_t> result(points.n);
@@ -81,9 +84,6 @@ std::vector<uint32_t> OneBitOracle(const PointCloudSetView& points,
                                             queries[q].query_data[byte]));
           const float dot = 16129.0f * (float(db.padded_dim) - 2.0f * float(hamming));
           float distance = -dot * db.norm_scaling_factors[v] * queries[q].norm_scaling_factor;
-          if constexpr (metric)
-            distance = db.unquantized_squared_norms[v] + 2.0f * distance +
-                       queries[q].unquantized_squared_norm;
           nearest = std::min(nearest, distance);
         }
         sum += nearest;
@@ -97,22 +97,95 @@ std::vector<uint32_t> OneBitOracle(const PointCloudSetView& points,
   return result;
 }
 
+TEST(MVClustering, BorrowedInnerRowsKeepCoordinatesOrderAndSourceLifetime) {
+  using Set = PointCloudSet<ChamferIP_Point>;
+  for (uint32_t d : {7u, 31u, 128u}) {
+    const std::vector<size_t> lengths{1, 3, 2, 5};
+    const std::vector<uint32_t> public_ids{400, 20, 900, 1};
+    std::vector<size_t> offsets{0};
+    for (size_t length : lengths) offsets.push_back(offsets.back() + length * d);
+    std::vector<float> values(offsets.back());
+    const float pattern[]{0.0f, -0.0f, 1.25f, -3.5f, 1e-20f};
+    for (size_t i = 0; i < values.size(); ++i) values[i] = pattern[i % 5];
+    Set::FlatRows rows;
+    {
+      auto points = Set::borrow(lengths.size(), d, values.data(), offsets.data(), public_ids.data());
+      const parlay::sequence<uint32_t> selection{3, 0, 3, 2};
+      rows = points.filter_flattened_view(selection);
+    }  // Temporary selection and borrowed cloud wrapper are gone; coordinates still live.
+    static_assert(std::is_const_v<std::remove_reference_t<decltype(rows[0][0])>>);
+    ASSERT_EQ(rows.size(), 13);
+    size_t cursor = 0;
+    for (uint32_t doc : {3u, 0u, 3u, 2u})
+      for (size_t vector = 0; vector < lengths[doc]; ++vector) {
+        const float* expected = values.data() + offsets[doc] + vector * d;
+        ASSERT_EQ(rows[cursor].size(), d);
+        EXPECT_EQ(rows[cursor].data(), expected);
+        EXPECT_EQ(std::memcmp(rows[cursor].data(), expected, d * sizeof(float)), 0);
+        ++cursor;
+      }
+  }
+}
+
+TEST(MVClustering, TQ1PreparedInnerCachePreservesRaggedWeightedSamplesAndOwnership) {
+  constexpr uint32_t d = 31;
+  for (bool all_zero : {false, true}) {
+    for (uint32_t inner_limit : {1, 20}) {
+      std::vector<float> values;
+      std::vector<size_t> offsets{0};
+      std::vector<uint32_t> public_ids;
+      for (size_t doc = 0; doc < 6; ++doc) {
+        const size_t vectors = 3 + doc % 4;
+        for (size_t v = 0; v < vectors; ++v)
+          for (size_t j = 0; j < d; ++j) {
+            const float x = all_zero || (doc == 0 && v == 0) ? 0.0f :
+                float(int((doc * 13 + v * 7 + j * 3) % 19) - 9) *
+                    (0.125f * float(1 + doc + v));
+            values.push_back(x);
+          }
+        offsets.push_back(values.size());
+        public_ids.push_back(uint32_t(9001 - doc * 17));
+      }
+      auto root = own_point_clouds(std::move(values), std::move(offsets), d, std::move(public_ids));
+      // Root positions differ from public IDs; document5 appears twice, out of order.
+      const std::vector<uint32_t> rows{5, 1, 5, 0, 3};
+      auto local = gather_point_clouds(root, rows, false);
+      MVClusteringConfig config;
+      config.assignment_quantizer = ClusteringQuantizer::TQ1;
+      config.seed = 11;  // Initial and empty-cluster reseeding mutate only trainer.params.seed.
+      config.niters = 3;
+      config.use_weighted_inner_kmeans = true;
+      config.max_points_per_centroid_inner_kmeans = inner_limit;
+      auto direct = cluster_point_clouds(local, 2, 2, config);
+      ClusteringResult cached;
+      {
+        ClusteringContext context(root, config);
+        cached = context.cluster(local, rows, 2, 2);
+      }  // Every inner backend and its temporary index selection have finished.
+      root = {};
+      local = {};
+      ASSERT_TRUE(cached.centers.owner);
+      EXPECT_EQ(cached.assignments, direct.assignments);
+      ASSERT_EQ(cached.centers.n, direct.centers.n);
+      ASSERT_EQ(cached.centers.d, direct.centers.d);
+      const size_t count = cached.centers.offsets[cached.centers.n];
+      ASSERT_EQ(count, direct.centers.offsets[direct.centers.n]);
+      EXPECT_EQ(std::memcmp(cached.centers.values, direct.centers.values, count * sizeof(float)), 0);
+    }
+  }
+}
+
 TEST(MVClustering, OneBitPanelsApplyNormsBeforeCloudMinima) {
   const uint32_t d = 31;
   const auto queries = Rays({1, 0}, d);
-  for (auto metric : {Metric::IP, Metric::L2}) {
-    // IP: the second collinear vector wins despite identical sign codes.
-    // L2: a zero vector beats the larger collinear vector in the first cloud.
-    const auto vectors =
-        metric == Metric::IP ? Rays({0.1f, 10, 5, 5}, d) : Rays({10, 0, 1.5f, 1.5f}, d);
-    auto centers = own_point_clouds(
-        std::vector<float>(vectors.values, vectors.values + vectors.offsets[vectors.n]),
-        {0, 2 * d, 4 * d}, d);
-    const auto actual = assign_point_clouds(queries, centers, metric, ClusteringQuantizer::TQ1, 11);
-    EXPECT_EQ(actual, (std::vector<uint32_t>{metric == Metric::IP ? 0u : 1u, 0}));
-    EXPECT_EQ(actual, metric == Metric::IP ? OneBitOracle<false>(queries, centers, 11)
-                                           : OneBitOracle<true>(queries, centers, 11));
-  }
+  // The second collinear vector wins despite identical sign codes.
+  const auto vectors = Rays({0.1f, 10, 5, 5}, d);
+  auto centers = own_point_clouds(
+      std::vector<float>(vectors.values, vectors.values + vectors.offsets[vectors.n]),
+      {0, 2 * d, 4 * d}, d);
+  const auto actual = assign_point_clouds(queries, centers, ClusteringQuantizer::TQ1, 11);
+  EXPECT_EQ(actual, (std::vector<uint32_t>{0, 0}));
+  EXPECT_EQ(actual, OneBitOracle(queries, centers, 11));
 }
 
 TEST(MVClustering, OneBitPanelsMatchDecodedRaggedAndSingletonOracles) {
@@ -130,12 +203,8 @@ TEST(MVClustering, OneBitPanelsMatchDecodedRaggedAndSingletonOracles) {
       auto queries = own_point_clouds(std::move(query_values), {0, d, 4 * d, 9 * d}, d);
       auto centers = own_point_clouds(
           std::move(center_values), {0, length * d, (2 * length + 1) * d, (3 * length + 1) * d}, d);
-      for (auto metric : {Metric::IP, Metric::L2}) {
-        const auto actual =
-            assign_point_clouds(queries, centers, metric, ClusteringQuantizer::TQ1, 11);
-        EXPECT_EQ(actual, metric == Metric::IP ? OneBitOracle<false>(queries, centers, 11)
-                                               : OneBitOracle<true>(queries, centers, 11));
-      }
+      const auto actual = assign_point_clouds(queries, centers, ClusteringQuantizer::TQ1, 11);
+      EXPECT_EQ(actual, OneBitOracle(queries, centers, 11));
       // The public assignment boundary selects the same packed singleton
       // layout used by inner Lloyd assignment when all clouds contain one row.
       std::vector<size_t> offsets(length + 1);
@@ -145,13 +214,9 @@ TEST(MVClustering, OneBitPanelsMatchDecodedRaggedAndSingletonOracles) {
           std::vector<float>(queries.values, queries.values + 3 * d), {0, d, 2 * d, 3 * d}, d);
       auto single_centers = own_point_clouds(
           std::vector<float>(centers.values, centers.values + length * d), std::move(offsets), d);
-      for (auto metric : {Metric::IP, Metric::L2}) {
-        const auto actual = assign_point_clouds(single_queries, single_centers, metric,
-                                                ClusteringQuantizer::TQ1, 11);
-        EXPECT_EQ(actual, metric == Metric::IP
-                              ? OneBitOracle<false>(single_queries, single_centers, 11)
-                              : OneBitOracle<true>(single_queries, single_centers, 11));
-      }
+      const auto singleton =
+          assign_point_clouds(single_queries, single_centers, ClusteringQuantizer::TQ1, 11);
+      EXPECT_EQ(singleton, OneBitOracle(single_queries, single_centers, 11));
     }
 }
 
@@ -161,13 +226,9 @@ TEST(MVClustering, OneBitSingletonAssignmentKeepsLowestCenterIdAcrossPanels) {
   scales[1] = scales[8] = scales[16] = 1;
   for (uint32_t expected : {1, 8}) {
     auto centers = Rays(scales, 31);
-    for (auto metric : {Metric::IP, Metric::L2}) {
-      const auto actual =
-          assign_point_clouds(queries, centers, metric, ClusteringQuantizer::TQ1, 11);
-      EXPECT_EQ(actual, (std::vector<uint32_t>{expected, 0, 0}));
-      EXPECT_EQ(actual, metric == Metric::IP ? OneBitOracle<false>(queries, centers, 11)
-                                             : OneBitOracle<true>(queries, centers, 11));
-    }
+    const auto actual = assign_point_clouds(queries, centers, ClusteringQuantizer::TQ1, 11);
+    EXPECT_EQ(actual, (std::vector<uint32_t>{expected, 0, 0}));
+    EXPECT_EQ(actual, OneBitOracle(queries, centers, 11));
     scales[1] = -1;
   }
 }
@@ -181,20 +242,18 @@ TEST(MVClustering, FloatAssignmentMatchesIndependentRaggedOracle) {
   auto points = own_point_clouds(std::move(values), {0, 32, 96, 112, 176, 224, 320, 448}, 16);
   const std::vector<uint32_t> rows{1, 3, 5};
   auto centers = gather_point_clouds(points, rows);
-  for (auto metric : {Metric::IP, Metric::L2}) {
-    auto actual = assign_point_clouds(points, centers, metric, ClusteringQuantizer::None);
-    for (size_t i = 0; i < points.n; ++i) {
-      uint32_t expected = 0;
-      float best = std::numeric_limits<float>::infinity();
-      for (size_t j = 0; j < centers.n; ++j) {
-        const float distance = Distance(points[i], centers[j], metric);
-        if (distance < best) {
-          best = distance;
-          expected = j;
-        }
+  auto actual = assign_point_clouds(points, centers, ClusteringQuantizer::None);
+  for (size_t i = 0; i < points.n; ++i) {
+    uint32_t expected = 0;
+    float best = std::numeric_limits<float>::infinity();
+    for (size_t j = 0; j < centers.n; ++j) {
+      const float distance = Distance(points[i], centers[j]);
+      if (distance < best) {
+        best = distance;
+        expected = j;
       }
-      EXPECT_EQ(actual[i], expected);
     }
+    EXPECT_EQ(actual[i], expected);
   }
 }
 
@@ -202,55 +261,51 @@ TEST(MVClustering, QuantizedAssignmentRetainsNormsAndZeroVectors) {
   auto centers = Rays({0, 1, 10, -10});
   auto queries = Rays({0, 0.8f, 9, -9});
   for (auto codec : codecs) {
-    EXPECT_EQ(assign_point_clouds(queries, centers, Metric::L2, codec, 17),
-              (std::vector<uint32_t>{0, 1, 2, 3}));
-    auto ip = assign_point_clouds(queries, centers, Metric::IP, codec, 17);
+    auto ip = assign_point_clouds(queries, centers, codec, 17);
     EXPECT_EQ(ip[1], 2);
     EXPECT_EQ(ip[2], 2);
     EXPECT_EQ(ip[3], 3);
-    EXPECT_EQ(ip, assign_point_clouds(queries, centers, Metric::IP, codec, 17));
+    EXPECT_EQ(ip, assign_point_clouds(queries, centers, codec, 17));
   }
 }
 
 TEST(MVClustering, QuantizedAssignmentKeepsFloatWeightedCentroidUpdates) {
-  // Two documents: [1] and [3,3,3]. One inner center must be the float mean;
-  // weighting gives the documents equal total mass: (1 + 3) / 2 = 2.
-  auto points = own_point_clouds({1, 0, 3, 0, 3, 0, 3, 0}, {0, 2, 8}, 2);
+  // Documents [1,0] and [0,3] repeated three times have different spherical
+  // means when each document receives equal total mass.
+  auto points = own_point_clouds({1, 0, 0, 3, 0, 3, 0, 3}, {0, 2, 8}, 2);
   for (auto codec : codecs)
     for (bool weighted : {false, true}) {
       MVClusteringConfig config;
       config.niters = 1;
       config.assignment_quantizer = codec;
       config.use_weighted_inner_kmeans = weighted;
-      const auto result = cluster_point_clouds(points, 1, 1, Metric::L2, config);
-      EXPECT_NEAR(result.centers.values[0], weighted ? 2.0f : 2.5f, 1e-6f);
-      EXPECT_FLOAT_EQ(result.centers.values[1], 0.0f);
+      const auto result = cluster_point_clouds(points, 1, 1, config);
+      const float y = weighted ? 3.0f : 9.0f;
+      const float norm = std::sqrt(1 + y * y);
+      EXPECT_NEAR(result.centers.values[0], 1 / norm, 1e-6f);
+      EXPECT_NEAR(result.centers.values[1], y / norm, 1e-6f);
       EXPECT_EQ(result.assignments, (std::vector<uint32_t>{0, 0}));
-      const auto ip = cluster_point_clouds(points, 1, 1, Metric::IP, config);
-      EXPECT_NEAR(ip.centers.values[0], 1.0f, 1e-6f);
-      EXPECT_FLOAT_EQ(ip.centers.values[1], 0.0f);
     }
 }
 
 TEST(MVClustering, RepeatedTrainingAndUnderfilledCentroidsAreDeterministic) {
   auto points = Rays({1, 1, 1, 1, -1, -1, -1, -1});
-  for (auto codec : codecs)
-    for (auto metric : {Metric::IP, Metric::L2}) {
-      MVClusteringConfig config;
-      config.assignment_quantizer = codec;
-      config.niters = 2;
-      config.seed = 4;
-      const auto a = cluster_point_clouds(points, 4, 5, metric, config);
-      const auto b = cluster_point_clouds(points, 4, 5, metric, config);
-      ASSERT_EQ(a.centers.num_bytes(), b.centers.num_bytes());
-      for (size_t i = 0; i < a.centers.offsets[a.centers.n]; ++i) {
-        EXPECT_TRUE(std::isfinite(a.centers.values[i]));
-        EXPECT_FLOAT_EQ(a.centers.values[i], b.centers.values[i]);
-      }
-      EXPECT_EQ(a.assignments, b.assignments);
-      for (auto id : a.assignments)
-        EXPECT_LT(id, 4);
+  for (auto codec : codecs) {
+    MVClusteringConfig config;
+    config.assignment_quantizer = codec;
+    config.niters = 2;
+    config.seed = 4;
+    const auto a = cluster_point_clouds(points, 4, 5, config);
+    const auto b = cluster_point_clouds(points, 4, 5, config);
+    ASSERT_EQ(a.centers.num_bytes(), b.centers.num_bytes());
+    for (size_t i = 0; i < a.centers.offsets[a.centers.n]; ++i) {
+      EXPECT_TRUE(std::isfinite(a.centers.values[i]));
+      EXPECT_FLOAT_EQ(a.centers.values[i], b.centers.values[i]);
     }
+    EXPECT_EQ(a.assignments, b.assignments);
+    for (auto id : a.assignments)
+      EXPECT_LT(id, 4);
+  }
 }
 
 TEST(MVClustering, SubsampledTrainingAssignsEveryInputAndOwnsCenters) {
@@ -259,7 +314,7 @@ TEST(MVClustering, SubsampledTrainingAssignsEveryInputAndOwnsCenters) {
   config.max_point_clouds_per_cluster = 5;
   config.niters = 1;
   config.assignment_quantizer = ClusteringQuantizer::TQ8;
-  auto result = cluster_point_clouds(points, 2, 1, Metric::IP, config);
+  auto result = cluster_point_clouds(points, 2, 1, config);
   points = {};
   ASSERT_EQ(result.assignments.size(), 2050);
   EXPECT_TRUE(result.centers.owner);
@@ -272,32 +327,31 @@ TEST(MVClustering, RecursivePreparedCacheMatchesDirectTraining) {
   auto root = Rays({-8, 7, -5, 4, 3, -2, 1, 9});
   const std::vector<uint32_t> rows{7, 0, 4, 2, 6, 1};
   auto local = gather_point_clouds(root, rows);
-  for (auto codec : codecs)
-    for (auto metric : {Metric::IP, Metric::L2}) {
-      MVClusteringConfig config;
-      config.assignment_quantizer = codec;
-      config.niters = 2;
-      config.seed = 5;
-      ClusteringContext context(root, metric, config);
-      auto cached = context.cluster(local, rows, 2, 1);
-      auto direct = cluster_point_clouds(local, 2, 1, metric, config);
-      ASSERT_EQ(cached.centers.num_bytes(), direct.centers.num_bytes());
-      EXPECT_EQ(cached.assignments, direct.assignments);
-      for (size_t i = 0; i < cached.centers.offsets[cached.centers.n]; ++i)
-        EXPECT_NEAR(cached.centers.values[i], direct.centers.values[i], 1e-6f);
-    }
+  for (auto codec : codecs) {
+    MVClusteringConfig config;
+    config.assignment_quantizer = codec;
+    config.niters = 2;
+    config.seed = 5;
+    ClusteringContext context(root, config);
+    auto cached = context.cluster(local, rows, 2, 1);
+    auto direct = cluster_point_clouds(local, 2, 1, config);
+    ASSERT_EQ(cached.centers.num_bytes(), direct.centers.num_bytes());
+    EXPECT_EQ(cached.assignments, direct.assignments);
+    for (size_t i = 0; i < cached.centers.offsets[cached.centers.n]; ++i)
+      EXPECT_NEAR(cached.centers.values[i], direct.centers.values[i], 1e-6f);
+  }
 }
 
 TEST(MVClustering, FloatFacadePreservesLegacyTrainingOnControlledData) {
   auto points = Rays({-4, -3, -2, 2, 3, 4});
   auto borrowed =
-      PointCloudSet<ChamferL2_Point>::borrow(points.n, points.d, points.values, points.offsets);
+      PointCloudSet<ChamferIP_Point>::borrow(points.n, points.d, points.values, points.offsets);
   MVClusteringConfig config;
   config.seed = 3;
   config.niters = 2;
-  MVClustering<true> original(points.d, 2, 1, config);
+  MVClustering original(points.d, 2, 1, config);
   original.train(borrowed);
-  auto actual = cluster_point_clouds(points, 2, 1, Metric::L2, config);
+  auto actual = cluster_point_clouds(points, 2, 1, config);
   auto expected = original.get_clustering(borrowed);
   EXPECT_EQ(actual.assignments, (std::vector<uint32_t>(expected.begin(), expected.end())));
   for (size_t i = 0; i < actual.centers.offsets[actual.centers.n]; ++i)
@@ -310,31 +364,28 @@ TEST(MVClustering, SphericalUpdateHandlesSubnormalMeans) {
     MVClusteringConfig config;
     config.niters = 1;
     config.inner_backend = backend;
-    auto result = cluster_point_clouds(points, 1, 1, Metric::IP, config);
+    auto result = cluster_point_clouds(points, 1, 1, config);
     EXPECT_FLOAT_EQ(result.centers.values[0], 1.0f);
     EXPECT_FLOAT_EQ(result.centers.values[1], 0.0f);
   }
 }
 
-TEST(MVClustering, InnerMetricIsIndependentAndRetainsWeights) {
-  auto points = own_point_clouds({1, 0, 3, 0, 3, 0, 3, 0}, {0, 2, 8}, 2);
+TEST(MVClustering, ExperimentalInnerTrainingRetainsSphericalWeightedUpdates) {
+  auto points = own_point_clouds({1, 0, 0, 3, 0, 3, 0, 3}, {0, 2, 8}, 2);
   for (auto codec : codecs)
     for (bool weighted : {false, true}) {
-      for (const std::string inner : {"l2", "ip"}) {
-        MVClusteringConfig config;
-        config.niters = 1;
-        config.assignment_quantizer = codec;
-        config.inner_metric = inner;
-        config.inner_init = "kmeans++";
-        config.inner_backend = "adaptive";
-        config.use_weighted_inner_kmeans = weighted;
-        // Opposite outer objective makes accidental template coupling observable.
-        const auto outer = inner == "l2" ? Metric::IP : Metric::L2;
-        auto result = cluster_point_clouds(points, 1, 1, outer, config);
-        EXPECT_NEAR(result.centers.values[0], inner == "ip" ? 1.0f : weighted ? 2.0f : 2.5f, 1e-6f);
-        EXPECT_FLOAT_EQ(result.centers.values[1], 0);
-        EXPECT_EQ(result.assignments, (std::vector<uint32_t>{0, 0}));
-      }
+      MVClusteringConfig config;
+      config.niters = 1;
+      config.assignment_quantizer = codec;
+      config.inner_init = "kmeans++";
+      config.inner_backend = "adaptive";
+      config.use_weighted_inner_kmeans = weighted;
+      auto result = cluster_point_clouds(points, 1, 1, config);
+      const float y = weighted ? 3.0f : 9.0f;
+      const float norm = std::sqrt(1 + y * y);
+      EXPECT_NEAR(result.centers.values[0], 1 / norm, 1e-6f);
+      EXPECT_NEAR(result.centers.values[1], y / norm, 1e-6f);
+      EXPECT_EQ(result.assignments, (std::vector<uint32_t>{0, 0}));
     }
 }
 
@@ -421,27 +472,25 @@ TEST(MVClustering, AdaptiveFloatLayoutMatchesLegacyOnUnpaddedDimensions) {
       EXPECT_NEAR(old_means[c][j], new_means[c][j], 1e-6f);
 }
 
-TEST(MVClustering, CrossMetricTQ8CacheMatchesDirectTraining) {
+TEST(MVClustering, TQ8CacheMatchesDirectTrainingWithExperimentalSeeds) {
   auto root = Rays({-8, 7, -5, 4, 3, -2, 1, 9});
   const std::vector<uint32_t> rows{7, 0, 4, 2, 6, 1};
   auto local = gather_point_clouds(root, rows);
-  for (auto outer : {Metric::IP, Metric::L2})
-    for (const std::string init : {"uniform", "kmeans++", "prefix_doubling"}) {
-      MVClusteringConfig config;
-      config.assignment_quantizer = ClusteringQuantizer::TQ8;
-      config.inner_metric = outer == Metric::IP ? "l2" : "ip";
-      config.inner_init = init;
-      config.inner_backend = "adaptive";
-      config.niters = 2;
-      config.seed = 19;
-      ClusteringContext context(root, outer, config);
-      auto cached = context.cluster(local, rows, 2, 1);
-      auto direct = cluster_point_clouds(local, 2, 1, outer, config);
-      EXPECT_EQ(cached.assignments, direct.assignments);
-      ASSERT_EQ(cached.centers.num_bytes(), direct.centers.num_bytes());
-      for (size_t i = 0; i < cached.centers.offsets[cached.centers.n]; ++i)
-        EXPECT_NEAR(cached.centers.values[i], direct.centers.values[i], 1e-6f);
-    }
+  for (const std::string init : {"uniform", "kmeans++", "prefix_doubling"}) {
+    MVClusteringConfig config;
+    config.assignment_quantizer = ClusteringQuantizer::TQ8;
+    config.inner_init = init;
+    config.inner_backend = "adaptive";
+    config.niters = 2;
+    config.seed = 19;
+    ClusteringContext context(root, config);
+    auto cached = context.cluster(local, rows, 2, 1);
+    auto direct = cluster_point_clouds(local, 2, 1, config);
+    EXPECT_EQ(cached.assignments, direct.assignments);
+    ASSERT_EQ(cached.centers.num_bytes(), direct.centers.num_bytes());
+    for (size_t i = 0; i < cached.centers.offsets[cached.centers.n]; ++i)
+      EXPECT_NEAR(cached.centers.values[i], direct.centers.values[i], 1e-6f);
+  }
 }
 
 class RecordedLloydsBackend : public lloyds::FloatLloydsBackend<true> {
@@ -502,34 +551,57 @@ TEST(MVClustering, QuietLloydsOmitsOnlyTheUnusedFinalAssignment) {
 TEST(MVClustering, RejectsNormsThatCanOverflowLongCloudScores) {
   auto zero_queries = own_point_clouds(std::vector<float>(32, 0), {0, 32}, 1);
   auto large_center = own_point_clouds({4e18f}, {0, 1}, 1);
-  // Its individual squared norm fits float, but 32 L2 terms would overflow
-  // their float sum before division. The common boundary cap rejects it.
+  // Bound both operands uniformly at the public boundary, including zero
+  // queries against a center whose norm exceeds the long-cloud scoring cap.
   for (auto codec : codecs)
-    EXPECT_THROW(assign_point_clouds(zero_queries, large_center, Metric::L2, codec),
-                 std::invalid_argument);
-  EXPECT_THROW(cluster_point_clouds(large_center, 1, 1, Metric::L2), std::invalid_argument);
+    EXPECT_THROW(assign_point_clouds(zero_queries, large_center, codec), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(large_center, 1, 1), std::invalid_argument);
+}
+
+TEST(MVClustering, IterationTimersDoNotCountAssignmentTwice) {
+  auto input = Rays({1, 1});
+  auto points = PointCloudSet<ChamferIP_Point>::borrow(
+      input.n, input.d, input.values, input.offsets);
+  MVClusteringConfig config;
+  config.niters = 1;
+  parlay::execute_with_scheduler(1, [&] {
+    MVClustering trainer(input.d, 1, 1, config);
+    trainer.assignment_function = [](const auto& points, const auto&, auto& ids) {
+      // Make assignment dominate setup so double counting is observable even
+      // on this tiny fixture. Representative updates retain the real trainer.
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      ids = parlay::sequence<uint32_t>(points.size(), 0);
+    };
+    const auto start = std::chrono::steady_clock::now();
+    trainer.train(points);
+    const double wall = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+    ASSERT_EQ(trainer._iteration_stats.size(), 2u);
+    const auto& iteration = trainer._iteration_stats[1];
+    EXPECT_GE(iteration.assignment_time, .015);
+    EXPECT_GE(iteration.centroid_update_time, 0);
+    // The two measured phases are disjoint subintervals of train().
+    EXPECT_LE(iteration.assignment_time + iteration.centroid_update_time, wall + .001);
+  });
 }
 
 TEST(MVClustering, RejectsInvalidBoundaryInputs) {
   auto points = Rays({1, 2});
-  EXPECT_THROW(cluster_point_clouds(points, 0, 1, Metric::IP), std::invalid_argument);
-  EXPECT_THROW(cluster_point_clouds(points, 3, 1, Metric::IP), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(points, 0, 1), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(points, 3, 1), std::invalid_argument);
   MVClusteringConfig config;
-  config.inner_metric = "invalid";
-  EXPECT_THROW(cluster_point_clouds(points, 1, 1, Metric::IP, config), std::invalid_argument);
-  config.inner_metric = "same";
   config.inner_init = "invalid";
-  EXPECT_THROW(cluster_point_clouds(points, 1, 1, Metric::IP, config), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(points, 1, 1, config), std::invalid_argument);
   config.inner_init = "default";
   config.inner_backend = "invalid";
-  EXPECT_THROW(cluster_point_clouds(points, 1, 1, Metric::IP, config), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(points, 1, 1, config), std::invalid_argument);
   config.inner_backend = "legacy";
   config.assignment_quantizer = static_cast<ClusteringQuantizer>(99);
-  EXPECT_THROW(cluster_point_clouds(points, 1, 1, Metric::IP, config), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(points, 1, 1, config), std::invalid_argument);
   auto invalid = own_point_clouds({std::numeric_limits<float>::quiet_NaN()}, {0, 1}, 1);
-  EXPECT_THROW(cluster_point_clouds(invalid, 1, 1, Metric::IP), std::invalid_argument);
+  EXPECT_THROW(cluster_point_clouds(invalid, 1, 1), std::invalid_argument);
   auto wrong_dimension = Rays({1}, 8);
-  EXPECT_THROW(assign_point_clouds(points, wrong_dimension, Metric::L2, ClusteringQuantizer::None),
+  EXPECT_THROW(assign_point_clouds(points, wrong_dimension, ClusteringQuantizer::None),
                std::invalid_argument);
 }
 

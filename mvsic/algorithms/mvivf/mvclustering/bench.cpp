@@ -38,19 +38,15 @@ int main(int argc, char* argv[]) {
 
   // MVClusteringParams params(iters, seeding, os_rate, verbose, lb);
   parlay::sequence<uint32_t> clustering;
-  if (df == "L2") {
-    auto points = mvsic::PointCloudSet<mvsic::ChamferL2_Point>(P.getOptionValue("-i"));
-    mvsic::MVClustering<true> clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster, 20,
-                                   verbose, "Random", 0, use_weighted_inner_kmeans);
-    clus.train(points);
-    clustering = clus.cluster_ids;
-  } else if (df == "IP") {
+  if (df != "IP")
+    throw std::invalid_argument("MVClustering supports only IP/MaxSim; L2 is retired");
+  {
     auto points = mvsic::PointCloudSet<mvsic::ChamferIP_Point>(P.getOptionValue("-i"));
     std::cout << points.size() << " point clouds read." << std::endl;
     std::cout << points.get_dims() << " dimensions per point cloud." << std::endl;
     std::cout << points.average_size() << " average number of points per point cloud." << std::endl;
-    mvsic::MVClustering<false> clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster,
-                                    20, verbose, "Random", 0, use_weighted_inner_kmeans);
+    mvsic::MVClustering clus(points.get_dims(), k, s, iters, max_point_clouds_per_cluster, 20,
+                             verbose, "Random", 0, use_weighted_inner_kmeans);
     clus.train(points);
     clustering = clus.cluster_ids;
   }

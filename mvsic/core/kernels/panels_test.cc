@@ -154,7 +154,7 @@ void verify_ip_padding(mvsic::IndexParams::QuantizerType codec) {
   auto params = IndexParams::mvivf();
   params.max_leaf_size = 100;
   params.pq.method = codec;
-  IndexMVIVF index(128, Metric::IP, params);
+  IndexMVIVF index(128, params);
   index.build(points);
   auto search = SearchParams::mvivf(points.n, 3, 0, false);
   const auto batch = index.search_all(queries, search);
